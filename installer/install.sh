@@ -208,7 +208,7 @@ main() {
 
     log "=== Installation complete ==="
     log "System will boot $NOS_NAME on next reboot."
-    # ONIE handles reboot — don't call it here
+    /sbin/reboot 2>/dev/null || reboot 2>/dev/null || true
 }
 
 main "$@"
