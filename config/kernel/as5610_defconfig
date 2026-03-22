@@ -49,6 +49,9 @@ CONFIG_HZ_1000=y
 CONFIG_HIGHMEM=y
 CONFIG_FLATMEM=y
 CONFIG_LOWMEM_SIZE_BOOL=n
+CONFIG_CMA=y
+CONFIG_DMA_CMA=y
+CONFIG_CMA_SIZE_MBYTES=32
 
 # ── Bus ───────────────────────────────────────────────────────────
 CONFIG_PCI=y

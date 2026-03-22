@@ -41,7 +41,8 @@ load_mod() {
 log "=== Phase 1: Loading kernel modules ==="
 
 # BDE: ASIC PCI driver + DMA pool (must be first)
-load_mod linux-kernel-bde dma_size=32
+# Try 4MB DMA first (32MB often fails on P2020 without CMA)
+load_mod linux-kernel-bde dma_size=4
 load_mod linux-user-bde
 
 # TUN: packet I/O interfaces
