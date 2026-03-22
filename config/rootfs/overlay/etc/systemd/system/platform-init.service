@@ -1,0 +1,13 @@
+[Unit]
+Description=EdgeNOS Platform Initialization
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=switchd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/platform-init.sh
+
+[Install]
+WantedBy=multi-user.target

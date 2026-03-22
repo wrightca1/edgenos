@@ -1,0 +1,182 @@
+#!/bin/bash
+# edgenos-diag - Platform diagnostic tool for AS5610-52X
+# Reports thermal sensors, fan status, PSU status, SFP presence, LED states
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+ok()   { echo -e "${GREEN}OK${NC}"; }
+warn() { echo -e "${YELLOW}WARN${NC}"; }
+fail() { echo -e "${RED}FAIL${NC}"; }
+
+# ── Header ────────────────────────────────────────────────────
+echo "============================================"
+echo "  EdgeNOS Platform Diagnostics"
+echo "  Edgecore AS5610-52X"
+echo "============================================"
+echo ""
+
+# ── CPLD ──────────────────────────────────────────────────────
+echo "=== CPLD ==="
+CPLD_SYSFS="/sys/bus/platform/devices/as5610_52x_cpld"
+if [ -d "$CPLD_SYSFS" ]; then
+    echo "  Version: $(cat "$CPLD_SYSFS/version" 2>/dev/null || echo 'N/A')"
+    echo "  Status: $(ok)"
+else
+    echo "  Status: $(fail) (driver not loaded)"
+fi
+echo ""
+
+# ── Thermal Sensors ──────────────────────────────────────────
+echo "=== Thermal Sensors ==="
+for hwmon_dir in /sys/class/hwmon/hwmon*; do
+    [ -d "$hwmon_dir" ] || continue
+    name=$(cat "$hwmon_dir/name" 2>/dev/null || echo "unknown")
+    for temp_file in "$hwmon_dir"/temp*_input; do
+        [ -f "$temp_file" ] || continue
+        temp=$(cat "$temp_file" 2>/dev/null || continue)
+        temp_c=$((temp / 1000))
+        temp_frac=$(( (temp % 1000) / 100 ))
+        label_file="${temp_file%_input}_label"
+        label=$(cat "$label_file" 2>/dev/null || basename "$temp_file" | sed 's/_input//')
+
+        status="$(ok)"
+        [ "$temp_c" -ge 65 ] && status="$(warn)"
+        [ "$temp_c" -ge 75 ] && status="$(fail)"
+
+        printf "  %-20s %3d.%d°C  %s\n" "$name/$label:" "$temp_c" "$temp_frac" "$status"
+    done
+done
+echo ""
+
+# ── Fans ─────────────────────────────────────────────────────
+echo "=== Fans ==="
+if [ -f "$CPLD_SYSFS/fan_status" ]; then
+    fan_status=$(cat "$CPLD_SYSFS/fan_status")
+    fan_pwm=$(cat "$CPLD_SYSFS/fan_pwm" 2>/dev/null || echo "?")
+    echo "  Fan status register: $fan_status"
+    echo "  Fan PWM value: $fan_pwm"
+    echo "  Status: $(ok)"
+else
+    echo "  Status: $(warn) (CPLD not available)"
+fi
+echo ""
+
+# ── PSU ──────────────────────────────────────────────────────
+echo "=== Power Supplies ==="
+if [ -d "$CPLD_SYSFS" ]; then
+    for psu in 1 2; do
+        present=$(cat "$CPLD_SYSFS/psu${psu}_present" 2>/dev/null || echo "?")
+        good=$(cat "$CPLD_SYSFS/psu${psu}_good" 2>/dev/null || echo "?")
+        if [ "$present" = "1" ]; then
+            if [ "$good" = "1" ]; then
+                echo "  PSU$psu: Present, Power Good $(ok)"
+            else
+                echo "  PSU$psu: Present, Power $(fail)"
+            fi
+        else
+            echo "  PSU$psu: $(warn) Not present"
+        fi
+    done
+else
+    echo "  Status: $(warn) (CPLD not available)"
+fi
+echo ""
+
+# ── SFP/QSFP Presence ───────────────────────────────────────
+echo "=== SFP/QSFP Port Presence ==="
+present_count=0
+absent_count=0
+
+# Read from I2C GPIO expanders if available
+for port in $(seq 1 52); do
+    if [ "$port" -le 48 ]; then
+        bus=$((21 + port))
+        # Try to detect SFP EEPROM at 0x50
+        if i2cget -y "$bus" 0x50 0 b >/dev/null 2>&1; then
+            present_count=$((present_count + 1))
+        else
+            absent_count=$((absent_count + 1))
+        fi
+    else
+        bus=$((port - 49 + 18))
+        if i2cget -y "$bus" 0x50 0 b >/dev/null 2>&1; then
+            present_count=$((present_count + 1))
+        else
+            absent_count=$((absent_count + 1))
+        fi
+    fi
+done 2>/dev/null
+
+echo "  SFP+/QSFP+ present: $present_count / 52"
+echo "  SFP+/QSFP+ absent:  $absent_count / 52"
+echo ""
+
+# ── PCIe / ASIC ─────────────────────────────────────────────
+echo "=== ASIC ==="
+bcm_pci=$(lspci -d 14e4: 2>/dev/null | head -1)
+if [ -n "$bcm_pci" ]; then
+    echo "  $bcm_pci"
+    echo "  Status: $(ok)"
+else
+    echo "  Status: $(fail) (BCM56846 not found on PCIe)"
+fi
+
+# Check BDE module
+if [ -c /dev/linux-kernel-bde ]; then
+    echo "  BDE kernel module: $(ok)"
+else
+    echo "  BDE kernel module: $(warn) (not loaded)"
+fi
+
+# Check switchd
+if pidof switchd >/dev/null 2>&1; then
+    echo "  switchd: $(ok) (PID $(pidof switchd))"
+else
+    echo "  switchd: $(warn) (not running)"
+fi
+echo ""
+
+# ── LEDs ─────────────────────────────────────────────────────
+echo "=== LEDs ==="
+if [ -f "$CPLD_SYSFS/led_sys" ]; then
+    led_sys=$(cat "$CPLD_SYSFS/led_sys")
+    led_loc=$(cat "$CPLD_SYSFS/led_loc" 2>/dev/null || echo "?")
+    echo "  System LED register: $led_sys"
+    echo "  Locator LED register: $led_loc"
+else
+    echo "  Status: $(warn) (CPLD not available)"
+fi
+echo ""
+
+# ── Network Interfaces ──────────────────────────────────────
+echo "=== Network Interfaces ==="
+mgmt_count=0
+swp_count=0
+for iface in /sys/class/net/*; do
+    name=$(basename "$iface")
+    case "$name" in
+        eth*) mgmt_count=$((mgmt_count + 1));;
+        swp*) swp_count=$((swp_count + 1));;
+    esac
+done
+echo "  Management interfaces: $mgmt_count"
+echo "  Switch port interfaces: $swp_count"
+echo ""
+
+# ── I2C Buses ────────────────────────────────────────────────
+echo "=== I2C Buses ==="
+bus_count=$(ls -d /sys/bus/i2c/devices/i2c-* 2>/dev/null | wc -l)
+echo "  Total I2C buses: $bus_count (expected: 70)"
+if [ "$bus_count" -ge 60 ]; then
+    echo "  Status: $(ok)"
+else
+    echo "  Status: $(warn) (some mux channels may not be probed)"
+fi
+echo ""
+
+echo "=== Diagnostics Complete ==="

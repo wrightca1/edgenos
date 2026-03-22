@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:www.edge-core.com)",
+      "WebFetch(domain:www.manualslib.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:opencomputeproject.github.io)",
+      "Bash(find:*)",
+      "Bash(ssh:*)",
+      "Bash(docker run:*)",
+      "Bash(unsquashfs -l /home/smiley/edgecore/newnos/output/images/rootfs.sqsh)",
+      "Bash(unsquashfs -f -d /tmp/sqcheck /home/smiley/edgecore/newnos/output/images/rootfs.sqsh etc/ssh/sshd_config etc/shadow)",
+      "Read(//tmp/sqcheck/etc/ssh/**)",
+      "Bash(docker build:*)",
+      "Bash(cat:*)",
+      "Bash(make:*)",
+      "Bash(/tmp/compare_analysis.txt:*)",
+      "Read(//tmp/**)",
+      "Bash(ls:*)",
+      "WebFetch(domain:broadcom-switch.github.io)",
+      "Bash(scp:*)",
+      "Bash(/home/smiley/analysis/ghidra_12.0.3_PUBLIC/support/analyzeHeadless /home/smiley/analysis/build-server/opennsl/ghidra-projects libopennsl -process libopennsl.so.1 -noanalysis -scriptPath /tmp/ghidra_scripts_fresh -postScript DecompMailbox.java)",
+      "Bash(python3:*)"
+    ]
+  }
+}

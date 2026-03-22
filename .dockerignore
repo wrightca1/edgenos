@@ -1,0 +1,10 @@
+# Don't send build artifacts to Docker context
+output/
+build/
+.git/
+.claude/
+
+# Large files that are downloaded inside the container
+*.tar.xz
+*.tar.gz
+*.tar.bz2

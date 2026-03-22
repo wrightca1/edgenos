@@ -1,0 +1,8 @@
+# BCM56846 Trident+ hardware description
+hardware.total_buffer_cells = 46080
+hardware.cell_bytes = 208
+hardware.max_frame_cells = 45
+hardware.num_priorities = 16
+hardware.num_priority_groups = 8
+hardware.num_service_pools = 4
+hardware.num_mc_queues = 4

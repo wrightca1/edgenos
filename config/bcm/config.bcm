@@ -1,0 +1,148 @@
+# EdgeNOS BCM56846 (Trident+) SDK Configuration
+# Edgecore AS5610-52X: 48x SFP+ 10GbE + 4x QSFP+ 40GbE
+
+# SDK parameters
+polled_irq_mode=0
+bcm_stat_flags=0x1
+l2xmsg_mode=1
+miim_intr_enable=1
+tdma_intr_enable=1
+tslam_intr_enable=1
+tslam_dma_enable=1
+table_dma_enable=1
+parity_enable=1
+xgxs_lcpll_xtal_refclk=1
+phy_ext_rom_boot=0
+
+# Port bitmaps
+pbmp_xport_xe.0=0x1ffffffffffffe
+pbmp_valid.0=0x2001fffffffffffff
+
+# Port map: logical_port → physical_lane:speed
+# SFP+ ports 1-8 (SerDes lanes 65-72)
+portmap_1.0=65:10
+portmap_2.0=66:10
+portmap_3.0=67:10
+portmap_4.0=68:10
+portmap_5.0=69:10
+portmap_6.0=70:10
+portmap_7.0=71:10
+portmap_8.0=72:10
+
+# SFP+ ports 9-16 (SerDes lanes 5-12)
+portmap_9.0=5:10
+portmap_10.0=6:10
+portmap_11.0=7:10
+portmap_12.0=8:10
+portmap_13.0=9:10
+portmap_14.0=10:10
+portmap_15.0=11:10
+portmap_16.0=12:10
+
+# SFP+ ports 17-24 (SerDes lanes 13-20, non-sequential)
+portmap_17.0=13:10
+portmap_18.0=14:10
+portmap_19.0=15:10
+portmap_20.0=16:10
+portmap_21.0=18:10
+portmap_22.0=17:10
+portmap_23.0=20:10
+portmap_24.0=19:10
+
+# SFP+ ports 25-32 (SerDes lanes 21-28, non-sequential)
+portmap_25.0=22:10
+portmap_26.0=21:10
+portmap_27.0=24:10
+portmap_28.0=23:10
+portmap_29.0=25:10
+portmap_30.0=26:10
+portmap_31.0=27:10
+portmap_32.0=28:10
+
+# SFP+ ports 33-40 (SerDes lanes 29-36)
+portmap_33.0=29:10
+portmap_34.0=30:10
+portmap_35.0=31:10
+portmap_36.0=32:10
+portmap_37.0=33:10
+portmap_38.0=34:10
+portmap_39.0=35:10
+portmap_40.0=36:10
+
+# SFP+ ports 41-48 (SerDes lanes 37-44)
+portmap_41.0=37:10
+portmap_42.0=38:10
+portmap_43.0=39:10
+portmap_44.0=40:10
+portmap_45.0=41:10
+portmap_46.0=42:10
+portmap_47.0=43:10
+portmap_48.0=44:10
+
+# QSFP+ ports 49-52 (40G)
+portmap_49.0=49:40
+portmap_50.0=45:40
+portmap_51.0=61:40
+portmap_52.0=57:40
+
+# Port init
+port_init_duplex=1
+
+# SFP+ 10G ports
+port_init_speed_xe0=10000
+port_init_speed_xe1=10000
+port_init_speed_xe2=10000
+port_init_speed_xe3=10000
+port_init_speed_xe4=10000
+port_init_speed_xe5=10000
+port_init_speed_xe6=10000
+port_init_speed_xe7=10000
+port_init_speed_xe8=10000
+port_init_speed_xe9=10000
+port_init_speed_xe10=10000
+port_init_speed_xe11=10000
+port_init_speed_xe12=10000
+port_init_speed_xe13=10000
+port_init_speed_xe14=10000
+port_init_speed_xe15=10000
+port_init_speed_xe16=10000
+port_init_speed_xe17=10000
+port_init_speed_xe18=10000
+port_init_speed_xe19=10000
+port_init_speed_xe20=10000
+port_init_speed_xe21=10000
+port_init_speed_xe22=10000
+port_init_speed_xe23=10000
+port_init_speed_xe24=10000
+port_init_speed_xe25=10000
+port_init_speed_xe26=10000
+port_init_speed_xe27=10000
+port_init_speed_xe28=10000
+port_init_speed_xe29=10000
+port_init_speed_xe30=10000
+port_init_speed_xe31=10000
+port_init_speed_xe32=10000
+port_init_speed_xe33=10000
+port_init_speed_xe34=10000
+port_init_speed_xe35=10000
+port_init_speed_xe36=10000
+port_init_speed_xe37=10000
+port_init_speed_xe38=10000
+port_init_speed_xe39=10000
+port_init_speed_xe40=10000
+port_init_speed_xe41=10000
+port_init_speed_xe42=10000
+port_init_speed_xe43=10000
+port_init_speed_xe44=10000
+port_init_speed_xe45=10000
+port_init_speed_xe46=10000
+port_init_speed_xe47=10000
+
+# QSFP+ 40G ports
+port_init_speed_xe48=40000
+port_init_speed_xe49=40000
+port_init_speed_xe50=40000
+port_init_speed_xe51=40000
+
+# No autoneg on any port
+port_init_autoneg_xe=0

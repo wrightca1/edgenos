@@ -1,0 +1,115 @@
+#!/bin/bash
+# nos-upgrade - EdgeNOS upgrade utility
+# Upgrades the inactive slot and optionally switches to it
+
+set -e
+
+PROG=$(basename "$0")
+INSTALL_DEV="/dev/sda"
+
+usage() {
+    echo "Usage: $PROG [options] <image.bin>"
+    echo "  --slot A|B    Install to specific slot (default: inactive)"
+    echo "  --activate    Switch active slot after install"
+    echo "  --reboot      Reboot after install"
+    echo "  -h, --help    Show this help"
+}
+
+log() { echo "$PROG: $*"; logger -t nos-upgrade "$*"; }
+
+get_active_slot() {
+    fw_printenv cl.active 2>/dev/null | cut -d= -f2 || echo "1"
+}
+
+# Parse args
+SLOT=""
+ACTIVATE=0
+REBOOT=0
+IMAGE=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --slot)     SLOT="$2"; shift 2 ;;
+        --activate) ACTIVATE=1; shift ;;
+        --reboot)   REBOOT=1; shift ;;
+        -h|--help)  usage; exit 0 ;;
+        *)          IMAGE="$1"; shift ;;
+    esac
+done
+
+if [ -z "$IMAGE" ]; then
+    usage
+    exit 1
+fi
+
+if [ ! -f "$IMAGE" ]; then
+    log "ERROR: Image not found: $IMAGE"
+    exit 1
+fi
+
+# Determine target slot
+ACTIVE=$(get_active_slot)
+if [ -z "$SLOT" ]; then
+    SLOT=$( [ "$ACTIVE" = "1" ] && echo "2" || echo "1" )
+fi
+
+if [ "$SLOT" = "1" ] || [ "$SLOT" = "A" ]; then
+    KERN_PART="${INSTALL_DEV}5"
+    ROOT_PART="${INSTALL_DEV}6"
+    SLOT_NUM=1
+elif [ "$SLOT" = "2" ] || [ "$SLOT" = "B" ]; then
+    KERN_PART="${INSTALL_DEV}7"
+    ROOT_PART="${INSTALL_DEV}8"
+    SLOT_NUM=2
+else
+    log "ERROR: Invalid slot: $SLOT"
+    exit 1
+fi
+
+log "Active slot: $ACTIVE, installing to slot $SLOT_NUM"
+
+# Extract payload from image
+ARCHIVE_LINE=$(grep -an "^__ARCHIVE__$" "$IMAGE" | tail -1 | cut -d: -f1)
+if [ -z "$ARCHIVE_LINE" ]; then
+    log "ERROR: Not a valid EdgeNOS image"
+    exit 1
+fi
+
+TMPDIR=$(mktemp -d)
+tail -c "+$(( $(head -n "$ARCHIVE_LINE" "$IMAGE" | wc -c) + 1 ))" "$IMAGE" | \
+    tar -x -C "$TMPDIR"
+
+# Write FIT image
+if [ -f "$TMPDIR/uImage-powerpc.itb" ]; then
+    log "Writing FIT image to $KERN_PART..."
+    dd if="$TMPDIR/uImage-powerpc.itb" of="$KERN_PART" bs=64k 2>/dev/null
+else
+    log "ERROR: FIT image not found in archive"
+    rm -rf "$TMPDIR"
+    exit 1
+fi
+
+# Write rootfs
+if [ -f "$TMPDIR/rootfs.sqsh" ]; then
+    log "Writing rootfs to $ROOT_PART..."
+    dd if="$TMPDIR/rootfs.sqsh" of="$ROOT_PART" bs=64k 2>/dev/null
+else
+    log "ERROR: rootfs not found in archive"
+    rm -rf "$TMPDIR"
+    exit 1
+fi
+
+rm -rf "$TMPDIR"
+log "Slot $SLOT_NUM upgrade complete."
+
+# Activate if requested
+if [ "$ACTIVATE" = "1" ]; then
+    log "Activating slot $SLOT_NUM..."
+    fw_setenv cl.active "$SLOT_NUM"
+fi
+
+# Reboot if requested
+if [ "$REBOOT" = "1" ]; then
+    log "Rebooting..."
+    reboot
+fi

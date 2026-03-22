@@ -1,0 +1,36 @@
+#!/bin/bash
+# switchd-init - Pre-flight checks before starting switchd
+set -e
+
+log() { logger -t switchd-init "$*"; echo "switchd-init: $*"; }
+
+# Check BDE modules are loaded
+if [ ! -c /dev/linux-user-bde ]; then
+    log "ERROR: /dev/linux-user-bde not found. Loading BDE modules..."
+    insmod /lib/modules/extra/linux-kernel-bde.ko maxpayload=128 2>/dev/null || true
+    insmod /lib/modules/extra/linux-user-bde.ko 2>/dev/null || true
+
+    # Wait for device node
+    for i in $(seq 1 10); do
+        [ -c /dev/linux-user-bde ] && break
+        sleep 1
+    done
+
+    if [ ! -c /dev/linux-user-bde ]; then
+        log "FATAL: Cannot create /dev/linux-user-bde"
+        exit 1
+    fi
+fi
+
+# Check ASIC is visible on PCIe
+if ! lspci | grep -qi "broadcom.*56"; then
+    log "WARNING: BCM56846 not found on PCIe bus"
+fi
+
+# Ensure config files exist
+if [ ! -f /etc/switchd/config.bcm ]; then
+    log "ERROR: /etc/switchd/config.bcm not found"
+    exit 1
+fi
+
+log "Pre-flight checks passed"

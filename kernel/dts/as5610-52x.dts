@@ -1,0 +1,827 @@
+/*
+ * EdgeNOS Device Tree for Edgecore AS5610-52X
+ * Based on ONL DTS with full I2C bus 1 topology, CPLD, sensors, and retimers
+ *
+ * Platform: Freescale P2020 (MPC85xx) + Broadcom BCM56846 (Trident+)
+ * Ports: 48x SFP+ 10GbE + 4x QSFP+ 40GbE
+ */
+
+/dts-v1/;
+/ {
+	model = "powerpc-accton-as5610-52x-r0";
+	compatible = "accton,as5610_52x", "fsl,P2020RDB";
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	aliases {
+		ethernet0 = &enet0;
+		serial0 = &serial0;
+		serial1 = &serial1;
+		pci0 = &pci0;
+		pci1 = &pci1;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		PowerPC,P2020@0 {
+			device_type = "cpu";
+			reg = <0x0>;
+			next-level-cache = <&L2>;
+		};
+
+		PowerPC,P2020@1 {
+			device_type = "cpu";
+			reg = <0x1>;
+			next-level-cache = <&L2>;
+		};
+	};
+
+	memory {
+		device_type = "memory";
+	};
+
+	localbus@ff705000 {
+		#address-cells = <2>;
+		#size-cells = <1>;
+		compatible = "fsl,p2020-elbc", "fsl,elbc", "simple-bus";
+		reg = <0 0xff705000 0 0x1000>;
+		interrupts = <19 2>;
+		interrupt-parent = <&mpic>;
+
+		ranges = <0x0 0x0 0x0 0xefc00000 0x00400000
+		          0x1 0x0 0x0 0xea000000 0x00000100>;
+
+		/* NOR flash: Spansion S29GL064N (4 MB mapped) */
+		nor@0,0 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			compatible = "cfi-flash";
+			reg = <0x0 0x0 0x400000>;
+			bank-width = <1>;
+			device-width = <1>;
+
+			partition@0 {
+				reg = <0x0 0x00360000>;
+				label = "onie";
+			};
+			partition@360000 {
+				reg = <0x360000 0x00010000>;
+				label = "u-boot-env";
+			};
+			partition@370000 {
+				reg = <0x00370000 0x00010000>;
+				label = "board_eeprom";
+				read-only;
+			};
+			partition@380000 {
+				reg = <0x00380000 0x00080000>;
+				label = "uboot";
+				read-only;
+			};
+		};
+
+		/* CPLD: Altera EPM570T144C5N via eLBC CS1 */
+		cpld@1,0 {
+			compatible = "accton,as5610-52x-cpld";
+			reg = <0x1 0x0 0x100>;
+		};
+	};
+
+	soc@ff700000 {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		device_type = "soc";
+		compatible = "fsl,p2020-immr", "simple-bus";
+		ranges = <0x0 0x0 0xff700000 0x100000>;
+		bus-frequency = <0>;
+
+		ecm-law@0 {
+			compatible = "fsl,ecm-law";
+			reg = <0x0 0x1000>;
+			fsl,num-laws = <12>;
+		};
+
+		ecm@1000 {
+			compatible = "fsl,p2020-ecm", "fsl,ecm";
+			reg = <0x1000 0x1000>;
+			interrupts = <17 2>;
+			interrupt-parent = <&mpic>;
+		};
+
+		memory-controller@2000 {
+			compatible = "fsl,p2020-memory-controller";
+			reg = <0x2000 0x1000>;
+			interrupt-parent = <&mpic>;
+			interrupts = <18 2>;
+		};
+
+		/* ═══ I2C Bus 0: Management / Platform ═══ */
+		i2c@3000 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			cell-index = <0>;
+			compatible = "fsl-i2c";
+			reg = <0x3000 0x100>;
+			interrupts = <43 2>;
+			interrupt-parent = <&mpic>;
+			dfsrr;
+
+			mux@70 {
+				compatible = "nxp,pca9548";
+				reg = <0x70>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				/* ch0: RTC */
+				i2c@0 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <0>;
+					rtc@51 {
+						compatible = "nxp,pcf8563";
+						reg = <0x51>;
+					};
+				};
+
+				/* ch1: PSU1 */
+				i2c@1 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <1>;
+					psu1_eeprom: eeprom@3a {
+						compatible = "atmel,24c02";
+						reg = <0x3a>;
+						read-only;
+					};
+				};
+
+				/* ch2: PSU2 */
+				i2c@2 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <2>;
+					psu2_eeprom: eeprom@39 {
+						compatible = "atmel,24c02";
+						reg = <0x39>;
+						read-only;
+					};
+				};
+
+				/* ch3: empty */
+				/* ch4: USB hub (0x2C) */
+				/* ch5: VT1165M (0x71) */
+				/* ch6: ICS83905I (0x6E) */
+
+				/* ch7: Thermal sensors */
+				i2c@7 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <7>;
+
+					max6697@4d {
+						compatible = "maxim,max6697";
+						reg = <0x4d>;
+					};
+					ne1617a@18 {
+						compatible = "national,ne1617a", "maxim,max1617";
+						reg = <0x18>;
+					};
+				};
+			};
+		};
+
+		/* ═══ I2C Bus 1: SFP/QSFP Data + Control ═══ */
+		i2c@3100 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			cell-index = <1>;
+			compatible = "fsl-i2c";
+			reg = <0x3100 0x100>;
+			interrupts = <43 2>;
+			interrupt-parent = <&mpic>;
+			dfsrr;
+
+			/* ── PCA9546 @ 0x75: SFP ports 1-32 ── */
+			mux@75 {
+				compatible = "nxp,pca9546";
+				reg = <0x75>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				deselect-on-exit;
+
+				/* ch0 → PCA9548 → ports 1-8 */
+				i2c@0 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <0>;
+					mux@74 {
+						compatible = "nxp,pca9548";
+						reg = <0x74>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						i2c@0 { reg = <0>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_0"; };
+						};
+						i2c@1 { reg = <1>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_1"; };
+						};
+						i2c@2 { reg = <2>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_2"; };
+						};
+						i2c@3 { reg = <3>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_3"; };
+						};
+						i2c@4 { reg = <4>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@5 { reg = <5>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@6 { reg = <6>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@7 { reg = <7>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+					};
+				};
+
+				/* ch1 → PCA9548 → ports 9-16 */
+				i2c@1 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <1>;
+					mux@74 {
+						compatible = "nxp,pca9548";
+						reg = <0x74>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						i2c@0 { reg = <0>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_4"; };
+						};
+						i2c@1 { reg = <1>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_5"; };
+						};
+						i2c@2 { reg = <2>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_6"; };
+						};
+						i2c@3 { reg = <3>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_7"; };
+						};
+						i2c@4 { reg = <4>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@5 { reg = <5>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@6 { reg = <6>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@7 { reg = <7>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+					};
+				};
+
+				/* ch2 → PCA9548 → ports 17-24 */
+				i2c@2 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <2>;
+					mux@74 {
+						compatible = "nxp,pca9548";
+						reg = <0x74>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						i2c@0 { reg = <0>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_8"; };
+						};
+						i2c@1 { reg = <1>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_9"; };
+						};
+						i2c@2 { reg = <2>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_10"; };
+						};
+						i2c@3 { reg = <3>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_rx_eq_11"; };
+						};
+						i2c@4 { reg = <4>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@5 { reg = <5>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@6 { reg = <6>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@7 { reg = <7>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+					};
+				};
+
+				/* ch3 → PCA9548 → ports 25-32 */
+				i2c@3 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <3>;
+					mux@74 {
+						compatible = "nxp,pca9548";
+						reg = <0x74>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						i2c@0 { reg = <0>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_0"; };
+						};
+						i2c@1 { reg = <1>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_1"; };
+						};
+						i2c@2 { reg = <2>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_2"; };
+						};
+						i2c@3 { reg = <3>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_3"; };
+						};
+						i2c@4 { reg = <4>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@5 { reg = <5>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@6 { reg = <6>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@7 { reg = <7>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+					};
+				};
+			};
+
+			/* ── PCA9546 @ 0x76: SFP ports 33-48 + GPIO control ── */
+			mux@76 {
+				compatible = "nxp,pca9546";
+				reg = <0x76>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				deselect-on-exit;
+
+				/* ch0 → PCA9548 → ports 33-40 */
+				i2c@0 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <0>;
+					mux@74 {
+						compatible = "nxp,pca9548";
+						reg = <0x74>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						i2c@0 { reg = <0>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_4"; };
+						};
+						i2c@1 { reg = <1>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_5"; };
+						};
+						i2c@2 { reg = <2>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_6"; };
+						};
+						i2c@3 { reg = <3>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_7"; };
+						};
+						i2c@4 { reg = <4>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@5 { reg = <5>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@6 { reg = <6>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+						i2c@7 { reg = <7>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+						};
+					};
+				};
+
+				/* ch1 → PCA9548 → ports 41-48 */
+				i2c@1 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <1>;
+					mux@74 {
+						compatible = "nxp,pca9548";
+						reg = <0x74>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						i2c@0 { reg = <0>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_8"; };
+						};
+						i2c@1 { reg = <1>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_9"; };
+						};
+						i2c@2 { reg = <2>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_10"; };
+						};
+						i2c@3 { reg = <3>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "sfp_tx_eq_11"; };
+						};
+						i2c@4 { reg = <4>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "qsfp_tx_eq_0"; };
+						};
+						i2c@5 { reg = <5>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "qsfp_tx_eq_1"; };
+						};
+						i2c@6 { reg = <6>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "qsfp_tx_eq_2"; };
+						};
+						i2c@7 { reg = <7>; #address-cells = <1>; #size-cells = <0>;
+							eeprom@50 { compatible = "atmel,24c04"; reg = <0x50>; };
+							retimer@27 { compatible = "ti,ds100df410"; reg = <0x27>; label = "qsfp_tx_eq_3"; };
+						};
+					};
+				};
+
+				/* ch2: GPIO control bus 1 - QSFP + SFP rate select */
+				i2c@2 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <2>;
+
+					/* QSFP LPMODE[3:0] + RESET[3:0] */
+					gpio_qsfp_rst: gpio@70 {
+						compatible = "nxp,pca9538";
+						reg = <0x70>;
+						gpio-controller;
+						#gpio-cells = <2>;
+					};
+					/* QSFP MODSEL[3:0] + INT */
+					gpio_qsfp_modsel: gpio@71 {
+						compatible = "nxp,pca9538";
+						reg = <0x71>;
+						gpio-controller;
+						#gpio-cells = <2>;
+					};
+					/* SFP 40-47 rate select */
+					gpio@72 {
+						compatible = "nxp,pca9538";
+						reg = <0x72>;
+						gpio-controller;
+						#gpio-cells = <2>;
+					};
+					/* Misc GPIO */
+					gpio@73 {
+						compatible = "nxp,pca9538";
+						reg = <0x73>;
+						gpio-controller;
+						#gpio-cells = <2>;
+					};
+				};
+
+				/* ch3: GPIO control bus 2 - SFP status/control */
+				i2c@3 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <3>;
+
+					/* SFP MOD_ABS (present) ports 0-39 */
+					/* SFP TX_FAULT ports 0-39 */
+					/* SFP RX_LOS ports 0-39 */
+					/* Mixed: SFP 40-47 + QSFP presence */
+					/* SFP TX_DISABLE ports 0-39 */
+				};
+			};
+
+			/* ── PCA9546 @ 0x77: QSFP ports 49-52 ── */
+			mux@77 {
+				compatible = "nxp,pca9546";
+				reg = <0x77>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				deselect-on-exit;
+
+				/* ch0: QSFP port 49 */
+				i2c@0 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <0>;
+					eeprom@50 {
+						compatible = "sff,sff8436";
+						reg = <0x50>;
+					};
+					retimer@27 {
+						compatible = "ti,ds100df410";
+						reg = <0x27>;
+						label = "qsfp_rx_eq_0";
+					};
+				};
+
+				/* ch1: QSFP port 50 */
+				i2c@1 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <1>;
+					eeprom@50 {
+						compatible = "sff,sff8436";
+						reg = <0x50>;
+					};
+					retimer@27 {
+						compatible = "ti,ds100df410";
+						reg = <0x27>;
+						label = "qsfp_rx_eq_1";
+					};
+				};
+
+				/* ch2: QSFP port 51 */
+				i2c@2 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <2>;
+					eeprom@50 {
+						compatible = "sff,sff8436";
+						reg = <0x50>;
+					};
+					retimer@27 {
+						compatible = "ti,ds100df410";
+						reg = <0x27>;
+						label = "qsfp_rx_eq_2";
+					};
+				};
+
+				/* ch3: QSFP port 52 */
+				i2c@3 {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					reg = <3>;
+					eeprom@50 {
+						compatible = "sff,sff8436";
+						reg = <0x50>;
+					};
+					retimer@27 {
+						compatible = "ti,ds100df410";
+						reg = <0x27>;
+						label = "qsfp_rx_eq_3";
+					};
+				};
+			};
+		};
+
+		serial0: serial@4500 {
+			cell-index = <0>;
+			device_type = "serial";
+			compatible = "ns16550";
+			reg = <0x4500 0x100>;
+			clock-frequency = <0>;
+			interrupts = <42 2>;
+			interrupt-parent = <&mpic>;
+		};
+
+		serial1: serial@4600 {
+			cell-index = <1>;
+			device_type = "serial";
+			compatible = "ns16550";
+			reg = <0x4600 0x100>;
+			clock-frequency = <0>;
+			interrupts = <42 2>;
+			interrupt-parent = <&mpic>;
+		};
+
+		spi@7000 {
+			cell-index = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			compatible = "fsl,espi";
+			reg = <0x7000 0x1000>;
+			interrupts = <59 0x2>;
+			interrupt-parent = <&mpic>;
+			mode = "cpu";
+
+			flash@0 {
+				#address-cells = <1>;
+				#size-cells = <1>;
+				compatible = "fsl,espi-flash";
+				reg = <0>;
+				spi-max-frequency = <32000000>;
+			};
+		};
+
+		dma@c300 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			compatible = "fsl,eloplus-dma";
+			reg = <0xc300 0x4>;
+			ranges = <0x0 0xc100 0x200>;
+			cell-index = <1>;
+			dma-channel@0   { compatible = "fsl,eloplus-dma-channel"; reg = <0x0 0x80>;   cell-index = <0>; interrupt-parent = <&mpic>; interrupts = <76 2>; };
+			dma-channel@80  { compatible = "fsl,eloplus-dma-channel"; reg = <0x80 0x80>;  cell-index = <1>; interrupt-parent = <&mpic>; interrupts = <77 2>; };
+			dma-channel@100 { compatible = "fsl,eloplus-dma-channel"; reg = <0x100 0x80>; cell-index = <2>; interrupt-parent = <&mpic>; interrupts = <78 2>; };
+			dma-channel@180 { compatible = "fsl,eloplus-dma-channel"; reg = <0x180 0x80>; cell-index = <3>; interrupt-parent = <&mpic>; interrupts = <79 2>; };
+		};
+
+		gpio: gpio-controller@f000 {
+			#gpio-cells = <2>;
+			compatible = "fsl,mpc8572-gpio";
+			reg = <0xf000 0x100>;
+			interrupts = <47 0x2>;
+			interrupt-parent = <&mpic>;
+			gpio-controller;
+		};
+
+		L2: l2-cache-controller@20000 {
+			compatible = "fsl,p2020-l2-cache-controller";
+			reg = <0x20000 0x1000>;
+			cache-line-size = <32>;
+			cache-size = <0x80000>;
+			interrupt-parent = <&mpic>;
+			interrupts = <16 2>;
+		};
+
+		dma@21300 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			compatible = "fsl,eloplus-dma";
+			reg = <0x21300 0x4>;
+			ranges = <0x0 0x21100 0x200>;
+			cell-index = <0>;
+			dma-channel@0   { compatible = "fsl,eloplus-dma-channel"; reg = <0x0 0x80>;   cell-index = <0>; interrupt-parent = <&mpic>; interrupts = <20 2>; };
+			dma-channel@80  { compatible = "fsl,eloplus-dma-channel"; reg = <0x80 0x80>;  cell-index = <1>; interrupt-parent = <&mpic>; interrupts = <21 2>; };
+			dma-channel@100 { compatible = "fsl,eloplus-dma-channel"; reg = <0x100 0x80>; cell-index = <2>; interrupt-parent = <&mpic>; interrupts = <22 2>; };
+			dma-channel@180 { compatible = "fsl,eloplus-dma-channel"; reg = <0x180 0x80>; cell-index = <3>; interrupt-parent = <&mpic>; interrupts = <23 2>; };
+		};
+
+		usb@22000 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			compatible = "fsl-usb2-dr";
+			reg = <0x22000 0x1000>;
+			interrupt-parent = <&mpic>;
+			interrupts = <28 0x2>;
+			phy_type = "ulpi";
+		};
+
+		/* Management Ethernet (eTSEC) */
+		enet0: ethernet@24000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			cell-index = <0>;
+			device_type = "network";
+			model = "eTSEC";
+			compatible = "gianfar";
+			reg = <0x24000 0x1000>;
+			ranges = <0x0 0x24000 0x1000>;
+			local-mac-address = [ 00 00 00 00 00 00 ];
+			interrupts = <29 2 30 2 34 2>;
+			interrupt-parent = <&mpic>;
+			phy-handle = <&phy1>;
+			phy-connection-type = "rgmii-id";
+
+			mdio@520 {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				device_type = "mdio";
+				compatible = "fsl,gianfar-mdio";
+				reg = <0x520 0x20>;
+
+				phy1: ethernet-phy@1 {
+					reg = <0x1>;
+					device_type = "ethernet-phy";
+				};
+			};
+		};
+
+		sdhci@2e000 {
+			compatible = "fsl,p2020-esdhc", "fsl,esdhc";
+			reg = <0x2e000 0x1000>;
+			interrupts = <72 0x2>;
+			interrupt-parent = <&mpic>;
+			fsl,sdhci-adjust-timeout;
+			clock-frequency = <0>;
+		};
+
+		crypto@30000 {
+			compatible = "fsl,sec3.1", "fsl,sec3.0", "fsl,sec2.4",
+			             "fsl,sec2.2", "fsl,sec2.1", "fsl,sec2.0";
+			reg = <0x30000 0x10000>;
+			interrupts = <45 2 58 2>;
+			interrupt-parent = <&mpic>;
+			fsl,num-channels = <4>;
+			fsl,channel-fifo-len = <24>;
+			fsl,exec-units-mask = <0xbfe>;
+			fsl,descriptor-types-mask = <0x3ab0ebf>;
+		};
+
+		mpic: pic@40000 {
+			interrupt-controller;
+			#address-cells = <0>;
+			#interrupt-cells = <2>;
+			reg = <0x40000 0x40000>;
+			compatible = "chrp,open-pic";
+			device_type = "open-pic";
+		};
+
+		msi@41600 {
+			compatible = "fsl,p2020-msi", "fsl,mpic-msi";
+			reg = <0x41600 0x80>;
+			msi-available-ranges = <0 0x100>;
+			interrupts = <0xe0 0 0xe1 0 0xe2 0 0xe3 0
+			              0xe4 0 0xe5 0 0xe6 0 0xe7 0>;
+			interrupt-parent = <&mpic>;
+		};
+
+		global-utilities@e0000 {
+			compatible = "fsl,p2020-guts";
+			reg = <0xe0000 0x1000>;
+			fsl,has-rstcr;
+		};
+	};
+
+	/* PCIe controller 1 (unused on AS5610) */
+	pci0: pcie@ff709000 {
+		cell-index = <1>;
+		compatible = "fsl,mpc8548-pcie";
+		device_type = "pci";
+		#interrupt-cells = <1>;
+		#size-cells = <2>;
+		#address-cells = <3>;
+		reg = <0 0xff709000 0 0x1000>;
+		bus-range = <0 255>;
+		ranges = <0x2000000 0x0 0xc0000000 0 0xc0000000 0x0 0x20000000
+		          0x1000000 0x0 0x00000000 0 0xffc30000 0x0 0x10000>;
+		clock-frequency = <33333333>;
+		interrupt-parent = <&mpic>;
+		interrupts = <25 2>;
+		interrupt-map-mask = <0xf800 0x0 0x0 0x7>;
+		interrupt-map = <
+			0000 0x0 0x0 0x1 &mpic 0x4 0x1
+			0000 0x0 0x0 0x2 &mpic 0x5 0x1
+			0000 0x0 0x0 0x3 &mpic 0x6 0x1
+			0000 0x0 0x0 0x4 &mpic 0x7 0x1>;
+		pcie@0 {
+			reg = <0x0 0x0 0x0 0x0 0x0>;
+			#size-cells = <2>;
+			#address-cells = <3>;
+			device_type = "pci";
+			ranges = <0x2000000 0x0 0xc0000000 0x2000000 0x0 0xc0000000 0x0 0x20000000
+			          0x1000000 0x0 0x0 0x1000000 0x0 0x0 0x0 0x100000>;
+		};
+	};
+
+	/* PCIe controller 2: BCM56846 Trident+ ASIC */
+	pci1: pcie@ff70a000 {
+		cell-index = <2>;
+		compatible = "fsl,mpc8548-pcie";
+		device_type = "pci";
+		#interrupt-cells = <1>;
+		#size-cells = <2>;
+		#address-cells = <3>;
+		reg = <0 0xff70a000 0 0x1000>;
+		bus-range = <0 255>;
+		ranges = <0x2000000 0x0 0xa0000000 0 0xa0000000 0x0 0x20000000
+		          0x1000000 0x0 0x00000000 0 0xffc20000 0x0 0x10000>;
+		clock-frequency = <33333333>;
+		interrupt-parent = <&mpic>;
+		interrupts = <26 2>;
+		interrupt-map-mask = <0xf800 0x0 0x0 0x7>;
+		interrupt-map = <
+			0000 0x0 0x0 0x1 &mpic 0x0 0x1
+			0000 0x0 0x0 0x2 &mpic 0x1 0x1
+			0000 0x0 0x0 0x3 &mpic 0x2 0x1
+			0000 0x0 0x0 0x4 &mpic 0x3 0x1>;
+		pcie@0 {
+			reg = <0x0 0x0 0x0 0x0 0x0>;
+			#size-cells = <2>;
+			#address-cells = <3>;
+			device_type = "pci";
+			ranges = <0x2000000 0x0 0xa0000000 0x2000000 0x0 0xa0000000 0x0 0x20000000
+			          0x1000000 0x0 0x0 0x1000000 0x0 0x0 0x0 0x100000>;
+		};
+	};
+};

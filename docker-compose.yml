@@ -1,0 +1,36 @@
+# EdgeNOS Docker Build Environment
+#
+# Usage:
+#   docker compose build                          # Build the container
+#   docker compose run --rm build                  # Full build (all targets)
+#   docker compose run --rm build kernel           # Build kernel only
+#   docker compose run --rm build bash             # Interactive shell
+#   docker compose run --rm build modules          # Platform modules only
+#   docker compose run --rm build sdk              # OpenMDK only
+#   docker compose run --rm build switchd          # Switch daemon only
+#   docker compose run --rm build rootfs           # Root filesystem only
+#   docker compose run --rm build image            # ONIE installer only
+
+services:
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        KVER: "5.10.224"
+        BRVER: "2023.02.9"
+        JOBS: "0"  # 0 = auto-detect (nproc)
+    image: edgenos-builder
+    volumes:
+      # Persist build output on the host
+      - ./output:/build/output
+      # Optionally mount source for iterative development:
+      # - ./asic/switchd:/build/asic/switchd
+      # - ./platform:/build/platform
+      # - ./config:/build/config
+    # Resource limits (adjust for your machine)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "8"
+    #       memory: 8G

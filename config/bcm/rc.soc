@@ -1,0 +1,37 @@
+# EdgeNOS rc.soc - BCM56846 SOC initialization
+
+# Suppress verbose debug output
+debug -PCi -SChan -SOCMEM -SYMTAB -VERInet -L3 -INTr -ARL -ARLMon
+debug -L2table -DMA -POrt -PAcket -TX -RCLOAD -TEsts -VERbose -MIIm
+debug -PHY -END -LInk -CounTeR -IP -STP -VLAN -RX -I2C -REG -MEM -STK
+
+# Attach to unit 0 and initialize
+attach *
+0:
+init all
+
+# Load port definitions
+rcload /etc/switchd/rc.ports_0
+
+# XMAC TX control
+setreg xmac_tx_ctrl 0xc802
+s MAC_RSV_MASK MASK=0x18
+
+# Enable 40G link detection
+m cmic_misc_control LINK40G_ENABLE=1
+
+# Load forwarding config
+rcload /etc/switchd/rc.forwarding
+
+# Trident FP_METER parity errata workaround
+setreg IFP_METER_PARITY_CONTROL 0
+
+# RX drop stats counters
+setreg rdbgc0_select 0x04000d11
+setreg rdbgc3_select 0x00000011
+setreg rdbgc4_select 0x00000100
+setreg rdbgc5_select 0x00002000
+setreg rdbgc6_select 0x00008000
+
+# TX drop stats counters
+setreg tdbgc6_select 0x00040000

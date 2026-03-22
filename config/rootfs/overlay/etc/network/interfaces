@@ -1,0 +1,8 @@
+# /etc/network/interfaces - EdgeNOS management interface config
+
+auto lo
+iface lo inet loopback
+
+# Management Ethernet (eTSEC / eth0)
+auto eth0
+iface eth0 inet dhcp

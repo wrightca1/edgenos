@@ -1,0 +1,19 @@
+[Unit]
+Description=EdgeNOS Switch Daemon
+After=network.target local-fs.target
+Wants=network.target
+ConditionPathExists=/usr/sbin/switchd
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/switchd-init
+ExecStart=/usr/sbin/switchd -c /etc/switchd/config.bcm
+Restart=on-failure
+RestartSec=5
+LimitCORE=infinity
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

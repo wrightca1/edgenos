@@ -1,0 +1,35 @@
+# EdgeNOS forwarding configuration
+# RTAG7 ECMP hashing and CPU punt rules
+
+# RTAG7 hash configuration
+m RTAG7_HASH_CONTROL_3 \
+    HASH_FIELD_BITMAP_A=rpid,sip_31_16,sip_15_0,dip_31_16,dip_15_0,vlan,l4_sport,l4_dport,protocol,src_portid,src_modid,dst_portid,dst_modid
+
+# IPv4 TCP/UDP hash bins
+m RTAG7_IPV4_TCP_UDP_HASH_FIELD_BMAP_2 \
+    IPV4_TCP_UDP_FIELD_BITMAP_A=2,3,4,5,6,8,9,10,11
+
+# IPv6 TCP/UDP hash bins
+m RTAG7_IPV6_TCP_UDP_HASH_FIELD_BMAP_2 \
+    IPV6_TCP_UDP_FIELD_BITMAP_A=2,3,4,5,6,8,9,10,11
+
+# Hash function: CRC16-CCITT
+m RTAG7_HASH_SEED_A hash_a0_function_select=9
+m RTAG7_HASH_SEED_A rtag7_hash_seed_a=42
+
+# ECMP uses RTAG7
+m HASH_CONTROL ecmp_hash_use_rtag7=1
+m ING_CONFIG use_tcp_udp_ports=1
+m EGR_CONFIG l3_hash_select=4
+
+# Trunk hashing
+m HASH_CONTROL non_uc_trunk_hash_use_rtag7=1
+
+# CPU punt configuration
+m ING_CONFIG l3_mtu_fail_tocpu=1
+m EGR_CONFIG l3_slowpath_tocpu=1
+m ING_CONFIG v4l3dstmiss_tocpu=1
+m ING_CONFIG v6l3dstmiss_tocpu=1
+
+# L2 mod fifo (avoid overflow)
+m L2_MOD_FIFO_ENABLE l2_mod_fifo_enable_l2_delete=0

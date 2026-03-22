@@ -1,0 +1,4 @@
+# Port group definitions
+setenv allports xe0-xe51
+setenv 40Gports xe48-xe51
+setenv 10Gports xe0-xe47
