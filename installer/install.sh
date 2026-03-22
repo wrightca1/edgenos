@@ -39,7 +39,7 @@ log "Install device: /dev/$BLK_DEV"
 # ── Extract payload ──────────────────────────────────────────
 extract_payload() {
     local line skip
-    line=$(head -n 200 "$0" | awk '/^__ARCHIVE__$/ { print NR; exit }')
+    line=$(head -n 300 "$0" | awk '/^__ARCHIVE__$/ { print NR; exit }')
     [ -z "$line" ] && fatal "No __ARCHIVE__ marker found"
     skip=$(head -n "$line" "$0" | wc -c)
     {
