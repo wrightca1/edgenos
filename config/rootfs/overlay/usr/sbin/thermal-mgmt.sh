@@ -1,69 +1,73 @@
 #!/bin/bash
-# thermal-mgmt.sh - Thermal management daemon
-# Reads sensors and adjusts fan speed via CPLD
+# thermal-mgmt.sh - Thermal management daemon for AS5610-52X
+#
+# Reads temperature sensors and adjusts fan speed via CPLD PWM.
+#
+# Hardware (from COMPLETE_CHIP_INVENTORY.md):
+#   MAX6697 (7-channel) at I2C bus 9, addr 0x4d -> hwmon1
+#   MAX1617 (2-channel) at I2C bus 9, addr 0x18 -> hwmon2
+#   Fan PWM via CPLD at /sys/devices/ff705000.localbus/ea000000.cpld/pwm1
+#   Fan PWM range: 0 (off) to 248 (full speed)
+#
+# Cumulus uses pwmd daemon for this; we use a simple shell script.
 
-CPLD_FAN_PWM="/sys/bus/platform/devices/as5610_52x_cpld/fan_pwm"
+CPLD="/sys/devices/ff705000.localbus/ea000000.cpld"
+CPLD_PWM="${CPLD}/pwm1"
+CPLD_FAN_LED="${CPLD}/led_fan"
 POLL_INTERVAL=10  # seconds
 
 # Thermal thresholds (millidegrees C)
-THRESH_LOW=45000
-THRESH_MED=55000
-THRESH_HIGH=65000
+THRESH_LOW=40000
+THRESH_MED=50000
+THRESH_HIGH=60000
 THRESH_CRIT=75000
 
-# Fan duty cycle values (CPLD register 0x0D)
-FAN_LOW=4      # ~40%
-FAN_MED=7      # ~70%
-FAN_HIGH=10    # ~100%
+# Fan PWM values (CPLD register, 0-248)
+FAN_LOW=64       # ~25%
+FAN_MED=128      # ~50%
+FAN_HIGH=200     # ~80%
+FAN_FULL=248     # 100%
 
 log() { logger -t thermal-mgmt "$*"; }
 
 get_max_temp() {
     local max=0
-    local temp
-
-    # Read all hwmon temperature sensors
     for f in /sys/class/hwmon/hwmon*/temp*_input; do
         [ -f "$f" ] || continue
         temp=$(cat "$f" 2>/dev/null) || continue
-        if [ "$temp" -gt "$max" ]; then
-            max=$temp
-        fi
+        [ "$temp" -gt "$max" ] && max=$temp
     done
     echo "$max"
 }
 
-set_fan_duty() {
-    local duty=$1
-    if [ -f "$CPLD_FAN_PWM" ]; then
-        echo "$duty" > "$CPLD_FAN_PWM"
-    fi
+set_fan() {
+    local pwm=$1
+    [ -f "$CPLD_PWM" ] && echo "$pwm" > "$CPLD_PWM" 2>/dev/null
 }
 
-log "Thermal management started"
-set_fan_duty $FAN_MED  # Start at medium
+log "Thermal management started (poll=${POLL_INTERVAL}s)"
+set_fan $FAN_MED  # Start at medium
 
 while true; do
     max_temp=$(get_max_temp)
+    temp_c=$((max_temp / 1000))
 
     if [ "$max_temp" -ge "$THRESH_CRIT" ]; then
-        log "CRITICAL: Temperature ${max_temp}mC exceeds ${THRESH_CRIT}mC! Emergency shutdown!"
-        set_fan_duty $FAN_HIGH
+        log "CRITICAL: ${temp_c}C! Full fan + shutdown warning"
+        set_fan $FAN_FULL
+        [ -f "$CPLD_FAN_LED" ] && echo yellow > "$CPLD_FAN_LED"
         sleep 30
-        # Re-check before shutdown
         max_temp=$(get_max_temp)
         if [ "$max_temp" -ge "$THRESH_CRIT" ]; then
-            log "CRITICAL: Still above threshold. Shutting down."
-            shutdown -h now "Thermal emergency shutdown"
+            log "CRITICAL: Still ${temp_c}C. Emergency shutdown."
+            shutdown -h now "Thermal emergency"
         fi
     elif [ "$max_temp" -ge "$THRESH_HIGH" ]; then
-        set_fan_duty $FAN_HIGH
+        set_fan $FAN_HIGH
     elif [ "$max_temp" -ge "$THRESH_MED" ]; then
-        set_fan_duty $FAN_MED
-    elif [ "$max_temp" -ge "$THRESH_LOW" ]; then
-        set_fan_duty $FAN_MED
+        set_fan $FAN_MED
     else
-        set_fan_duty $FAN_LOW
+        set_fan $FAN_LOW
     fi
 
     sleep $POLL_INTERVAL

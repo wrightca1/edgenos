@@ -151,6 +151,15 @@ static int bde_pci_probe(struct pci_dev *pdev,
 		pcie_set_readrq(pdev, maxpayload);
 	}
 
+	/* Request interrupt */
+	ret = request_irq(pdev->irq, bde_isr, IRQF_SHARED,
+			  DRIVER_NAME, bdev);
+	if (ret) {
+		dev_warn(&pdev->dev, "Failed to request IRQ %d (polling mode)\n",
+			 pdev->irq);
+		/* Non-fatal: we can poll instead */
+	}
+
 	bdev->pdev = pdev;
 	bdev->valid = 1;
 	pci_set_drvdata(pdev, bdev);
@@ -176,6 +185,8 @@ static void bde_pci_remove(struct pci_dev *pdev)
 
 	if (!bdev)
 		return;
+
+	free_irq(pdev->irq, bdev);
 
 	if (bdev->dma_virt)
 		dma_free_coherent(&pdev->dev, bdev->dma_size,
@@ -204,6 +215,32 @@ static struct pci_driver bde_pci_driver = {
 	.probe    = bde_pci_probe,
 	.remove   = bde_pci_remove,
 };
+
+/* ── Interrupt handling ──────────────────────────────────────── */
+
+/*
+ * The Cumulus BDE uses two ioctls for synchronization:
+ *   WAIT_FOR_INTERRUPT (0x20004c09): blocks until ASIC interrupt fires
+ *   SEM_OP (0x20004c0a): semaphore for thread coordination
+ *
+ * For OpenMDK BMD, the DMA completion is polled (bmd_xgs_dma_tx_poll,
+ * bmd_xgs_dma_rx_poll) rather than interrupt-driven. So we don't need
+ * a full interrupt handler initially.
+ *
+ * However, we do need to support the interrupt wait for future use.
+ */
+static DECLARE_WAIT_QUEUE_HEAD(bde_wait);
+static volatile int bde_interrupt_pending;
+
+static irqreturn_t bde_isr(int irq, void *dev_id)
+{
+	bde_interrupt_pending = 1;
+	wake_up_interruptible(&bde_wait);
+	return IRQ_HANDLED;
+}
+
+#define BDE_IOC_WAIT_INTR    _IO(BDE_IOC_MAGIC, 5)
+#define BDE_IOC_SEM_OP       _IO(BDE_IOC_MAGIC, 6)
 
 /* ── Character device operations ─────────────────────────────── */
 
@@ -275,6 +312,18 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		dinfo.size = bdev->dma_size;
 		if (copy_to_user((void __user *)arg, &dinfo, sizeof(dinfo)))
 			return -EFAULT;
+		return 0;
+
+	case BDE_IOC_WAIT_INTR:
+		/* Block until ASIC interrupt fires */
+		bde_interrupt_pending = 0;
+		wait_event_interruptible(bde_wait, bde_interrupt_pending);
+		return 0;
+
+	case BDE_IOC_SEM_OP:
+		/* Semaphore operation (wake up waiters) */
+		bde_interrupt_pending = 1;
+		wake_up_interruptible(&bde_wait);
 		return 0;
 
 	default:

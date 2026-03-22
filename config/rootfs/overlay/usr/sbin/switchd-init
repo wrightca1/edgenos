@@ -1,36 +1,87 @@
 #!/bin/bash
-# switchd-init - Pre-flight checks before starting switchd
-set -e
+# switchd-init - Start/stop EdgeNOS switch daemon
+#
+# Boot sequence (from Cumulus RE):
+#   platform-init.sh -> switchd-init start -> networking
+#
+# switchd internally does:
+#   1. BDE open -> CDK probe -> BMD reset -> BMD init (Warpcore firmware)
+#   2. BMD switching init (L2 table, VLAN 1)
+#   3. Port mode set (10G/40G) + TX driver config (idriver=2, predriver=3)
+#   4. Create 52 TUN interfaces -> netlink listener -> main loop
 
+set -e
 log() { logger -t switchd-init "$*"; echo "switchd-init: $*"; }
 
-# Check BDE modules are loaded
-if [ ! -c /dev/linux-user-bde ]; then
-    log "ERROR: /dev/linux-user-bde not found. Loading BDE modules..."
-    insmod /lib/modules/extra/linux-kernel-bde.ko maxpayload=128 2>/dev/null || true
-    insmod /lib/modules/extra/linux-user-bde.ko 2>/dev/null || true
+SWITCHD=/usr/sbin/switchd
+PIDFILE=/var/run/switchd.pid
+CPLD="/sys/devices/ff705000.localbus/ea000000.cpld"
 
-    # Wait for device node
+case "$1" in
+start)
+    log "Starting EdgeNOS switchd..."
+
+    # Check BDE modules
+    if [ ! -c /dev/linux-kernel-bde ]; then
+        log "BDE not loaded, running platform-init..."
+        /usr/sbin/platform-init.sh
+    fi
+
+    # Wait for BDE device
     for i in $(seq 1 10); do
-        [ -c /dev/linux-user-bde ] && break
+        [ -c /dev/linux-kernel-bde ] && break
         sleep 1
     done
+    [ -c /dev/linux-kernel-bde ] || { log "FATAL: BDE device not found"; exit 1; }
 
-    if [ ! -c /dev/linux-user-bde ]; then
-        log "FATAL: Cannot create /dev/linux-user-bde"
-        exit 1
+    # Check ASIC on PCIe
+    if lspci 2>/dev/null | grep -qi "broadcom"; then
+        log "BCM56846 found on PCIe"
+    else
+        log "WARNING: BCM56846 not detected via lspci"
     fi
-fi
 
-# Check ASIC is visible on PCIe
-if ! lspci | grep -qi "broadcom.*56"; then
-    log "WARNING: BCM56846 not found on PCIe bus"
-fi
+    # Ensure config exists
+    mkdir -p /etc/switchd
+    [ -f /etc/switchd/config.bcm ] || touch /etc/switchd/config.bcm
 
-# Ensure config files exist
-if [ ! -f /etc/switchd/config.bcm ]; then
-    log "ERROR: /etc/switchd/config.bcm not found"
+    # Start switchd in foreground mode, log to syslog
+    $SWITCHD -f 2>&1 | logger -t switchd &
+    echo $! > $PIDFILE
+
+    # Wait for ports to come up
+    sleep 8
+    port_count=$(ip link show 2>/dev/null | grep -c "swp" || true)
+    log "switchd started, $port_count ports created"
+
+    # Set system LED to green
+    [ -f "${CPLD}/led_diag" ] && echo green > "${CPLD}/led_diag" 2>/dev/null
+    ;;
+
+stop)
+    log "Stopping switchd..."
+    [ -f $PIDFILE ] && kill $(cat $PIDFILE) 2>/dev/null
+    rm -f $PIDFILE
+
+    # Set system LED to yellow
+    [ -f "${CPLD}/led_diag" ] && echo yellow > "${CPLD}/led_diag" 2>/dev/null
+    ;;
+
+restart)
+    $0 stop; sleep 2; $0 start
+    ;;
+
+status)
+    if [ -f $PIDFILE ] && kill -0 $(cat $PIDFILE) 2>/dev/null; then
+        echo "switchd is running (PID $(cat $PIDFILE))"
+        ip link show 2>/dev/null | grep -c "swp" | xargs echo "Ports:"
+    else
+        echo "switchd is not running"
+    fi
+    ;;
+
+*)
+    echo "Usage: $0 {start|stop|restart|status}"
     exit 1
-fi
-
-log "Pre-flight checks passed"
+    ;;
+esac
