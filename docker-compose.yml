@@ -21,16 +21,17 @@ services:
         BRVER: "2023.02.9"
         JOBS: "0"  # 0 = auto-detect (nproc)
     image: edgenos-builder
+    network_mode: host
     volumes:
       # Persist build output on the host
       - ./output:/build/output
+      # Persist ccache across builds (2x-10x faster rebuilds)
+      - edgenos-ccache:/build/.ccache
       # Optionally mount source for iterative development:
       # - ./asic/switchd:/build/asic/switchd
       # - ./platform:/build/platform
       # - ./config:/build/config
-    # Resource limits (adjust for your machine)
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: "8"
-    #       memory: 8G
+
+volumes:
+  edgenos-ccache:
+    name: edgenos-ccache

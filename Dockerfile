@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # General build tools
     build-essential \
     make \
+    ccache \
     wget \
     curl \
     rsync \
@@ -72,7 +73,9 @@ ENV HOME=/home/builder
 # ── Set cross-compile environment ─────────────────────────────
 ENV CROSS_COMPILE=powerpc-linux-gnu-
 ENV ARCH=powerpc
-ENV PATH="/usr/bin:${PATH}"
+ENV PATH="/usr/lib/ccache:/usr/bin:${PATH}"
+ENV CCACHE_DIR=/build/.ccache
+ENV CCACHE_MAXSIZE=2G
 
 # ── Copy project source ──────────────────────────────────────
 WORKDIR /build
