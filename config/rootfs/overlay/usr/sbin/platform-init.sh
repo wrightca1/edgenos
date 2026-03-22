@@ -19,7 +19,8 @@
 #
 # After modules: GPIO init, retimer programming, fan speed
 
-set -e
+# Don't exit on errors - continue loading what we can
+set +e
 
 log() { echo "platform-init: $*"; logger -t platform-init "$*" 2>/dev/null; }
 
