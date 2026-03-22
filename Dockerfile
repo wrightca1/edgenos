@@ -318,8 +318,71 @@ build_image() {
     }
     cp "${DTB}" "${FITDIR}/as5610_52x.dtb"
 
-    # Create stub initramfs (U-Boot 2013.01 requires ramdisk node or fails)
-    echo -n | gzip -n -9 > "${FITDIR}/initramfs.cpio.gz"
+    # Build real initramfs with nos-init (handles squashfs + overlayfs mount)
+    echo "  Building initramfs..."
+    local IRDIR=$(mktemp -d)
+    powerpc-linux-gnu-gcc -static -nostdlib -nostartfiles -nodefaultlibs \
+        -Os -Wall -o "${IRDIR}/init" /build/initramfs/nos-init.c 2>/dev/null
+    if [ -f "${IRDIR}/init" ]; then
+        echo "  nos-init compiled OK"
+    else
+        echo "  nos-init compile failed, using shell initramfs"
+        mkdir -p "${IRDIR}/bin" "${IRDIR}/dev" "${IRDIR}/proc" "${IRDIR}/sys" \
+                 "${IRDIR}/lower" "${IRDIR}/rw" "${IRDIR}/newroot"
+        cp "${BRSRC}/output/target/bin/busybox" "${IRDIR}/bin/" 2>/dev/null || \
+            cp /usr/powerpc-linux-gnu/bin/busybox "${IRDIR}/bin/" 2>/dev/null || true
+        cat > "${IRDIR}/init" << 'SHINIT'
+#!/bin/busybox sh
+export PATH=/bin
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox mkdir -p /lower /rw /newroot
+echo "nos-init: waiting for USB storage..."
+i=0
+while [ ! -b /dev/sda6 ] && [ $i -lt 30 ]; do
+    /bin/busybox sleep 1
+    i=$((i+1))
+done
+if [ ! -b /dev/sda6 ]; then
+    echo "nos-init: ERROR /dev/sda6 not found"
+    exec /bin/busybox sh
+fi
+echo "nos-init: mounting squashfs..."
+/bin/busybox mount -t squashfs -o ro /dev/sda6 /lower || {
+    echo "nos-init: squashfs mount failed"; exec /bin/busybox sh; }
+echo "nos-init: mounting overlay..."
+/bin/busybox mount -t ext2 /dev/sda3 /rw 2>/dev/null || {
+    echo "nos-init: formatting sda3..."
+    /lower/sbin/mke2fs -L NOS-RW /dev/sda3 2>/dev/null
+    /bin/busybox mount -t ext2 /dev/sda3 /rw || {
+        echo "nos-init: overlay mount failed, booting read-only"
+        /bin/busybox mount --move /proc /lower/proc 2>/dev/null
+        /bin/busybox mount --move /sys /lower/sys 2>/dev/null
+        /bin/busybox mount --move /dev /lower/dev 2>/dev/null
+        exec /bin/busybox switch_root /lower /sbin/init
+    }
+}
+/bin/busybox mkdir -p /rw/upper /rw/work
+/bin/busybox mount -t overlay overlay \
+    -o lowerdir=/lower,upperdir=/rw/upper,workdir=/rw/work /newroot || {
+    echo "nos-init: overlay failed, booting read-only"
+    /bin/busybox mount --move /proc /lower/proc 2>/dev/null
+    /bin/busybox mount --move /sys /lower/sys 2>/dev/null
+    /bin/busybox mount --move /dev /lower/dev 2>/dev/null
+    exec /bin/busybox switch_root /lower /sbin/init
+}
+echo "nos-init: switching root..."
+/bin/busybox mount --move /proc /newroot/proc
+/bin/busybox mount --move /sys /newroot/sys
+/bin/busybox mount --move /dev /newroot/dev
+exec /bin/busybox switch_root /newroot /sbin/init
+SHINIT
+        chmod +x "${IRDIR}/init"
+    fi
+    (cd "${IRDIR}" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "${FITDIR}/initramfs.cpio.gz")
+    rm -rf "${IRDIR}"
+    echo "  initramfs: $(du -h "${FITDIR}/initramfs.cpio.gz" | awk '{print $1}')"
 
     # Generate ITS matching open-nos-as5610 reference format
     cat > "${FITDIR}/nos.its" << 'ITSEOF'

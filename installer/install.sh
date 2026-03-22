@@ -153,7 +153,7 @@ configure_uboot() {
     cat > "$envfile" << 'UBOOT_ENV'
 fdt_high 0xffffffff
 initrd_high 0xffffffff
-nos_bootcmd usb start; usbiddev; setenv bootargs console=ttyS0,115200 root=/dev/sda6 rootfstype=squashfs ro rootwait; usbboot 0x02000000 ${usbdev}:5 && bootm 0x02000000#accton_as5610_52x
+nos_bootcmd usb start; usbiddev; setenv bootargs console=ttyS0,115200; usbboot 0x02000000 ${usbdev}:5 && bootm 0x02000000#accton_as5610_52x
 boot_count 0
 UBOOT_ENV
     # Delete onie_boot_reason (empty value = delete in fw_setenv -s)
