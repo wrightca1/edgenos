@@ -244,7 +244,7 @@ void bde_close(void)
  */
 static uint32_t dma_offset;  /* Simple bump allocator */
 
-void *bmd_dma_alloc_coherent(int unit, size_t size, dma_addr_t *baddr)
+void *_bde_dma_alloc(void *dvc, size_t size, dma_addr_t *baddr)
 {
     uint32_t aligned_size;
 
@@ -270,7 +270,7 @@ void *bmd_dma_alloc_coherent(int unit, size_t size, dma_addr_t *baddr)
     return vaddr;
 }
 
-void bmd_dma_free_coherent(int unit, size_t size, void *laddr, dma_addr_t baddr)
+void _bde_dma_free(void *dvc, size_t size, void *laddr, dma_addr_t baddr)
 {
     /*
      * Simple bump allocator doesn't support free.
@@ -278,7 +278,7 @@ void bmd_dma_free_coherent(int unit, size_t size, void *laddr, dma_addr_t baddr)
      * This is acceptable for initial bringup since the total DMA
      * usage is small (16 RX buffers + TX DCBs = ~40KB).
      */
-    (void)unit;
+    (void)dvc;
     (void)size;
     (void)laddr;
     (void)baddr;

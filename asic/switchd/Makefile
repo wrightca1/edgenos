@@ -21,9 +21,15 @@ SDK_CFLAGS = -I$(OPENMDK)/cdk/include \
 
 # CDK custom config and system libc
 SDK_CFLAGS += -DCDK_INCLUDE_CUSTOM_CONFIG -DUSE_SYSTEM_LIBC
-SDK_CFLAGS += -DBMD_CONFIG_INCLUDE_DMA=0
+SDK_CFLAGS += -DBMD_CONFIG_INCLUDE_DMA=1
 SDK_CFLAGS += -DBMD_SYS_USLEEP=_usleep -DPHY_SYS_USLEEP=_usleep
 SDK_CFLAGS += -DSYS_BE_PIO=1 -DSYS_BE_PACKET=1 -DSYS_BE_OTHER=1
+# DMA allocation functions (implemented in bde_interface.c)
+SDK_CFLAGS += '-DBMD_SYS_DMA_ALLOC_COHERENT=_bde_dma_alloc'
+SDK_CFLAGS += '-DBMD_SYS_DMA_FREE_COHERENT=_bde_dma_free'
+# DMA cache control (not needed - our DMA pool is uncached/coherent)
+SDK_CFLAGS += '-DBMD_SYS_DMA_CACHE_FLUSH(addr,len)='
+SDK_CFLAGS += '-DBMD_SYS_DMA_CACHE_INVAL(addr,len)='
 
 # OpenMDK static libraries (link order matters)
 SDK_LIBS = $(SDK_BLDDIR)/bmd/libbmdshell.a \

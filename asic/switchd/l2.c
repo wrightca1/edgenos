@@ -37,8 +37,6 @@
 
 int l2_init(void)
 {
-    int rv;
-
     syslog(LOG_INFO, "L2 forwarding initialized");
 
     /*
@@ -97,8 +95,9 @@ int l2_mac_add(const uint8_t *mac, int ifindex)
      *   L2Xm_VALIDf_SET() - marks entry valid
      *   WRITE_L2Xm() - writes to ASIC via S-Channel
      */
-    rv = bmd_port_mac_addr_add(switchd.unit, logical, DEFAULT_VLAN,
-                               (uint8_t *)mac);
+    bmd_mac_addr_t bmac;
+    memcpy(bmac.b, mac, 6);
+    rv = bmd_port_mac_addr_add(switchd.unit, logical, DEFAULT_VLAN, &bmac);
     if (rv < 0) {
         syslog(LOG_WARNING, "L2 add failed: %02x:%02x:%02x:%02x:%02x:%02x "
                "port %d: rv=%d",
@@ -135,8 +134,9 @@ int l2_mac_del(const uint8_t *mac, int ifindex)
      * Remove MAC entry from ASIC L2 table.
      * bmd_port_mac_addr_remove() invalidates the entry.
      */
-    rv = bmd_port_mac_addr_remove(switchd.unit, logical, DEFAULT_VLAN,
-                                  (uint8_t *)mac);
+    bmd_mac_addr_t bmac;
+    memcpy(bmac.b, mac, 6);
+    rv = bmd_port_mac_addr_remove(switchd.unit, logical, DEFAULT_VLAN, &bmac);
     if (rv < 0) {
         syslog(LOG_DEBUG, "L2 del failed (may not exist): rv=%d", rv);
     }

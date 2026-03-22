@@ -110,7 +110,7 @@ int vlan_port_add(int vid, int swp, int tagged)
      *
      * flags: 0 = untagged, BMD_VLAN_PORT_F_TAG = tagged
      */
-    uint32_t flags = tagged ? BMD_VLAN_PORT_F_TAG : 0;
+    uint32_t flags = tagged ? 0 : BMD_VLAN_PORT_F_UNTAGGED;
     rv = bmd_vlan_port_add(switchd.unit, vid, logical, flags);
     if (rv < 0) {
         syslog(LOG_WARNING, "VLAN %d port add swp%d failed: %d",
