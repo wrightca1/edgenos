@@ -23,7 +23,7 @@
 #include <bmd/bmd.h>
 #include <bmd/bmd_phy_ctrl.h>
 
-/* PHY config */
+/* PHY headers - for direct PHY_CONFIG_SET access */
 #include <phy/phy.h>
 
 /* Port-to-SerDes lane mapping for AS5610-52X
@@ -137,34 +137,38 @@ int portmap_configure_ports(void)
         }
 
         /*
-         * Set RX equalization coefficients.
-         * These are AS5610-52X platform-specific values captured from
-         * Cumulus Linux MIIM traces. The Broadcom shadow registers on
-         * page 0 are used by the proprietary SDK but OpenMDK accesses
-         * the same WC registers via AER+IBLK.
+         * Set TX driver current via OpenMDK PHY driver.
          *
-         * Cumulus values:
-         *   reg[0x19] = 0x8320 (RX EQ coeff A)
-         *   reg[0x1a] = 0x8320 (RX EQ coeff B)
-         *   reg[0x1b] = 0x8320 (RX EQ coeff C)
-         *   reg[0x1d] = 0x8350 (RX EQ coeff D)
+         * Values from Cumulus RE capture (TX_DRIVERr = 0x0230):
+         *   idriver = 2, predriver = 3
          *
-         * Via OpenMDK PHY config API:
-         *   PhyConfig_TxPreemp = pre-emphasis (from TX_DRIVERr)
-         *   PhyConfig_TxIDrv = TX idriver current
-         *   PhyConfig_TxPreIDrv = TX pre-driver current
+         * API path (100% OpenMDK, no Cumulus code):
+         *   BMD_PORT_PHY_CTRL(unit, port)  -> get phy_ctrl_t for this port
+         *   PHY_CONFIG_SET(pc, cfg, val)   -> dispatch to WC driver
+         *   bcmi_warpcore_xgxs_config_set  -> WRITE TXB_TX_DRIVERr via AER
+         *
+         * This works because bmd_init() loaded OpenMDK firmware v0x0101
+         * which does NOT intercept direct register writes (unlike the
+         * Cumulus firmware v0x0103/v0x242F which overrides TX_DRIVERr
+         * via a firmware mailbox protocol).
          */
-        rv = bmd_phy_config_set(switchd.unit, port,
-                                PhyConfig_TxIDrv, 2, NULL);
-        if (rv < 0)
-            syslog(LOG_WARNING, "Port %s: PhyConfig_TxIDrv failed: %d",
-                   switchd.ports[i].ifname, rv);
+        {
+            phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(switchd.unit, port);
+            if (pc) {
+                rv = PHY_CONFIG_SET(pc, PhyConfig_TxIDrv, 2, NULL);
+                if (rv < 0)
+                    syslog(LOG_WARNING, "Port %s: PhyConfig_TxIDrv failed: %d",
+                           switchd.ports[i].ifname, rv);
 
-        rv = bmd_phy_config_set(switchd.unit, port,
-                                PhyConfig_TxPreIDrv, 3, NULL);
-        if (rv < 0)
-            syslog(LOG_WARNING, "Port %s: PhyConfig_TxPreIDrv failed: %d",
-                   switchd.ports[i].ifname, rv);
+                rv = PHY_CONFIG_SET(pc, PhyConfig_TxPreIDrv, 3, NULL);
+                if (rv < 0)
+                    syslog(LOG_WARNING, "Port %s: PhyConfig_TxPreIDrv failed: %d",
+                           switchd.ports[i].ifname, rv);
+            } else {
+                syslog(LOG_WARNING, "Port %s: no PHY control (port %d)",
+                       switchd.ports[i].ifname, port);
+            }
+        }
 
         switchd.ports[i].enabled = 1;
         configured++;
