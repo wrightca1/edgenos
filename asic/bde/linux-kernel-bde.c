@@ -89,6 +89,9 @@ static int dma_size = 4;  /* MB */
 module_param(dma_size, int, 0644);
 MODULE_PARM_DESC(dma_size, "DMA pool size in MB (default 4)");
 
+/* ── Interrupt handler (forward declaration) ─────────────────── */
+static irqreturn_t bde_isr(int irq, void *dev_id);
+
 /* ── PCI operations ──────────────────────────────────────────── */
 
 static int bde_pci_probe(struct pci_dev *pdev,
@@ -355,8 +358,19 @@ static int bde_mmap(struct file *filp, struct vm_area_struct *vma)
 		return io_remap_pfn_range(vma, vma->vm_start,
 					  offset >> PAGE_SHIFT,
 					  size, vma->vm_page_prot);
-	} else if (bdev->dma_virt && offset == (unsigned long)bdev->dma_phys) {
-		/* Map DMA region */
+	} else if (bdev->dma_virt &&
+		   (offset == (unsigned long)bdev->dma_phys ||
+		    offset == 0)) {
+		/* Map DMA region (offset=dma_phys or offset=0) */
+		return dma_mmap_coherent(&bdev->pdev->dev, vma,
+					 bdev->dma_virt, bdev->dma_phys,
+					 bdev->dma_size);
+	}
+
+	/* Fallback: allow mapping any physical address in the DMA range */
+	if (bdev->dma_virt &&
+	    offset >= (unsigned long)bdev->dma_phys &&
+	    offset + size <= (unsigned long)bdev->dma_phys + bdev->dma_size) {
 		return dma_mmap_coherent(&bdev->pdev->dev, vma,
 					 bdev->dma_virt, bdev->dma_phys,
 					 bdev->dma_size);
