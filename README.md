@@ -142,18 +142,28 @@ ONIE resets `nos_bootcmd`. After install, before reboot:
 # Stop ONIE auto-discovery
 killall -9 discover; sleep 1
 
-# Set boot variables
-cat <<'E' | fw_setenv -f -s -
+# Set boot variables (write to temp file, not stdin - ONIE fw_setenv quirk)
+cat > /tmp/env.txt <<'E'
 fdt_high 0xffffffff
 initrd_high 0xffffffff
-nos_bootcmd usb start; setenv bootargs noinitrd console=ttyS0,115200 earlycon root=/dev/sda6 rootfstype=squashfs ro rootwait; usb read 0x02000000 0x42000 0x7fc2; bootm 0x02000000#accton_as5610_52x
+nos_bootcmd usb start; usbiddev; setenv bootargs console=ttyS0,115200 root=/dev/sda6 rootfstype=squashfs ro rootwait; usbboot 0x02000000 ${usbdev}:5 && bootm 0x02000000#accton_as5610_52x
 boot_count 0
-onie_boot_reason nos
 E
+# CRITICAL: DELETE onie_boot_reason (empty value = delete)
+# If set to ANY value (even "nos"), U-Boot boots ONIE instead of NOS!
+echo "onie_boot_reason" >> /tmp/env.txt
+
+fw_setenv -f -s /tmp/env.txt
 
 # Reboot into EdgeNOS
 reboot -f
 ```
+
+**Important U-Boot notes for AS5610:**
+- `usbboot` (not `usb read`) is the proven command for this U-Boot build
+- `onie_boot_reason` must be **deleted** (empty), not set to "nos"
+- `usbiddev` detects the USB device number automatically
+- `bootm ... #accton_as5610_52x` selects the FIT configuration by name
 
 ### Step 5: Login
 

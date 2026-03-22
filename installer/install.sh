@@ -123,16 +123,45 @@ configure_uboot() {
 
     command -v fw_setenv >/dev/null 2>&1 || { log "WARN: fw_setenv not found"; return; }
 
-    # Partition 5 starts at sector 270336 = 0x42000
-    # Partition 5 size = 303041 - 270336 + 1 = 32706 sectors = 0x7FC2
-    (cat <<'UBOOT_ENV'
+    #
+    # CRITICAL boot chain (verified against live Cumulus switch fw_printenv):
+    #
+    # U-Boot bootcmd: run check_boot_reason; run nos_bootcmd; run onie_bootcmd
+    #
+    # check_boot_reason: if onie_boot_reason is set (non-empty), boots ONIE.
+    #   FIX: we must DELETE onie_boot_reason (not set it to "nos"!)
+    #
+    # nos_bootcmd: Cumulus uses a chain (flashboot -> usbboot).
+    #   We use the proven Cumulus approach with usbboot (not raw usb read),
+    #   which reads partition 5 as a raw FIT image.
+    #
+    # Cumulus boot chain variables (from fw_printenv on live switch):
+    #   usbiddev -> identifies USB device number
+    #   initargs -> sets console + root device
+    #   hw_active1 -> usbboot from partition 5 + bootm
+    #   set_active1 -> selects slot 1 partitions
+    #   boot_active -> set_active + hw_active
+    #   flashboot -> boot_active
+    #   lbootcmd -> flashboot
+    #   nos_bootcmd -> lbootcmd
+    #
+    # We simplify to a single nos_bootcmd that does the full sequence.
+    # Using 'usbboot' (proven on this hardware) instead of 'usb read'.
+    #
+
+    local envfile=$(mktemp)
+    cat > "$envfile" << 'UBOOT_ENV'
 fdt_high 0xffffffff
 initrd_high 0xffffffff
-nos_bootcmd usb start; setenv bootargs noinitrd console=ttyS0,115200 earlycon root=/dev/sda6 rootfstype=squashfs ro rootwait; usb read 0x02000000 0x42000 0x7fc2; bootm 0x02000000#accton_as5610_52x
+nos_bootcmd usb start; usbiddev; setenv bootargs console=ttyS0,115200 root=/dev/sda6 rootfstype=squashfs ro rootwait; usbboot 0x02000000 ${usbdev}:5 && bootm 0x02000000#accton_as5610_52x
 boot_count 0
-onie_boot_reason nos
 UBOOT_ENV
-    ) | fw_setenv -f -s - 2>/dev/null || log "WARN: fw_setenv failed"
+    # Delete onie_boot_reason (empty value = delete in fw_setenv -s)
+    # If onie_boot_reason is set to ANY value, U-Boot boots ONIE instead of NOS!
+    echo "onie_boot_reason" >> "$envfile"
+
+    fw_setenv -f -s "$envfile" 2>/dev/null || log "WARN: fw_setenv failed"
+    rm -f "$envfile"
 
     log "U-Boot environment configured."
 }
