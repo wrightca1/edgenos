@@ -4,7 +4,11 @@
 CROSS_COMPILE ?= powerpc-linux-gnu-
 CC = $(CROSS_COMPILE)gcc
 CFLAGS = -Wall -Wextra -O2 -g
-LDFLAGS = -lpthread -lrt
+# Static linking avoids glibc version mismatch between cross-compiler
+# (Ubuntu glibc 2.35) and rootfs (Buildroot glibc, version varies).
+# switchd needs GLIBC_2.34 symbols (__libc_start_main, __stack_chk_fail)
+# which may not exist in Buildroot's glibc.
+LDFLAGS = -static -lpthread -lrt
 
 TOPDIR ?= $(shell cd ../.. && pwd)
 OPENMDK ?= $(TOPDIR)/asic/openmdk
