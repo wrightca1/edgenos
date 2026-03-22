@@ -18,3 +18,31 @@ if [ -f "${TARGET_DIR}/etc/ssh/sshd_config" ]; then
     grep -q "^PermitRootLogin" "${TARGET_DIR}/etc/ssh/sshd_config" || \
         echo "PermitRootLogin yes" >> "${TARGET_DIR}/etc/ssh/sshd_config"
 fi
+
+# Enable systemd services
+SYSD="${TARGET_DIR}/etc/systemd/system"
+WANTS="${SYSD}/multi-user.target.wants"
+mkdir -p "$WANTS"
+
+# Enable sshd
+[ -f "${TARGET_DIR}/usr/lib/systemd/system/sshd.service" ] && \
+    ln -sf /usr/lib/systemd/system/sshd.service "$WANTS/sshd.service" 2>/dev/null
+
+# Enable SSH keygen
+[ -f "${SYSD}/sshd-keygen.service" ] && \
+    ln -sf /etc/systemd/system/sshd-keygen.service "$WANTS/sshd-keygen.service" 2>/dev/null
+
+# Enable systemd-networkd for DHCP
+ln -sf /usr/lib/systemd/system/systemd-networkd.service "$WANTS/systemd-networkd.service" 2>/dev/null
+ln -sf /usr/lib/systemd/system/systemd-resolved.service "$WANTS/systemd-resolved.service" 2>/dev/null
+
+# Enable platform-init and switchd
+[ -f "${SYSD}/platform-init.service" ] && \
+    ln -sf /etc/systemd/system/platform-init.service "$WANTS/platform-init.service" 2>/dev/null
+[ -f "${SYSD}/switchd.service" ] && \
+    ln -sf /etc/systemd/system/switchd.service "$WANTS/switchd.service" 2>/dev/null
+[ -f "${SYSD}/thermal-mgmt.service" ] && \
+    ln -sf /etc/systemd/system/thermal-mgmt.service "$WANTS/thermal-mgmt.service" 2>/dev/null
+
+# Set hostname
+echo "edgenos" > "${TARGET_DIR}/etc/hostname"

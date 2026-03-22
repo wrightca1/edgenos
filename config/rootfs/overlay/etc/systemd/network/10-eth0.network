@@ -1,5 +1,8 @@
 [Match]
-Name=eth0
+# P2020 eTSEC management port
+# Kernel 5.10+ uses predictable names: end0 (ethernet-device-0)
+# Older kernels use: eth0
+Name=eth0 end0 en*
 
 [Network]
 DHCP=yes

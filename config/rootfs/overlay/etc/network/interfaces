@@ -3,6 +3,10 @@
 auto lo
 iface lo inet loopback
 
-# Management Ethernet (eTSEC / eth0)
+# Management Ethernet (P2020 eTSEC)
+# Kernel 5.10+ names it end0, older kernels use eth0
 auto eth0
 iface eth0 inet dhcp
+
+auto end0
+iface end0 inet dhcp
