@@ -94,7 +94,7 @@ build_image() {
     # Create self-extracting installer
     # The installer script + FIT image are concatenated
     cp "$INSTALLER" "$OUTPUT"
-    echo "ARCHIVE_MARKER" >> "$OUTPUT"
+    echo "__ARCHIVE__" >> "$OUTPUT"
     cat "$FIT" >> "$OUTPUT"
 
     chmod +x "$OUTPUT"
