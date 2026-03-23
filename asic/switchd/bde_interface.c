@@ -84,11 +84,23 @@ struct bde_dma_info {
     unsigned long phys_addr;
 };
 
-#define BDE_IOC_DEV_INFO     _IOR(BDE_IOC_MAGIC, 0, struct bde_dev_info)
-#define BDE_IOC_REG_READ     _IOWR(BDE_IOC_MAGIC, 1, struct bde_reg_io)
-#define BDE_IOC_REG_WRITE    _IOW(BDE_IOC_MAGIC, 2, struct bde_reg_io)
-#define BDE_IOC_DMA_ALLOC    _IOWR(BDE_IOC_MAGIC, 3, struct bde_dma_info)
-#define BDE_IOC_GET_NUM_DEVS _IOR(BDE_IOC_MAGIC, 4, int)
+/*
+ * IOCTL command numbers.
+ * CRITICAL: PPC has _IOC_READ=1, _IOC_WRITE=2 (reversed from x86!)
+ * The cross-compiler's _IOW macro may use x86 encoding (direction=1)
+ * which doesn't match the kernel's PPC encoding (direction=2).
+ * We hardcode the PPC values to avoid this mismatch.
+ *
+ * _IOC(dir, type, nr, size) = (dir<<30) | (size<<16) | (type<<8) | nr
+ * PPC: _IOR = (1<<30), _IOW = (2<<30), _IOWR = (3<<30)
+ */
+#define _PPC_IOC(d,t,n,s) (((d)<<30)|((s)<<16)|((t)<<8)|(n))
+#define BDE_IOC_DEV_INFO     _PPC_IOC(1, BDE_IOC_MAGIC, 0, sizeof(struct bde_dev_info))
+#define BDE_IOC_REG_READ     _PPC_IOC(3, BDE_IOC_MAGIC, 1, sizeof(struct bde_reg_io))
+/* PPC _IOW: direction=2 (NOT 1 like x86) */
+#define BDE_IOC_REG_WRITE    _PPC_IOC(2, BDE_IOC_MAGIC, 2, sizeof(struct bde_reg_io))
+#define BDE_IOC_DMA_ALLOC    _PPC_IOC(3, BDE_IOC_MAGIC, 3, sizeof(struct bde_dma_info))
+#define BDE_IOC_GET_NUM_DEVS _PPC_IOC(1, BDE_IOC_MAGIC, 4, sizeof(int))
 
 /* BMD/PHY sleep function */
 int _usleep(uint32_t usecs) { return usleep(usecs); }
@@ -109,17 +121,8 @@ static int bde_read32(void *dvc, uint32_t addr, uint32_t *data)
 {
     struct bde_reg_io rio;
 
-    /*
-     * Fast path: XLPORT/MIIM registers (0x000-0x10000) can be accessed
-     * via direct mmap since they're in the direct-access BAR0 window.
-     * This avoids an ioctl syscall for the hot path (link polling, MIIM).
-     */
-    if (bar0_map && addr < 0x10000) {
-        *data = bar0_map[addr / 4];
-        return 0;
-    }
-
-    /* Slow path: use BDE ioctl for CMICm PIO registers */
+    /* All register access goes through BDE ioctl.
+     * Direct mmap writes are silently dropped on P2020 PPC. */
     rio.dev = 0;
     rio.addr = addr;
     rio.val = 0;
@@ -142,13 +145,7 @@ static int bde_write32(void *dvc, uint32_t addr, uint32_t data)
 {
     struct bde_reg_io rio;
 
-    /* Fast path for XLPORT/MIIM */
-    if (bar0_map && addr < 0x10000) {
-        bar0_map[addr / 4] = data;
-        return 0;
-    }
-
-    /* Slow path: BDE ioctl */
+    /* All writes via BDE ioctl (mmap writes silently dropped on PPC) */
     rio.dev = 0;
     rio.addr = addr;
     rio.val = data;
@@ -333,7 +330,15 @@ int cdk_init(void)
      * The functions use fast-path mmap for 0x000-0x10000 and
      * BDE ioctl for 0x10000+ (CMICm PIO indirect registers).
      */
-    dv.base_addr = (volatile uint32_t *)bar0_map;
+    /*
+     * CRITICAL: do NOT set dv.base_addr!
+     * CDK's cdk_dev_read32() checks base_addr FIRST and uses direct
+     * pointer access if non-NULL. On P2020 PPC, /dev/mem mmap reads
+     * work but WRITES are silently dropped (never reach PCIe device).
+     * By setting base_addr=NULL, CDK falls through to dv.read32/write32
+     * which go through the BDE kernel module's ioread/iowrite.
+     */
+    dv.base_addr = NULL;
     dv.read32 = bde_read32;
     dv.write32 = bde_write32;
 

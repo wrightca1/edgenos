@@ -288,11 +288,14 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		if (!bdev->valid || rio.addr >= bdev->base_size)
 			return -EINVAL;
 		/*
-		 * Use __raw_readl instead of ioread32.
-		 * On P2020 PPC, the PCIe outbound window does NOT byte-swap,
-		 * so ASIC registers appear in big-endian format to the CPU.
-		 * ioread32() adds an unwanted LE→BE conversion.
-		 * __raw_readl() reads the raw 32-bit value as-is.
+		 * Use __raw_readl for reads on P2020 PPC.
+		 * The PCIe outbound window does NOT byte-swap on this platform.
+		 * ioread32() adds unwanted LE->BE conversion.
+		 * __raw_readl() reads the raw 32-bit value as seen by the CPU.
+		 *
+		 * CRITICAL: direct mmap READS work but WRITES are silently
+		 * dropped on this platform. All writes MUST go through
+		 * iowrite32() which uses proper PPC MMIO store instructions.
 		 */
 		rio.val = __raw_readl(bdev->base + rio.addr);
 		if (copy_to_user((void __user *)arg, &rio, sizeof(rio)))

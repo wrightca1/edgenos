@@ -24,11 +24,17 @@ SDK_CFLAGS = -I$(OPENMDK)/cdk/include \
              -I$(CURDIR)
 
 # CDK custom config and system libc
-# Use direct pointer access for CMIC registers (same as Cumulus)
-# This bypasses BDE ioctl and accesses BAR0 via mmap pointer directly
-SDK_CFLAGS += -DCDK_INCLUDE_CUSTOM_CONFIG -DUSE_SYSTEM_LIBC -DCDK_CONFIG_MEMMAP_DIRECT=1
+# Use BDE ioctl function pointers for register access (NOT direct mmap).
+# On P2020 PPC, direct mmap READS work but WRITES are silently dropped.
+# The BDE kernel module's __raw_readl/__raw_writel handle MMIO correctly.
+SDK_CFLAGS += -DCDK_INCLUDE_CUSTOM_CONFIG -DUSE_SYSTEM_LIBC
 SDK_CFLAGS += -DBMD_CONFIG_INCLUDE_DMA=1
 SDK_CFLAGS += -DBMD_SYS_USLEEP=_usleep -DPHY_SYS_USLEEP=_usleep
+# With CDK_CONFIG_MEMMAP_DIRECT=1 on PPC, base_addr[offset/4] reads
+# the raw big-endian value. CDK handles this natively - do NOT set
+# SYS_BE_PIO which would cause double byte-swapping.
+# __raw_readl returns big-endian raw bytes (e.g. 0x46b80200 for DEV_REV_ID).
+# CDK with SYS_BE_PIO=1 byte-swaps to get the correct LE value (0x0002b846).
 SDK_CFLAGS += -DSYS_BE_PIO=1 -DSYS_BE_PACKET=1 -DSYS_BE_OTHER=1
 # DMA allocation functions (implemented in bde_interface.c)
 SDK_CFLAGS += '-DBMD_SYS_DMA_ALLOC_COHERENT=_bde_dma_alloc'
