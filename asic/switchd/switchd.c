@@ -211,6 +211,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /*
+     * Reset DMA pool after ASIC init.
+     * BMD init uses DMA for S-Channel table writes (temporary).
+     * These are freed by BMD but our bump allocator ignores frees.
+     * Reset the pool so packet I/O can use the full 4MB.
+     */
+    bde_dma_pool_reset();
+
     /* Create TUN interfaces for each port */
     if (packet_io_init() < 0) {
         syslog(LOG_ERR, "Packet I/O init failed");

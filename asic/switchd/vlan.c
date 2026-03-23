@@ -41,10 +41,10 @@ int vlan_init_default(void)
             continue;
 
         rv = bmd_port_vlan_set(switchd.unit,
-                               switchd.ports[i].logical_port, 1);
+                               switchd.ports[i].physical_lane, 1);
         if (rv < 0) {
             syslog(LOG_WARNING, "VLAN: failed to set PVID on port %d: %d",
-                   switchd.ports[i].logical_port, rv);
+                   switchd.ports[i].physical_lane, rv);
         }
     }
 

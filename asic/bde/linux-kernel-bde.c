@@ -443,16 +443,13 @@ static int bde_mmap(struct file *filp, struct vm_area_struct *vma)
 	} else if (bdev->dma_virt &&
 		   (offset == (unsigned long)bdev->dma_phys ||
 		    offset == 0)) {
-		/* Map DMA region (offset=dma_phys or offset=0) */
-		return dma_mmap_coherent(&bdev->pdev->dev, vma,
-					 bdev->dma_virt, bdev->dma_phys,
-					 bdev->dma_size);
-	}
-
-	/* Fallback: allow mapping any physical address in the DMA range */
-	if (bdev->dma_virt &&
-	    offset >= (unsigned long)bdev->dma_phys &&
-	    offset + size <= (unsigned long)bdev->dma_phys + bdev->dma_size) {
+		/*
+		 * Map DMA region.
+		 * dma_mmap_coherent() requires vm_pgoff=0 (offset into
+		 * the DMA allocation). Reset it here so userspace can
+		 * pass either offset=0 or offset=dma_phys.
+		 */
+		vma->vm_pgoff = 0;
 		return dma_mmap_coherent(&bdev->pdev->dev, vma,
 					 bdev->dma_virt, bdev->dma_phys,
 					 bdev->dma_size);

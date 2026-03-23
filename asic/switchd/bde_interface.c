@@ -222,11 +222,17 @@ int bde_open(void)
         dma_phys = dinfo.phys_addr;
         dma_size = dinfo.size;
 
-        /* mmap DMA pool for userspace access */
+        /*
+         * mmap DMA pool for userspace access.
+         * Use offset=0: dma_mmap_coherent() in the kernel requires
+         * vm_pgoff=0. The kernel BDE mmap handler recognizes offset=0
+         * as a DMA mapping request.
+         */
         dma_map = mmap(NULL, dma_size, PROT_READ | PROT_WRITE,
-                       MAP_SHARED, bde_fd, dma_phys);
+                       MAP_SHARED, bde_fd, 0);
         if (dma_map == MAP_FAILED) {
-            syslog(LOG_WARNING, "BDE: DMA mmap failed");
+            syslog(LOG_WARNING, "BDE: DMA mmap(offset=0) failed: %s",
+                   strerror(errno));
             dma_map = NULL;
         } else {
             syslog(LOG_INFO, "BDE: DMA pool %u MB at phys 0x%lx mapped at %p",
@@ -258,6 +264,7 @@ void bde_close(void)
  * and physical (for ASIC DMA) addresses.
  */
 static uint32_t dma_offset;  /* Simple bump allocator */
+static uint32_t dma_high_water;  /* Track peak usage for debugging */
 
 void *_bde_dma_alloc(void *dvc, size_t size, dma_addr_t *baddr)
 {
@@ -281,22 +288,39 @@ void *_bde_dma_alloc(void *dvc, size_t size, dma_addr_t *baddr)
     *baddr = dma_phys + dma_offset;
     dma_offset += aligned_size;
 
+    if (dma_offset > dma_high_water)
+        dma_high_water = dma_offset;
+
     memset(vaddr, 0, size);
     return vaddr;
 }
 
 void _bde_dma_free(void *dvc, size_t size, void *laddr, dma_addr_t baddr)
 {
-    /*
-     * Simple bump allocator doesn't support free.
-     * For a real implementation, use a proper DMA pool allocator.
-     * This is acceptable for initial bringup since the total DMA
-     * usage is small (16 RX buffers + TX DCBs = ~40KB).
-     */
     (void)dvc;
     (void)size;
     (void)laddr;
     (void)baddr;
+    /* Bump allocator - free is handled by bde_dma_pool_reset() */
+}
+
+/*
+ * Reset the DMA bump allocator.
+ *
+ * BMD init (bmd_reset, bmd_init, bmd_switching_init) uses DMA for
+ * S-Channel table writes. These are temporary allocations that BMD
+ * "frees" via _bde_dma_free after each operation. With a bump
+ * allocator, frees are no-ops so the pool fills up during init.
+ *
+ * Call this after BMD init completes but before packet I/O starts.
+ * The init-time DMA buffers are no longer referenced by hardware
+ * at that point, so resetting the offset is safe.
+ */
+void bde_dma_pool_reset(void)
+{
+    syslog(LOG_INFO, "DMA pool reset: was %u bytes used (high water %u), pool %u bytes",
+           dma_offset, dma_high_water, dma_size);
+    dma_offset = 0;
 }
 
 int cdk_init(void)
@@ -353,6 +377,15 @@ int cdk_init(void)
            unit, dev_id.device_id, dev_id.revision);
 
     /* AS5610-52X uses 156.25 MHz LCPLL reference clock */
+    /*
+     * AS5610-52X: 156.25 MHz LCPLL reference clock.
+     *
+     * Note: DCFG_40G not set - it would disable all non-base sub-ports.
+     * QSFP 40G port mode will fail with CDK_E_PARAM, but the ports
+     * still get link via the PHY/SerDes at 10G per lane. Full 40G
+     * support requires CDK_CONFIG_INCLUDE_DYN_CONFIG with per-port
+     * speed_max configuration (future improvement).
+     */
     CDK_CHIP_CONFIG_SET(unit, DCFG_LCPLL_156);
 
     /* Initialize PHY probe */

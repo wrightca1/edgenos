@@ -26,6 +26,8 @@ log() { echo "platform-init: $*"; logger -t platform-init "$*" 2>/dev/null; }
 
 MODDIR="/lib/modules/$(uname -r)"
 EXTRA="${MODDIR}/extra"
+# Fallback: modules may be in /usr/lib/modules/extra (squashfs layout)
+[ -d "$EXTRA" ] || EXTRA="/usr/lib/modules/extra"
 
 load_mod() {
     local mod="$1"; shift

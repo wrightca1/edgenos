@@ -73,8 +73,9 @@ int l2_mac_add(const uint8_t *mac, int ifindex)
     if (swp < 1 || swp > SWITCHD_MAX_PORTS)
         return -1;
 
-    logical = portmap_swp_to_logical(swp);
-    if (logical < 0)
+    /* Use CDK physical port for BMD calls */
+    logical = switchd.ports[swp - 1].physical_lane;
+    if (logical <= 0)
         return -1;
 
     syslog(LOG_DEBUG, "L2 add: %02x:%02x:%02x:%02x:%02x:%02x on port %d (swp%d)",
@@ -123,8 +124,9 @@ int l2_mac_del(const uint8_t *mac, int ifindex)
     if (swp < 1 || swp > SWITCHD_MAX_PORTS)
         return -1;
 
-    logical = portmap_swp_to_logical(swp);
-    if (logical < 0)
+    /* Use CDK physical port for BMD calls */
+    logical = switchd.ports[swp - 1].physical_lane;
+    if (logical <= 0)
         return -1;
 
     syslog(LOG_DEBUG, "L2 del: %02x:%02x:%02x:%02x:%02x:%02x on port %d (swp%d)",

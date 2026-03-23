@@ -102,7 +102,11 @@ int portmap_configure_ports(void)
         if (!switchd.ports[i].valid)
             continue;
 
-        int port = switchd.ports[i].logical_port;
+        /*
+         * BMD functions expect CDK physical port number,
+         * which is physical_lane on BCM56840.
+         */
+        int port = switchd.ports[i].physical_lane;
         int speed = switchd.ports[i].speed;
         bmd_port_mode_t mode;
         uint32_t flags = 0;
@@ -123,11 +127,13 @@ int portmap_configure_ports(void)
          *   - Enables XMAC RX/TX
          *   - Updates EPC_LINK_BMAP
          */
-        if (speed == 40000) {
-            mode = bmdPortMode40000fd;
-        } else {
-            mode = bmdPortMode10000fd;
-        }
+        /*
+         * Without CDK_CONFIG_INCLUDE_DYN_CONFIG, DCFG_40G is not set
+         * and all ports default to 10G single-lane. Use 10G mode for
+         * all ports including QSFP (which will run as 4x10G lanes
+         * instead of 1x40G until per-port config is implemented).
+         */
+        mode = bmdPortMode10000fd;
 
         rv = bmd_port_mode_set(switchd.unit, port, mode, flags);
         if (rv < 0) {
@@ -204,6 +210,17 @@ int portmap_logical_to_swp(int logical)
     return -1;
 }
 
+/* Map CDK physical port number to front-panel swp number */
+int portmap_phys_to_swp(int phys_port)
+{
+    int i;
+    for (i = 0; i < SWITCHD_MAX_PORTS; i++) {
+        if (switchd.ports[i].physical_lane == phys_port)
+            return i + 1;
+    }
+    return -1;
+}
+
 int portmap_swp_to_i2c_bus(int swp)
 {
     if (swp < 1 || swp > SWITCHD_MAX_PORTS)
@@ -232,7 +249,7 @@ int portmap_link_poll(void)
         if (!switchd.ports[i].valid || !switchd.ports[i].enabled)
             continue;
 
-        int port = switchd.ports[i].logical_port;
+        int port = switchd.ports[i].physical_lane;  /* CDK port */
         int old_link = switchd.ports[i].link_up;
 
         /*
@@ -247,22 +264,36 @@ int portmap_link_poll(void)
          *   -> if link: port_enable_set(1) -> XMAC_CTRL RX_EN=1
          *   -> else:    port_enable_set(0) -> XMAC_CTRL RX_EN=0
          */
-        int rv = bmd_port_mode_update(switchd.unit, port);
-        if (rv < 0) {
-            /* Transient errors during link negotiation are normal */
-            continue;
-        }
+        /*
+         * bmd_port_mode_update() reads PHY link status and updates
+         * MAC enable + EPC_LINK_BMAP. If it fails, we still try
+         * bmd_phy_link_get() to check the physical link state.
+         */
+        bmd_port_mode_update(switchd.unit, port);
 
-        /* Check if link state changed by reading port status */
+        /* Check physical link state */
         int link = 0;
         int autoneg_done = 0;
-        rv = bmd_phy_link_get(switchd.unit, port, &link, &autoneg_done);
+        int rv = bmd_phy_link_get(switchd.unit, port, &link, &autoneg_done);
         if (rv == 0) {
             switchd.ports[i].link_up = link;
+
+            /*
+             * Ensure BMD_PST_LINK_UP matches actual PHY link state.
+             * bmd_port_mode_update may fail on some ports but the
+             * PHY link is real. Without BMD_PST_LINK_UP, bmd_tx
+             * silently drops all packets.
+             */
+            if (link) {
+                BMD_PORT_STATUS_SET(switchd.unit, port, BMD_PST_LINK_UP);
+            } else {
+                BMD_PORT_STATUS_CLR(switchd.unit, port, BMD_PST_LINK_UP);
+            }
+
             if (link != old_link) {
-                syslog(LOG_INFO, "Port %s: link %s",
-                       switchd.ports[i].ifname,
-                       link ? "UP" : "DOWN");
+                syslog(LOG_INFO, "BMD link %s: port %d (%s)",
+                       link ? "UP" : "DOWN", port,
+                       switchd.ports[i].ifname);
                 changes++;
             }
         }

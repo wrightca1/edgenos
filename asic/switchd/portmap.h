@@ -21,6 +21,7 @@ int portmap_link_poll(void);
 /* Lookup functions */
 int portmap_swp_to_logical(int swp);
 int portmap_logical_to_swp(int logical);
+int portmap_phys_to_swp(int phys_port);
 int portmap_swp_to_i2c_bus(int swp);
 
 #endif /* __PORTMAP_H__ */

@@ -66,8 +66,13 @@ CPPFLAGS += -I$(CDK)/include -I$(BMD)/include -I$(PHY)/include -I$(CURDIR) -I$(L
 
 # Use CDK custom config file and system C library
 CPPFLAGS += -DCDK_INCLUDE_CUSTOM_CONFIG -DUSE_SYSTEM_LIBC
-CPPFLAGS += -DBMD_CONFIG_INCLUDE_DMA=0
+CPPFLAGS += -DBMD_CONFIG_INCLUDE_DMA=1
 CPPFLAGS += -DBMD_SYS_USLEEP=_usleep -DPHY_SYS_USLEEP=_usleep
+# DMA allocation functions (implemented in switchd's bde_interface.c at link time)
+CPPFLAGS += '-DBMD_SYS_DMA_ALLOC_COHERENT=_bde_dma_alloc'
+CPPFLAGS += '-DBMD_SYS_DMA_FREE_COHERENT=_bde_dma_free'
+CPPFLAGS += '-DBMD_SYS_DMA_CACHE_FLUSH(addr,len)='
+CPPFLAGS += '-DBMD_SYS_DMA_CACHE_INVAL(addr,len)='
 
 # P2020 big-endian PCI
 CPPFLAGS += -DSYS_BE_PIO=1 -DSYS_BE_PACKET=1 -DSYS_BE_OTHER=1

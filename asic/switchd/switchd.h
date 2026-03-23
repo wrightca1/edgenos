@@ -50,6 +50,7 @@ extern struct switchd_state switchd;
 /* BDE interface */
 int bde_open(void);
 void bde_close(void);
+void bde_dma_pool_reset(void);
 
 /* CDK/BMD interface */
 int cdk_init(void);

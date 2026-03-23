@@ -109,43 +109,41 @@ static int tun_create(const char *name)
  * via bmd_rx_start(). The ASIC will DMA received packets into these
  * buffers. We poll for completed buffers via bmd_rx_poll().
  */
+/*
+ * OpenMDK RX DMA is single-buffer: one bmd_rx_start() at a time.
+ * After bmd_rx_poll() returns a packet, we must resubmit via
+ * bmd_rx_start() before the next packet can be received.
+ */
+static bmd_pkt_t rx_pkt;
+static dma_addr_t rx_baddr;
+
 static int rx_dma_init(void)
 {
-    int i;
-    int submitted = 0;
+    int rv;
 
-    memset(rx_pkts, 0, sizeof(rx_pkts));
+    memset(&rx_pkt, 0, sizeof(rx_pkt));
 
-    for (i = 0; i < NUM_RX_BUFS; i++) {
-        dma_addr_t baddr;
-
-        rx_pkts[i].data = bmd_dma_alloc_coherent(switchd.unit,
-                                                  RX_BUF_SIZE, &baddr);
-        if (!rx_pkts[i].data) {
-            syslog(LOG_ERR, "Failed to allocate RX DMA buffer %d", i);
-            break;
-        }
-
-        rx_pkts[i].size = RX_BUF_SIZE;
-        rx_pkts[i].baddr = baddr;
-        rx_pkts[i].port = -1;  /* Will be filled by ASIC on RX */
-
-        int rv = bmd_rx_start(switchd.unit, &rx_pkts[i]);
-        if (rv < 0) {
-            syslog(LOG_ERR, "bmd_rx_start failed for buffer %d: %d", i, rv);
-            bmd_dma_free_coherent(switchd.unit, RX_BUF_SIZE,
-                                  rx_pkts[i].data, baddr);
-            rx_pkts[i].data = NULL;
-            break;
-        }
-
-        submitted++;
+    rx_pkt.data = bmd_dma_alloc_coherent(switchd.unit, RX_BUF_SIZE, &rx_baddr);
+    if (!rx_pkt.data) {
+        syslog(LOG_ERR, "Failed to allocate RX DMA buffer");
+        return -1;
     }
 
-    syslog(LOG_INFO, "Submitted %d RX DMA buffers (%d bytes each)",
-           submitted, RX_BUF_SIZE);
-    rx_initialized = (submitted > 0);
-    return submitted > 0 ? 0 : -1;
+    rx_pkt.size = RX_BUF_SIZE;
+    rx_pkt.baddr = rx_baddr;
+    rx_pkt.port = -1;
+
+    rv = bmd_rx_start(switchd.unit, &rx_pkt);
+    if (rv < 0) {
+        syslog(LOG_ERR, "bmd_rx_start failed: %d", rv);
+        bmd_dma_free_coherent(switchd.unit, RX_BUF_SIZE, rx_pkt.data, rx_baddr);
+        rx_pkt.data = NULL;
+        return -1;
+    }
+
+    syslog(LOG_INFO, "RX DMA initialized (single buffer, %d bytes)", RX_BUF_SIZE);
+    rx_initialized = 1;
+    return 0;
 }
 
 int packet_io_init(void)
@@ -223,7 +221,12 @@ static void handle_tun_tx(int port_idx)
 
     /* Set up BMD packet structure */
     memset(&pkt, 0, sizeof(pkt));
-    pkt.port = port->logical_port;
+    /*
+     * pkt.port must be the CDK physical port number (not front-panel).
+     * BMD_PORT_VALID checks BMD_PORT_PROPERTIES which is indexed by
+     * CDK port. On BCM56840, physical_lane IS the CDK port number.
+     */
+    pkt.port = port->physical_lane;
     pkt.data = dma_buf;
     pkt.size = len;
     pkt.baddr = baddr;
@@ -270,8 +273,8 @@ static void handle_asic_rx(void)
     if (rv < 0 || !pkt)
         return;
 
-    /* Map ASIC ingress port to swpN */
-    int swp = portmap_logical_to_swp(pkt->port);
+    /* Map ASIC ingress port (CDK physical port) to swpN */
+    int swp = portmap_phys_to_swp(pkt->port);
     if (swp < 1 || swp > SWITCHD_MAX_PORTS) {
         syslog(LOG_DEBUG, "RX: unknown ingress port %d", pkt->port);
         goto resubmit;
