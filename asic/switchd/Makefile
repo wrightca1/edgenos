@@ -24,7 +24,9 @@ SDK_CFLAGS = -I$(OPENMDK)/cdk/include \
              -I$(CURDIR)
 
 # CDK custom config and system libc
-SDK_CFLAGS += -DCDK_INCLUDE_CUSTOM_CONFIG -DUSE_SYSTEM_LIBC
+# Use direct pointer access for CMIC registers (same as Cumulus)
+# This bypasses BDE ioctl and accesses BAR0 via mmap pointer directly
+SDK_CFLAGS += -DCDK_INCLUDE_CUSTOM_CONFIG -DUSE_SYSTEM_LIBC -DCDK_CONFIG_MEMMAP_DIRECT=1
 SDK_CFLAGS += -DBMD_CONFIG_INCLUDE_DMA=1
 SDK_CFLAGS += -DBMD_SYS_USLEEP=_usleep -DPHY_SYS_USLEEP=_usleep
 SDK_CFLAGS += -DSYS_BE_PIO=1 -DSYS_BE_PACKET=1 -DSYS_BE_OTHER=1

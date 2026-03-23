@@ -187,12 +187,30 @@ int bde_open(void)
     syslog(LOG_INFO, "BDE: BCM%04x rev %02x at phys 0x%lx, BAR0 %u bytes",
            info.device_id, info.revision, bar0_phys, info.base_size);
 
-    /* mmap BAR0 for fast path (XLPORT/MIIM direct window) */
-    bar0_map = mmap(NULL, info.base_size, PROT_READ | PROT_WRITE,
-                    MAP_SHARED, bde_fd, bar0_phys);
-    if (bar0_map == MAP_FAILED) {
-        syslog(LOG_WARNING, "BDE: BAR0 mmap failed, using ioctl-only mode");
-        bar0_map = NULL;
+    /*
+     * mmap BAR0 via /dev/mem for direct register access.
+     * This is the proven path (same as Cumulus switchd).
+     * The BDE fd mmap doesn't work reliably on PPC due to
+     * endianness issues with the kernel's ioremap mapping.
+     * Direct /dev/mem mmap with PPC big-endian pointer access
+     * gives correct register values.
+     */
+    {
+        int mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
+        if (mem_fd >= 0) {
+            bar0_map = mmap(NULL, info.base_size, PROT_READ | PROT_WRITE,
+                            MAP_SHARED, mem_fd, bar0_phys);
+            if (bar0_map == MAP_FAILED) {
+                syslog(LOG_WARNING, "BDE: BAR0 /dev/mem mmap failed");
+                bar0_map = NULL;
+            } else {
+                syslog(LOG_INFO, "BDE: BAR0 mapped via /dev/mem at %p", bar0_map);
+            }
+            close(mem_fd);  /* fd can be closed after mmap */
+        } else {
+            syslog(LOG_WARNING, "BDE: Cannot open /dev/mem");
+            bar0_map = NULL;
+        }
     }
 
     /* Get DMA pool info */
