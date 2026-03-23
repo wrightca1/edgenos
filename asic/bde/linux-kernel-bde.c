@@ -89,6 +89,75 @@ static int dma_size = 4;  /* MB */
 module_param(dma_size, int, 0644);
 MODULE_PARM_DESC(dma_size, "DMA pool size in MB (default 4)");
 
+/*
+ * iProc PAXB sub-window register access.
+ *
+ * BCM56846 uses iProc (PCI-AXI bridge) for CMICm registers.
+ * BAR0 is divided into 8 sub-windows of 4KB each (0x0000-0x7FFF).
+ * Sub-windows 0-6 have fixed mappings. Sub-window 7 (BAR0+0x7000)
+ * is remappable via IMAP0_7 register at BAR0+0x2C1C.
+ *
+ * To access a CMIC register at AXI address A:
+ *   1. Write ((A & ~0xFFF) | 1) to IMAP0_7 (BAR0+0x2C1C)
+ *   2. Access BAR0+0x7000+(A & 0xFFF)
+ *
+ * Registers below 0x8000 can be accessed directly (fixed sub-windows).
+ * Registers at 0x8000+ need the sub-window 7 remap.
+ *
+ * From OpenMDK libbde/shared/shbde_iproc.c:
+ *   shbde_iproc_pci_read() / shbde_iproc_pci_write()
+ */
+#define BAR0_PAXB_IMAP0_7      0x2c1c
+#define IPROC_SUBWIN_BASE      0x7000
+#define IPROC_SUBWIN_SIZE      0x1000
+
+static DEFINE_SPINLOCK(iproc_lock);
+
+static u32 iproc_read(struct bde_device *bdev, u32 addr)
+{
+	unsigned long flags;
+	u32 val;
+
+	if (addr < 0x8000) {
+		/* Direct access for low registers */
+		return ioread32(bdev->base + addr);
+	}
+
+	/* Use sub-window 7 for high registers */
+	spin_lock_irqsave(&iproc_lock, flags);
+
+	/* Program IMAP0_7 with target base address */
+	iowrite32((addr & ~0xfff) | 0x1, bdev->base + BAR0_PAXB_IMAP0_7);
+
+	/* Read through sub-window 7 */
+	val = ioread32(bdev->base + IPROC_SUBWIN_BASE + (addr & 0xfff));
+
+	spin_unlock_irqrestore(&iproc_lock, flags);
+	return val;
+}
+
+static void iproc_write(struct bde_device *bdev, u32 addr, u32 val)
+{
+	unsigned long flags;
+
+	if (addr < 0x8000) {
+		/* Direct access for low registers */
+		iowrite32(val, bdev->base + addr);
+		return;
+	}
+
+	/* Use sub-window 7 for high registers */
+	spin_lock_irqsave(&iproc_lock, flags);
+
+	/* Program IMAP0_7 with target base address */
+	iowrite32((addr & ~0xfff) | 0x1, bdev->base + BAR0_PAXB_IMAP0_7);
+
+	/* Write through sub-window 7 */
+	iowrite32(val, bdev->base + IPROC_SUBWIN_BASE + (addr & 0xfff));
+
+	spin_unlock_irqrestore(&iproc_lock, flags);
+}
+
 /* ── Interrupt handler (forward declaration) ─────────────────── */
 static irqreturn_t bde_isr(int irq, void *dev_id);
 
@@ -152,6 +221,20 @@ static int bde_pci_probe(struct pci_dev *pdev,
 	/* Set PCIe max payload if supported */
 	if (maxpayload > 0 && pci_is_pcie(pdev)) {
 		pcie_set_readrq(pdev, maxpayload);
+	}
+
+	/*
+	 * Initialize PAXB endianness for big-endian PPC host.
+	 * Write 0x01010101 to BAR0+0x2030 (PAXB_ENDIANESS).
+	 * This tells the iProc bridge to swap bytes for the host.
+	 */
+	iowrite32(0x01010101, bdev->base + 0x2030);
+	if (ioread32(bdev->base + 0x2030) != 1) {
+		/* If read-back doesn't match, try little-endian mode */
+		iowrite32(0x0, bdev->base + 0x2030);
+		dev_info(&pdev->dev, "PAXB endianness: little-endian\n");
+	} else {
+		dev_info(&pdev->dev, "PAXB endianness: big-endian\n");
 	}
 
 	/* Request interrupt */
@@ -288,16 +371,12 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		if (!bdev->valid || rio.addr >= bdev->base_size)
 			return -EINVAL;
 		/*
-		 * Use __raw_readl for reads on P2020 PPC.
-		 * The PCIe outbound window does NOT byte-swap on this platform.
-		 * ioread32() adds unwanted LE->BE conversion.
-		 * __raw_readl() reads the raw 32-bit value as seen by the CPU.
-		 *
-		 * CRITICAL: direct mmap READS work but WRITES are silently
-		 * dropped on this platform. All writes MUST go through
-		 * iowrite32() which uses proper PPC MMIO store instructions.
+		 * Use iProc sub-window access for CMICm registers.
+		 * Registers above 0x8000 need PAXB IMAP0_7 remapping.
+		 * ioread32/iowrite32 through the sub-window work correctly
+		 * on PPC (includes proper MMIO barriers).
 		 */
-		rio.val = __raw_readl(bdev->base + rio.addr);
+		rio.val = iproc_read(bdev, rio.addr);
 		if (copy_to_user((void __user *)arg, &rio, sizeof(rio)))
 			return -EFAULT;
 		return 0;
@@ -310,8 +389,8 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		bdev = &bde_devices[rio.dev];
 		if (!bdev->valid || rio.addr >= bdev->base_size)
 			return -EINVAL;
-		/* Raw write - no endian conversion (see REG_READ comment) */
-		__raw_writel(rio.val, bdev->base + rio.addr);
+		/* Use iProc sub-window for CMICm register writes */
+		iproc_write(bdev, rio.addr, rio.val);
 		return 0;
 
 	case BDE_IOC_DMA_ALLOC:
