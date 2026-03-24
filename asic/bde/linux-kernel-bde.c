@@ -113,24 +113,42 @@ MODULE_PARM_DESC(dma_size, "DMA pool size in MB (default 4)");
 
 static DEFINE_SPINLOCK(iproc_lock);
 
+/*
+ * Register access using raw (non-byte-swapped) PPC load/store.
+ *
+ * CRITICAL: Cumulus BDE uses stwx/lwzx (raw store/load) for ALL
+ * iProc register access, NOT stwbrx/lwbrx (iowrite32/ioread32).
+ * Confirmed by disassembly of Cumulus linux-kernel-bde.ko:
+ *   _iproc_write: stwx at 0x2F50
+ *   _iproc_read:  lwzx at 0x3034
+ *
+ * With raw access, the CPU writes native big-endian values directly.
+ * The CDK with SYS_BE_PIO=1 handles endianness conversion in software.
+ * Using iowrite32 (byte-swap) caused MIIM_WR_START to silently fail
+ * because the PAXB bit-command protocol received garbled bit positions.
+ */
 static u32 iproc_read(struct bde_device *bdev, u32 addr)
 {
 	unsigned long flags;
 	u32 val;
 
 	if (addr < 0x8000) {
-		/* Direct access for low registers */
-		return ioread32(bdev->base + addr);
+		/* Direct access for low registers - raw read (no swap) */
+		val = __raw_readl(bdev->base + addr);
+		rmb();
+		return val;
 	}
 
 	/* Use sub-window 7 for high registers */
 	spin_lock_irqsave(&iproc_lock, flags);
 
 	/* Program IMAP0_7 with target base address */
-	iowrite32((addr & ~0xfff) | 0x1, bdev->base + BAR0_PAXB_IMAP0_7);
+	__raw_writel((addr & ~0xfff) | 0x1, bdev->base + BAR0_PAXB_IMAP0_7);
+	wmb();
 
 	/* Read through sub-window 7 */
-	val = ioread32(bdev->base + IPROC_SUBWIN_BASE + (addr & 0xfff));
+	val = __raw_readl(bdev->base + IPROC_SUBWIN_BASE + (addr & 0xfff));
+	rmb();
 
 	spin_unlock_irqrestore(&iproc_lock, flags);
 	return val;
@@ -141,20 +159,9 @@ static void iproc_write(struct bde_device *bdev, u32 addr, u32 val)
 	unsigned long flags;
 
 	if (addr < 0x8000) {
-		/*
-		 * Direct access for low CMIC registers.
-		 *
-		 * On P2020 PPC with iProc PAXB, iowrite32 (out_le32)
-		 * byte-swaps for most registers. However, certain
-		 * command/status registers (SCHAN_CTRL at 0x50 and
-		 * DMA_STAT at 0x104) don't respond to iowrite32 -
-		 * they need __raw_writel (no byte-swap).
-		 *
-		 * This may be because these registers use a different
-		 * write-trigger protocol where the PAXB endianness
-		 * conversion produces the wrong bit pattern.
-		 */
-		iowrite32(val, bdev->base + addr);
+		/* Direct access for low registers - raw write (no swap) */
+		__raw_writel(val, bdev->base + addr);
+		wmb();
 		return;
 	}
 
@@ -162,10 +169,12 @@ static void iproc_write(struct bde_device *bdev, u32 addr, u32 val)
 	spin_lock_irqsave(&iproc_lock, flags);
 
 	/* Program IMAP0_7 with target base address */
-	iowrite32((addr & ~0xfff) | 0x1, bdev->base + BAR0_PAXB_IMAP0_7);
+	__raw_writel((addr & ~0xfff) | 0x1, bdev->base + BAR0_PAXB_IMAP0_7);
+	wmb();
 
 	/* Write through sub-window 7 */
-	iowrite32(val, bdev->base + IPROC_SUBWIN_BASE + (addr & 0xfff));
+	__raw_writel(val, bdev->base + IPROC_SUBWIN_BASE + (addr & 0xfff));
+	wmb();
 
 	spin_unlock_irqrestore(&iproc_lock, flags);
 }
@@ -236,17 +245,17 @@ static int bde_pci_probe(struct pci_dev *pdev,
 	}
 
 	/*
-	 * Initialize PAXB endianness for big-endian PPC host.
-	 * Write 0x01010101 to BAR0+0x2030 (PAXB_ENDIANESS).
-	 * This tells the iProc bridge to swap bytes for the host.
+	 * PAXB endianness: leave at default (no swap).
+	 *
+	 * Cumulus BDE uses raw PPC load/store (stwx/lwzx) which
+	 * writes native big-endian values without byte-swap.
+	 * CDK with SYS_BE_PIO=1 handles endianness in software.
+	 * Do NOT set PAXB_ENDIANESS - raw access works with defaults.
 	 */
-	iowrite32(0x01010101, bdev->base + 0x2030);
-	if (ioread32(bdev->base + 0x2030) != 1) {
-		/* If read-back doesn't match, try little-endian mode */
-		iowrite32(0x0, bdev->base + 0x2030);
-		dev_info(&pdev->dev, "PAXB endianness: little-endian\n");
-	} else {
-		dev_info(&pdev->dev, "PAXB endianness: big-endian\n");
+	{
+		u32 paxb_endian = __raw_readl(bdev->base + 0x2030);
+		dev_info(&pdev->dev, "PAXB endianness: 0x%08x (raw access mode)\n",
+			 paxb_endian);
 	}
 
 	/* Request interrupt */
