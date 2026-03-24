@@ -127,56 +127,100 @@ static DEFINE_SPINLOCK(iproc_lock);
  * Using iowrite32 (byte-swap) caused MIIM_WR_START to silently fail
  * because the PAXB bit-command protocol received garbled bit positions.
  */
-static u32 iproc_read(struct bde_device *bdev, u32 addr)
+/*
+ * Register access: direct BAR0 read/write using raw PPC load/store.
+ *
+ * BCM56846 iProc PAXB maps the full 256KB BAR0 to fixed AXI targets:
+ *   BAR0+0x00000-0x0FFFF: CMIC registers (MIIM, config, etc.)
+ *   BAR0+0x10000-0x2FFFF: XLPORT/MAC registers
+ *   BAR0+0x30000-0x3FFFF: CMICm (S-Channel, DMA, IRQ)
+ *     0x31000+: CMC0 DMA
+ *     0x32800+: CMC0 S-Channel
+ *     0x33000+: CMC2 S-Channel
+ *
+ * These are FIXED mappings - no IMAP sub-window remapping needed.
+ * The entire BAR0 is directly accessible.
+ *
+ * Cumulus BDE uses stwx/lwzx (raw, no byte-swap) for ALL BAR0 access.
+ * CDK with SYS_BE_PIO=1 handles endianness in software.
+ */
+/*
+ * Address translation: old CMIC → CMICm (CMC0).
+ *
+ * OpenMDK CDK uses old CMIC register offsets (0x00-0x4FF) for
+ * S-Channel, MIIM, DMA, etc. But BCM56846 with iProc has these
+ * at CMICm CMC0 base (BAR0+0x32000).
+ *
+ * Mapping from Cumulus RE captures:
+ *   Old CMIC 0x000-0x04C (SCHAN msg buffer) → CMC0 0x3280C-0x32858
+ *   Old CMIC 0x050 (SCHAN_CTRL)            → CMC0 0x32800
+ *   Old CMIC 0x054 (SCHAN_ERR)             → CMC0 0x32804 (approx)
+ *   Old CMIC 0x100 (DMA_CTRL)              → CMC0 0x31100-ish
+ *   Old CMIC 0x104 (DMA_STAT)              → CMC0 0x31150-ish
+ *   Old CMIC 0x110 (DMA_DESC0)             → CMC0 0x31158
+ *   Old CMIC 0x158 (MIIM_PARAM)            → stays at 0x158 (accessible)
+ *   Old CMIC 0x15C (MIIM_READ_DATA)        → stays at 0x15C
+ *   Old CMIC 0x4A0 (MIIM_ADDRESS)          → stays at 0x4A0
+ *
+ * For now, remap S-Channel registers. MIIM registers at 0x158+ are
+ * directly accessible in sub-window 0 and work as-is.
+ */
+static u32 iproc_addr_translate(u32 addr)
 {
-	unsigned long flags;
-	u32 val;
+	/* S-Channel message buffer: 0x00-0x4C → 0x3280C-0x32858 */
+	if (addr <= 0x4c)
+		return 0x3280c + addr;
 
-	if (addr < 0x8000) {
-		/* Direct access for low registers - raw read (no swap) */
-		val = __raw_readl(bdev->base + addr);
-		rmb();
-		return val;
+	/* S-Channel control: 0x50 → 0x32800 */
+	if (addr == 0x50)
+		return 0x32800;
+
+	/* S-Channel error: 0x5C → 0x32808 (estimated) */
+	if (addr == 0x5c)
+		return 0x32808;
+
+	/* DMA registers: 0x100-0x11C → CMC0 DMA (0x31100+) */
+	if (addr >= 0x100 && addr <= 0x11c) {
+		/* CMIC_DMA_CTRL (0x100) → 0x31100 */
+		/* CMIC_DMA_STAT (0x104) → 0x31150 */
+		/* CMIC_DMA_DESC0 (0x110) → 0x31158 */
+		switch (addr) {
+		case 0x100: return 0x31140;  /* DMA_CTRL ch0 */
+		case 0x104: return 0x31150;  /* DMA_STAT */
+		case 0x10c: return addr;     /* CMIC_CONFIG - stays */
+		case 0x110: return 0x31158;  /* DMA_DESC0 ch0 */
+		case 0x114: return 0x3115c;  /* DMA_DESC1 ch1 */
+		default: return addr;
+		}
 	}
 
-	/* Use sub-window 7 for high registers */
-	spin_lock_irqsave(&iproc_lock, flags);
+	/* All other addresses pass through directly */
+	return addr;
+}
 
-	/* Program IMAP0_7 with target base address */
-	__raw_writel((addr & ~0xfff) | 0x1, bdev->base + BAR0_PAXB_IMAP0_7);
-	wmb();
+static u32 iproc_read(struct bde_device *bdev, u32 addr)
+{
+	u32 val;
 
-	/* Read through sub-window 7 */
-	val = __raw_readl(bdev->base + IPROC_SUBWIN_BASE + (addr & 0xfff));
+	addr = iproc_addr_translate(addr);
+
+	if (addr >= bdev->base_size)
+		return 0xffffffff;
+
+	val = __raw_readl(bdev->base + addr);
 	rmb();
-
-	spin_unlock_irqrestore(&iproc_lock, flags);
 	return val;
 }
 
 static void iproc_write(struct bde_device *bdev, u32 addr, u32 val)
 {
-	unsigned long flags;
+	addr = iproc_addr_translate(addr);
 
-	if (addr < 0x8000) {
-		/* Direct access for low registers - raw write (no swap) */
-		__raw_writel(val, bdev->base + addr);
-		wmb();
+	if (addr >= bdev->base_size)
 		return;
-	}
 
-	/* Use sub-window 7 for high registers */
-	spin_lock_irqsave(&iproc_lock, flags);
-
-	/* Program IMAP0_7 with target base address */
-	__raw_writel((addr & ~0xfff) | 0x1, bdev->base + BAR0_PAXB_IMAP0_7);
+	__raw_writel(val, bdev->base + addr);
 	wmb();
-
-	/* Write through sub-window 7 */
-	__raw_writel(val, bdev->base + IPROC_SUBWIN_BASE + (addr & 0xfff));
-	wmb();
-
-	spin_unlock_irqrestore(&iproc_lock, flags);
 }
 
 /* ── Interrupt handler (forward declaration) ─────────────────── */
