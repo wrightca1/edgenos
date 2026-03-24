@@ -240,10 +240,13 @@ int portmap_swp_to_i2c_bus(int swp)
  * Cumulus polls at ~30ms per port. We poll all ports each call,
  * called from main loop with appropriate interval.
  */
+static int link_poll_count;
+
 int portmap_link_poll(void)
 {
     int i;
     int changes = 0;
+    int first_poll = (link_poll_count++ == 0);
 
     for (i = 0; i < SWITCHD_MAX_PORTS; i++) {
         if (!switchd.ports[i].valid || !switchd.ports[i].enabled)
@@ -275,6 +278,11 @@ int portmap_link_poll(void)
         int link = 0;
         int autoneg_done = 0;
         int rv = bmd_phy_link_get(switchd.unit, port, &link, &autoneg_done);
+        /* Log first poll result for debugging */
+        if (first_poll && switchd.ports[i].port_type == PORT_TYPE_QSFP) {
+            syslog(LOG_INFO, "link_poll[%s]: port=%d rv=%d link=%d an=%d",
+                   switchd.ports[i].ifname, port, rv, link, autoneg_done);
+        }
         if (rv == 0) {
             switchd.ports[i].link_up = link;
 

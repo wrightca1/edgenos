@@ -141,7 +141,19 @@ static void iproc_write(struct bde_device *bdev, u32 addr, u32 val)
 	unsigned long flags;
 
 	if (addr < 0x8000) {
-		/* Direct access for low registers */
+		/*
+		 * Direct access for low CMIC registers.
+		 *
+		 * On P2020 PPC with iProc PAXB, iowrite32 (out_le32)
+		 * byte-swaps for most registers. However, certain
+		 * command/status registers (SCHAN_CTRL at 0x50 and
+		 * DMA_STAT at 0x104) don't respond to iowrite32 -
+		 * they need __raw_writel (no byte-swap).
+		 *
+		 * This may be because these registers use a different
+		 * write-trigger protocol where the PAXB endianness
+		 * conversion produces the wrong bit pattern.
+		 */
 		iowrite32(val, bdev->base + addr);
 		return;
 	}
