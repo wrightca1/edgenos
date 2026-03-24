@@ -127,12 +127,7 @@ int portmap_configure_ports(void)
          *   - Enables XMAC RX/TX
          *   - Updates EPC_LINK_BMAP
          */
-        /*
-         * Without CDK_CONFIG_INCLUDE_DYN_CONFIG, DCFG_40G is not set
-         * and all ports default to 10G single-lane. Use 10G mode for
-         * all ports including QSFP (which will run as 4x10G lanes
-         * instead of 1x40G until per-port config is implemented).
-         */
+        /* Use 10G for all ports (40G requires CDK per-port config) */
         mode = bmdPortMode10000fd;
 
         rv = bmd_port_mode_set(switchd.unit, port, mode, flags);
@@ -279,7 +274,7 @@ int portmap_link_poll(void)
         int autoneg_done = 0;
         int rv = bmd_phy_link_get(switchd.unit, port, &link, &autoneg_done);
         /* Log first poll result for debugging */
-        if (first_poll && switchd.ports[i].port_type == PORT_TYPE_QSFP) {
+        if (first_poll && (i < 3 || switchd.ports[i].port_type == PORT_TYPE_QSFP)) {
             syslog(LOG_INFO, "link_poll[%s]: port=%d rv=%d link=%d an=%d",
                    switchd.ports[i].ifname, port, rv, link, autoneg_done);
         }

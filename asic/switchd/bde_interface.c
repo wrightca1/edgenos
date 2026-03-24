@@ -377,15 +377,7 @@ int cdk_init(void)
            unit, dev_id.device_id, dev_id.revision);
 
     /* AS5610-52X uses 156.25 MHz LCPLL reference clock */
-    /*
-     * AS5610-52X: 156.25 MHz LCPLL reference clock.
-     *
-     * Note: DCFG_40G not set - it would disable all non-base sub-ports.
-     * QSFP 40G port mode will fail with CDK_E_PARAM, but the ports
-     * still get link via the PHY/SerDes at 10G per lane. Full 40G
-     * support requires CDK_CONFIG_INCLUDE_DYN_CONFIG with per-port
-     * speed_max configuration (future improvement).
-     */
+    /* AS5610-52X: 156.25 MHz LCPLL reference clock */
     CDK_CHIP_CONFIG_SET(unit, DCFG_LCPLL_156);
 
     /* Initialize PHY probe */
