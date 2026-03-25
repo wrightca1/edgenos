@@ -82,29 +82,40 @@ export_gpio() {
     [ -n "$val" ] && echo "$val" > "${GPIO_SYS}/gpio${gpio}/value" 2>/dev/null || true
 }
 
-# QSFP reset lines (PCA9538 at gpiochip160): RST_L high = not reset
-for gpio in $(seq 160 163); do
-    export_gpio $gpio out 1
+# QSFP control via PCA9538 GPIO expanders
+# Find the actual gpiochip base numbers (vary by kernel version)
+for chip in /sys/class/gpio/gpiochip*; do
+    label=$(cat "$chip/label" 2>/dev/null)
+    base=$(cat "$chip/base" 2>/dev/null)
+    case "$label" in
+        64-007[0-3])
+            # PCA9538 QSFP GPIO: pin0=RESET_N pin1=LPMODE pin2=MODSEL_N
+            export_gpio $base out 1           # RESET_N = 1 (deassert)
+            export_gpio $((base+1)) out 0     # LPMODE = 0 (high power)
+            export_gpio $((base+2)) out 0     # MODSEL_N = 0 (selected)
+            log "QSFP GPIO: chip=$label base=$base"
+            ;;
+    esac
 done
 
-# QSFP modsel lines (PCA9538 at gpiochip164): MODSEL_L low = selected
-for gpio in $(seq 164 167); do
-    export_gpio $gpio out 0
+# SFP TX_DISABLE via PCA9506 GPIO expanders on buses 64-65
+# These are NOT in gpiochip sysfs - control directly via I2C
+# PCA9506: direction reg 0x18+, output reg 0x08+
+# Set all outputs to 0 (TX_DISABLE = low = TX enabled)
+for bus in 64 65; do
+    for addr in 0x20 0x21 0x22 0x23 0x24; do
+        if i2cget -y $bus $addr 0 b >/dev/null 2>&1; then
+            # Set all 5 ports to output, all bits low
+            for port in 0x18 0x19 0x1a 0x1b 0x1c; do
+                i2cset -y $bus $addr $port 0x00 b 2>/dev/null
+            done
+            for port in 0x08 0x09 0x0a 0x0b 0x0c; do
+                i2cset -y $bus $addr $port 0x00 b 2>/dev/null
+            done
+        fi
+    done
 done
-
-# QSFP lpmode lines (PCA9538 at gpiochip168): LPMODE low = high power
-for gpio in $(seq 168 171); do
-    export_gpio $gpio out 0
-done
-
-# SFP TX disable: PCA9506 at gpiochip24 (40 GPIOs) + gpiochip64 (40 GPIOs)
-# TX_DISABLE is active-high, set low to enable TX
-for gpio in $(seq 24 64); do
-    export_gpio $gpio out 0
-done
-for gpio in $(seq 97 104); do
-    export_gpio $gpio out 0
-done
+log "SFP TX_DISABLE cleared (buses 64-65)"
 
 log "GPIO initialization complete"
 
@@ -113,6 +124,29 @@ log "GPIO initialization complete"
 # 32 DS100DF410 devices at I2C addr 0x27 on buses 18-69
 
 log "=== Phase 3: Programming retimers ==="
+
+# Program DS100DF410 retimers directly via I2C
+# (retimer_class kernel module not available, use i2cset)
+retimer_count=0
+for bus in $(seq 11 54); do
+    if i2cget -y $bus 0x27 0 b >/dev/null 2>&1; then
+        i2cset -y $bus 0x27 0xff 0x0c b 2>/dev/null  # broadcast all channels
+        i2cset -y $bus 0x27 0x15 0x01 b 2>/dev/null  # VEO clock CDR cap
+        i2cset -y $bus 0x27 0x1e 0x00 b 2>/dev/null  # PFD/PRBS/DFE unmute
+        i2cset -y $bus 0x27 0x17 0x40 b 2>/dev/null  # CTLE+DFE adaptive EQ
+        i2cset -y $bus 0x27 0x0a 0x1c b 2>/dev/null  # CDR reset assert
+        retimer_count=$((retimer_count + 1))
+    fi
+done
+usleep 20000  # 20ms settling
+for bus in $(seq 11 54); do
+    i2cset -y $bus 0x27 0x0a 0x10 b 2>/dev/null  # CDR reset release
+done
+log "Programmed $retimer_count retimers via I2C"
+
+# Also set fan to medium speed immediately
+devmem $((0xEA000000 + 0x0D)) 8 0x0E 2>/dev/null
+log "Fan set to medium (14/31)"
 
 RDIR="/sys/class/retimer_dev"
 NUM_RETIMERS=32
