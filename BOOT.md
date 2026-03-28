@@ -121,52 +121,144 @@ CONFIG_CMDLINE_BOOL=n
 ## Critical U-Boot Environment Variables
 
 ```
-# MUST be set to prevent FDT relocation hang
-fdt_high=0xffffffff
-initrd_high=0xffffffff
+# ONLY set nos_bootcmd. Do NOT set fdt_high or initrd_high!
+# Setting fdt_high=0xffffffff BREAKS both EdgeNOS AND ONIE boot.
+# The default U-Boot behavior (no fdt_high/initrd_high) works correctly.
 
-# MUST be set to prevent ONIE install-mode loop
-onie_boot_reason=nos        (not blank, not 'install')
+# Delete onie_boot_reason to prevent ONIE install-mode loop
+# (fw_setenv with empty value deletes the variable)
 
-# Boot command using raw sector read (not ext2load, not usbboot)
-nos_bootcmd=usb start; setenv bootargs noinitrd console=ttyS0,115200 earlycon root=/dev/sda6 rootfstype=squashfs ro rootwait; usb read 0x02000000 0x42000 0x7fc2; bootm 0x02000000#accton_as5610_52x
+# Boot command using partition-based usbboot (not raw sector read)
+nos_bootcmd=usb start; usbiddev; setenv bootargs console=$consoledev,$baudrate root=/dev/sda6 rootfstype=squashfs ro rootwait earlycon; usbboot $loadaddr ${usbdev}:5 && bootm ${loadaddr}#accton_as5610_52x
+```
 
-# Boot count safety (NOS resets to 0 on successful boot)
-boot_count=0
+### Variables that must NOT be set
+
+| Variable | Why NOT |
+|----------|---------|
+| `fdt_high` | Setting to 0xffffffff disables FDT relocation. This breaks ONIE's boot and may break EdgeNOS depending on memory layout. Leave at U-Boot default. |
+| `initrd_high` | Same — leave at default. U-Boot handles initrd placement correctly without override. |
+
+### Setting from ONIE shell
+
+```bash
+export PATH=/sbin:/usr/sbin:$PATH
+echo y | fw_setenv nos_bootcmd "usb start; usbiddev; setenv bootargs console=\$consoledev,\$baudrate root=/dev/sda6 rootfstype=squashfs ro rootwait earlycon; usbboot \$loadaddr \${usbdev}:5 && bootm \${loadaddr}#accton_as5610_52x"
+# Delete onie_boot_reason to exit install mode:
+echo "onie_boot_reason" > /tmp/env_del.txt
+echo y | fw_setenv -f -s /tmp/env_del.txt
+```
+
+### Recovering from broken U-Boot env
+
+If boot is completely broken (both EdgeNOS and ONIE hang):
+```
+# At LOADER=> prompt, interrupt autoboot and run:
+env default -a
+saveenv
+reset
+# This restores all U-Boot defaults and boots into ONIE
 ```
 
 ## FIT Image Format
 
-The FIT image **must** have:
+The FIT image format was reverse-engineered from Cumulus 2.5.0's working
+`uImage-powerpc.itb` (March 2026 session). The format MUST match exactly.
 
-1. **Kernel**: gzip compressed (NOT uncompressed uImage-in-FIT)
-   - Extract raw payload: `dumpimage -T kernel -p 0 -o kernel.gz uImage`
-   - `compression = "gzip"`, `load = <0x00000000>`, `entry = <0x00000000>`
+### Working FIT structure (verified March 28, 2026)
 
-2. **DTB**: with explicit load address below 16MB
-   - `load = <0x00f00000>` (without this: kernel hangs after "Loading Device Tree")
-   - Compatible string: `"accton,as5610_52x"` (underscores, not hyphens)
+```dts
+/ {
+    description = "PowerPC kernel, initramfs and FDT blobs";
+    #address-cells = <0x01>;
 
-3. **Initramfs**: real init binary (not a stub)
-   - `load = <0x01000000>`
-   - U-Boot 2013.01 requires a ramdisk node or fails
+    images {
+        kernel {                          /* node name: "kernel" (no @1) */
+            type = "kernel";
+            arch = "ppc";
+            os = "linux";
+            compression = "gzip";         /* gzip compressed vmlinux */
+            load = <0x00>;                /* load address 0 */
+            entry = <0x00>;               /* entry address 0 */
+        };
 
-4. **Configuration**: name must be `accton_as5610_52x`
-   - U-Boot bootm uses `#${cl.platform}` which resolves to this
+        initramfs {                       /* REQUIRED — U-Boot 2013.01 needs this */
+            type = "ramdisk";
+            arch = "ppc";
+            os = "linux";
+            compression = "none";         /* cpio.gz treated as uncompressed blob */
+            load = <0x00>;
+        };
 
-## Initramfs (nos-init.c)
+        accton_as5610_52x_dtb {           /* node name matches Cumulus convention */
+            type = "flat_dt";
+            arch = "ppc";
+            os = "linux";
+            compression = "none";
+            /* NO load address — let U-Boot place it automatically */
+        };
+    };
 
-Must be compiled with:
+    configurations {
+        default = "accton_as5610_52x";
+
+        accton_as5610_52x {
+            kernel = "kernel";
+            ramdisk = "initramfs";
+            fdt = "accton_as5610_52x_dtb";
+        };
+    };
+};
 ```
-powerpc-linux-gnu-gcc -nostdlib -nostartfiles -static -O1 \
-    -mcpu=8548 -msoft-float -fno-builtin -fno-pic -fno-pie \
-    -o init nos-init.c -lgcc
+
+### Critical rules (learned the hard way)
+
+1. **Kernel load/entry = 0x00** — CONFIG_RELOCATABLE=y handles address setup
+2. **DTB has NO load property** — U-Boot places it in high memory automatically
+3. **Initramfs is REQUIRED** — without it, U-Boot 2013.01 fails silently
+4. **Node names: no `@1` suffix** — use `kernel`, `initramfs`, not `kernel@1`
+5. **Kernel data = gzip of raw vmlinux** — extract from uImage: `dd if=uImage bs=64 skip=1 of=kernel.gz`
+6. **Do NOT wrap uImage inside FIT** — that double-wraps and bootm can't unwrap it
+7. **Config name = `accton_as5610_52x`** — matches U-Boot's `#accton_as5610_52x`
+
+### What DOESN'T work (all tested and failed)
+
+| Attempt | Result |
+|---------|--------|
+| `load = <0x00f00000>` on kernel | Kernel hangs after "Using Device Tree in place" |
+| `load = <0x00f00000>` on DTB | Same hang |
+| `fdt_high = 0xffffffff` | Breaks ONIE boot AND EdgeNOS boot |
+| `initrd_high = 0xffffffff` | Same |
+| Full uImage inside FIT (`type=kernel, compression=none`) | bootm tries to execute uImage header bytes |
+| FIT without initramfs/ramdisk node | U-Boot hangs or fails silently |
+| `kernel@1` node naming | Works but differs from Cumulus convention |
+
+## Initramfs (nos-init)
+
+Two versions exist. Use `initramfs-nos-init.c` (libc-based) for reliability:
+
+### Working version: `initramfs-nos-init.c` (with standard libc)
+
+```bash
+powerpc-linux-gnu-gcc -static -Os -o init initramfs-nos-init.c
 ```
 
-**Why these flags matter**:
-- `-nostdlib -nostartfiles`: Debian's powerpc glibc has FPU instructions (stfd)
-  that crash on e500v2. Must use raw syscalls only.
-- `-mcpu=8548`: e500v2 ISA (same as 8548)
+This uses standard `main()` with glibc. Despite earlier concerns about e500v2 FPU
+compatibility, gcc-11's static powerpc glibc works fine on e500v2.
+
+### Raw syscall version: `initramfs/nos-init.c` (NO libc)
+
+```bash
+powerpc-linux-gnu-gcc -static -nostartfiles -Os -o init initramfs/nos-init.c -lgcc
+```
+
+**WARNING**: This uses a custom `_start()` without proper PPC stack setup.
+Compiling with `-nostartfiles` causes `_start` to execute without a valid stack
+frame, leading to `User access of kernel address (ffff8ff8)` crash. The `-lgcc`
+flag is needed for `_restgpr_30_x` PPC register save/restore routines.
+
+**Recommendation**: Use `initramfs-nos-init.c` with standard libc. It's larger
+(767K vs ~12K) but reliable.
 - `-msoft-float`: no hardware FPU on e500v2
 - `-fno-builtin`: prevents GCC from replacing string ops with libc calls
 - `-lgcc`: provides `_restgpr_*` register save/restore helpers

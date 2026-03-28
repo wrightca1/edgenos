@@ -14,47 +14,74 @@ build_fit() {
 
     local UIMAGE="$OUTDIR/kernel/uImage"
     local DTB="$OUTDIR/kernel/as5610-52x.dtb"
-    local ROOTFS="$IMGDIR/rootfs.sqsh"
+    local INITRAMFS="$TOPDIR/initramfs.cpio.gz"
 
-    for f in "$UIMAGE" "$DTB" "$ROOTFS"; do
+    for f in "$UIMAGE" "$DTB"; do
         if [ ! -f "$f" ]; then
             echo "ERROR: Required file not found: $f"
             exit 1
         fi
     done
 
-    # Generate ITS (Image Tree Source)
+    # Build initramfs if not present
+    if [ ! -f "$INITRAMFS" ]; then
+        echo "  Building initramfs..."
+        bash "$TOPDIR/initramfs-build.sh"
+    fi
+    if [ ! -f "$INITRAMFS" ]; then
+        echo "ERROR: initramfs.cpio.gz not found and build failed"
+        exit 1
+    fi
+
+    # Extract gzip kernel payload from uImage (strip 64-byte mkimage header)
+    # The uImage contains: mkimage_header(64 bytes) + gzip(vmlinux)
+    # FIT needs the raw gzip, not the uImage wrapper
+    local KERNEL_GZ="$IMGDIR/kernel.gz"
+    dd if="$UIMAGE" bs=64 skip=1 of="$KERNEL_GZ" 2>/dev/null
+    echo "  kernel.gz: $(ls -lh "$KERNEL_GZ" | awk '{print $5}')"
+
+    # Generate ITS matching Cumulus 2.5.0 FIT format exactly.
+    # See BOOT.md "FIT Image Format" for why each field matters.
+    #
+    # CRITICAL RULES (all verified on hardware March 28, 2026):
+    #   - kernel: load=0x00, entry=0x00, compression=gzip
+    #   - DTB: NO load address (let U-Boot place it)
+    #   - initramfs: REQUIRED, load=0x00, compression=none
+    #   - node names: no @1 suffix (match Cumulus convention)
+    #   - Do NOT set fdt_high or initrd_high in U-Boot env
     cat > "$IMGDIR/nos.its" << EOF
 /dts-v1/;
 
 / {
-    description = "EdgeNOS for AS5610-52X";
-    #address-cells = <1>;
+    description = "PowerPC kernel, initramfs and FDT blobs";
+    #address-cells = <0x01>;
 
     images {
-        kernel@1 {
-            description = "Linux kernel";
-            data = /incbin/("$(realpath "$UIMAGE")");
+        kernel {
+            description = "PowerPC Kernel";
+            data = /incbin/("$(realpath "$KERNEL_GZ")");
             type = "kernel";
             arch = "ppc";
             os = "linux";
-            compression = "none";
-            load = <0x00000000>;
-            entry = <0x00000000>;
+            compression = "gzip";
+            load = <0x00>;
+            entry = <0x00>;
         };
 
-        fdt@1 {
-            description = "AS5610-52X device tree";
+        initramfs {
+            description = "initramfs";
+            data = /incbin/("$(realpath "$INITRAMFS")");
+            type = "ramdisk";
+            arch = "ppc";
+            os = "linux";
+            compression = "none";
+            load = <0x00>;
+        };
+
+        accton_as5610_52x_dtb {
+            description = "accton_as5610_52x.dtb";
             data = /incbin/("$(realpath "$DTB")");
             type = "flat_dt";
-            arch = "ppc";
-            compression = "none";
-        };
-
-        rootfs@1 {
-            description = "Root filesystem (squashfs)";
-            data = /incbin/("$(realpath "$ROOTFS")");
-            type = "ramdisk";
             arch = "ppc";
             os = "linux";
             compression = "none";
@@ -65,10 +92,10 @@ build_fit() {
         default = "accton_as5610_52x";
 
         accton_as5610_52x {
-            description = "EdgeNOS AS5610-52X";
-            kernel = "kernel@1";
-            fdt = "fdt@1";
-            ramdisk = "rootfs@1";
+            description = "accton_as5610_52x";
+            kernel = "kernel";
+            ramdisk = "initramfs";
+            fdt = "accton_as5610_52x_dtb";
         };
     };
 };
@@ -92,10 +119,24 @@ build_image() {
     fi
 
     # Create self-extracting installer
-    # The installer script + FIT image are concatenated
+    # The install.sh expects a tar archive after __ARCHIVE__ containing:
+    #   uImage-powerpc.itb  (FIT: kernel + DTB)
+    #   rootfs.sqsh         (squashfs root filesystem)
+    local ROOTFS="$IMGDIR/rootfs.sqsh"
+    if [ ! -f "$ROOTFS" ]; then
+        echo "ERROR: rootfs.sqsh not found."
+        exit 1
+    fi
+
+    # Build payload tar
+    local PAYLOAD="$IMGDIR/payload.tar"
+    tar -cf "$PAYLOAD" -C "$IMGDIR" uImage-powerpc.itb rootfs.sqsh
+    echo "  payload.tar: $(ls -lh "$PAYLOAD" | awk '{print $5}')"
+
+    # Assemble: install.sh already ends with __ARCHIVE__ marker
+    # Just append the payload tar directly after it
     cp "$INSTALLER" "$OUTPUT"
-    echo "__ARCHIVE__" >> "$OUTPUT"
-    cat "$FIT" >> "$OUTPUT"
+    cat "$PAYLOAD" >> "$OUTPUT"
 
     chmod +x "$OUTPUT"
     echo "==> ONIE installer: $OUTPUT"
