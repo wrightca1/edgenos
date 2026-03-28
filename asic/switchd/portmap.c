@@ -187,48 +187,66 @@ int portmap_configure_ports(void)
         }
 
         /*
-         * Set TX driver and pre-emphasis via direct Warpcore register writes.
+         * Set TX driver current and pre-emphasis.
          *
          * Values captured from Cumulus 2.5.1 switchd via GDB breakpoints
-         * on soc_miim_write (March 27, 2026):
+         * on soc_miim_write (March 27, 2026).
          *
-         * 10G SFP+:
-         *   Block 0x8370 reg 0x18 (TX_ANATXACONTROL6) = 0x0ACC
-         *     idriver=10(0xA), ipredriver=12(0xC), post2=12(0xC)
-         *   Block 0x8370 reg 0x10 (TX_ANATXACONTROL0) = 0x000E
-         *     TX FIR enable
-         *   Block 0x8370 reg 0x15 (TX_ANATXACONTROL5) = 0x0002
-         *     TX FIR coefficient
+         * Cumulus writes two sets of registers:
          *
-         * 40G QSFP:
-         *   Block 0x8370 reg 0x18 (TX_ANATXACONTROL6) = 0x0AFF
-         *     idriver=10(0xA), ipredriver=15(0xF), post2=15(0xF)
-         *   Block 0x8370 reg 0x10 (TX_ANATXACONTROL0) = 0x000E
+         * 1. TX0_TX_DRIVERr (block 0x8060, reg 0x07, addr 0x8067):
+         *    OpenMDK PHY_CONFIG_SET API — sets IDRIVER and IPREDRIVER fields.
+         *    This is the standard SDK path via PhyConfig_TxIDrv/TxPreIDrv.
          *
-         * Cumulus writes these as standard CL22 block-addressed MIIM,
-         * NOT via firmware mailbox. Per-lane via AER (block 0xFFD0
-         * reg 0x1E = 0x180N for lane N).
+         * 2. TX_ANATXACONTROL (block 0x8370, regs 0x10/0x15/0x18):
+         *    Analog TX pre-emphasis / FIR filter config.
+         *    Written directly via CL22 block addressing.
+         *    10G: reg 0x18 = 0x0ACC, reg 0x10 = 0x000E, reg 0x15 = 0x0002
+         *    40G: reg 0x18 = 0x0AFF, reg 0x10 = 0x000E
+         *
+         * Both are needed: TX_DRIVERr sets the output current,
+         * ANATXACONTROL sets the FIR/pre-emphasis shaping.
          */
         {
             phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(switchd.unit, port);
             if (pc) {
-                int lane;
                 int is_qsfp = (switchd.ports[i].port_type == PORT_TYPE_QSFP);
-                uint32_t tx_amp = is_qsfp ? 0x0AFF : 0x0ACC;
+                int lane;
 
+                /*
+                 * Part 1: TX_DRIVERr via OpenMDK PHY_CONFIG_SET API.
+                 * Decoded from Cumulus capture of TX0_TX_DRIVERr (0x8067):
+                 *   IDRIVER = 10 (0xA), IPREDRIVER = 12 (0xC) for 10G
+                 *   IDRIVER = 10 (0xA), IPREDRIVER = 15 (0xF) for 40G
+                 */
+                rv = PHY_CONFIG_SET(pc, PhyConfig_TxIDrv, 10, NULL);
+                if (rv < 0)
+                    syslog(LOG_WARNING, "Port %s: PhyConfig_TxIDrv failed: %d",
+                           switchd.ports[i].ifname, rv);
+
+                rv = PHY_CONFIG_SET(pc, PhyConfig_TxPreIDrv,
+                                    is_qsfp ? 15 : 12, NULL);
+                if (rv < 0)
+                    syslog(LOG_WARNING, "Port %s: PhyConfig_TxPreIDrv failed: %d",
+                           switchd.ports[i].ifname, rv);
+
+                /*
+                 * Part 2: TX_ANATXACONTROL (block 0x8370) via direct
+                 * CL22 block access. Per-lane via AER lane select.
+                 */
                 for (lane = 0; lane < 4; lane++) {
                     /* Select lane via AER */
                     PHY_BUS_WRITE(pc, 0x1f, 0xffd0);
                     PHY_BUS_WRITE(pc, 0x1e, 0x1800 + lane);
 
-                    /* TX_ANATXACONTROL6: driver current + pre-emphasis */
+                    /* TX_ANATXACONTROL6 (reg 0x18): amplitude */
                     PHY_BUS_WRITE(pc, 0x1f, 0x8370);
-                    PHY_BUS_WRITE(pc, 0x18, tx_amp);
+                    PHY_BUS_WRITE(pc, 0x18, is_qsfp ? 0x0AFF : 0x0ACC);
 
-                    /* TX_ANATXACONTROL0: TX FIR enable */
-                    PHY_BUS_WRITE(pc, 0x10, 0x000e);
+                    /* TX_ANATXACONTROL0 (reg 0x10): FIR enable */
+                    PHY_BUS_WRITE(pc, 0x10, 0x000E);
 
-                    /* TX_ANATXACONTROL5: FIR coefficient (10G only) */
+                    /* TX_ANATXACONTROL5 (reg 0x15): FIR coeff (10G only) */
                     if (!is_qsfp)
                         PHY_BUS_WRITE(pc, 0x15, 0x0002);
                 }
@@ -238,8 +256,10 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc, 0x1e, 0x0000);
                 PHY_BUS_WRITE(pc, 0x1f, 0x0000);
 
-                syslog(LOG_INFO, "Port %s: TX driver set 0x%04x (%s)",
-                       switchd.ports[i].ifname, tx_amp,
+                syslog(LOG_INFO, "Port %s: TX driver idrv=10 ipre=%d + ANATX 0x%04x (%s)",
+                       switchd.ports[i].ifname,
+                       is_qsfp ? 15 : 12,
+                       is_qsfp ? 0x0AFF : 0x0ACC,
                        is_qsfp ? "40G QSFP" : "10G SFP+");
             } else {
                 syslog(LOG_WARNING, "Port %s: no PHY control (port %d)",
