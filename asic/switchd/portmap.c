@@ -163,10 +163,30 @@ int portmap_configure_ports(void)
         {
             phy_ctrl_t *pc_chk = BMD_PORT_PHY_CTRL(switchd.unit, port);
             if (pc_chk) {
-                syslog(LOG_INFO, "Port %s: SERDES_MODE set rv=%d flags=0x%x 4lane=%d",
-                       switchd.ports[i].ifname, rv,
-                       PHY_CTRL_FLAGS(pc_chk),
-                       (PHY_CTRL_FLAGS(pc_chk) & PHY_F_SERDES_MODE) == 0);
+                /*
+                 * CRITICAL FIX: Clear PHY_F_CLAUSE45 flag.
+                 *
+                 * The Warpcore PHY init sets CLAUSE45 based on the
+                 * MULTIMMDS_EN register. On BCM56846, this is enabled
+                 * but the CMIC MIIM doesn't properly handle CL45 for
+                 * internal SerDes. With CLAUSE45 set, phy_aer_iblk_write
+                 * takes the early CL45 path (DEVAD+reg) instead of the
+                 * CL22 block-select path (reg 0x1F + reg offset).
+                 *
+                 * Result: MISC1r, MISC3r, FIRMWARE_MODEr writes all
+                 * silently fail → speed encoding never changes from
+                 * default CX4 → PCS can't block-lock on XFI signal
+                 * → link stays down despite TX/RX optical power.
+                 *
+                 * Cumulus SDK 6.3.8 likely has a different MIIM
+                 * implementation that handles CL45 correctly for
+                 * iProc-based switches. OpenMDK needs CL22 path.
+                 */
+                PHY_CTRL_FLAGS(pc_chk) &= ~PHY_F_CLAUSE45;
+
+                syslog(LOG_INFO, "Port %s: flags=0x%x (CLAUSE45 cleared)",
+                       switchd.ports[i].ifname,
+                       PHY_CTRL_FLAGS(pc_chk));
             } else {
                 syslog(LOG_WARNING, "Port %s: no PHY ctrl for port %d",
                        switchd.ports[i].ifname, port);
