@@ -30,6 +30,11 @@
 #include "l3.h"
 #include "vlan.h"
 
+/* BMD/PHY headers for CLAUSE45 fix */
+#include <bmd/bmd.h>
+#include <bmd/bmd_phy_ctrl.h>
+#include <phy/phy.h>
+
 /* Global state */
 struct switchd_state switchd;
 static volatile int running = 1;
@@ -124,6 +129,29 @@ static int asic_init(void)
     if (rv < 0) {
         syslog(LOG_ERR, "BMD init failed");
         return rv;
+    }
+
+    /*
+     * CRITICAL: Clear PHY_F_CLAUSE45 on all internal Warpcore PHYs
+     * BEFORE bmd_switching_init (which calls bmd_port_mode_set).
+     *
+     * bmd_init sets CLAUSE45 based on Warpcore MULTIMMDS_EN register.
+     * On BCM56846 with iProc, CL45 MIIM doesn't work for internal
+     * SerDes — register writes via CL45 path silently fail, causing
+     * speed encoding to never change from default CX4.
+     *
+     * Must be cleared after bmd_init (which sets the flag) but before
+     * any bmd_port_mode_set call (which writes speed registers).
+     */
+    {
+        int p;
+        for (p = 0; p < BMD_CONFIG_MAX_PORTS; p++) {
+            phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(switchd.unit, p);
+            if (pc && (PHY_CTRL_FLAGS(pc) & PHY_F_CLAUSE45)) {
+                PHY_CTRL_FLAGS(pc) &= ~PHY_F_CLAUSE45;
+            }
+        }
+        syslog(LOG_INFO, "Cleared PHY_F_CLAUSE45 on all internal Warpcores");
     }
 
     /* Initialize switching (L2 tables, VLANs) */
