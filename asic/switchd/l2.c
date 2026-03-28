@@ -35,26 +35,70 @@
 /* Default VLAN */
 #define DEFAULT_VLAN 1
 
+/*
+ * Read base MAC address from eth0 (management port).
+ * Cumulus assigns MACs as: eth0 = base, swp1 = base+1, swp2 = base+2, etc.
+ * Base MAC for this switch: 80:a2:35:81:ca:ae (captured from Cumulus).
+ * Falls back to hardcoded MAC if sysfs read fails.
+ */
+static int read_mgmt_mac(bmd_mac_addr_t *mac)
+{
+    FILE *f;
+    unsigned int m[6];
+
+    f = fopen("/sys/class/net/eth0/address", "r");
+    if (f) {
+        if (fscanf(f, "%x:%x:%x:%x:%x:%x",
+                   &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) == 6) {
+            int i;
+            for (i = 0; i < 6; i++)
+                mac->b[i] = (uint8_t)m[i];
+            fclose(f);
+            return 0;
+        }
+        fclose(f);
+    }
+
+    /* Fallback: hardcoded base MAC from Cumulus capture */
+    mac->b[0] = 0x80; mac->b[1] = 0xa2; mac->b[2] = 0x35;
+    mac->b[3] = 0x81; mac->b[4] = 0xca; mac->b[5] = 0xae;
+    return 0;
+}
+
 int l2_init(void)
 {
-    syslog(LOG_INFO, "L2 forwarding initialized");
+    bmd_mac_addr_t mgmt_mac;
+    int rv;
 
     /*
      * bmd_switching_init() already configured:
      * - L2 table reset
      * - Default VLAN (1) with all ports as members
-     * - Hardware MAC learning enabled
+     * - Hardware MAC learning enabled (PORT_TABm CML_FLAGS=8)
      * - L2 aging timer active
+     */
+
+    /*
+     * Add CPU MAC address to L2 table so packets destined to the
+     * switch management address get forwarded to CPU (via RX DMA)
+     * instead of being flooded to all ports.
      *
-     * Add CPU MAC address so packets destined to the switch
-     * management address get forwarded to CPU (via RX DMA).
+     * Without this, ARP replies, DHCP responses, and any traffic
+     * addressed to the switch's own MAC will flood or be dropped.
      */
+    read_mgmt_mac(&mgmt_mac);
 
-    /* TODO: Read management MAC from EEPROM (at24 on I2C bus 3/4)
-     * For now use the base MAC from switchd HAL port map:
-     * 80:a2:35:81:ca:af (swp1 MAC from Cumulus)
-     */
+    rv = bmd_cpu_mac_addr_add(switchd.unit, DEFAULT_VLAN, &mgmt_mac);
+    if (rv < 0) {
+        syslog(LOG_WARNING, "L2: failed to add CPU MAC: rv=%d", rv);
+    } else {
+        syslog(LOG_INFO, "L2: CPU MAC %02x:%02x:%02x:%02x:%02x:%02x added to VLAN %d",
+               mgmt_mac.b[0], mgmt_mac.b[1], mgmt_mac.b[2],
+               mgmt_mac.b[3], mgmt_mac.b[4], mgmt_mac.b[5],
+               DEFAULT_VLAN);
+    }
 
+    syslog(LOG_INFO, "L2 forwarding initialized");
     return 0;
 }
 

@@ -36,6 +36,9 @@
 #include "l2.h"
 #include "l3.h"
 
+/* BMD headers for port mode control */
+#include <bmd/bmd.h>
+
 #define NETLINK_BUF_SIZE  16384
 
 int netlink_init(void)
@@ -94,12 +97,38 @@ static void handle_link(struct nlmsghdr *nlh)
 
     if (nlh->nlmsg_type == RTM_NEWLINK) {
         int up = (ifi->ifi_flags & IFF_UP) ? 1 : 0;
-        syslog(LOG_INFO, "Link %s %s", ifname, up ? "UP" : "DOWN");
+        int was_up = switchd.ports[swp - 1].enabled;
 
-        /* TODO: Enable/disable port on ASIC
-         * bmd_port_mode_set(unit, logical_port, up ? enabled : disabled);
-         */
-        switchd.ports[swp - 1].enabled = up;
+        if (up != was_up) {
+            int port = switchd.ports[swp - 1].physical_lane;
+            syslog(LOG_INFO, "Link %s %s (port %d)", ifname,
+                   up ? "UP" : "DOWN", port);
+
+            if (port > 0) {
+                if (up) {
+                    /*
+                     * Enable port: set mode to current speed.
+                     * bmd_port_mode_set() configures XLPORT, XMAC,
+                     * PHY speed, and clears EPC_LINK_BMAP (link poll
+                     * will re-enable when PHY link comes up).
+                     */
+                    bmd_port_mode_t mode;
+                    if (switchd.ports[swp - 1].speed >= 40000)
+                        mode = bmdPortMode40000fd;
+                    else
+                        mode = bmdPortMode10000fd;
+                    bmd_port_mode_set(switchd.unit, port, mode, 0);
+                } else {
+                    /*
+                     * Disable port: set mode to disabled.
+                     * This disables MAC RX/TX and clears EPC_LINK_BMAP.
+                     */
+                    bmd_port_mode_set(switchd.unit, port,
+                                      bmdPortModeDisabled, 0);
+                }
+            }
+            switchd.ports[swp - 1].enabled = up;
+        }
     }
 }
 
