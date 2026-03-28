@@ -17,7 +17,9 @@ LABEL maintainer="EdgeNOS Contributors"
 LABEL description="Cross-compilation environment for EdgeNOS (AS5610-52X)"
 
 # ── Install build dependencies ────────────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Force IPv4 (Docker IPv6 DNS can hang on some networks)
+RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 \
+    && apt-get update && apt-get install -y --no-install-recommends \
     # Cross-compiler
     gcc-powerpc-linux-gnu \
     g++-powerpc-linux-gnu \
