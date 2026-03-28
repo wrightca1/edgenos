@@ -126,23 +126,63 @@ log "GPIO initialization complete"
 log "=== Phase 3: Programming retimers ==="
 
 # Program DS100DF410 retimers directly via I2C
-# (retimer_class kernel module not available, use i2cset)
+# Register values captured from Cumulus 2.5.1 boot-time config (March 2026)
+# See traces/cumulus_retimer_registers.txt for source
+#
+# Retimer buses:
+#   QSFP: 18-21 (direct on mux 0x77)
+#   SFP group 1 (swp1-4):   22-25
+#   SFP group 2 (swp9-12):  30-33
+#   SFP group 3 (swp17-20): 38-41
+#   SFP group 4 (swp25-28): 46-49
+#   SFP group 5 (swp33-36): 54-57
+#   SFP group 6 (swp41-48): 62-69 (all 8 have retimers)
+
+init_retimer() {
+    local bus=$1
+    i2cset -f -y $bus 0x27 0xFF 0x0F 2>/dev/null || return 1
+    i2cset -f -y $bus 0x27 0x0A 0x10 2>/dev/null  # CDR control
+    i2cset -f -y $bus 0x27 0x0B 0x0F 2>/dev/null  # CDR bandwidth
+    i2cset -f -y $bus 0x27 0x0C 0x08 2>/dev/null  # CDR mode
+    i2cset -f -y $bus 0x27 0x0E 0x93 2>/dev/null  # EQ/DFE config
+    i2cset -f -y $bus 0x27 0x0F 0x69 2>/dev/null  # EQ boost
+    i2cset -f -y $bus 0x27 0x10 0x3A 2>/dev/null
+    i2cset -f -y $bus 0x27 0x11 0x20 2>/dev/null
+    i2cset -f -y $bus 0x27 0x12 0xA0 2>/dev/null
+    i2cset -f -y $bus 0x27 0x13 0x30 2>/dev/null
+    i2cset -f -y $bus 0x27 0x15 0x10 2>/dev/null  # Output amplitude
+    i2cset -f -y $bus 0x27 0x16 0x7A 2>/dev/null
+    i2cset -f -y $bus 0x27 0x17 0x36 2>/dev/null
+    i2cset -f -y $bus 0x27 0x18 0x40 2>/dev/null
+    i2cset -f -y $bus 0x27 0x19 0x23 2>/dev/null
+    i2cset -f -y $bus 0x27 0x1B 0x03 2>/dev/null
+    i2cset -f -y $bus 0x27 0x1C 0x24 2>/dev/null
+    i2cset -f -y $bus 0x27 0x1E 0xE9 2>/dev/null  # CTLE config
+    i2cset -f -y $bus 0x27 0x1F 0x55 2>/dev/null
+    i2cset -f -y $bus 0x27 0x23 0x40 2>/dev/null
+    i2cset -f -y $bus 0x27 0x2A 0x30 2>/dev/null
+    i2cset -f -y $bus 0x27 0x2C 0x72 2>/dev/null
+    i2cset -f -y $bus 0x27 0x2D 0x80 2>/dev/null  # DFE mode
+    i2cset -f -y $bus 0x27 0x2F 0x06 2>/dev/null
+    i2cset -f -y $bus 0x27 0x31 0x20 2>/dev/null  # TX FIR
+    i2cset -f -y $bus 0x27 0x32 0x11 2>/dev/null
+    i2cset -f -y $bus 0x27 0x33 0x88 2>/dev/null
+    i2cset -f -y $bus 0x27 0x34 0x3F 2>/dev/null
+    i2cset -f -y $bus 0x27 0x35 0x1F 2>/dev/null
+    i2cset -f -y $bus 0x27 0x36 0x01 2>/dev/null  # Channel config
+    i2cset -f -y $bus 0x27 0x3A 0xA5 2>/dev/null
+    i2cset -f -y $bus 0x27 0x3E 0x80 2>/dev/null
+    return 0
+}
+
 retimer_count=0
-for bus in $(seq 11 54); do
-    if i2cget -y $bus 0x27 0 b >/dev/null 2>&1; then
-        i2cset -y $bus 0x27 0xff 0x0c b 2>/dev/null  # broadcast all channels
-        i2cset -y $bus 0x27 0x15 0x01 b 2>/dev/null  # VEO clock CDR cap
-        i2cset -y $bus 0x27 0x1e 0x00 b 2>/dev/null  # PFD/PRBS/DFE unmute
-        i2cset -y $bus 0x27 0x17 0x40 b 2>/dev/null  # CTLE+DFE adaptive EQ
-        i2cset -y $bus 0x27 0x0a 0x1c b 2>/dev/null  # CDR reset assert
+RETIMER_BUSES="18 19 20 21 22 23 24 25 30 31 32 33 38 39 40 41 46 47 48 49 54 55 56 57 62 63 64 65 66 67 68 69"
+for bus in $RETIMER_BUSES; do
+    if init_retimer $bus; then
         retimer_count=$((retimer_count + 1))
     fi
 done
-usleep 20000  # 20ms settling
-for bus in $(seq 11 54); do
-    i2cset -y $bus 0x27 0x0a 0x10 b 2>/dev/null  # CDR reset release
-done
-log "Programmed $retimer_count retimers via I2C"
+log "Programmed $retimer_count retimers with Cumulus-captured values"
 
 # Also set fan to medium speed immediately
 devmem $((0xEA000000 + 0x0D)) 8 0x0E 2>/dev/null
