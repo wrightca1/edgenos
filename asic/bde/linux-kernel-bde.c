@@ -41,6 +41,8 @@
 #define BDE_IOC_REG_WRITE    _IOW(BDE_IOC_MAGIC, 2, struct bde_reg_io)
 #define BDE_IOC_DMA_ALLOC    _IOWR(BDE_IOC_MAGIC, 3, struct bde_dma_info)
 #define BDE_IOC_GET_NUM_DEVS _IOR(BDE_IOC_MAGIC, 4, int)
+#define BDE_IOC_IPROC_READ   _IOWR(BDE_IOC_MAGIC, 7, struct bde_reg_io)
+#define BDE_IOC_IPROC_WRITE  _IOW(BDE_IOC_MAGIC, 8, struct bde_reg_io)
 
 struct bde_dev_info {
 	unsigned int vendor_id;
@@ -64,6 +66,14 @@ struct bde_dma_info {
 	unsigned long phys_addr;
 };
 
+/* iProc PAXB sub-window definitions */
+#define PAXB_NUM_SUBWIN        8
+#define PAXB_SUBWIN_SIZE       0x1000
+#define PAXB_IMAP0_BASE        0x2c00     /* IMAP0_0 register offset in BAR0 */
+#define PAXB_REMAP_SUBWIN      7          /* Sub-window used for dynamic remap */
+#define PAXB_REMAP_BAR0_BASE   (PAXB_REMAP_SUBWIN * PAXB_SUBWIN_SIZE) /* 0x7000 */
+#define PAXB_IMAP_VALID        0x1        /* Valid bit in IMAP register */
+
 struct bde_device {
 	struct pci_dev *pdev;
 	void __iomem *base;
@@ -73,6 +83,10 @@ struct bde_device {
 	dma_addr_t dma_phys;
 	unsigned int dma_size;
 	int valid;
+
+	/* iProc sub-window cache: subwin_base[i] = AXI base addr (page-aligned) */
+	u32 subwin_base[PAXB_NUM_SUBWIN];
+	int subwin_valid;
 };
 
 static struct bde_device bde_devices[BDE_MAX_DEVICES];
@@ -92,44 +106,55 @@ MODULE_PARM_DESC(dma_size, "DMA pool size in MB (default 4)");
 /*
  * iProc PAXB sub-window register access.
  *
- * BCM56846 uses iProc (PCI-AXI bridge) for CMICm registers.
- * BAR0 is divided into 8 sub-windows of 4KB each (0x0000-0x7FFF).
- * Sub-windows 0-6 have fixed mappings. Sub-window 7 (BAR0+0x7000)
- * is remappable via IMAP0_7 register at BAR0+0x2C1C.
+ * BCM56846 uses iProc (PCI-AXI bridge) with 8 sub-windows of 4KB each.
+ * BAR0 offsets 0x0000-0x7FFF map to AXI addresses via IMAP0_0 through
+ * IMAP0_7 registers at BAR0+0x2C00..0x2C1C.
  *
- * To access a CMIC register at AXI address A:
- *   1. Write ((A & ~0xFFF) | 1) to IMAP0_7 (BAR0+0x2C1C)
- *   2. Access BAR0+0x7000+(A & 0xFFF)
+ * Each IMAP register holds: (AXI_page_address & ~0xFFF) | valid_bit
  *
- * Registers below 0x8000 can be accessed directly (fixed sub-windows).
- * Registers at 0x8000+ need the sub-window 7 remap.
+ * On boot, the default IMAP values map sub-window 0 to AXI 0x18000000
+ * (legacy CMIC).  Sub-windows 1-7 have default values that may or may
+ * not be useful.
  *
- * From OpenMDK libbde/shared/shbde_iproc.c:
- *   shbde_iproc_pci_read() / shbde_iproc_pci_write()
+ * To access an arbitrary AXI address:
+ *   1. Check if any cached sub-window already maps the 4K page
+ *   2. If not, remap sub-window 7 by writing (axi_base | 1) to IMAP0_7
+ *   3. Access BAR0 + (subwin * 0x1000) + (addr & 0xFFF)
+ *
+ * This matches the Broadcom SDK shbde_iproc_pci_read/write from
+ * shbde_iproc.c.
+ *
+ * Register access uses ioread32/iowrite32 (PPC LE-converted I/O).
+ * Verified on BCM56846: iowrite32 works for ALL register writes on
+ * fresh cold-booted ASIC.  CDK with SYS_BE_PIO=1 handles value
+ * byte-swap in software.
+ *
+ * IMPORTANT: The ASIC must be cold-booted (full power cycle) for
+ * reliable operation.  Warm reboot or module reload after errors may
+ * leave the ASIC in a corrupted state where S-Channel and MIIM fail.
  */
-#define BAR0_PAXB_IMAP0_7      0x2c1c
-#define IPROC_SUBWIN_BASE      0x7000
-#define IPROC_SUBWIN_SIZE      0x1000
 
 static DEFINE_SPINLOCK(iproc_lock);
 
+/* Cache the current IMAP values from hardware */
+static void subwin_cache_init(struct bde_device *bdev)
+{
+	int i;
+
+	for (i = 0; i < PAXB_NUM_SUBWIN; i++) {
+		u32 imap = ioread32(bdev->base + PAXB_IMAP0_BASE + (4 * i));
+		bdev->subwin_base[i] = imap & ~0xfff;
+		dev_dbg(&bdev->pdev->dev, "IMAP%d = 0x%08x (base 0x%08x)\n",
+			i, imap, bdev->subwin_base[i]);
+	}
+	bdev->subwin_valid = 1;
+}
+
 /*
- * Register access via ioread32/iowrite32 (PPC LE-converted I/O).
- *
- * Verified on BCM56846 with iProc PAXB:
- * - iowrite32 works for ALL register writes on fresh cold-booted ASIC
- * - S-Channel, MIIM read/write, DMA all function correctly
- * - Previous "MIIM write failures" were from corrupted ASIC state,
- *   NOT from endianness issues
- * - CDK with SYS_BE_PIO=1 handles value byte-swap in software
- *
- * Note: Cumulus BDE uses stwx/lwzx (raw, no byte-swap) which also
- * works, but iowrite32 is equally valid when PAXB is in its default
- * endianness state (0xF2 = pass-through with LE conversion by PPC).
- *
- * IMPORTANT: The ASIC must be cold-booted (full power cycle) for
- * reliable operation. Warm reboot or module reload after errors may
- * leave the ASIC in a corrupted state where S-Channel and MIIM fail.
+ * Direct BAR0 register read/write (for offsets within the 256KB window).
+ * Used for legacy CMIC registers in sub-window 0 and for PAXB config
+ * registers (IMAP, OARR, endianness) which are always at fixed BAR0
+ * offsets regardless of sub-window mapping.
  */
 static u32 iproc_read(struct bde_device *bdev, u32 addr)
 {
@@ -145,6 +170,70 @@ static void iproc_write(struct bde_device *bdev, u32 addr, u32 val)
 		return;
 
 	iowrite32(val, bdev->base + addr);
+}
+
+/*
+ * iProc AXI register read via sub-window translation.
+ *
+ * @bdev: BDE device
+ * @axi_addr: Full AXI address (e.g. 0x18032000 for CMICm MIIM)
+ *
+ * Looks up cached sub-windows for a match; if none, remaps sub-window 7.
+ * Must be called with iproc_lock held if concurrent access is possible.
+ */
+static u32 iproc_axi_read(struct bde_device *bdev, u32 axi_addr)
+{
+	u32 page = axi_addr & ~0xfff;
+	u32 offset = axi_addr & 0xfff;
+	int i;
+
+	if (!bdev->subwin_valid)
+		subwin_cache_init(bdev);
+
+	/* Search existing sub-windows for a match */
+	for (i = 0; i < PAXB_NUM_SUBWIN; i++) {
+		if (bdev->subwin_base[i] == page)
+			return ioread32(bdev->base + (i * PAXB_SUBWIN_SIZE) + offset);
+	}
+
+	/* No match — remap sub-window 7 */
+	iowrite32(page | PAXB_IMAP_VALID,
+		  bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
+	/* Readback to ensure the write completes before using the window */
+	bdev->subwin_base[PAXB_REMAP_SUBWIN] =
+		ioread32(bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN)) & ~0xfff;
+
+	return ioread32(bdev->base + PAXB_REMAP_BAR0_BASE + offset);
+}
+
+/*
+ * iProc AXI register write via sub-window translation.
+ * Same logic as iproc_axi_read but writes instead.
+ */
+static void iproc_axi_write(struct bde_device *bdev, u32 axi_addr, u32 val)
+{
+	u32 page = axi_addr & ~0xfff;
+	u32 offset = axi_addr & 0xfff;
+	int i;
+
+	if (!bdev->subwin_valid)
+		subwin_cache_init(bdev);
+
+	/* Search existing sub-windows for a match */
+	for (i = 0; i < PAXB_NUM_SUBWIN; i++) {
+		if (bdev->subwin_base[i] == page) {
+			iowrite32(val, bdev->base + (i * PAXB_SUBWIN_SIZE) + offset);
+			return;
+		}
+	}
+
+	/* No match — remap sub-window 7 */
+	iowrite32(page | PAXB_IMAP_VALID,
+		  bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
+	bdev->subwin_base[PAXB_REMAP_SUBWIN] =
+		ioread32(bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN)) & ~0xfff;
+
+	iowrite32(val, bdev->base + PAXB_REMAP_BAR0_BASE + offset);
 }
 
 /* ── Interrupt handler (forward declaration) ─────────────────── */
@@ -214,17 +303,16 @@ static int bde_pci_probe(struct pci_dev *pdev,
 
 	/*
 	 * PAXB endianness: leave at default (no swap).
-	 *
-	 * Cumulus BDE uses raw PPC load/store (stwx/lwzx) which
-	 * writes native big-endian values without byte-swap.
 	 * CDK with SYS_BE_PIO=1 handles endianness in software.
-	 * Do NOT set PAXB_ENDIANESS - raw access works with defaults.
 	 */
 	{
 		u32 paxb_endian = __raw_readl(bdev->base + 0x2030);
 		dev_info(&pdev->dev, "PAXB endianness: 0x%08x (raw access mode)\n",
 			 paxb_endian);
 	}
+
+	/* Initialize iProc sub-window cache from current IMAP values */
+	subwin_cache_init(bdev);
 
 	/* Request interrupt */
 	ret = request_irq(pdev->irq, bde_isr, IRQF_SHARED,
@@ -394,6 +482,34 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		dinfo.size = bdev->dma_size;
 		if (copy_to_user((void __user *)arg, &dinfo, sizeof(dinfo)))
 			return -EFAULT;
+		return 0;
+
+	case BDE_IOC_IPROC_READ:
+		if (copy_from_user(&rio, (void __user *)arg, sizeof(rio)))
+			return -EFAULT;
+		if (rio.dev >= bde_num_devices)
+			return -EINVAL;
+		bdev = &bde_devices[rio.dev];
+		if (!bdev->valid)
+			return -ENODEV;
+		spin_lock(&iproc_lock);
+		rio.val = iproc_axi_read(bdev, rio.addr);
+		spin_unlock(&iproc_lock);
+		if (copy_to_user((void __user *)arg, &rio, sizeof(rio)))
+			return -EFAULT;
+		return 0;
+
+	case BDE_IOC_IPROC_WRITE:
+		if (copy_from_user(&rio, (void __user *)arg, sizeof(rio)))
+			return -EFAULT;
+		if (rio.dev >= bde_num_devices)
+			return -EINVAL;
+		bdev = &bde_devices[rio.dev];
+		if (!bdev->valid)
+			return -ENODEV;
+		spin_lock(&iproc_lock);
+		iproc_axi_write(bdev, rio.addr, rio.val);
+		spin_unlock(&iproc_lock);
 		return 0;
 
 	case BDE_IOC_WAIT_INTR:
