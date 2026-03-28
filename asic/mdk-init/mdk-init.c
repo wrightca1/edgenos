@@ -48,6 +48,37 @@
 #include <phy/phy_drvlist.h>
 #include <phy/phy_buslist.h>
 
+/*
+ * DMA stub implementations for BMD.
+ * mdk-init uses /dev/mem mmap (not BDE kernel module) so DMA goes
+ * through a simple malloc pool. The BDE kernel module provides the
+ * real DMA coherent pool; these stubs allow mdk-init to link and
+ * run standalone for testing.
+ */
+#include <bmd/bmd_dma.h>
+
+static char dma_pool[4 * 1024 * 1024] __attribute__((aligned(4096)));
+static size_t dma_offset;
+
+void *_bde_dma_alloc(size_t size, dma_addr_t *baddr)
+{
+    void *ptr;
+    size = (size + 0xf) & ~0xf; /* 16-byte align */
+    if (dma_offset + size > sizeof(dma_pool))
+        return NULL;
+    ptr = dma_pool + dma_offset;
+    if (baddr)
+        *baddr = (dma_addr_t)(uintptr_t)ptr;
+    dma_offset += size;
+    return ptr;
+}
+
+void _bde_dma_free(void *dvc, size_t size, void *laddr, dma_addr_t baddr)
+{
+    /* Bump allocator: no-op free */
+    (void)dvc; (void)size; (void)laddr; (void)baddr;
+}
+
 /* BCM56846 on AS5610-52X */
 #define BCM56846_VENDOR_ID  0x14e4
 #define BCM56846_DEVICE_ID  0xb846

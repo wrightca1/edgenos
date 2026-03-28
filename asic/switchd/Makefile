@@ -68,6 +68,7 @@ SRCS = switchd.c \
        l2.c \
        l3.c \
        vlan.c \
+       datapath.c \
        bde_interface.c
 
 OBJS = $(SRCS:.c=.o)
