@@ -40,18 +40,28 @@ static const int port_to_lane[SWITCHD_MAX_PORTS] = {
     /* QSFP+ ports 49-52 */ 49, 45, 61, 57,
 };
 
-/* Port-to-I2C bus mapping
- * SFP: port N (1-based) = I2C bus (21 + N)
- * QSFP: port 49=18, 50=19, 51=20, 52=21
+/* Port-to-I2C bus mapping (EdgeNOS kernel 5.10)
+ *
+ * Kernel 5.10 enumerates I2C mux children depth-first (sub-mux children
+ * get consecutive bus numbers immediately after parent), unlike Cumulus
+ * kernel 3.2 which was breadth-first. See I2C_BUS_NUMBER_MAPPING.md.
+ *
+ * Bus 1 → mux 0x75 ch0 → bus 10 → sub-mux 0x74 → buses 11-18 (swp1-8)
+ * Bus 1 → mux 0x75 ch1 → bus 19 → sub-mux 0x74 → buses 20-27 (swp9-16)
+ * Bus 1 → mux 0x75 ch2 → bus 28 → sub-mux 0x74 → buses 29-36 (swp17-24)
+ * Bus 1 → mux 0x75 ch3 → bus 37 → sub-mux 0x74 → buses 38-45 (swp25-32)
+ * Bus 1 → mux 0x76 ch0 → bus 46 → sub-mux 0x74 → buses 47-54 (swp33-40)
+ * Bus 1 → mux 0x76 ch1 → bus 55 → sub-mux 0x74 → buses 56-63 (swp41-48)
+ * Bus 1 → mux 0x77 ch0-3 → buses 66-69 (QSFP swp49-52)
  */
 static const int port_to_i2c_bus[SWITCHD_MAX_PORTS] = {
-    22, 23, 24, 25, 26, 27, 28, 29,   /* ports 1-8 */
-    30, 31, 32, 33, 34, 35, 36, 37,   /* ports 9-16 */
-    38, 39, 40, 41, 42, 43, 44, 45,   /* ports 17-24 */
-    46, 47, 48, 49, 50, 51, 52, 53,   /* ports 25-32 */
-    54, 55, 56, 57, 58, 59, 60, 61,   /* ports 33-40 */
-    62, 63, 64, 65, 66, 67, 68, 69,   /* ports 41-48 */
-    18, 19, 20, 21,                    /* ports 49-52 (QSFP) */
+    11, 12, 13, 14, 15, 16, 17, 18,   /* ports 1-8   (group 1, sub-mux on bus 10) */
+    20, 21, 22, 23, 24, 25, 26, 27,   /* ports 9-16  (group 2, sub-mux on bus 19) */
+    29, 30, 31, 32, 33, 34, 35, 36,   /* ports 17-24 (group 3, sub-mux on bus 28) */
+    38, 39, 40, 41, 42, 43, 44, 45,   /* ports 25-32 (group 4, sub-mux on bus 37) */
+    47, 48, 49, 50, 51, 52, 53, 54,   /* ports 33-40 (group 5, sub-mux on bus 46) */
+    56, 57, 58, 59, 60, 61, 62, 63,   /* ports 41-48 (group 6, sub-mux on bus 55) */
+    66, 67, 68, 69,                    /* ports 49-52 (QSFP, mux 0x77) */
 };
 
 void portmap_parse_config(const char *key, const char *val)
@@ -134,14 +144,22 @@ int portmap_configure_ports(void)
             mode = bmdPortMode10000fd;
 
         /*
-         * Set SERDES_MODE flag for single-lane ports.
+         * Set SERDES_MODE flag for single-lane SFP+ ports ONLY.
          * Without this, the Warpcore PHY driver classifies ports as
          * 4-lane (IS_4LANE_PORT) and configures 10GBASE-CX4 encoding
          * instead of 10G XFI (single-lane 64b/66b for SFP+).
          * CX4 encoding is incompatible with 10GBASE-LR/SR optics.
+         *
+         * QSFP ports must NOT have SERDES_MODE set — they need 4-lane
+         * mode for 40G. Setting SERDES_MODE on QSFP causes
+         * bmd_port_mode_set(40G) to fail with CDK_E_PARAM (-4).
          */
-        rv = bmd_phy_mode_set(switchd.unit, port, "warpcore",
-                         BMD_PHY_MODE_SERDES, 1);
+        if (switchd.ports[i].port_type != PORT_TYPE_QSFP) {
+            rv = bmd_phy_mode_set(switchd.unit, port, "warpcore",
+                             BMD_PHY_MODE_SERDES, 1);
+        } else {
+            rv = 0; /* QSFP: keep 4-lane mode */
+        }
         {
             phy_ctrl_t *pc_chk = BMD_PORT_PHY_CTRL(switchd.unit, port);
             if (pc_chk) {

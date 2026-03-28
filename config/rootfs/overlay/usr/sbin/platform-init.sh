@@ -98,8 +98,9 @@ for chip in /sys/class/gpio/gpiochip*; do
     esac
 done
 
-# SFP TX_DISABLE via PCA9506 GPIO expanders on buses 64-65
-# These are NOT in gpiochip sysfs - control directly via I2C
+# SFP TX_DISABLE via PCA9506 GPIO expanders
+# EdgeNOS bus 64 = mux 0x76 ch2 (Cumulus was bus 16)
+# EdgeNOS bus 65 = mux 0x76 ch3 (Cumulus was bus 17)
 # PCA9506: direction reg 0x18+, output reg 0x08+
 # Set all outputs to 0 (TX_DISABLE = low = TX enabled)
 for bus in 64 65; do
@@ -176,7 +177,18 @@ init_retimer() {
 }
 
 retimer_count=0
-RETIMER_BUSES="18 19 20 21 22 23 24 25 30 31 32 33 38 39 40 41 46 47 48 49 54 55 56 57 62 63 64 65 66 67 68 69"
+# EdgeNOS kernel 5.10 bus numbers (depth-first enumeration)
+# See I2C_BUS_NUMBER_MAPPING.md for Cumulus vs EdgeNOS mapping
+#
+# Retimer buses (0x27 on ports that have retimers):
+#   QSFP: 66,67,68,69 (mux 0x77 ch0-3)
+#   SFP group 1 (swp1-4):   11,12,13,14
+#   SFP group 2 (swp9-12):  20,21,22,23
+#   SFP group 3 (swp17-20): 29,30,31,32
+#   SFP group 4 (swp25-28): 38,39,40,41
+#   SFP group 5 (swp33-36): 47,48,49,50
+#   SFP group 6 (swp41-48): 56,57,58,59,60,61,62,63 (all 8)
+RETIMER_BUSES="66 67 68 69 11 12 13 14 20 21 22 23 29 30 31 32 38 39 40 41 47 48 49 50 56 57 58 59 60 61 62 63"
 for bus in $RETIMER_BUSES; do
     if init_retimer $bus; then
         retimer_count=$((retimer_count + 1))
@@ -184,9 +196,15 @@ for bus in $RETIMER_BUSES; do
 done
 log "Programmed $retimer_count retimers with Cumulus-captured values"
 
-# Also set fan to medium speed immediately
-devmem $((0xEA000000 + 0x0D)) 8 0x0E 2>/dev/null
-log "Fan set to medium (14/31)"
+# Fan speed: use CPLD sysfs if available, skip devmem (can crash eLBC/USB)
+CPLD_SYSFS="/sys/devices/platform/as5610_52x_cpld"
+if [ -f "$CPLD_SYSFS/pwm1" ]; then
+    echo 128 > "$CPLD_SYSFS/pwm1" 2>/dev/null
+    log "Fan set to medium via sysfs"
+else
+    log "WARN: CPLD sysfs not available, fan at default speed"
+    # Do NOT use devmem for CPLD - it can hang the eLBC and crash USB
+fi
 
 RDIR="/sys/class/retimer_dev"
 NUM_RETIMERS=32
