@@ -57,4 +57,7 @@ int cdk_init(void);
 int bmd_init_all(void);
 int bmd_switching_init_all(void);
 
+/* Datapath configuration (CPU punt, hash, buffers) */
+int datapath_init(void);
+
 #endif /* __SWITCHD_H__ */

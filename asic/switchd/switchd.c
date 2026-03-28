@@ -147,6 +147,13 @@ static int asic_init(void)
         return rv;
     }
 
+    /* Configure datapath: CPU punt, hash, buffer thresholds */
+    rv = datapath_init();
+    if (rv < 0) {
+        syslog(LOG_ERR, "Datapath init failed");
+        return rv;
+    }
+
     syslog(LOG_INFO, "ASIC initialization complete");
     return 0;
 }
