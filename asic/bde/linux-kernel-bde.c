@@ -311,6 +311,39 @@ static int bde_pci_probe(struct pci_dev *pdev,
 			 paxb_endian);
 	}
 
+	/*
+	 * PAXB DMA configuration.
+	 *
+	 * The iProc PCI-AXI bridge (PAXB) needs outbound address range
+	 * registers (OARR) configured to allow the ASIC DMA engine to
+	 * write to host memory. Without this, DMA TX/RX operations
+	 * timeout (CDK_E_TIMEOUT).
+	 *
+	 * From Broadcom SDK shbde_iproc_paxb_init():
+	 *   BAR0+0x2104 (PCIE_EP_AXI_CONFIG) = 0x0
+	 *   BAR0+0x2D60 (OARR_2) = 0x1 (enable)
+	 *   BAR0+0x2D64 (OARR_2_UPPER) = dma_hi_bits
+	 *
+	 * dma_hi_bits = 0x1 for PCI core 0, 0x2 for PCI core 1.
+	 * BCM56846 uses PCI core 0 → dma_hi_bits = 0x1.
+	 */
+	{
+		u32 oarr2;
+
+		/* Disable EP AXI config */
+		iowrite32(0x0, bdev->base + 0x2104);
+
+		/* Enable OARR_2 for outbound DMA */
+		iowrite32(0x1, bdev->base + 0x2D60);
+
+		/* Set upper address bits for DMA */
+		iowrite32(0x1, bdev->base + 0x2D64);
+
+		oarr2 = ioread32(bdev->base + 0x2D60);
+		dev_info(&pdev->dev, "PAXB DMA: OARR_2=0x%08x (DMA enabled)\n",
+			 oarr2);
+	}
+
 	/* Initialize iProc sub-window cache from current IMAP values */
 	subwin_cache_init(bdev);
 

@@ -240,6 +240,34 @@ int bde_open(void)
         }
     }
 
+    /*
+     * Configure PAXB for outbound DMA.
+     *
+     * The iProc PCI-AXI bridge needs OARR (Outbound Address Range Register)
+     * configured to allow the ASIC DMA engine to write to host memory.
+     * Without this, bmd_tx/bmd_rx DMA operations timeout.
+     *
+     * From Broadcom SDK shbde_iproc_paxb_init():
+     *   BAR0+0x2104 (PCIE_EP_AXI_CONFIG) = 0x0
+     *   BAR0+0x2D60 (OARR_2) = 0x1 (enable)
+     *   BAR0+0x2D64 (OARR_2_UPPER) = 0x1 (PCI core 0 DMA hi bits)
+     */
+    if (bar0_map) {
+        volatile uint32_t *bar0 = (volatile uint32_t *)bar0_map;
+
+        /* Disable EP AXI config */
+        bar0[0x2104 / 4] = 0x0;
+
+        /* Enable OARR_2 for outbound DMA */
+        bar0[0x2D60 / 4] = 0x1;
+
+        /* Set DMA high address bits (PCI core 0 = 0x1) */
+        bar0[0x2D64 / 4] = 0x1;
+
+        syslog(LOG_INFO, "BDE: PAXB OARR_2=0x%08x (DMA outbound enabled)",
+               bar0[0x2D60 / 4]);
+    }
+
     return 0;
 }
 
