@@ -336,8 +336,12 @@ static int bde_pci_probe(struct pci_dev *pdev,
 		/* Enable OARR_2 for outbound DMA */
 		iowrite32(0x1, bdev->base + 0x2D60);
 
-		/* Set upper address bits for DMA */
-		iowrite32(0x1, bdev->base + 0x2D64);
+		/* Set upper address bits for DMA.
+		 * P2020 is 32-bit — use 0x0 for upper bits (not 0x1).
+		 * dma_hi_bits=0x1 is for 64-bit systems where DMA pool
+		 * is in the upper 4GB address range.
+		 */
+		iowrite32(0x0, bdev->base + 0x2D64);
 
 		oarr2 = ioread32(bdev->base + 0x2D60);
 		dev_info(&pdev->dev, "PAXB DMA: OARR_2=0x%08x (DMA enabled)\n",
