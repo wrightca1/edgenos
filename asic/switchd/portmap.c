@@ -196,6 +196,18 @@ int portmap_configure_ports(void)
             }
         }
 
+        /*
+         * Force port mode re-set by first disabling, then enabling.
+         * bmd_switching_init already called bmd_port_mode_set(Auto) which
+         * set CX4 mode (speed_val=0x05) because CLAUSE45 was set during
+         * that call. Now with CLAUSE45 cleared, a fresh port_mode_set
+         * will correctly write MISC1r + MISC3r for XFI (speed_val=0x25).
+         *
+         * Without the Disable→Enable cycle, bmd_port_mode_set sees
+         * "already at 10G" and skips the PHY speed_set entirely.
+         */
+        bmd_port_mode_set(switchd.unit, port, bmdPortModeDisabled, 0);
+
         rv = bmd_port_mode_set(switchd.unit, port, mode, flags);
         if (rv < 0) {
             syslog(LOG_ERR, "Port %s: bmd_port_mode_set(%d, %dG) failed: %d",
@@ -229,29 +241,40 @@ int portmap_configure_ports(void)
                        switchd.ports[i].ifname, val & 0xffff);
 
                 /*
-                 * Test 3: Read via phy_reg_read (goes through AER path)
+                 * Test 3: Read MISC3r for FORCE_SPEED_B5
                  */
-                ioerr = phy_reg_read(pc_dbg, 0x50008308, &val);
-                syslog(LOG_INFO, "Port %s: MISC1r via AER (0x50008308) = 0x%04x ioerr=%d",
-                       switchd.ports[i].ifname, val & 0xffff, ioerr);
-
-                /*
-                 * Test 4: Write a known value to MISC1r and read back
-                 */
-                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8300);
-                PHY_BUS_WRITE(pc_dbg, 0x18, 0xBEEF);
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8350);
                 PHY_BUS_READ(pc_dbg, 0x18, &val);
-                syslog(LOG_INFO, "Port %s: MISC1r write 0xBEEF readback = 0x%04x",
-                       switchd.ports[i].ifname, val & 0xffff);
-                /* Restore — write 0 */
-                PHY_BUS_WRITE(pc_dbg, 0x18, 0x0000);
+                {
+                    uint32_t misc1_speed = ((val >> 7) & 1) ? 0x20 : 0;
+                    uint32_t misc1_low = 0;
+                    PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8300);
+                    PHY_BUS_READ(pc_dbg, 0x18, &misc1_low);
+                    misc1_speed |= (misc1_low & 0x1f);
+                    syslog(LOG_INFO, "Port %s: MISC3r=0x%04x B5=%d  MISC1r[4:0]=%d  speed=0x%02x (%s)",
+                           switchd.ports[i].ifname,
+                           val & 0xffff, (val >> 7) & 1,
+                           misc1_low & 0x1f, misc1_speed,
+                           misc1_speed == 0x25 ? "10G_XFI" :
+                           misc1_speed == 0x05 ? "CX4_WRONG" :
+                           misc1_speed == 0x29 ? "10G_SFI" : "other");
+                }
 
                 /*
-                 * Test 5: Read current block (should be 0x8300)
+                 * Test 4: Read FIRMWARE_MODEr
                  */
-                PHY_BUS_READ(pc_dbg, 0x1f, &val);
-                syslog(LOG_INFO, "Port %s: current block (reg 0x1F) = 0x%04x",
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8200);
+                PHY_BUS_READ(pc_dbg, 0x1A, &val);
+                syslog(LOG_INFO, "Port %s: FWMODE=0x%04x",
                        switchd.ports[i].ifname, val & 0xffff);
+
+                /*
+                 * Test 5: Read MISC6r force_speed_sel
+                 */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8340);
+                PHY_BUS_READ(pc_dbg, 0x15, &val);
+                syslog(LOG_INFO, "Port %s: MISC6r=0x%04x force_speed_sel=%d",
+                       switchd.ports[i].ifname, val & 0xffff, (val >> 6) & 1);
 
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0000);
             }
