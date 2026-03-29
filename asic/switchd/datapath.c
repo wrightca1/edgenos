@@ -19,6 +19,9 @@
 #include <cdk/chip/bcm56840_a0_defs.h>
 #include <cdk/arch/xgs_chip.h>
 
+/* From bcm56840_a0_internal.h */
+extern int bcm56840_a0_xlport_pbmp_get(int unit, cdk_pbmp_t *pbmp);
+
 /*
  * CPU punt configuration.
  *
@@ -125,10 +128,77 @@ static int datapath_hash_init(int unit)
 }
 
 /*
+ * MAC and CMIC register configuration from Cumulus rc.soc.
+ *
+ * These registers are set by Cumulus after "init all" and before
+ * datapath configuration. Without them, links may not come up.
+ *
+ * From traces/cumulus_rc.soc:
+ *   setreg xmac_tx_ctrl 0xc802
+ *   s MAC_RSV_MASK MASK=0x18
+ *   m cmic_misc_control LINK40G_ENABLE=1
+ *   setreg IFP_METER_PARITY_CONTROL 0
+ */
+static int datapath_mac_init(int unit)
+{
+    int ioerr = 0;
+    int port;
+    cdk_pbmp_t pbmp;
+
+    /*
+     * xmac_tx_ctrl = 0xc802 on all XE ports.
+     * Controls MAC TX behavior including CRC mode and pad enable.
+     * 0xc802 = CRC_MODE=2 (replace), TX_ANY_START=1, PAD_EN=1
+     */
+    XMAC_TX_CTRLr_t xmac_tx_ctrl;
+    bcm56840_a0_xlport_pbmp_get(unit, &pbmp);
+    CDK_PBMP_ITER(pbmp, port) {
+        XMAC_TX_CTRLr_CLR(xmac_tx_ctrl);
+        XMAC_TX_CTRLr_SET(xmac_tx_ctrl, 0, 0xc802);
+        ioerr += WRITE_XMAC_TX_CTRLr(unit, port, xmac_tx_ctrl);
+    }
+    syslog(LOG_INFO, "MAC: xmac_tx_ctrl=0xc802 on all XE ports");
+
+    /*
+     * MAC_RSV_MASK = 0x18 on all ports.
+     * Controls which reserved frame types are dropped vs forwarded.
+     * 0x18 = pass BPDU frames, drop other reserved MACs.
+     */
+    MAC_RSV_MASKr_t mac_rsv;
+    CDK_PBMP_ITER(pbmp, port) {
+        MAC_RSV_MASKr_SET(mac_rsv, 0x18);
+        ioerr += WRITE_MAC_RSV_MASKr(unit, port, mac_rsv);
+    }
+    syslog(LOG_INFO, "MAC: MAC_RSV_MASK=0x18 on all ports");
+
+    /*
+     * cmic_misc_control LINK40G_ENABLE=1
+     * Enables 40G link status detection in CMIC.
+     * Without this, 40G QSFP ports may not report link-up.
+     */
+    CMIC_MISC_CONTROLr_t cmic_misc;
+    ioerr += READ_CMIC_MISC_CONTROLr(unit, &cmic_misc);
+    CMIC_MISC_CONTROLr_LINK40G_ENABLEf_SET(cmic_misc, 1);
+    ioerr += WRITE_CMIC_MISC_CONTROLr(unit, cmic_misc);
+    syslog(LOG_INFO, "MAC: cmic_misc_control LINK40G_ENABLE=1");
+
+    /*
+     * IFP_METER_PARITY_CONTROL = 0
+     * Errata workaround for Trident — avoids false FP meter parity errors.
+     */
+    IFP_METER_PARITY_CONTROLr_t ifp_meter;
+    IFP_METER_PARITY_CONTROLr_SET(ifp_meter, 0);
+    ioerr += WRITE_IFP_METER_PARITY_CONTROLr(unit, ifp_meter);
+    syslog(LOG_INFO, "MAC: IFP_METER_PARITY_CONTROL=0 (errata)");
+
+    return ioerr;
+}
+
+/*
  * Initialize datapath configuration.
  *
  * Called after bmd_switching_init() and portmap_configure_ports().
- * Applies CPU punt rules, hash config, and basic buffer setup.
+ * Applies MAC config, CPU punt rules, hash config, and basic buffer setup.
  *
  * Note: Full buffer threshold configuration (THDO tables from
  * rc.datapath_0) is not yet implemented. The ASIC defaults should
@@ -138,6 +208,7 @@ int datapath_init(void)
 {
     int ioerr = 0;
 
+    ioerr += datapath_mac_init(switchd.unit);
     ioerr += datapath_cpu_punt_init(switchd.unit);
     ioerr += datapath_hash_init(switchd.unit);
 
