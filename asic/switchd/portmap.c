@@ -184,9 +184,12 @@ int portmap_configure_ports(void)
                  */
                 PHY_CTRL_FLAGS(pc_chk) &= ~PHY_F_CLAUSE45;
 
-                syslog(LOG_INFO, "Port %s: flags=0x%x (CLAUSE45 cleared)",
+                syslog(LOG_INFO, "Port %s: flags=0x%x (CLAUSE45 cleared) bus=%s phy_addr=0x%03x inst=%d",
                        switchd.ports[i].ifname,
-                       PHY_CTRL_FLAGS(pc_chk));
+                       PHY_CTRL_FLAGS(pc_chk),
+                       pc_chk->bus ? pc_chk->bus->drv_name : "NULL",
+                       pc_chk->bus ? pc_chk->bus->phy_addr(port) : 0,
+                       PHY_CTRL_INST(pc_chk));
             } else {
                 syslog(LOG_WARNING, "Port %s: no PHY ctrl for port %d",
                        switchd.ports[i].ifname, port);
@@ -200,27 +203,57 @@ int portmap_configure_ports(void)
             continue;
         }
 
-        /* Read back MISC1r (0x8308) to verify speed_val was written */
+        /* Debug: test block access via both CL22 and AER paths */
         {
             phy_ctrl_t *pc_dbg = BMD_PORT_PHY_CTRL(switchd.unit, port);
             if (pc_dbg && i < 3) {
-                uint32_t misc1_val = 0, misc3_val = 0, fwmode_val = 0;
-                /* MISC1r = block 0x8300, reg 0x08 = devad 1, addr 0x8308 */
-                PHY_BUS_READ(pc_dbg, 0x1f, &misc1_val); /* save block */
+                uint32_t val = 0;
+                int ioerr;
+
+                /*
+                 * Test 1: Read XGXSBLK0 (block 0x8000) — always works
+                 */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8000);
+                PHY_BUS_READ(pc_dbg, 0x10, &val);
+                syslog(LOG_INFO, "Port %s: XGXSSTATUS (blk 0x8000 reg 0x10) = 0x%04x",
+                       switchd.ports[i].ifname, val & 0xffff);
+
+                /*
+                 * Test 2: Read MISC1r via CL22 block select
+                 * Write block 0x8300 to reg 0x1F, read reg 0x18
+                 * (reg 0x08 + 0x10 for high block = 0x18)
+                 */
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8300);
-                PHY_BUS_READ(pc_dbg, 0x08, &misc1_val);
-                /* MISC3r = block 0x8350, reg 0x08 = devad 1, addr 0x8358 */
-                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8350);
-                PHY_BUS_READ(pc_dbg, 0x08, &misc3_val);
-                /* FIRMWARE_MODEr = block 0x8200, reg 0x0a = addr 0x820a */
-                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8200);
-                PHY_BUS_READ(pc_dbg, 0x0a, &fwmode_val);
-                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0000); /* restore block */
-                syslog(LOG_INFO,
-                       "Port %s: MISC1r=0x%04x MISC3r=0x%04x FWMODE=0x%04x",
-                       switchd.ports[i].ifname,
-                       misc1_val & 0xffff, misc3_val & 0xffff,
-                       fwmode_val & 0xffff);
+                PHY_BUS_READ(pc_dbg, 0x18, &val);
+                syslog(LOG_INFO, "Port %s: MISC1r via CL22 (blk 0x8300 reg 0x18) = 0x%04x",
+                       switchd.ports[i].ifname, val & 0xffff);
+
+                /*
+                 * Test 3: Read via phy_reg_read (goes through AER path)
+                 */
+                ioerr = phy_reg_read(pc_dbg, 0x50008308, &val);
+                syslog(LOG_INFO, "Port %s: MISC1r via AER (0x50008308) = 0x%04x ioerr=%d",
+                       switchd.ports[i].ifname, val & 0xffff, ioerr);
+
+                /*
+                 * Test 4: Write a known value to MISC1r and read back
+                 */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8300);
+                PHY_BUS_WRITE(pc_dbg, 0x18, 0xBEEF);
+                PHY_BUS_READ(pc_dbg, 0x18, &val);
+                syslog(LOG_INFO, "Port %s: MISC1r write 0xBEEF readback = 0x%04x",
+                       switchd.ports[i].ifname, val & 0xffff);
+                /* Restore — write 0 */
+                PHY_BUS_WRITE(pc_dbg, 0x18, 0x0000);
+
+                /*
+                 * Test 5: Read current block (should be 0x8300)
+                 */
+                PHY_BUS_READ(pc_dbg, 0x1f, &val);
+                syslog(LOG_INFO, "Port %s: current block (reg 0x1F) = 0x%04x",
+                       switchd.ports[i].ifname, val & 0xffff);
+
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0000);
             }
         }
 
