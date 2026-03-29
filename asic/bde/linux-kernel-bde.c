@@ -482,15 +482,23 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		if (rio.dev >= bde_num_devices)
 			return -EINVAL;
 		bdev = &bde_devices[rio.dev];
-		if (!bdev->valid || rio.addr >= bdev->base_size)
-			return -EINVAL;
+		if (!bdev->valid)
+			return -ENODEV;
 		/*
-		 * Use iProc sub-window access for CMICm registers.
-		 * Registers above 0x8000 need PAXB IMAP0_7 remapping.
-		 * ioread32/iowrite32 through the sub-window work correctly
-		 * on PPC (includes proper MMIO barriers).
+		 * Use iProc AXI sub-window access for ALL registers.
+		 *
+		 * CMICm registers (DMA at 0x31xxx, SCHAN at 0x33xxx,
+		 * MIIM at 0x32xxx) are at AXI addresses that need
+		 * PAXB sub-window remapping. Direct BAR0 access only
+		 * works for the first 4KB (sub-window 0 at 0x000-0xFFF).
+		 *
+		 * The AXI base for CMIC is 0x18000000. Register offsets
+		 * from the CDK are relative to this base. So CDK address
+		 * 0x31140 maps to AXI 0x18031140.
 		 */
-		rio.val = iproc_read(bdev, rio.addr);
+		spin_lock(&iproc_lock);
+		rio.val = iproc_axi_read(bdev, 0x18000000 + rio.addr);
+		spin_unlock(&iproc_lock);
 		if (copy_to_user((void __user *)arg, &rio, sizeof(rio)))
 			return -EFAULT;
 		return 0;
@@ -501,10 +509,11 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		if (rio.dev >= bde_num_devices)
 			return -EINVAL;
 		bdev = &bde_devices[rio.dev];
-		if (!bdev->valid || rio.addr >= bdev->base_size)
-			return -EINVAL;
-		/* Use iProc sub-window for CMICm register writes */
-		iproc_write(bdev, rio.addr, rio.val);
+		if (!bdev->valid)
+			return -ENODEV;
+		spin_lock(&iproc_lock);
+		iproc_axi_write(bdev, 0x18000000 + rio.addr, rio.val);
+		spin_unlock(&iproc_lock);
 		return 0;
 
 	case BDE_IOC_DMA_ALLOC:
