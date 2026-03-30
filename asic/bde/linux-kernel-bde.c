@@ -500,24 +500,17 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		 */
 		if (rio.addr >= bdev->base_size)
 			return -EINVAL;
-		if (rio.addr < PAXB_SUBWIN_SIZE) {
-			/*
-			 * Sub-window 0 (0x000-0xFFF): legacy CMIC registers.
-			 * Direct BAR0 access — no remap needed.
-			 * This includes SCHAN_CTRL/MSG, MIIM, DMA_STAT (legacy).
-			 * MUST be fast and atomic for S-Channel message sequences.
-			 */
-			rio.val = iproc_read(bdev, rio.addr);
-		} else {
-			/*
-			 * Addresses 0x1000+: CMICm registers at AXI 0x18001000+.
-			 * Need sub-window remapping to access.
-			 * Includes CMICm DMA (0x31xxx), SCHAN (0x33xxx), MIIM (0x32xxx).
-			 */
-			spin_lock(&iproc_lock);
-			rio.val = iproc_axi_read(bdev, 0x18000000 + rio.addr);
-			spin_unlock(&iproc_lock);
-		}
+		/*
+		 * Use direct BAR0 access for all registers.
+		 * This is the original working path that gets links UP.
+		 *
+		 * CMICm DMA registers at 0x31xxx will NOT work through
+		 * this path (they need AXI sub-window remap), but all
+		 * other registers (SCHAN, MIIM, MAC, PAXB) work correctly.
+		 *
+		 * DMA will be fixed separately by using the IPROC ioctls.
+		 */
+		rio.val = iproc_read(bdev, rio.addr);
 		if (copy_to_user((void __user *)arg, &rio, sizeof(rio)))
 			return -EFAULT;
 		return 0;
@@ -532,15 +525,7 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -ENODEV;
 		if (rio.addr >= bdev->base_size)
 			return -EINVAL;
-		if (rio.addr < PAXB_SUBWIN_SIZE) {
-			/* Sub-window 0: direct BAR0 access */
-			iproc_write(bdev, rio.addr, rio.val);
-		} else {
-			/* CMICm: AXI sub-window remap */
-			spin_lock(&iproc_lock);
-			iproc_axi_write(bdev, 0x18000000 + rio.addr, rio.val);
-			spin_unlock(&iproc_lock);
-		}
+		iproc_write(bdev, rio.addr, rio.val);
 		return 0;
 
 	case BDE_IOC_DMA_ALLOC:
