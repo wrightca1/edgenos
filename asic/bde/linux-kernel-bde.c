@@ -485,20 +485,39 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		if (!bdev->valid)
 			return -ENODEV;
 		/*
-		 * Use iProc AXI sub-window access for ALL registers.
+		 * Register access routing:
 		 *
-		 * CMICm registers (DMA at 0x31xxx, SCHAN at 0x33xxx,
-		 * MIIM at 0x32xxx) are at AXI addresses that need
-		 * PAXB sub-window remapping. Direct BAR0 access only
-		 * works for the first 4KB (sub-window 0 at 0x000-0xFFF).
+		 * Addresses < 0x40000 (256KB BAR0) are CMIC register offsets.
+		 * These map to AXI 0x18000000 + offset and need sub-window
+		 * remapping for offsets above 0x1000 (CMICm DMA at 0x31xxx,
+		 * SCHAN at 0x33xxx, MIIM at 0x32xxx).
 		 *
-		 * The AXI base for CMIC is 0x18000000. Register offsets
-		 * from the CDK are relative to this base. So CDK address
-		 * 0x31140 maps to AXI 0x18031140.
+		 * Addresses >= 0x40000 are S-Channel encoded register
+		 * addresses (block/port/type). These go through SCHAN_MSG
+		 * + SCHAN_CTRL at BAR0+0x050 — the CDK handles this
+		 * internally by writing to SCHAN_MSG first, then triggering
+		 * via SCHAN_CTRL. They should NOT be treated as AXI offsets.
 		 */
-		spin_lock(&iproc_lock);
-		rio.val = iproc_axi_read(bdev, 0x18000000 + rio.addr);
-		spin_unlock(&iproc_lock);
+		if (rio.addr >= bdev->base_size)
+			return -EINVAL;
+		if (rio.addr < PAXB_SUBWIN_SIZE) {
+			/*
+			 * Sub-window 0 (0x000-0xFFF): legacy CMIC registers.
+			 * Direct BAR0 access — no remap needed.
+			 * This includes SCHAN_CTRL/MSG, MIIM, DMA_STAT (legacy).
+			 * MUST be fast and atomic for S-Channel message sequences.
+			 */
+			rio.val = iproc_read(bdev, rio.addr);
+		} else {
+			/*
+			 * Addresses 0x1000+: CMICm registers at AXI 0x18001000+.
+			 * Need sub-window remapping to access.
+			 * Includes CMICm DMA (0x31xxx), SCHAN (0x33xxx), MIIM (0x32xxx).
+			 */
+			spin_lock(&iproc_lock);
+			rio.val = iproc_axi_read(bdev, 0x18000000 + rio.addr);
+			spin_unlock(&iproc_lock);
+		}
 		if (copy_to_user((void __user *)arg, &rio, sizeof(rio)))
 			return -EFAULT;
 		return 0;
@@ -511,9 +530,17 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		bdev = &bde_devices[rio.dev];
 		if (!bdev->valid)
 			return -ENODEV;
-		spin_lock(&iproc_lock);
-		iproc_axi_write(bdev, 0x18000000 + rio.addr, rio.val);
-		spin_unlock(&iproc_lock);
+		if (rio.addr >= bdev->base_size)
+			return -EINVAL;
+		if (rio.addr < PAXB_SUBWIN_SIZE) {
+			/* Sub-window 0: direct BAR0 access */
+			iproc_write(bdev, rio.addr, rio.val);
+		} else {
+			/* CMICm: AXI sub-window remap */
+			spin_lock(&iproc_lock);
+			iproc_axi_write(bdev, 0x18000000 + rio.addr, rio.val);
+			spin_unlock(&iproc_lock);
+		}
 		return 0;
 
 	case BDE_IOC_DMA_ALLOC:
