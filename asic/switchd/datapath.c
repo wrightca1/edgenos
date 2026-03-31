@@ -48,12 +48,17 @@ static int datapath_cpu_punt_init(int unit)
 
     ioerr += WRITE_CPU_CONTROL_1r(unit, cpu_ctrl1);
 
-    /* Enable ARP and DHCP punt to CPU on all ports */
+    /* Enable ARP and DHCP punt to CPU on all valid ports.
+     * PROTOCOL_PKT_CONTROLr is per-port (indexed by logical port).
+     * BCM56840 has ports 1-72 (logical). Skip 0 (CPU) and stop at 72.
+     * S-channel errors on non-existent ports are harmless but slow.
+     */
     {
         int p;
         PROTOCOL_PKT_CONTROLr_t ppc;
-        for (p = 0; p < CDK_CONFIG_MAX_PORTS; p++) {
-            ioerr += READ_PROTOCOL_PKT_CONTROLr(unit, p, &ppc);
+        for (p = 1; p <= 72; p++) {
+            if (READ_PROTOCOL_PKT_CONTROLr(unit, p, &ppc) != 0)
+                continue;  /* Skip non-existent ports */
             PROTOCOL_PKT_CONTROLr_ARP_REQUEST_TO_CPUf_SET(ppc, 1);
             PROTOCOL_PKT_CONTROLr_ARP_REPLY_TO_CPUf_SET(ppc, 1);
             PROTOCOL_PKT_CONTROLr_DHCP_PKT_TO_CPUf_SET(ppc, 1);

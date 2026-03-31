@@ -29,7 +29,9 @@
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <net/if.h>
+#include <net/if_arp.h>
 #include <linux/if_tun.h>
 
 #include "switchd.h"
@@ -174,6 +176,34 @@ int packet_io_init(void)
 
     syslog(LOG_INFO, "Created %d TUN interfaces", count);
 
+    /* Add each TUN's MAC to L2 table so unicast frames to our
+     * interfaces get forwarded to CPU instead of flooded/dropped. */
+    {
+        int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock >= 0) {
+            for (i = 0; i < SWITCHD_MAX_PORTS; i++) {
+                if (!switchd.ports[i].valid || switchd.ports[i].tun_fd <= 0)
+                    continue;
+                struct ifreq ifr;
+                memset(&ifr, 0, sizeof(ifr));
+                strncpy(ifr.ifr_name, switchd.ports[i].ifname, IFNAMSIZ - 1);
+                if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0) {
+                    bmd_mac_addr_t mac;
+                    memcpy(mac.b, ifr.ifr_hwaddr.sa_data, 6);
+                    /* Use bmd_port_mac_addr_add on CPU port (0) — this writes
+                     * to L2_ENTRY with STATIC bit, which has priority over
+                     * hardware-learned dynamic entries. */
+                    int rv = bmd_port_mac_addr_add(switchd.unit, 0, 1, &mac);
+                    syslog(LOG_INFO, "L2: %s MAC %02x:%02x:%02x:%02x:%02x:%02x -> CPU (rv=%d)",
+                           switchd.ports[i].ifname,
+                           mac.b[0], mac.b[1], mac.b[2],
+                           mac.b[3], mac.b[4], mac.b[5], rv);
+                }
+            }
+            close(sock);
+        }
+    }
+
     /* Initialize RX DMA buffers */
     if (rx_dma_init() < 0) {
         syslog(LOG_WARNING, "RX DMA init failed - RX path disabled");
@@ -208,7 +238,15 @@ static void handle_tun_tx(int port_idx)
     if (len <= 0)
         return;
 
-    /* Allocate DMA-coherent buffer for the packet data */
+    /* Pad to 64 bytes minimum. The MAC adds 4-byte FCS for 68 on wire.
+     * Extra 4 bytes beyond the standard 60-byte minimum compensates for
+     * the ASIC stripping a VLAN tag on untagged egress ports. */
+    if (len < 64) {
+        memset(tx_buf + len, 0, 64 - len);
+        len = 64;
+    }
+
+    /* Allocate DMA-coherent buffer for the (padded) packet data */
     dma_buf = bmd_dma_alloc_coherent(switchd.unit, len, &baddr);
     if (!dma_buf) {
         syslog(LOG_DEBUG, "TX: DMA alloc failed for %s (%zd bytes)",
@@ -284,6 +322,21 @@ static void handle_asic_rx(void)
     if (rv < 0 || !pkt)
         return;
 
+    /* Debug: dump first RX packets */
+    {
+        static int rx_dbg_count = 0;
+        if (rx_dbg_count < 5) {
+            char hex[97];
+            int i, n = pkt->size < 32 ? pkt->size : 32;
+            for (i = 0; i < n; i++)
+                sprintf(hex + i*3, "%02x ", ((unsigned char*)pkt->data)[i]);
+            hex[n*3] = '\0';
+            syslog(LOG_INFO, "RX: port=%d size=%d baddr=0x%08x: %s",
+                   pkt->port, pkt->size, (unsigned)pkt->baddr, hex);
+            rx_dbg_count++;
+        }
+    }
+
     /* Map ASIC ingress port (CDK physical port) to swpN */
     int swp = portmap_phys_to_swp(pkt->port);
     if (swp < 1 || swp > SWITCHD_MAX_PORTS) {
@@ -299,8 +352,18 @@ static void handle_asic_rx(void)
         goto resubmit;
     }
 
+    /* Strip 802.1Q VLAN tag if present (ASIC adds it for CPU-bound frames).
+     * VLAN tag is 4 bytes at offset 12: [81 00] [TCI].
+     * Remove it so the kernel sees a clean untagged Ethernet frame. */
+    uint8_t *frame = pkt->data;
+    int frame_len = pkt->size;
+    if (frame_len >= 18 && frame[12] == 0x81 && frame[13] == 0x00) {
+        memmove(frame + 12, frame + 16, frame_len - 16);
+        frame_len -= 4;
+    }
+
     /* Write packet to TUN fd (delivers to kernel network stack) */
-    ssize_t written = write(port->tun_fd, pkt->data, pkt->size);
+    ssize_t written = write(port->tun_fd, frame, frame_len);
     if (written > 0) {
         port->rx_packets++;
         port->rx_bytes += written;
