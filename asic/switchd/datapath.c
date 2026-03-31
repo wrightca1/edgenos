@@ -72,72 +72,28 @@ static int datapath_cpu_punt_init(int unit)
         }
     }
 
-    /* Disable source MAC learning on CPU port (port 0).
-     * Without this, frames sent from CPU via DMA get their source MAC
-     * hardware-learned — incoming unicast replies then get forwarded
-     * back out the front-panel port instead of to CPU.
-     *
-     * CML_FLAGS_NEW: bit[3]=HW learn, bit[2]=pending, bit[1]=copy CPU, bit[0]=drop
-     * Set to 0 on CPU port to disable all learning from CPU-originated frames.
-     *
-     * PORT_TABm is 10 words (40 bytes). Use CDK_DEV_WRITE32/READ32 directly
-     * to modify just the CML_FLAGS field at word offset 4.
-     */
-    /* Disable MAC learning on CPU port 0 via PORT_TABm.
-     * CML_FLAGS_NEW is bits [4:1] of word 4, CML_FLAGS_MOVE is bits [8:5].
-     * Read-modify-write word 4 only via raw S-Channel memory access.
-     */
-    /* Configure MAC learning on CPU port and front-panel ports.
-     *
-     * CML_FLAGS_NEW (bits [4:1]): action for new source MAC
-     *   bit[0]=drop, bit[1]=copy to CPU, bit[2]=pending, bit[3]=HW learn
-     *
-     * CPU port (0): CML=0 (no learning from CPU-originated frames)
-     * Front-panel ports: CML=0xa (HW learn + copy to CPU for new MACs)
-     *   This ensures unicast frames to our MACs reach CPU even if L2
-     *   lookup forwards to the learned port.
-     */
+    /* Disable MAC learning on CPU port so HW doesn't override L2 entries.
+     * Clear unknown unicast block masks so flood reaches CPU. */
     {
-        uint32_t ptab[10];
+        static uint32_t ptab[10];
+        static uint32_t zero[9];
         int p, rv;
 
-        /* Disable MAC learning on ALL ports so all unicast is "unknown"
-         * and floods to all VLAN members including CPU */
+        /* ALL ports: CML_FLAGS=0 (disable learning so unicast floods to CPU) */
         for (p = 0; p <= 72; p++) {
             memset(ptab, 0, sizeof(ptab));
             rv = cdk_xgs_mem_read(unit, PORT_TABm, p, ptab, 10);
             if (rv != 0) continue;
-            ptab[4] &= ~(0x1FE);  /* CML_FLAGS_NEW=0, CML_FLAGS_MOVE=0 */
+            ptab[4] &= ~(0x1FE);
             cdk_xgs_mem_write(unit, PORT_TABm, p, ptab, 10);
         }
 
-        /* Clear UNKNOWN_UCAST_BLOCK_MASK for all ports so unknown unicast
-         * floods to all VLAN members including CPU port */
-        {
-            uint32_t zero[9];
-            memset(zero, 0, sizeof(zero));
-            for (p = 0; p <= 66; p++) {
-                cdk_xgs_mem_write(unit, UNKNOWN_UCAST_BLOCK_MASKm, p, zero, 9);
-            }
-        }
+        /* Clear unknown unicast block masks (allow flood to all ports) */
+        memset(zero, 0, sizeof(zero));
+        for (p = 0; p <= 66; p++)
+            cdk_xgs_mem_write(unit, UNKNOWN_UCAST_BLOCK_MASKm, p, zero, 9);
 
-        /* Add CPU port 0 to VLAN 1 port bitmap directly.
-         * bmd_vlan_port_add() rejects port 0 (BMD_CHECK_PORT fails).
-         * VLAN_TABm PORT_BITMAP_W0 bit 0 = CPU logical port 0.
-         */
-        {
-            uint32_t vtab[25];
-            memset(vtab, 0, sizeof(vtab));
-            rv = cdk_xgs_mem_read(unit, VLAN_TABm, 1, vtab, 25);
-            if (rv == 0) {
-                syslog(LOG_INFO, "VLAN_TAB[1] w0=0x%08x w1=0x%08x (before CPU add)", vtab[0], vtab[1]);
-                vtab[0] |= 0x1;  /* Set bit 0 = CPU port in PORT_BITMAP_W0 */
-                rv = cdk_xgs_mem_write(unit, VLAN_TABm, 1, vtab, 25);
-                syslog(LOG_INFO, "VLAN_TAB[1] CPU port added to bitmap (rv=%d)", rv);
-            }
-        }
-
-        syslog(LOG_INFO, "All ports: CML=0, unknown unicast block masks cleared, CPU in VLAN 1");
+        syslog(LOG_INFO, "CPU port: CML=0, unknown unicast block masks cleared");
     }
 
     syslog(LOG_INFO, "CPU punt: L3 MTU/slowpath/dstmiss + ARP/DHCP enabled");
