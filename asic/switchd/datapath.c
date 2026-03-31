@@ -90,7 +90,54 @@ static int datapath_cpu_punt_init(int unit)
         }
         syslog(LOG_INFO, "L3 enabled on all front-panel ports (V4+V6)");
     }
-    /* MY_STATION_TCAM entries are programmed in packet_io_init */
+
+    /* Disable MAC learning on ALL ports and flush stale L2 entries.
+     * bmd_init sets CML=8 (HW learn) during bmd_switching_init.
+     * By the time we get here, the ASIC may have already learned
+     * our TX source MACs on the wrong ports. Clear CML and flush. */
+    {
+        static uint32_t ptab[10];
+        int p, rv;
+        for (p = 0; p <= 72; p++) {
+            memset(ptab, 0, sizeof(ptab));
+            rv = cdk_xgs_mem_read(unit, PORT_TABm, p, ptab, 10);
+            if (rv != 0) continue;
+            ptab[4] &= ~(0x1FE);  /* CML_FLAGS_NEW=0, CML_FLAGS_MOVE=0 */
+            cdk_xgs_mem_write(unit, PORT_TABm, p, ptab, 10);
+        }
+
+        /* Flush all dynamic L2 entries via L2_BULK_CONTROL */
+        {
+            L2_BULK_CONTROLr_t l2bc;
+            L2_BULK_CONTROLr_CLR(l2bc);
+            /* Delete all non-static entries: NUM_ENTRIES=0 (all), ACTION bits */
+            L2_BULK_CONTROLr_SET(l2bc, (1 << 1));  /* L2_MOD_FIFO_ENABLE + action */
+            WRITE_L2_BULK_CONTROLr(unit, l2bc);
+        }
+
+        syslog(LOG_INFO, "All ports CML=0, dynamic L2 entries flushed");
+
+        /* Verify and force CPU port into VLAN 1 port bitmap.
+         * Read VLAN_TAB entry 1, check word 0 bit 0, set if needed. */
+        {
+            static uint32_t vtab[20];
+            memset(vtab, 0, sizeof(vtab));
+            rv = cdk_xgs_mem_read(unit, VLAN_TABm, 1, vtab, 20);
+            syslog(LOG_INFO, "VLAN1: w0=0x%08x w1=0x%08x w2=0x%08x w6=0x%08x (rv=%d, cpu_bit=%d)",
+                   vtab[0], vtab[1], vtab[2], vtab[6], rv, vtab[0] & 1);
+            if (rv == 0) {
+                vtab[0] |= 1;  /* Set bit 0 = CPU port in PORT_BITMAP */
+                vtab[6] |= (1 << 13);  /* Set VALID bit */
+                rv = cdk_xgs_mem_write(unit, VLAN_TABm, 1, vtab, 20);
+                syslog(LOG_INFO, "VLAN1: VALID + CPU port set (rv=%d)", rv);
+                /* Verify */
+                memset(vtab, 0, sizeof(vtab));
+                cdk_xgs_mem_read(unit, VLAN_TABm, 1, vtab, 20);
+                syslog(LOG_INFO, "VLAN1 verify: w0=0x%08x w6=0x%08x valid=%d",
+                       vtab[0], vtab[6], (vtab[6] >> 13) & 1);
+            }
+        }
+    }
 
     syslog(LOG_INFO, "CPU punt: L3 MTU/slowpath/dstmiss + ARP/DHCP enabled");
     return ioerr;

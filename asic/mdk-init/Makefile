@@ -75,7 +75,10 @@ CPPFLAGS += '-DBMD_SYS_DMA_CACHE_FLUSH(addr,len)='
 CPPFLAGS += '-DBMD_SYS_DMA_CACHE_INVAL(addr,len)='
 
 # P2020 big-endian PCI
-CPPFLAGS += -DSYS_BE_PIO=1 -DSYS_BE_PACKET=1 -DSYS_BE_OTHER=1
+# SYS_BE_PIO=0: iowrite32/ioread32 handle LE conversion; CDK must NOT also swap.
+# SYS_BE_PIO=1 + iowrite32 = double-swap = corrupted S-Channel TABLE_INSERT data.
+# SYS_BE_PACKET/OTHER: only affect CMIC ENDIAN_SEL register (we override manually).
+CPPFLAGS += -DSYS_BE_PIO=0 -DSYS_BE_PACKET=0 -DSYS_BE_OTHER=0
 
 # BCM56846 iProc uses CMC 0 for PCI host interface DMA
 CPPFLAGS += -DCDK_XGSD_CMC=0
