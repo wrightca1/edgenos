@@ -72,29 +72,25 @@ static int datapath_cpu_punt_init(int unit)
         }
     }
 
-    /* Disable MAC learning on CPU port so HW doesn't override L2 entries.
-     * Clear unknown unicast block masks so flood reaches CPU. */
+    /*
+     * Enable L3 processing on all front-panel ports.
+     * LPORT_TABm V4L3_ENABLE=1 and V6L3_ENABLE=1 are required for
+     * MY_STATION_TCAM to trigger L3 lookup on matching frames.
+     * Without this, even matched frames stay in L2 forwarding.
+     */
     {
-        static uint32_t ptab[10];
-        static uint32_t zero[9];
+        static uint32_t lptab[10];  /* LPORT_TABm is 10 words */
         int p, rv;
-
-        /* ALL ports: CML_FLAGS=0 (disable learning so unicast floods to CPU) */
-        for (p = 0; p <= 72; p++) {
-            memset(ptab, 0, sizeof(ptab));
-            rv = cdk_xgs_mem_read(unit, PORT_TABm, p, ptab, 10);
+        for (p = 1; p <= 72; p++) {
+            memset(lptab, 0, sizeof(lptab));
+            rv = cdk_xgs_mem_read(unit, LPORT_TABm, p, lptab, 10);
             if (rv != 0) continue;
-            ptab[4] &= ~(0x1FE);
-            cdk_xgs_mem_write(unit, PORT_TABm, p, ptab, 10);
+            lptab[0] |= (1 << 19) | (1 << 18);  /* V4L3_ENABLE | V6L3_ENABLE */
+            cdk_xgs_mem_write(unit, LPORT_TABm, p, lptab, 10);
         }
-
-        /* Clear unknown unicast block masks (allow flood to all ports) */
-        memset(zero, 0, sizeof(zero));
-        for (p = 0; p <= 66; p++)
-            cdk_xgs_mem_write(unit, UNKNOWN_UCAST_BLOCK_MASKm, p, zero, 9);
-
-        syslog(LOG_INFO, "CPU port: CML=0, unknown unicast block masks cleared");
+        syslog(LOG_INFO, "L3 enabled on all front-panel ports (V4+V6)");
     }
+    /* MY_STATION_TCAM entries are programmed in packet_io_init */
 
     syslog(LOG_INFO, "CPU punt: L3 MTU/slowpath/dstmiss + ARP/DHCP enabled");
     return ioerr;

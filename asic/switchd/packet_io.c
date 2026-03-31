@@ -38,9 +38,10 @@
 #include "packet_io.h"
 #include "portmap.h"
 
-/* BMD headers */
+/* BMD/CDK headers */
 #include <bmd/bmd.h>
 #include <bmd/bmd_dma.h>
+#include <cdk/chip/bcm56840_a0_defs.h>
 
 #define TUN_DEV     "/dev/net/tun"
 #define MAX_PKT_SIZE 9216  /* Jumbo frame support */
@@ -190,10 +191,44 @@ int packet_io_init(void)
                 if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0) {
                     bmd_mac_addr_t mac;
                     memcpy(mac.b, ifr.ifr_hwaddr.sa_data, 6);
-                    /* Skip static L2 entries — rely on unknown unicast flood
-                     * to CPU port instead. Static entries get overridden by
-                     * hardware learning. Flood works if CPU is in VLAN. */
-                    int rv = 0; /* bmd_port_mac_addr_add(switchd.unit, 0, 1, &mac); */
+                    /*
+                     * Program MY_STATION_TCAM so ASIC triggers L3 processing
+                     * for packets to our MAC. With V4L3DSTMISS_TOCPU, these
+                     * get punted to CPU. VLAN mask=0 matches all VLANs.
+                     */
+                    {
+                        static int tcam_idx = 0;
+                        static MY_STATION_TCAMm_t mst;
+                        uint32_t mac_field[2];
+
+                        MY_STATION_TCAMm_CLR(mst);
+
+                        /* Set MAC address (key) */
+                        mac_field[0] = ((uint32_t)mac.b[2] << 24) | ((uint32_t)mac.b[3] << 16) |
+                                       ((uint32_t)mac.b[4] << 8) | mac.b[5];
+                        mac_field[1] = ((uint32_t)mac.b[0] << 8) | mac.b[1];
+                        MY_STATION_TCAMm_MAC_ADDRf_SET(mst, mac_field);
+
+                        /* Set MAC mask (all 1s = exact match) */
+                        mac_field[0] = 0xFFFFFFFF;
+                        mac_field[1] = 0xFFFF;
+                        MY_STATION_TCAMm_MAC_ADDR_MASKf_SET(mst, mac_field);
+
+                        /* VLAN mask=0 (match any VLAN) */
+                        MY_STATION_TCAMm_VLAN_ID_MASKf_SET(mst, 0);
+
+                        /* Enable IPv4 and IPv6 termination */
+                        MY_STATION_TCAMm_IPV4_TERMINATION_ALLOWEDf_SET(mst, 1);
+                        MY_STATION_TCAMm_IPV6_TERMINATION_ALLOWEDf_SET(mst, 1);
+
+                        /* Valid */
+                        MY_STATION_TCAMm_VALIDf_SET(mst, 1);
+
+                        int rv2 = WRITE_MY_STATION_TCAMm(switchd.unit, tcam_idx, mst);
+                        if (rv2 == 0)
+                            tcam_idx++;
+                    }
+                    int rv = 0;
                     syslog(LOG_INFO, "L2: %s MAC %02x:%02x:%02x:%02x:%02x:%02x -> CPU (rv=%d)",
                            switchd.ports[i].ifname,
                            mac.b[0], mac.b[1], mac.b[2],
