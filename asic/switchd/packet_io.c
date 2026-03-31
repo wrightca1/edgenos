@@ -42,6 +42,9 @@
 #include <bmd/bmd.h>
 #include <bmd/bmd_dma.h>
 #include <cdk/chip/bcm56840_a0_defs.h>
+#include <cdk/arch/xgs_schan.h>
+#include <cdk/arch/xgs_chip.h>
+#include <bmdi/arch/xgs_mac_util.h>
 
 #define TUN_DEV     "/dev/net/tun"
 #define MAX_PKT_SIZE 9216  /* Jumbo frame support */
@@ -192,41 +195,38 @@ int packet_io_init(void)
                     bmd_mac_addr_t mac;
                     memcpy(mac.b, ifr.ifr_hwaddr.sa_data, 6);
                     /*
-                     * Program MY_STATION_TCAM so ASIC triggers L3 processing
-                     * for packets to our MAC. With V4L3DSTMISS_TOCPU, these
-                     * get punted to CPU. VLAN mask=0 matches all VLANs.
+                     * Add L2X entry with CPUf=1 — this tells the ASIC to
+                     * forward frames matching this MAC to CPU, regardless
+                     * of PORT_NUM. Unlike PORT_NUM=0 which gets overridden
+                     * by hardware learning, CPUf is a separate flag.
                      */
                     {
-                        static int tcam_idx = 0;
-                        static MY_STATION_TCAMm_t mst;
-                        uint32_t mac_field[2];
+                        L2Xm_t l2x;
+                        uint32_t fval[2];
+                        /* cdk_xgs_schan_op and cdk_xgs_block_number from headers */
+                        schan_msg_t schan_msg;
 
-                        MY_STATION_TCAMm_CLR(mst);
+                        L2Xm_CLR(l2x);
+                        fval[0] = ((uint32_t)mac.b[2] << 24) | ((uint32_t)mac.b[3] << 16) |
+                                  ((uint32_t)mac.b[4] << 8) | mac.b[5];
+                        fval[1] = ((uint32_t)mac.b[0] << 8) | mac.b[1];
+                        L2Xm_L2_MAC_ADDRf_SET(l2x, fval);
+                        L2Xm_L2_VLAN_IDf_SET(l2x, 1);
+                        L2Xm_L2_PORT_NUMf_SET(l2x, 0); /* CPU port */
+                        L2Xm_L2_STATIC_BITf_SET(l2x, 1);
+                        L2Xm_VALIDf_SET(l2x, 1);
+                        /* KEY: CPUf=1 tells ASIC to copy to CPU */
+                        l2x.l2x[2] |= (1 << 31); /* LEGACY_CPUf */
 
-                        /* Set MAC address (key) */
-                        mac_field[0] = ((uint32_t)mac.b[2] << 24) | ((uint32_t)mac.b[3] << 16) |
-                                       ((uint32_t)mac.b[4] << 8) | mac.b[5];
-                        mac_field[1] = ((uint32_t)mac.b[0] << 8) | mac.b[1];
-                        MY_STATION_TCAMm_MAC_ADDRf_SET(mst, mac_field);
-
-                        /* Set MAC mask (all 1s = exact match) */
-                        mac_field[0] = 0xFFFFFFFF;
-                        mac_field[1] = 0xFFFF;
-                        MY_STATION_TCAMm_MAC_ADDR_MASKf_SET(mst, mac_field);
-
-                        /* VLAN mask=0 (match any VLAN) */
-                        MY_STATION_TCAMm_VLAN_ID_MASKf_SET(mst, 0);
-
-                        /* Enable IPv4 and IPv6 termination */
-                        MY_STATION_TCAMm_IPV4_TERMINATION_ALLOWEDf_SET(mst, 1);
-                        MY_STATION_TCAMm_IPV6_TERMINATION_ALLOWEDf_SET(mst, 1);
-
-                        /* Valid */
-                        MY_STATION_TCAMm_VALIDf_SET(mst, 1);
-
-                        int rv2 = WRITE_MY_STATION_TCAMm(switchd.unit, tcam_idx, mst);
-                        if (rv2 == 0)
-                            tcam_idx++;
+                        int ipipe_blk = cdk_xgs_block_number(switchd.unit, BLKTYPE_IPIPE, 0);
+                        SCHAN_MSG_CLEAR(&schan_msg);
+                        SCMH_OPCODE_SET(schan_msg.gencmd.header, TABLE_INSERT_CMD_MSG);
+                        SCMH_SRCBLK_SET(schan_msg.gencmd.header, CDK_XGS_CMIC_BLOCK(switchd.unit));
+                        SCMH_DSTBLK_SET(schan_msg.gencmd.header, ipipe_blk);
+                        SCMH_DATALEN_SET(schan_msg.gencmd.header, 16);
+                        CDK_MEMCPY(schan_msg.gencmd.data, &l2x, sizeof(l2x));
+                        schan_msg.gencmd.address = L2Xm;
+                        cdk_xgs_schan_op(switchd.unit, &schan_msg, 6, 0);
                     }
                     int rv = 0;
                     syslog(LOG_INFO, "L2: %s MAC %02x:%02x:%02x:%02x:%02x:%02x -> CPU (rv=%d)",
