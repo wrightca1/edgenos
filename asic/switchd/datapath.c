@@ -68,22 +68,21 @@ static int datapath_cpu_punt_init(int unit)
 
     /* Disable source MAC learning on CPU port (port 0).
      * Without this, frames sent from CPU via DMA get their source MAC
-     * hardware-learned on the CPU port's logical port. Later, when the
-     * same MAC is seen on a front-panel port (from our TX), the entry
-     * moves to that port — and incoming unicast replies get forwarded
+     * hardware-learned — incoming unicast replies then get forwarded
      * back out the front-panel port instead of to CPU.
      *
      * CML_FLAGS_NEW: bit[3]=HW learn, bit[2]=pending, bit[1]=copy CPU, bit[0]=drop
      * Set to 0 on CPU port to disable all learning from CPU-originated frames.
+     *
+     * PORT_TABm is 10 words (40 bytes). Use CDK_DEV_WRITE32/READ32 directly
+     * to modify just the CML_FLAGS field at word offset 4.
      */
-    {
-        PORT_TABm_t port_tab;
-        ioerr += READ_PORT_TABm(unit, 0, port_tab);
-        PORT_TABm_CML_FLAGS_NEWf_SET(port_tab, 0);
-        PORT_TABm_CML_FLAGS_MOVEf_SET(port_tab, 0);
-        ioerr += WRITE_PORT_TABm(unit, 0, port_tab);
-        syslog(LOG_INFO, "CPU port: disabled MAC learning (CML_FLAGS=0)");
-    }
+    /* TODO: Disable MAC learning on CPU port (PORT_TABm CML_FLAGS=0)
+     * to prevent HW learning from overriding static L2 entries.
+     * PORT_TABm/LPORT_TABm S-Channel access crashes — needs investigation.
+     * Ping works without this when switchd is freshly started (static L2
+     * entries take effect before HW learning kicks in).
+     */
 
     syslog(LOG_INFO, "CPU punt: L3 MTU/slowpath/dstmiss + ARP/DHCP enabled");
     return ioerr;
