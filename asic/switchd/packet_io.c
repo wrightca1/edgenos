@@ -190,10 +190,10 @@ int packet_io_init(void)
                 if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0) {
                     bmd_mac_addr_t mac;
                     memcpy(mac.b, ifr.ifr_hwaddr.sa_data, 6);
-                    /* Use bmd_port_mac_addr_add on CPU port (0) — this writes
-                     * to L2_ENTRY with STATIC bit, which has priority over
-                     * hardware-learned dynamic entries. */
-                    int rv = bmd_port_mac_addr_add(switchd.unit, 0, 1, &mac);
+                    /* Skip static L2 entries — rely on unknown unicast flood
+                     * to CPU port instead. Static entries get overridden by
+                     * hardware learning. Flood works if CPU is in VLAN. */
+                    int rv = 0; /* bmd_port_mac_addr_add(switchd.unit, 0, 1, &mac); */
                     syslog(LOG_INFO, "L2: %s MAC %02x:%02x:%02x:%02x:%02x:%02x -> CPU (rv=%d)",
                            switchd.ports[i].ifname,
                            mac.b[0], mac.b[1], mac.b[2],
@@ -325,7 +325,7 @@ static void handle_asic_rx(void)
     /* Debug: dump first RX packets */
     {
         static int rx_dbg_count = 0;
-        if (rx_dbg_count < 5) {
+        if (rx_dbg_count < 20) {
             char hex[97];
             int i, n = pkt->size < 32 ? pkt->size : 32;
             for (i = 0; i < n; i++)
