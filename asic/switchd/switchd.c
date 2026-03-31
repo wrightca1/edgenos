@@ -254,6 +254,15 @@ int main(int argc, char **argv)
      */
     bde_dma_pool_reset();
 
+    /*
+     * Set DMA endianness right before packet I/O starts.
+     * CPS reset during bmd_reset clears CMIC_ENDIANESS_SEL, and
+     * the CDK's re-init doesn't stick reliably. Force it here.
+     * 0x06000006 = DMA_PACKET + DMA_OTHER (no PIO endian swap
+     * since iowrite32 already provides LE on PPC).
+     */
+    bde_set_dma_endianness();
+
     /* Create TUN interfaces for each port */
     if (packet_io_init() < 0) {
         syslog(LOG_ERR, "Packet I/O init failed");

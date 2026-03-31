@@ -77,6 +77,9 @@ CPPFLAGS += '-DBMD_SYS_DMA_CACHE_INVAL(addr,len)='
 # P2020 big-endian PCI
 CPPFLAGS += -DSYS_BE_PIO=1 -DSYS_BE_PACKET=1 -DSYS_BE_OTHER=1
 
+# BCM56846 iProc uses CMC 0 for PCI host interface DMA
+CPPFLAGS += -DCDK_XGSD_CMC=0
+
 CFLAGS += -Wall -O2
 
 ################################################################################

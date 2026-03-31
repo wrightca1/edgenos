@@ -141,8 +141,17 @@ log "=== Phase 3: Programming retimers ==="
 
 init_retimer() {
     local bus=$1
-    i2cset -f -y $bus 0x27 0xFF 0x0F 2>/dev/null || return 1
-    i2cset -f -y $bus 0x27 0x0A 0x10 2>/dev/null  # CDR control
+    # Match Cumulus S20retimer_init.sh sequence exactly:
+    # 1. Select channels (reg 0xFF)
+    # 2. Set veo_clk_cdr_cap (reg 0x36)
+    # 3. CDR reset: assert (28) then deassert (16) via reg 0x0A
+    # 4. Program all other registers
+    # Without CDR reset, the retimer CDR never locks and no signal
+    # passes from the SFP to the ASIC!
+    i2cset -f -y $bus 0x27 0xFF 0x0C 2>/dev/null || return 1  # channels=12
+    i2cset -f -y $bus 0x27 0x36 0x01 2>/dev/null  # veo_clk_cdr_cap=1
+    i2cset -f -y $bus 0x27 0x0A 0x1C 2>/dev/null  # CDR reset ASSERT (28)
+    i2cset -f -y $bus 0x27 0x0A 0x10 2>/dev/null  # CDR reset DEASSERT (16)
     i2cset -f -y $bus 0x27 0x0B 0x0F 2>/dev/null  # CDR bandwidth
     i2cset -f -y $bus 0x27 0x0C 0x08 2>/dev/null  # CDR mode
     i2cset -f -y $bus 0x27 0x0E 0x93 2>/dev/null  # EQ/DFE config
@@ -170,7 +179,7 @@ init_retimer() {
     i2cset -f -y $bus 0x27 0x33 0x88 2>/dev/null
     i2cset -f -y $bus 0x27 0x34 0x3F 2>/dev/null
     i2cset -f -y $bus 0x27 0x35 0x1F 2>/dev/null
-    i2cset -f -y $bus 0x27 0x36 0x01 2>/dev/null  # Channel config
+    # reg 0x36 (veo_clk_cdr_cap) already set above before CDR reset
     i2cset -f -y $bus 0x27 0x3A 0xA5 2>/dev/null
     i2cset -f -y $bus 0x27 0x3E 0x80 2>/dev/null
     return 0

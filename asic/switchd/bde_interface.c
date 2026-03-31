@@ -252,20 +252,56 @@ int bde_open(void)
      *   BAR0+0x2D60 (OARR_2) = 0x1 (enable)
      *   BAR0+0x2D64 (OARR_2_UPPER) = 0x1 (PCI core 0 DMA hi bits)
      */
-    if (bar0_map) {
-        volatile uint32_t *bar0 = (volatile uint32_t *)bar0_map;
+    /*
+     * Write OARR via PCI config space, not BAR0 MMIO.
+     * BAR0 MMIO writes to PAXB config registers (0x2xxx) don't persist
+     * after ASIC core reset during bmd_init. PCI config space writes
+     * go through the iProc PAXB and DO persist.
+     *
+     * PCI config space offset for OARR_2 = 0xD60 (bar offset 0x2D60
+     * minus PAXB base 0x2000). EP_AXI_CONFIG is at config offset 0x104.
+     *
+     * We use sysfs PCI config access via /sys/bus/pci/devices/.
+     */
+    {
+        char cfg_path[256];
+        int cfg_fd;
+        uint32_t val;
 
-        /* Disable EP AXI config */
-        bar0[0x2104 / 4] = 0x0;
+        snprintf(cfg_path, sizeof(cfg_path),
+                 "/sys/bus/pci/devices/0001:01:00.0/config");
+        cfg_fd = open(cfg_path, O_RDWR);
+        if (cfg_fd >= 0) {
+            /* EP_AXI_CONFIG at PCI config offset 0x104 */
+            val = 0x0;
+            pwrite(cfg_fd, &val, 4, 0x2104);
 
-        /* Enable OARR_2 for outbound DMA */
-        bar0[0x2D60 / 4] = 0x1;
+            /* OARR_2 at PCI config offset 0x2D60 */
+            val = 0x1;
+            pwrite(cfg_fd, &val, 4, 0x2D60);
 
-        /* Set DMA high address bits (PCI core 0 = 0x1) */
-        bar0[0x2D64 / 4] = 0x1;
+            /* OARR_2_UPPER at PCI config offset 0x2D64 */
+            val = 0x1;
+            pwrite(cfg_fd, &val, 4, 0x2D64);
 
-        syslog(LOG_INFO, "BDE: PAXB OARR_2=0x%08x (DMA outbound enabled)",
-               bar0[0x2D60 / 4]);
+            /* Read back to verify */
+            pread(cfg_fd, &val, 4, 0x2D60);
+            syslog(LOG_INFO, "BDE: PAXB OARR_2=0x%08x via PCI config",
+                   val);
+            close(cfg_fd);
+        } else {
+            syslog(LOG_ERR, "BDE: Cannot open PCI config: %s",
+                   strerror(errno));
+            /* Fall back to BAR0 MMIO attempt */
+            if (bar0_map) {
+                volatile uint32_t *bar0 = (volatile uint32_t *)bar0_map;
+                bar0[0x2104 / 4] = 0x0;
+                bar0[0x2D60 / 4] = 0x1;
+                bar0[0x2D64 / 4] = 0x1;
+                syslog(LOG_INFO, "BDE: PAXB OARR_2=0x%08x (BAR0 fallback)",
+                       bar0[0x2D60 / 4]);
+            }
+        }
     }
 
     return 0;
@@ -465,6 +501,30 @@ int bmd_init_all(void)
     }
 
     syslog(LOG_INFO, "BMD: ASIC initialized (SerDes firmware v0x0101 loaded)");
+
+    /*
+     * Force DMA endianness after bmd_init.
+     *
+     * CPS reset (in bmd_reset) clears CMIC_ENDIANESS_SEL. The CDK's
+     * cdk_xgs_cmic_init() tries to re-set it but the iowrite32 + CDK
+     * SYS_BE_PIO double-swap cancels out for palindromic values like
+     * 0x07000007 — however the CMIC may not accept the write during
+     * the narrow post-reset window. Force it here via BDE ioctl.
+     *
+     * CMIC_ENDIANESS_SEL (0x174):
+     *   Bit 1+25: DMA packet endian
+     *   Bit 2+26: DMA other (descriptor) endian
+     *   Value: 0x06000006
+     */
+    {
+        uint32_t readback = 0;
+
+        CDK_DEV_WRITE32(switchd.unit, 0x174, 0x04000004);
+        CDK_DEV_READ32(switchd.unit, 0x174, &readback);
+        syslog(LOG_INFO, "BMD: ENDIAN_SEL = 0x%08x (wrote 0x04000004)",
+               readback);
+    }
+
     return 0;
 }
 
@@ -491,4 +551,23 @@ int bmd_switching_init_all(void)
 
     syslog(LOG_INFO, "BMD: L2 switching initialized (VLAN 1, MAC learning)");
     return 0;
+}
+
+void bde_set_dma_endianness(void)
+{
+    /*
+     * Set CMIC_ENDIANESS_SEL for DMA byte-swapping on big-endian host.
+     * Must be called after all ASIC init (bmd_reset/bmd_init/bmd_switching_init)
+     * because CPS reset clears this register.
+     *
+     * 0x04000004 = DMA_OTHER only (bit 2+26) — descriptor word swap.
+     * NOT DMA_PACKET — packet data is already in network byte order (BE)
+     * in host memory and must pass through to the wire as-is.
+     * No PIO endian bit because iowrite32 already provides LE on PPC.
+     */
+    uint32_t readback = 0;
+
+    CDK_DEV_WRITE32(switchd.unit, 0x174, 0x04000004);
+    CDK_DEV_READ32(switchd.unit, 0x174, &readback);
+    syslog(LOG_INFO, "DMA endian: ENDIAN_SEL=0x%08x (wrote 0x04000004)", readback);
 }

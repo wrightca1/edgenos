@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <unistd.h>
 
 #include "switchd.h"
 #include "portmap.h"
@@ -215,66 +216,203 @@ int portmap_configure_ports(void)
             continue;
         }
 
-        /* Debug: test block access via both CL22 and AER paths */
+        /*
+         * Fix: Explicitly release TX/RX ASIC reset and set IND_40BITIF.
+         *
+         * The Disable→Enable cycle leaves MISC6r reset_rx=1 (RX stuck
+         * in reset) and MISC3r IND_40BITIF=0 (40-bit interface not
+         * enabled). Without these, PCS can never lock.
+         *
+         * speed_set (line 1589-1594 of xgxs_drv.c) should release
+         * the reset, but the write doesn't persist — possibly because
+         * the Disable call's MISC6r state overrides the Enable's write.
+         */
+        {
+            phy_ctrl_t *pc_fix = BMD_PORT_PHY_CTRL(switchd.unit, port);
+            if (pc_fix) {
+                /*
+                 * Release TX/RX ASIC reset via MISC6r.
+                 * MISC6r = CDK 0x8345 = block 0x8340, offset 0x5, CL22 reg 0x15
+                 * (NOT reg 0x19 — that's MISC7r at CDK 0x8349!)
+                 * RESET_RX_ASIC = bit 15, RESET_TX_ASIC = bit 14
+                 */
+                PHY_BUS_WRITE(pc_fix, 0x1f, 0x8340);
+                uint32_t misc6_val = 0;
+                PHY_BUS_READ(pc_fix, 0x15, &misc6_val);
+                misc6_val &= ~((1 << 15) | (1 << 14));  /* Clear RESET_RX_ASIC and RESET_TX_ASIC */
+                PHY_BUS_WRITE(pc_fix, 0x15, misc6_val);
+
+                /* Set IND_40BITIF=1 in MISC3r for XFI */
+                PHY_BUS_WRITE(pc_fix, 0x1f, 0x8330);
+                uint32_t misc3_val = 0;
+                PHY_BUS_READ(pc_fix, 0x1c, &misc3_val);
+                misc3_val |= (1 << 6);  /* IND_40BITIF = bit 6 */
+                PHY_BUS_WRITE(pc_fix, 0x1c, misc3_val);
+
+                /*
+                 * Restart PLL sequencer after MISC3r/MISC6r changes.
+                 *
+                 * The speed_set code restarts the sequencer during port
+                 * enable, but our IND_40BITIF fix above happens AFTER
+                 * that. Without a sequencer restart, the PLL is running
+                 * with the old (wrong) interface mode → PCS never locks.
+                 *
+                 * XGXSCONTROLr = block 0x8000, offset 0x00, CL22 reg 0x10
+                 * START_SEQUENCER = bit 13
+                 */
+                PHY_BUS_WRITE(pc_fix, 0x1f, 0x8000);
+                uint32_t xgxs_ctrl = 0;
+                PHY_BUS_READ(pc_fix, 0x10, &xgxs_ctrl);
+                xgxs_ctrl &= ~(1 << 13);  /* Stop sequencer */
+                PHY_BUS_WRITE(pc_fix, 0x10, xgxs_ctrl);
+                xgxs_ctrl |= (1 << 13);   /* Start sequencer */
+                PHY_BUS_WRITE(pc_fix, 0x10, xgxs_ctrl);
+
+                PHY_BUS_WRITE(pc_fix, 0x1f, 0x0000);
+
+                syslog(LOG_INFO, "Port %s: forced reset_rx=0 IND_40BITIF=1 seq_restart",
+                       switchd.ports[i].ifname);
+            }
+        }
+
+        /* Debug: comprehensive register dump after config */
         {
             phy_ctrl_t *pc_dbg = BMD_PORT_PHY_CTRL(switchd.unit, port);
-            if (pc_dbg && i < 3) {
+            if (pc_dbg && i < 2) {
                 uint32_t val = 0;
-                int ioerr;
 
-                /*
-                 * Test 1: Read XGXSBLK0 (block 0x8000) — always works
-                 */
+                /* Wait 100ms for PLL and CDR to settle */
+                usleep(100000);
+
+                /* Set AER lane for per-lane register reads */
+                int wc_lane = PHY_CTRL_INST(pc_dbg) & 0x3;
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0xffd0);
+                PHY_BUS_WRITE(pc_dbg, 0x1e, wc_lane);
+                syslog(LOG_INFO, "Port %s: AER lane=%d (inst=0x%x)",
+                       switchd.ports[i].ifname, wc_lane,
+                       (unsigned)PHY_CTRL_INST(pc_dbg));
+
+                /* XGXSBLK0: control/status, PLL lock */
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8000);
                 PHY_BUS_READ(pc_dbg, 0x10, &val);
-                syslog(LOG_INFO, "Port %s: XGXSSTATUS (blk 0x8000 reg 0x10) = 0x%04x",
-                       switchd.ports[i].ifname, val & 0xffff);
+                syslog(LOG_INFO, "Port %s: XGXSCONTROLr=0x%04x seq=%d",
+                       switchd.ports[i].ifname, val & 0xffff, (val >> 13) & 1);
+                PHY_BUS_READ(pc_dbg, 0x11, &val);
+                syslog(LOG_INFO, "Port %s: XGXSSTATUSr=0x%04x pll_lock=%d",
+                       switchd.ports[i].ifname, val & 0xffff, (val >> 11) & 1);
 
-                /*
-                 * Test 2: Read MISC1r via CL22 block select
-                 * Write block 0x8300 to reg 0x1F, read reg 0x18
-                 * (reg 0x08 + 0x10 for high block = 0x18)
-                 */
+                /* MISC1r: speed[4:0], PLL mode */
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8300);
                 PHY_BUS_READ(pc_dbg, 0x18, &val);
-                syslog(LOG_INFO, "Port %s: MISC1r via CL22 (blk 0x8300 reg 0x18) = 0x%04x",
-                       switchd.ports[i].ifname, val & 0xffff);
+                syslog(LOG_INFO, "Port %s: MISC1r=0x%04x spd[4:0]=%d pll=0x%x",
+                       switchd.ports[i].ifname, val & 0xffff,
+                       val & 0x1f, (val >> 8) & 0xf);
 
-                /*
-                 * Test 3: Read MISC3r for FORCE_SPEED_B5
-                 */
-                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8350);
-                PHY_BUS_READ(pc_dbg, 0x18, &val);
+                /* MISC3r: speed B5, IND_40BITIF */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8330);
+                PHY_BUS_READ(pc_dbg, 0x1c, &val);
                 {
-                    uint32_t misc1_speed = ((val >> 7) & 1) ? 0x20 : 0;
-                    uint32_t misc1_low = 0;
-                    PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8300);
-                    PHY_BUS_READ(pc_dbg, 0x18, &misc1_low);
-                    misc1_speed |= (misc1_low & 0x1f);
-                    syslog(LOG_INFO, "Port %s: MISC3r=0x%04x B5=%d  MISC1r[4:0]=%d  speed=0x%02x (%s)",
-                           switchd.ports[i].ifname,
-                           val & 0xffff, (val >> 7) & 1,
-                           misc1_low & 0x1f, misc1_speed,
-                           misc1_speed == 0x25 ? "10G_XFI" :
-                           misc1_speed == 0x05 ? "CX4_WRONG" :
-                           misc1_speed == 0x29 ? "10G_SFI" : "other");
+                    uint32_t m3 = val & 0xffff;
+                    uint32_t b5 = (m3 >> 7) & 1;
+                    uint32_t ind40 = (m3 >> 6) & 1;
+                    syslog(LOG_INFO, "Port %s: MISC3r=0x%04x B5=%d IND40=%d speed=0x%02x",
+                           switchd.ports[i].ifname, m3, b5, ind40,
+                           (5) | (b5 << 5));
                 }
 
-                /*
-                 * Test 4: Read FIRMWARE_MODEr
-                 */
-                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8200);
-                PHY_BUS_READ(pc_dbg, 0x1A, &val);
-                syslog(LOG_INFO, "Port %s: FWMODE=0x%04x",
-                       switchd.ports[i].ifname, val & 0xffff);
-
-                /*
-                 * Test 5: Read MISC6r force_speed_sel
-                 */
+                /* MISC6r: reset, USE_BRCM6466 */
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8340);
                 PHY_BUS_READ(pc_dbg, 0x15, &val);
-                syslog(LOG_INFO, "Port %s: MISC6r=0x%04x force_speed_sel=%d",
-                       switchd.ports[i].ifname, val & 0xffff, (val >> 6) & 1);
+                syslog(LOG_INFO, "Port %s: MISC6r=0x%04x rst_rx=%d rst_tx=%d brcm6466=%d",
+                       switchd.ports[i].ifname, val & 0xffff,
+                       (val >> 15) & 1, (val >> 14) & 1, (val >> 7) & 1);
+
+                /* MISC7r: force_oscdr, CL49 in all mode */
+                PHY_BUS_READ(pc_dbg, 0x19, &val);
+                syslog(LOG_INFO, "Port %s: MISC7r=0x%04x cl49_all=%d oscdr_force=%d oscdr_val=0x%x",
+                       switchd.ports[i].ifname, val & 0xffff,
+                       (val >> 5) & 1, (val >> 9) & 1, (val >> 10) & 0xf);
+
+                /* FIRMWARE_MODEr */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8200);
+                PHY_BUS_READ(pc_dbg, 0x1a, &val);
+                syslog(LOG_INFO, "Port %s: FWMODE=0x%04x l0=%d l1=%d l2=%d l3=%d",
+                       switchd.ports[i].ifname, val & 0xffff,
+                       val & 0xf, (val >> 4) & 0xf,
+                       (val >> 8) & 0xf, (val >> 12) & 0xf);
+
+                /* CONTROL1000X1r (CDK 0x8300): fiber mode, autoneg */
+                /* Wait — CONTROL1000X1r is in DIGITAL block, CDK 0x8300 = ... */
+                /* Actually, CONTROL1000X1r is at block 0x8300, offset 0x10 = reg 0x10+0x10...
+                 * No — let me use the CDK address. CONTROL1000X1r CDK might be elsewhere */
+
+                /* DIGITAL block: CONTROL1000X1r = CDK 0x8300 (wait, that's MISC1r block)
+                 * Actually SERDESDIGITAL_CONTROL1000X1r = 0x8300 in some drivers,
+                 * but in WC it's at a different address. Let me read from block 0x8300 regs. */
+
+                /* CL49 LSM status (64b/66b PCS block lock) */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8360);
+                PHY_BUS_READ(pc_dbg, 0x17, &val);
+                syslog(LOG_INFO, "Port %s: CL49_LSM=0x%04x block_lock=%d",
+                       switchd.ports[i].ifname, val & 0xffff,
+                       (val >> 15) & 1);
+
+                /* ANARXSTATUSr: signal detect, CDR status
+                 * Read with multiple rxtestsel values to find actual sigdet */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x80b0);
+                PHY_BUS_READ(pc_dbg, 0x11, &val);
+                {
+                    uint32_t rxctrl_orig = val & 0xffff;
+                    int sel;
+                    for (sel = 0; sel <= 7; sel++) {
+                        uint32_t rxctrl_new = (rxctrl_orig & ~0x1f) | sel;
+                        PHY_BUS_WRITE(pc_dbg, 0x11, rxctrl_new);
+                        PHY_BUS_READ(pc_dbg, 0x10, &val);
+                        syslog(LOG_INFO, "Port %s: ANARXSTAT[sel=%d]=0x%04x",
+                               switchd.ports[i].ifname, sel, val & 0xffff);
+                    }
+                    /* Restore */
+                    PHY_BUS_WRITE(pc_dbg, 0x11, rxctrl_orig);
+                }
+
+                /* RX66_CONTROLr: clock compensation enable
+                 * CDK 0x83C0 = block 0x83C0, offset 0x0, CL22 reg 0x10 */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x83c0);
+                PHY_BUS_READ(pc_dbg, 0x10, &val);
+                syslog(LOG_INFO, "Port %s: RX66_CTRL=0x%04x cc_en=%d cc_data=%d",
+                       switchd.ports[i].ifname, val & 0xffff,
+                       val & 1, (val >> 1) & 1);
+
+                /* COMBO_MIICNTLr (IEEE MII control, reg 0x00 page 0)
+                 * autoneg_enable = bit 12 */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0000);
+                PHY_BUS_READ(pc_dbg, 0x00, &val);
+                syslog(LOG_INFO, "Port %s: MII_CTRL=0x%04x an_en=%d loopback=%d",
+                       switchd.ports[i].ifname, val & 0xffff,
+                       (val >> 12) & 1, (val >> 14) & 1);
+
+                /* MII_STATUS (IEEE reg 1): link, AN complete */
+                PHY_BUS_READ(pc_dbg, 0x01, &val);
+                syslog(LOG_INFO, "Port %s: MII_STAT=0x%04x link=%d an_done=%d",
+                       switchd.ports[i].ifname, val & 0xffff,
+                       (val >> 2) & 1, (val >> 5) & 1);
+
+                /* AN_IEEECONTROL1r: CL73 AN enable
+                 * Block 0x0010 (AN block), reg 0x10 (offset 0) */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0010);
+                PHY_BUS_READ(pc_dbg, 0x10, &val);
+                syslog(LOG_INFO, "Port %s: AN_CTRL1=0x%04x cl73_an_en=%d restart=%d",
+                       switchd.ports[i].ifname, val & 0xffff,
+                       (val >> 12) & 1, (val >> 9) & 1);
+
+                /* TENGBASE_KR_PMD_CONTROL_150r: CL72 training enable
+                 * CDK 0x0096 → IEEE CL45 device 1, reg 0x96
+                 * In CL22 AER block: block 0x0090, offset 6, reg 0x16 */
+                PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0090);
+                PHY_BUS_READ(pc_dbg, 0x16, &val);
+                syslog(LOG_INFO, "Port %s: KR_PMD_CTRL=0x%04x training_en=%d",
+                       switchd.ports[i].ifname, val & 0xffff,
+                       (val >> 1) & 1);
 
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0000);
             }

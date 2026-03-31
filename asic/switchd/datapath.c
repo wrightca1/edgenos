@@ -48,7 +48,20 @@ static int datapath_cpu_punt_init(int unit)
 
     ioerr += WRITE_CPU_CONTROL_1r(unit, cpu_ctrl1);
 
-    syslog(LOG_INFO, "CPU punt: L3 MTU/slowpath/dstmiss enabled");
+    /* Enable ARP and DHCP punt to CPU on all ports */
+    {
+        int p;
+        PROTOCOL_PKT_CONTROLr_t ppc;
+        for (p = 0; p < CDK_CONFIG_MAX_PORTS; p++) {
+            ioerr += READ_PROTOCOL_PKT_CONTROLr(unit, p, &ppc);
+            PROTOCOL_PKT_CONTROLr_ARP_REQUEST_TO_CPUf_SET(ppc, 1);
+            PROTOCOL_PKT_CONTROLr_ARP_REPLY_TO_CPUf_SET(ppc, 1);
+            PROTOCOL_PKT_CONTROLr_DHCP_PKT_TO_CPUf_SET(ppc, 1);
+            ioerr += WRITE_PROTOCOL_PKT_CONTROLr(unit, p, ppc);
+        }
+    }
+
+    syslog(LOG_INFO, "CPU punt: L3 MTU/slowpath/dstmiss + ARP/DHCP enabled");
     return ioerr;
 }
 

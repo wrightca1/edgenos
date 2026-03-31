@@ -42,4 +42,13 @@
 #define CDK_TOUPPER                             toupper
 #define CDK_STRCAT                              strcat
 
+/*
+ * XGSD CMC (CMIC Management Controller) selection.
+ * BCM56846 iProc uses CMC 0 for the PCI host interface.
+ * Without this, CDK_XGSD_CMC_OFFSET adds an uninitialized
+ * offset to all CMICm register addresses, causing DMA
+ * registers to be accessed at the wrong AXI address.
+ */
+#define CDK_XGSD_CMC                            0
+
 #endif /* __CDK_CUSTOM_CONFIG_H__ */

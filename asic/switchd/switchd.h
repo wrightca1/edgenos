@@ -51,6 +51,7 @@ extern struct switchd_state switchd;
 int bde_open(void);
 void bde_close(void);
 void bde_dma_pool_reset(void);
+void bde_set_dma_endianness(void);
 
 /* CDK/BMD interface */
 int cdk_init(void);

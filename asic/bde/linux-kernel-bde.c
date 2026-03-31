@@ -73,6 +73,7 @@ struct bde_dma_info {
 #define PAXB_REMAP_SUBWIN      7          /* Sub-window used for dynamic remap */
 #define PAXB_REMAP_BAR0_BASE   (PAXB_REMAP_SUBWIN * PAXB_SUBWIN_SIZE) /* 0x7000 */
 #define PAXB_IMAP_VALID        0x1        /* Valid bit in IMAP register */
+#define PAXB_AXI_BASE          0x18000000 /* AXI base for iProc CMIC registers */
 
 struct bde_device {
 	struct pci_dev *pdev;
@@ -196,12 +197,22 @@ static u32 iproc_axi_read(struct bde_device *bdev, u32 axi_addr)
 			return ioread32(bdev->base + (i * PAXB_SUBWIN_SIZE) + offset);
 	}
 
-	/* No match — remap sub-window 7 */
-	iowrite32(page | PAXB_IMAP_VALID,
-		  bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
-	/* Readback to ensure the write completes before using the window */
-	bdev->subwin_base[PAXB_REMAP_SUBWIN] =
-		ioread32(bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN)) & ~0xfff;
+	/* No match — remap sub-window 7 via PCI config space.
+	 * BAR0 MMIO writes to PAXB IMAP registers don't persist on iProc.
+	 */
+	{
+		u32 imap_val = page | PAXB_IMAP_VALID;
+		u32 imap_rb;
+		pci_write_config_dword(bdev->pdev,
+			PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN), imap_val);
+		pci_read_config_dword(bdev->pdev,
+			PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN), &imap_rb);
+		bdev->subwin_base[PAXB_REMAP_SUBWIN] = imap_rb & ~0xfff;
+		if (printk_ratelimit())
+			dev_info(&bdev->pdev->dev,
+				 "AXI remap: page=0x%08x imap_rb=0x%08x bar_off=0x%x\n",
+				 page, imap_rb, PAXB_REMAP_BAR0_BASE + offset);
+	}
 
 	return ioread32(bdev->base + PAXB_REMAP_BAR0_BASE + offset);
 }
@@ -227,11 +238,16 @@ static void iproc_axi_write(struct bde_device *bdev, u32 axi_addr, u32 val)
 		}
 	}
 
-	/* No match — remap sub-window 7 */
-	iowrite32(page | PAXB_IMAP_VALID,
-		  bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
-	bdev->subwin_base[PAXB_REMAP_SUBWIN] =
-		ioread32(bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN)) & ~0xfff;
+	/* No match — remap sub-window 7 via PCI config space */
+	{
+		u32 imap_val = page | PAXB_IMAP_VALID;
+		u32 imap_rb;
+		pci_write_config_dword(bdev->pdev,
+			PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN), imap_val);
+		pci_read_config_dword(bdev->pdev,
+			PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN), &imap_rb);
+		bdev->subwin_base[PAXB_REMAP_SUBWIN] = imap_rb & ~0xfff;
+	}
 
 	iowrite32(val, bdev->base + PAXB_REMAP_BAR0_BASE + offset);
 }
@@ -301,6 +317,40 @@ static int bde_pci_probe(struct pci_dev *pdev,
 		pcie_set_readrq(pdev, maxpayload);
 	}
 
+	/* DEBUG: Test PAXB register writes via iowrite32 vs __raw_writel */
+	{
+		u32 before, after_io, after_raw;
+
+		/* Test ENDIAN_SEL at BAR0+0x174 */
+		iowrite32(0x0, bdev->base + 0x174);     /* Clear */
+		before = ioread32(bdev->base + 0x174);
+
+		iowrite32(0x06000006, bdev->base + 0x174);
+		after_io = ioread32(bdev->base + 0x174);
+
+		iowrite32(0x0, bdev->base + 0x174);     /* Clear */
+		__raw_writel(0x06000006, bdev->base + 0x174);
+		after_raw = __raw_readl(bdev->base + 0x174);
+
+		dev_info(&pdev->dev,
+			 "ENDIAN_SEL test: before=0x%08x iowrite32=0x%08x __raw_writel=0x%08x\n",
+			 before, after_io, after_raw);
+
+		/* Test OARR_2 at BAR0+0x2D60 */
+		before = ioread32(bdev->base + 0x2D60);
+		iowrite32(0x1, bdev->base + 0x2D60);
+		after_io = ioread32(bdev->base + 0x2D60);
+		__raw_writel(0x01000000, bdev->base + 0x2D60);
+		after_raw = __raw_readl(bdev->base + 0x2D60);
+
+		dev_info(&pdev->dev,
+			 "OARR_2 test: before=0x%08x iowrite32(0x1)=0x%08x __raw_writel(0x01000000)=0x%08x\n",
+			 before, after_io, after_raw);
+
+		/* Clean up — set OARR_2 to enable */
+		__raw_writel(0x01000000, bdev->base + 0x2D60);
+	}
+
 	/*
 	 * PAXB endianness: leave at default (no swap).
 	 * CDK with SYS_BE_PIO=1 handles endianness in software.
@@ -327,24 +377,25 @@ static int bde_pci_probe(struct pci_dev *pdev,
 	 * dma_hi_bits = 0x1 for PCI core 0, 0x2 for PCI core 1.
 	 * BCM56846 uses PCI core 0 → dma_hi_bits = 0x1.
 	 */
+	/*
+	 * Write OARR via PCI config space — BAR0 MMIO writes to PAXB
+	 * config registers (0x2xxx) don't persist after ASIC core reset.
+	 * PCI config space writes go through the iProc PAXB and persist.
+	 */
 	{
 		u32 oarr2;
 
-		/* Disable EP AXI config */
-		iowrite32(0x0, bdev->base + 0x2104);
+		/* Disable EP AXI config via PCI config space */
+		pci_write_config_dword(pdev, 0x2104, 0x0);
 
 		/* Enable OARR_2 for outbound DMA */
-		iowrite32(0x1, bdev->base + 0x2D60);
+		pci_write_config_dword(pdev, 0x2D60, 0x1);
 
-		/* Set upper address bits for DMA.
-		 * P2020 is 32-bit — use 0x0 for upper bits (not 0x1).
-		 * dma_hi_bits=0x1 is for 64-bit systems where DMA pool
-		 * is in the upper 4GB address range.
-		 */
-		iowrite32(0x0, bdev->base + 0x2D64);
+		/* DMA upper address bits (0 for 32-bit P2020) */
+		pci_write_config_dword(pdev, 0x2D64, 0x0);
 
-		oarr2 = ioread32(bdev->base + 0x2D60);
-		dev_info(&pdev->dev, "PAXB DMA: OARR_2=0x%08x (DMA enabled)\n",
+		pci_read_config_dword(pdev, 0x2D60, &oarr2);
+		dev_info(&pdev->dev, "PAXB DMA: OARR_2=0x%08x (via PCI config)\n",
 			 oarr2);
 	}
 
@@ -501,16 +552,21 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		if (rio.addr >= bdev->base_size)
 			return -EINVAL;
 		/*
-		 * Use direct BAR0 access for all registers.
-		 * This is the original working path that gets links UP.
+		 * Register access routing:
+		 * - Addresses < 0x1000: direct BAR0 (sub-window 0).
+		 *   Covers SCHAN (0x050), legacy CMIC, PAXB config.
+		 * - Addresses >= 0x1000: AXI sub-window remap.
+		 *   Needed for CMICm DMA (0x31xxx), MIIM (0x32xxx),
+		 *   and other iProc peripheral registers.
 		 *
-		 * CMICm DMA registers at 0x31xxx will NOT work through
-		 * this path (they need AXI sub-window remap), but all
-		 * other registers (SCHAN, MIIM, MAC, PAXB) work correctly.
-		 *
-		 * DMA will be fixed separately by using the IPROC ioctls.
+		 * Direct BAR0 for sub-window 0 avoids timing issues
+		 * with SCHAN (atomic MSG+CTRL writes).
 		 */
-		rio.val = iproc_read(bdev, rio.addr);
+		if (rio.addr >= PAXB_SUBWIN_SIZE)
+			rio.val = iproc_axi_read(bdev,
+						 PAXB_AXI_BASE + rio.addr);
+		else
+			rio.val = iproc_read(bdev, rio.addr);
 		if (copy_to_user((void __user *)arg, &rio, sizeof(rio)))
 			return -EFAULT;
 		return 0;
@@ -525,7 +581,11 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -ENODEV;
 		if (rio.addr >= bdev->base_size)
 			return -EINVAL;
-		iproc_write(bdev, rio.addr, rio.val);
+		if (rio.addr >= PAXB_SUBWIN_SIZE)
+			iproc_axi_write(bdev,
+					PAXB_AXI_BASE + rio.addr, rio.val);
+		else
+			iproc_write(bdev, rio.addr, rio.val);
 		return 0;
 
 	case BDE_IOC_DMA_ALLOC:

@@ -230,7 +230,18 @@ static void handle_tun_tx(int port_idx)
     pkt.data = dma_buf;
     pkt.size = len;
     pkt.baddr = baddr;
-    pkt.flags = BMD_PKT_F_UNTAGGED;
+    pkt.flags = 0;  /* Don't set UNTAGGED — avoids hdr_size/hdr_offset mismatch in DCB scatter-gather */
+
+    /* Debug: dump first 32 bytes of packet */
+    if (port->tx_packets < 3) {
+        char hex[97];
+        int i, n = len < 32 ? len : 32;
+        for (i = 0; i < n; i++)
+            sprintf(hex + i*3, "%02x ", ((unsigned char*)dma_buf)[i]);
+        hex[n*3] = '\0';
+        syslog(LOG_INFO, "TX %s: port=%d len=%d baddr=0x%08x: %s",
+               port->ifname, pkt.port, len, (unsigned)baddr, hex);
+    }
 
     /* Send to ASIC */
     rv = bmd_tx(switchd.unit, &pkt);
