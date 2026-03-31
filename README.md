@@ -265,22 +265,21 @@ platform/
 
 ## Implementation Status
 
-### Working (code complete, needs deploy+test)
+### Verified Working (end-to-end ping through ASIC)
 
-| Component | API | Source |
-|-----------|-----|--------|
-| ASIC reset + SerDes firmware | `bmd_reset()` + `bmd_init()` | OpenMDK (WC firmware v0x0101) |
-| Port bringup (10G/40G) | `bmd_port_mode_set()` | OpenMDK |
-| TX driver tuning | `PHY_CONFIG_SET(TxIDrv=2, TxPreIDrv=3)` | OpenMDK + Cumulus RE values |
-| Link polling (30ms) | `bmd_port_mode_update()` | OpenMDK |
-| Packet TX (kernel->ASIC) | `bmd_tx()` with DMA coherent | OpenMDK |
-| Packet RX (ASIC->kernel) | `bmd_rx_start/poll()` 16-buffer ring | OpenMDK |
-| L2 MAC forwarding | `bmd_port_mac_addr_add()` | OpenMDK |
-| VLAN management | `bmd_vlan_create/port_add()` | OpenMDK |
-| BDE kernel module | PCI + DMA + IRQ + mmap | Custom |
-| Platform init | 12 modules + GPIO + retimer | Scripts |
-| Thermal management | Fan PWM via CPLD | Scripts |
-| CMIC LED programs | led0.hex + led1.hex | From Cumulus capture |
+```
+AS5610 swp2 (10.101.101.10) <--10GbE SFP+--> Nexus Eth1/34 (10.101.101.9)
+ping: 5/5, 0% loss, RTT ~0.57ms
+```
+
+| Component | Status | Source |
+|-----------|--------|--------|
+| Link UP (10G SFP+) | Working | OpenMDK SerDes + retimer CDR reset |
+| TX DMA (kernel → wire) | Working | OpenMDK xgs_dma + endianness fix |
+| RX DMA (wire → kernel) | Working | OpenMDK xgs_dma + VLAN strip |
+| ARP resolution | Working | PROTOCOL_PKT_CONTROLr punt |
+| ICMP ping | Working | Static L2 + CML learning fix |
+| TUN interfaces (swp1-52) | Working | Custom packet_io.c |
 
 ### Not Yet Implemented
 
@@ -290,6 +289,151 @@ platform/
 | ACL/FP table programming | Requires OpenNSL |
 | ECMP hardware hash | Works at L2; L3 ECMP needs OpenNSL |
 | LLDP/STP/BGP | Install from packages (lldpd, mstpd, frr) |
+| swp1 link | Retimer CDR on bus 11 doesn't lock (hardware issue on that channel) |
+
+---
+
+## Key Technical Discoveries
+
+Each fix below was required to get end-to-end packet I/O working on
+BCM56846 (iProc) with a PowerPC (big-endian) host. Documented here
+because none of this is in public Broadcom documentation.
+
+### 1. Retimer CDR Reset (link UP)
+
+**Problem**: DS100DF410 retimer passes no signal even with correct EQ settings.
+**Root cause**: CDR (Clock Data Recovery) must be explicitly reset after power-on.
+**Fix**: Toggle register 0x0A between 0x1C (assert reset) and 0x10 (release).
+**How we found it**: DS100DF410 datasheet register map. Register 0x03 (CDR lock
+status) showed 0x00 (unlocked). After CDR reset, it shows 0x04 (locked) and
+the link comes up immediately.
+**Where**: `platform-init.sh` init_retimer(), `portmap.c`
+
+### 2. DMA Engine Selection (xgs not xgsd)
+
+**Problem**: CMICm DMA registers at 0x31xxx are inaccessible through BAR0.
+**Root cause**: iProc PAXB sub-window IMAP registers cannot be written via BAR0
+MMIO or PCI config space (only 4KB config on P2020). Without IMAP remap,
+only sub-window 0 (0x000-0xFFF → AXI 0x18000000) works.
+**Fix**: Use old CMIC DMA (xgs_dma at offset 0x0100) instead of CMICm
+(xgsd_dma at 0x31xxx). Old CMIC is in sub-window 0 and works directly.
+**How we found it**: Added AXI remap debug to BDE kernel module. IMAP register
+writes returned only the valid bit — page address was always lost. Traced
+through Broadcom SDK `shbde_iproc.c` which also uses BAR0 MMIO for IMAP,
+confirming the mechanism is correct but doesn't work on P2020 due to 4KB
+PCI config space limitation preventing proper PAXB initialization.
+**Where**: `mdk-init/Makefile` (reverted chip files to xgs_dma), `cdk_custom_config.h`
+
+### 3. CMC Offset Fix (CDK_XGSD_CMC=0)
+
+**Problem**: xgsd register access adds uninitialized CMC offset (0x8000) to addresses.
+**Root cause**: `CDK_XGSD_CMC_OFFSET(unit)` returns `CMC * 0x1000`. Without
+`CDK_XGSD_CMC` defined, uses dynamic value which is uninitialized = garbage.
+**Fix**: `-DCDK_XGSD_CMC=0` in build flags. BCM56846 iProc uses CMC 0 for PCI.
+**How we found it**: BDE AXI remap debug showed page=0x18039000 instead of
+expected 0x18031000. The 0x8000 difference = CMC 8 * 0x1000. Traced through
+CDK headers to `CDK_XGSD_CMC_OFFSET` macro.
+**Where**: `mdk-init/Makefile`, `cdk_custom_config.h`
+
+### 4. DMA Endianness (CMIC_ENDIANESS_SEL)
+
+**Problem**: DMA descriptors unreadable by ASIC — DMA_ACTIVE forever, never completes.
+**Root cause**: `CMIC_ENDIANESS_SEL` (register 0x174) is cleared by CPS reset during
+`bmd_reset()`. The CDK's `cdk_xgs_cmic_init()` tries to re-set it, but
+iowrite32 on PPC + CDK SYS_BE_PIO double-swap issue means the write may
+not take effect reliably.
+**Fix**: Set `ENDIAN_SEL = 0x04000004` (DMA_OTHER only) AFTER all bmd_init
+completes, right before packet_io starts. DMA_OTHER enables descriptor
+word byte-swap (BE host memory → LE CMIC internal). DMA_PACKET must NOT
+be set — packet data is already in network byte order.
+**How we found it**: Added debug printk to xgs_dma chan_start/poll showing
+DMA_STAT register. DMA_ACTIVE was set but DESC_DONE never appeared. Tested
+all ENDIAN_SEL values (0x00-0x07) via devmem. Discovered that
+`iowrite32(0x06000006)` works from kernel but CDK path doesn't persist
+after CPS reset. Added `bde_set_dma_endianness()` called from switchd.c.
+**Where**: `bde_interface.c` bde_set_dma_endianness(), `switchd.c`
+
+### 5. Single DCB TX (no scatter-gather)
+
+**Problem**: Nexus receives frames as "UnderSize" (InOctets shows ~70 bytes for 90-byte frame).
+**Root cause**: OpenMDK scatter-gather TX splits frame into 2 DCBs:
+DCB[0]=16 bytes (L2 header), DCB[1]=remaining. On BCM56846 iProc, the ASIC
+consumes DCB[0]'s data as metadata and only sends DCB[1] on the wire.
+**Fix**: Use a single DCB for the entire frame. Removed SG/CHAIN flags.
+**How we found it**: Nexus `show interface counters` showed InOctets=70 for
+a 90-byte frame. 90-16=74, 74-4(FCS)=70 — exactly DCB[1]'s byte count.
+The first 16 bytes (Ethernet header) were being eaten by the ASIC's
+scatter-gather handling on iProc.
+**Where**: `bcm56840_a0_bmd_tx.c` (pkgsrc — modified via Docker)
+
+### 6. Minimum Frame Padding (64 bytes)
+
+**Problem**: Nexus reports "UnderSize" for ARP frames (42 bytes from kernel).
+**Root cause**: The ASIC strips 4 bytes (VLAN tag) on egress for untagged ports,
+even if no VLAN tag was present. With standard 60-byte padding: 60-4=56+4FCS=60 → UnderSize.
+**Fix**: Pad frames to 64 bytes minimum (not the standard 60). After ASIC
+strips 4 bytes: 64-4=60+4FCS=64 → exactly at Ethernet minimum.
+**How we found it**: Nexus `show interface counters errors` showed UnderSize
+but 0 FCS-Err. Frames had valid CRC but were too short. Incrementally
+tested padding from 60→64 bytes until Nexus accepted the frames.
+**Where**: `packet_io.c` handle_tun_tx()
+
+### 7. RX VLAN Tag Strip
+
+**Problem**: Kernel can't parse received frames — ARP doesn't resolve despite frames arriving.
+**Root cause**: ASIC inserts 802.1Q VLAN tag (81 00 00 01) on all frames
+forwarded to CPU port. The kernel sees an unexpected VLAN tag before the
+EtherType and can't parse the protocol.
+**Fix**: Strip 4-byte VLAN tag at offset 12 in the RX path before writing
+to TUN interface.
+**How we found it**: Added hex dump to RX path in packet_io.c. Received
+frames showed `ff ff ff ff ff ff 6c b2 ae cd 13 33 81 00 00 01 08 06`
+— VLAN tag 0x8100 between src MAC and EtherType.
+**Where**: `packet_io.c` handle_asic_rx()
+
+### 8. Protocol Packet CPU Punt (ARP/DHCP)
+
+**Problem**: ASIC receives ARP broadcasts but drops them — never reach CPU.
+**Root cause**: `PROTOCOL_PKT_CONTROLr` (per-port register) defaults to 0,
+meaning ARP/DHCP/BPDU packets are forwarded normally through L2 but not
+copied to CPU.
+**Fix**: Set `ARP_REQUEST_TO_CPU`, `ARP_REPLY_TO_CPU`, `DHCP_PKT_TO_CPU`
+on all valid ports (1-72).
+**How we found it**: RX DMA debug showed zero packets during ARP attempts.
+Nexus showed it was sending ARP broadcasts (OutBcastPkts incrementing).
+Searched BCM56840 register definitions for "ARP" and "CPU" and found
+PROTOCOL_PKT_CONTROLr with per-port punt bits.
+**Where**: `datapath.c` datapath_cpu_punt_init()
+
+### 9. Static L2 MAC Entries for CPU
+
+**Problem**: Unicast frames to our MAC addresses don't reach CPU.
+**Root cause**: Each swp interface has a unique MAC (TUN-generated). Frames
+destined to these MACs go through L2 lookup. Without an entry pointing to
+CPU port, they're flooded or dropped.
+**Fix**: Read each TUN's MAC via `ioctl(SIOCGIFHWADDR)` and add to L2 table
+via `bmd_port_mac_addr_add(unit, port=0, vlan=1, mac)` after TUN creation.
+**How we found it**: ARP resolved (uses protocol punt) but ICMP ping failed
+(uses L2 forwarding). Added static L2 entries for all swp MACs → CPU.
+**Where**: `packet_io.c` packet_io_init()
+
+### 10. Disable CPU Port MAC Learning (CML_FLAGS)
+
+**Problem**: ICMP replies still don't reach CPU despite static L2 entries.
+**Root cause**: When CPU sends a frame via DMA, the ASIC hardware-learns the
+source MAC on the CPU port. But the SOBMH directs the frame to a front-panel
+port, causing the L2 entry to be overwritten: MAC → front-panel port instead
+of MAC → CPU. Incoming unicast replies then get forwarded back out the
+front-panel port (same-port drop) instead of to CPU.
+**Fix**: Set `PORT_TABm.CML_FLAGS_NEW=0` and `CML_FLAGS_MOVE=0` on CPU port 0.
+This disables hardware MAC learning for CPU-originated frames, letting the
+static L2 entries remain authoritative.
+**How we found it**: After adding L2 entries and protocol punt, ARP worked
+(protocol punt bypasses L2) but ICMP didn't (uses L2 forwarding).
+RX counter didn't increase during ping → frame never reached CPU.
+Traced through BCM56840 L2 learning architecture: PORT_TABm CML_FLAGS
+controls per-port learning behavior. Setting to 0 on CPU port fixed it.
+**Where**: `datapath.c` datapath_cpu_punt_init()
 
 ---
 
@@ -307,6 +451,7 @@ Key RE findings used (parameter values only, no proprietary code):
 - I2C bus topology: 70 buses, 133 devices (complete sysfs enumeration)
 - S-Channel protocol: 1789 operations captured via GDB breakpoint
 - CMICm register architecture: direct window vs PIO indirect access
+- CPU punt: `modreg cpu_control_1` from Cumulus rc.datapath_0
 
 ---
 
