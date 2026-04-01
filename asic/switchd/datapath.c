@@ -13,10 +13,14 @@
 
 #include <stdio.h>
 #include <syslog.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <net/if.h>
 
 #include "switchd.h"
 
-#include <string.h>
+#include <bmd/bmd.h>
 
 #include <cdk/chip/bcm56840_a0_defs.h>
 #include <cdk/arch/xgs_chip.h>
@@ -134,6 +138,11 @@ static int datapath_cpu_punt_init(int unit)
                 OP_QUEUE_CONFIG1_CELLr_Q_LIMIT_ENABLE_CELLf_SET(oqc1, 1);
                 WRITE_OP_QUEUE_CONFIG1_CELLr(unit, CMIC_PORT, q, oqc1);
             }
+            /* Verify readback */
+            OP_QUEUE_CONFIG_CELLr_t oqc_rb;
+            READ_OP_QUEUE_CONFIG_CELLr(unit, CMIC_PORT, 0, &oqc_rb);
+            syslog(LOG_INFO, "MMU: CPU q0 readback=0x%08x (wrote min=307 shared=2073)",
+                   OP_QUEUE_CONFIG_CELLr_GET(oqc_rb));
             syslog(LOG_INFO, "MMU: CPU OP_QUEUE_CONFIG q0-7 (min=307, shared=2073, enable=1)");
         }
 
@@ -147,6 +156,47 @@ static int datapath_cpu_punt_init(int unit)
             EGR_PORTm_EN_EFILTERf_SET(egr_port, 0);  /* DISABLE egress filter */
             WRITE_EGR_PORTm(unit, 0, egr_port);  /* lport 0 = CPU */
             syslog(LOG_INFO, "CPU port: egress VLAN filter DISABLED");
+
+        /* IFP: COPY_TO_CPU for ALL frames.
+         * Write FP_TCAM entry 0 = all zeros (match everything).
+         * Write FP_POLICY entry 0 with G_COPY_TO_CPU=1.
+         * FP_POLICY_TABLEm G_COPY_TO_CPUf at bits [33:31] = 001 */
+        {
+            uint32_t fp_tcam[15] = {0};  /* All zeros = match everything */
+            fp_tcam[0] = 3;  /* VALID=3 (entry valid for both pipes) */
+            cdk_xgs_mem_write(unit, FP_TCAMm, 0, fp_tcam, 15);
+
+            uint32_t fp_policy[8] = {0};
+            /* G_COPY_TO_CPU at bits [33:31] = 001
+             * bits 33:32 are in word[1] bits [1:0], bit 31 is in word[0] bit [31] */
+            fp_policy[0] |= (1u << 31);  /* G_COPY_TO_CPU bit 31 */
+            cdk_xgs_mem_write(unit, FP_POLICY_TABLEm, 0, fp_policy, 8);
+
+            syslog(LOG_INFO, "IFP: entry 0 = COPY_TO_CPU for all frames");
+        }
+
+        /* DIAGNOSTIC: Try L2 hash insert for our swp2 MAC → CPU port.
+         * If L2 hash forwarding to CPU works, the problem is TCAM.
+         * If it doesn't, the problem is the CPU delivery path. */
+        {
+            extern int bcm56840_a0_bmd_cpu_mac_addr_add(int, int, const bmd_mac_addr_t *);
+            bmd_mac_addr_t test_mac;
+            /* Use the swp2 MAC that the Nexus sends ICMP replies to */
+            struct ifreq ifr2;
+            int sock2 = socket(AF_INET, SOCK_DGRAM, 0);
+            if (sock2 >= 0) {
+                memset(&ifr2, 0, sizeof(ifr2));
+                strncpy(ifr2.ifr_name, "swp2", IFNAMSIZ - 1);
+                if (ioctl(sock2, SIOCGIFHWADDR, &ifr2) == 0) {
+                    memcpy(test_mac.b, ifr2.ifr_hwaddr.sa_data, 6);
+                    int rv4 = bcm56840_a0_bmd_cpu_mac_addr_add(unit, 1, &test_mac);
+                    syslog(LOG_INFO, "L2 HASH: swp2 MAC %02x:%02x:%02x:%02x:%02x:%02x → CPU (rv=%d)",
+                           test_mac.b[0], test_mac.b[1], test_mac.b[2],
+                           test_mac.b[3], test_mac.b[4], test_mac.b[5], rv4);
+                }
+                close(sock2);
+            }
+        }
 
         /* TEST: Add broadcast MAC to L2_USER_ENTRY to verify TCAM is searched.
          * If we get EXTRA ARP copies (beyond protocol punt), TCAM works. */
