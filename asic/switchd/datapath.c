@@ -185,6 +185,35 @@ static int datapath_cpu_punt_init(int unit)
             rv = cdk_xgs_mem_write(unit, 0x0d260000, 1, egr, 8);
             syslog(LOG_INFO, "EGR_VLAN[1] write: rv=%d", rv);
 
+            /* Configure MMU output queue for CPU port.
+             * Without this, the CPU port has zero buffer credits and
+             * ALL L2-forwarded frames get dropped in the MMU.
+             * (ARP works because protocol punt bypasses MMU queuing.)
+             *
+             * From Cumulus rc.datapath_0:
+             *   q_shared_limit_cell=2073, q_min_cell=307, q_limit_enable=1
+             */
+            /* Configure MMU for CPU port (mport=0).
+             * bmd_init SKIPS mport=0 in its MMU loop.
+             * CPU uses MMU_THDO_CONFIG_EX (extended queue table).
+             * mport=0 base = (0 - 0) * 74 = 0; queues at index 0-73.
+             * Normal COS queues at index 64-73 (base + 64).
+             * From Cumulus: q_shared_limit=2073, q_min=307, q_limit_enable=1
+             */
+            {
+                MMU_THDO_CONFIG_EX_0m_t thdo_ex0;
+                int q;
+                /* CPU mport=0: queue base = 0, normal queues at offset 64 */
+                for (q = 0; q < 10; q++) {
+                    MMU_THDO_CONFIG_EX_0m_CLR(thdo_ex0);
+                    MMU_THDO_CONFIG_EX_0m_Q_SHARED_LIMIT_CELLf_SET(thdo_ex0, 2073);
+                    MMU_THDO_CONFIG_EX_0m_Q_MIN_CELLf_SET(thdo_ex0, 307);
+                    MMU_THDO_CONFIG_EX_0m_Q_LIMIT_ENABLE_CELLf_SET(thdo_ex0, 1);
+                    WRITE_MMU_THDO_CONFIG_EX_0m(unit, 64 + q, thdo_ex0);
+                }
+                syslog(LOG_INFO, "MMU: CPU port EX queues 64-73 configured (min=307, shared=2073)");
+            }
+
             /* Check EGR_ENABLE for CPU port (index 0) */
             uint32_t egr_en = 0;
             cdk_xgs_mem_read(unit, EGR_ENABLEm, 0, &egr_en, 1);
