@@ -244,6 +244,19 @@ static int datapath_cpu_punt_init(int unit)
         }
     }
 
+    /* Enable TOCPU packets through old CMIC.
+     * CMIC_PKT_CTRLr (0x714): bit 2=ENABLE_TOCPU, bit 1=ENABLE_FROMCPU
+     * CMIC_PKT_COSr (0x730): bitmask of acceptable COS queues
+     * Without these, IFP/L2 copy-to-CPU packets are silently dropped. */
+    {
+        uint32_t pkt_ctrl = 0, pkt_cos = 0;
+        CDK_DEV_WRITE32(unit, 0x714, 0x06);  /* TOCPU + FROMCPU */
+        CDK_DEV_WRITE32(unit, 0x730, 0xFFFFFFFF);  /* All COS */
+        CDK_DEV_READ32(unit, 0x714, &pkt_ctrl);
+        CDK_DEV_READ32(unit, 0x730, &pkt_cos);
+        syslog(LOG_INFO, "CMIC PKT_CTRL=0x%08x PKT_COS=0x%08x", pkt_ctrl, pkt_cos);
+    }
+
     syslog(LOG_INFO, "CPU punt: L3 MTU/slowpath/dstmiss + ARP/DHCP enabled");
     return ioerr;
 }
