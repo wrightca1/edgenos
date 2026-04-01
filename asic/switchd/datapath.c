@@ -91,139 +91,16 @@ static int datapath_cpu_punt_init(int unit)
         syslog(LOG_INFO, "L3 enabled on all front-panel ports (V4+V6)");
     }
 
-    /* Disable MAC learning on ALL ports and flush stale L2 entries.
-     * bmd_init sets CML=8 (HW learn) during bmd_switching_init.
-     * By the time we get here, the ASIC may have already learned
-     * our TX source MACs on the wrong ports. Clear CML and flush. */
+    /* Leave all bmd_init defaults. With SYS_BE_PIO=0, L2 learning
+     * and VLAN tables should be correctly programmed by bmd_switching_init.
+     * Just log diagnostic info. */
     {
-        static uint32_t ptab[10];
-        int p, rv;
-        for (p = 0; p <= 72; p++) {
-            memset(ptab, 0, sizeof(ptab));
-            rv = cdk_xgs_mem_read(unit, PORT_TABm, p, ptab, 10);
-            if (rv != 0) continue;
-            ptab[4] &= ~(0x1FE);  /* CML_FLAGS_NEW=0, CML_FLAGS_MOVE=0 */
-            cdk_xgs_mem_write(unit, PORT_TABm, p, ptab, 10);
-        }
-
-        /* Flush all dynamic L2 entries via L2_BULK_CONTROL */
-        {
-            L2_BULK_CONTROLr_t l2bc;
-            L2_BULK_CONTROLr_CLR(l2bc);
-            /* Delete all non-static entries: NUM_ENTRIES=0 (all), ACTION bits */
-            L2_BULK_CONTROLr_SET(l2bc, (1 << 1));  /* L2_MOD_FIFO_ENABLE + action */
-            WRITE_L2_BULK_CONTROLr(unit, l2bc);
-        }
-
-        syslog(LOG_INFO, "All ports CML=0, dynamic L2 entries flushed");
-
-        /* Write VLAN 1 directly to the REAL ingress VLAN table (QVLAN).
-         *
-         * CDK's VLAN_TABm (0x05174000) is NOT the ingress lookup table.
-         * The actual table is QVLAN at S-Channel address 0x12168000
-         * (basetype=2, block=ipipe0, confirmed from Cumulus RE).
-         *
-         * Format (10 words, from Cumulus VLAN_TABLE_FORMAT.md):
-         *   w0: PORT_BITMAP[31:0]  - bit0=CPU, bit1=xe0/swp1, ...
-         *   w1: PORT_BITMAP[63:32]
-         *   w2: PORT_BITMAP[65:64] + ING_PORT_BITMAP[31:2] (bits [31:2])
-         *   w3: ING_PORT_BITMAP[63:32]
-         *   w4: ING_PORT_BITMAP[65:64] (bits [1:0]) + STG[12:4]
-         *   w5: (other fields)
-         *   w6: VALID at bit 13
-         *   w7: VLAN_PROFILE_PTR at bits [14:8]
-         *   w8-w9: (other fields)
-         */
-        {
-            static uint32_t qvlan[10];
-            memset(qvlan, 0, sizeof(qvlan));
-
-            /* First read current state */
-            rv = cdk_xgs_mem_read(unit, 0x12168000, 1, qvlan, 10);
-            syslog(LOG_INFO, "QVLAN[1] read: w0=0x%08x w2=0x%08x w4=0x%08x w6=0x%08x (rv=%d)",
-                   qvlan[0], qvlan[2], qvlan[4], qvlan[6], rv);
-
-            /* Set all 52 ports + CPU in PORT_BITMAP */
-            qvlan[0] = 0xFFFFFFFF;  /* ports 0-31 (CPU + swp1-31) */
-            qvlan[1] = 0x001FFFFF;  /* ports 32-52 (swp32-52) */
-            qvlan[2] = (qvlan[2] & ~0x3) | 0x0;  /* PORT_BITMAP bits 65:64 = 0 */
-
-            /* Set same for ING_PORT_BITMAP (at bits 66-131) */
-            qvlan[2] |= (0xFFFFFFFF << 2);  /* ING bits 0-29 at w2[31:2] */
-            qvlan[3] = 0xFFFFFFFF;           /* ING bits 30-61 */
-            qvlan[4] = (qvlan[4] & ~0x3) | 0x3; /* ING bits 62-63 at w4[1:0] */
-
-            /* STG = 1 (default spanning tree group) at w4[12:4] */
-            qvlan[4] = (qvlan[4] & ~(0x1FF << 4)) | (1 << 4);
-
-            /* VALID = 1 at w6[13] */
-            qvlan[6] |= (1 << 13);
-
-            /* VLAN_PROFILE_PTR = max (from bmd_vlan_create) at w7[14:8] */
-            qvlan[7] = (qvlan[7] & ~(0x7F << 8)) | (0x7F << 8);
-
-            rv = cdk_xgs_mem_write(unit, 0x12168000, 1, qvlan, 10);
-            syslog(LOG_INFO, "QVLAN[1] write: rv=%d", rv);
-
-            /* Verify */
-            memset(qvlan, 0, sizeof(qvlan));
-            cdk_xgs_mem_read(unit, 0x12168000, 1, qvlan, 10);
-            syslog(LOG_INFO, "QVLAN[1] verify: w0=0x%08x w6=0x%08x valid=%d cpu=%d",
-                   qvlan[0], qvlan[6], (qvlan[6] >> 13) & 1, qvlan[0] & 1);
-
-            /* Also check and fix EGR_VLAN at Cumulus address 0x0d260000 */
-            static uint32_t egr[8];
-            memset(egr, 0, sizeof(egr));
-            rv = cdk_xgs_mem_read(unit, 0x0d260000, 1, egr, 8);
-            syslog(LOG_INFO, "EGR_VLAN[1] read: w0=0x%08x w1=0x%08x w2=0x%08x (rv=%d)",
-                   egr[0], egr[1], egr[2], rv);
-            /* Set PORT_BITMAP with CPU port if not already there */
-            egr[0] |= 0xFFFFFFFF; /* all ports */
-            egr[1] |= 0x001FFFFF;
-            /* VALID + STG */
-            egr[3] |= (1 << 0); /* VALID might be at different position */
-            rv = cdk_xgs_mem_write(unit, 0x0d260000, 1, egr, 8);
-            syslog(LOG_INFO, "EGR_VLAN[1] write: rv=%d", rv);
-
-            /* Configure MMU output queue for CPU port.
-             * Without this, the CPU port has zero buffer credits and
-             * ALL L2-forwarded frames get dropped in the MMU.
-             * (ARP works because protocol punt bypasses MMU queuing.)
-             *
-             * From Cumulus rc.datapath_0:
-             *   q_shared_limit_cell=2073, q_min_cell=307, q_limit_enable=1
-             */
-            /* Configure MMU for CPU port (mport=0).
-             * bmd_init SKIPS mport=0 in its MMU loop.
-             * CPU uses MMU_THDO_CONFIG_EX (extended queue table).
-             * mport=0 base = (0 - 0) * 74 = 0; queues at index 0-73.
-             * Normal COS queues at index 64-73 (base + 64).
-             * From Cumulus: q_shared_limit=2073, q_min=307, q_limit_enable=1
-             */
-            {
-                MMU_THDO_CONFIG_EX_0m_t thdo_ex0;
-                int q;
-                /* CPU mport=0: queue base = 0, normal queues at offset 64 */
-                for (q = 0; q < 10; q++) {
-                    MMU_THDO_CONFIG_EX_0m_CLR(thdo_ex0);
-                    MMU_THDO_CONFIG_EX_0m_Q_SHARED_LIMIT_CELLf_SET(thdo_ex0, 2073);
-                    MMU_THDO_CONFIG_EX_0m_Q_MIN_CELLf_SET(thdo_ex0, 307);
-                    MMU_THDO_CONFIG_EX_0m_Q_LIMIT_ENABLE_CELLf_SET(thdo_ex0, 1);
-                    WRITE_MMU_THDO_CONFIG_EX_0m(unit, 64 + q, thdo_ex0);
-                }
-                syslog(LOG_INFO, "MMU: CPU port EX queues 64-73 configured (min=307, shared=2073)");
-            }
-
-            /* Check EGR_ENABLE for CPU port (index 0) */
-            uint32_t egr_en = 0;
-            cdk_xgs_mem_read(unit, EGR_ENABLEm, 0, &egr_en, 1);
-            syslog(LOG_INFO, "EGR_ENABLE[0] = 0x%08x (PRT_ENABLE=%d)", egr_en, egr_en & 1);
-            if (!(egr_en & 1)) {
-                egr_en |= 1;
-                cdk_xgs_mem_write(unit, EGR_ENABLEm, 0, &egr_en, 1);
-                syslog(LOG_INFO, "EGR_ENABLE[0]: CPU port ENABLED");
-            }
-        }
+        static uint32_t qvlan[10];
+        int rv;
+        memset(qvlan, 0, sizeof(qvlan));
+        rv = cdk_xgs_mem_read(unit, 0x12168000, 1, qvlan, 10);
+        syslog(LOG_INFO, "QVLAN[1]: w0=0x%08x w6=0x%08x valid=%d cpu=%d (rv=%d)",
+               qvlan[0], qvlan[6], (qvlan[6] >> 13) & 1, qvlan[0] & 1, rv);
     }
 
     syslog(LOG_INFO, "CPU punt: L3 MTU/slowpath/dstmiss + ARP/DHCP enabled");
