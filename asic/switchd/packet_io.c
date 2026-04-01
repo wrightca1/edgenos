@@ -224,9 +224,15 @@ int packet_io_init(void)
                         words[4] = (1 << 1);  /* COPY_TO_CPU=1 */
 
                         int rv2 = cdk_xgs_mem_write(switchd.unit, 0x06168000, tcam_idx, words, 5);
-                        syslog(LOG_INFO, "L2_USER[%d]: MAC %02x:%02x:%02x:%02x:%02x:%02x COPY_TO_CPU (rv=%d)",
+                        /* Read back and verify */
+                        uint32_t rb[5] = {0};
+                        cdk_xgs_mem_read(switchd.unit, 0x06168000, tcam_idx, rb, 5);
+                        syslog(LOG_INFO, "L2_USER[%d]: MAC %02x:%02x:%02x:%02x:%02x:%02x rv=%d "
+                               "w=[%08x %08x %08x %08x %08x] rb=[%08x %08x %08x %08x %08x]",
                                tcam_idx, mac.b[0], mac.b[1], mac.b[2],
-                               mac.b[3], mac.b[4], mac.b[5], rv2);
+                               mac.b[3], mac.b[4], mac.b[5], rv2,
+                               words[0], words[1], words[2], words[3], words[4],
+                               rb[0], rb[1], rb[2], rb[3], rb[4]);
                         if (rv2 == 0) tcam_idx++;
                     }
                     int rv = 0;

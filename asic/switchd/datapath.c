@@ -91,12 +91,62 @@ static int datapath_cpu_punt_init(int unit)
         syslog(LOG_INFO, "L3 enabled on all front-panel ports (V4+V6)");
     }
 
-    /* L2_USER_ENTRY TCAM: match our switch MAC and COPY_TO_CPU.
-     * This is the correct mechanism for CPU punt of unicast frames.
-     * L2_USER_ENTRY at 0x06168000, 5 words per entry.
-     * The COPY_TO_CPU bit causes ALL frames matching our MAC to be
-     * copied to CPU, regardless of L2 hash table or VLAN config.
-     * Programmed in packet_io_init after TUN MACs are known. */
+    /* Disable hardware MAC learning on CPU port (port 0).
+     * When CPU sends a frame, the ASIC learns the source MAC on port 0.
+     * Later, when a reply arrives on port 66 with that MAC as destination,
+     * the L2_ENTRY hit sends it to port 0 (CPU) — but the L2_ENTRY
+     * match takes priority over L2_USER_ENTRY COPY_TO_CPU.
+     * By disabling learning on CPU, no L2_ENTRY is created, and
+     * L2_USER_ENTRY COPY_TO_CPU triggers instead.
+     *
+     * Actually: we need the OPPOSITE. L2_ENTRY at port 0 is GOOD.
+     * The problem is learning on FRONT-PANEL ports: when we TX from
+     * CPU out port 66, port 66 might learn our MAC too (overriding
+     * the CPU port learning). Disable learning on front-panel only.
+     */
+    {
+        static uint32_t ptab[10];
+        int p, rv;
+        for (p = 1; p <= 72; p++) {
+            memset(ptab, 0, sizeof(ptab));
+            rv = cdk_xgs_mem_read(unit, PORT_TABm, p, ptab, 10);
+            if (rv != 0) continue;
+            ptab[4] &= ~(0x1FE);  /* CML=0 on front-panel */
+            cdk_xgs_mem_write(unit, PORT_TABm, p, ptab, 10);
+        }
+        syslog(LOG_INFO, "Front-panel ports CML=0 (learning disabled)");
+
+        /* Configure MMU output queues for CPU port using OP_QUEUE_CONFIG registers.
+         * From Cumulus rc.datapath_0: q_shared_limit_cell=2073, q_min_cell=307 */
+        {
+            OP_QUEUE_CONFIG_CELLr_t oqc;
+            OP_QUEUE_CONFIG1_CELLr_t oqc1;
+            int q;
+            for (q = 0; q < 8; q++) {
+                OP_QUEUE_CONFIG_CELLr_CLR(oqc);
+                OP_QUEUE_CONFIG_CELLr_Q_SHARED_LIMIT_CELLf_SET(oqc, 2073);
+                OP_QUEUE_CONFIG_CELLr_Q_MIN_CELLf_SET(oqc, 307);
+                WRITE_OP_QUEUE_CONFIG_CELLr(unit, CMIC_PORT, q, oqc);
+
+                OP_QUEUE_CONFIG1_CELLr_CLR(oqc1);
+                OP_QUEUE_CONFIG1_CELLr_Q_LIMIT_ENABLE_CELLf_SET(oqc1, 1);
+                WRITE_OP_QUEUE_CONFIG1_CELLr(unit, CMIC_PORT, q, oqc1);
+            }
+            syslog(LOG_INFO, "MMU: CPU OP_QUEUE_CONFIG q0-7 (min=307, shared=2073, enable=1)");
+        }
+
+        /* Disable egress VLAN filter on CPU port.
+         * bmd_init sets EN_EFILTER=1 on ALL ports including CPU.
+         * This causes the egress pipeline to drop frames to CPU
+         * if the frame's VLAN doesn't have CPU in EGR_VLAN bitmap. */
+        {
+            EGR_PORTm_t egr_port;
+            EGR_PORTm_CLR(egr_port);
+            EGR_PORTm_EN_EFILTERf_SET(egr_port, 0);  /* DISABLE egress filter */
+            WRITE_EGR_PORTm(unit, 0, egr_port);  /* lport 0 = CPU */
+            syslog(LOG_INFO, "CPU port: egress VLAN filter DISABLED");
+        }
+    }
 
     syslog(LOG_INFO, "CPU punt: L3 MTU/slowpath/dstmiss + ARP/DHCP enabled");
     return ioerr;
