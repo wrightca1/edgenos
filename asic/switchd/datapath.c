@@ -91,17 +91,12 @@ static int datapath_cpu_punt_init(int unit)
         syslog(LOG_INFO, "L3 enabled on all front-panel ports (V4+V6)");
     }
 
-    /* Leave all bmd_init defaults. With SYS_BE_PIO=0, L2 learning
-     * and VLAN tables should be correctly programmed by bmd_switching_init.
-     * Just log diagnostic info. */
-    {
-        static uint32_t qvlan[10];
-        int rv;
-        memset(qvlan, 0, sizeof(qvlan));
-        rv = cdk_xgs_mem_read(unit, 0x12168000, 1, qvlan, 10);
-        syslog(LOG_INFO, "QVLAN[1]: w0=0x%08x w6=0x%08x valid=%d cpu=%d (rv=%d)",
-               qvlan[0], qvlan[6], (qvlan[6] >> 13) & 1, qvlan[0] & 1, rv);
-    }
+    /* L2_USER_ENTRY TCAM: match our switch MAC and COPY_TO_CPU.
+     * This is the correct mechanism for CPU punt of unicast frames.
+     * L2_USER_ENTRY at 0x06168000, 5 words per entry.
+     * The COPY_TO_CPU bit causes ALL frames matching our MAC to be
+     * copied to CPU, regardless of L2 hash table or VLAN config.
+     * Programmed in packet_io_init after TUN MACs are known. */
 
     syslog(LOG_INFO, "CPU punt: L3 MTU/slowpath/dstmiss + ARP/DHCP enabled");
     return ioerr;

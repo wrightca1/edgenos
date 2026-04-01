@@ -195,38 +195,39 @@ int packet_io_init(void)
                     bmd_mac_addr_t mac;
                     memcpy(mac.b, ifr.ifr_hwaddr.sa_data, 6);
                     /*
-                     * Add L2X entry with CPUf=1 — this tells the ASIC to
-                     * forward frames matching this MAC to CPU, regardless
-                     * of PORT_NUM. Unlike PORT_NUM=0 which gets overridden
-                     * by hardware learning, CPUf is a separate flag.
+                     * Program L2_USER_ENTRY TCAM to COPY_TO_CPU for our MAC.
+                     * L2_USER_ENTRY at 0x06168000, 5 words per entry.
+                     * From open-nos-ref/sdk/src/l2.c:
+                     *   w0: VALID=1, MAC[30:0] in bits[31:1]
+                     *   w1: MAC[47:31], VLAN[28:17], KEY_TYPE@29, MASK[1:0]@31:30
+                     *   w2: MASK[33:2]
+                     *   w3: MASK[61:34]
+                     *   w4: COPY_TO_CPU@bit1, PORT_NUM[9:3]
+                     * MASK=all 1s for exact MAC match, VLAN mask=0 for any VLAN.
                      */
                     {
-                        L2Xm_t l2x;
-                        uint32_t fval[2];
-                        /* cdk_xgs_schan_op and cdk_xgs_block_number from headers */
-                        schan_msg_t schan_msg;
+                        static int tcam_idx = 0;
+                        uint32_t words[5];
+                        uint64_t mac48 = (uint64_t)mac.b[0] << 40 | (uint64_t)mac.b[1] << 32 |
+                                         (uint64_t)mac.b[2] << 24 | (uint64_t)mac.b[3] << 16 |
+                                         (uint64_t)mac.b[4] << 8 | mac.b[5];
+                        /* MAC mask = all 1s (exact match), VLAN mask = 0 (any) */
+                        uint64_t mask = 0x0000FFFFFFFFFFFFull; /* 48-bit MAC mask only */
 
-                        L2Xm_CLR(l2x);
-                        fval[0] = ((uint32_t)mac.b[2] << 24) | ((uint32_t)mac.b[3] << 16) |
-                                  ((uint32_t)mac.b[4] << 8) | mac.b[5];
-                        fval[1] = ((uint32_t)mac.b[0] << 8) | mac.b[1];
-                        L2Xm_L2_MAC_ADDRf_SET(l2x, fval);
-                        L2Xm_L2_VLAN_IDf_SET(l2x, 1);
-                        L2Xm_L2_PORT_NUMf_SET(l2x, 0); /* CPU port */
-                        L2Xm_L2_STATIC_BITf_SET(l2x, 1);
-                        L2Xm_VALIDf_SET(l2x, 1);
-                        /* KEY: CPUf=1 tells ASIC to copy to CPU */
-                        l2x.l2x[2] |= (1 << 31); /* LEGACY_CPUf */
+                        words[0] = 1u | ((uint32_t)(mac48 & 0x7FFFFFFFu) << 1);
+                        words[1] = (uint32_t)((mac48 >> 31) & 0x1FFFFu) |
+                                   (0 << 17) |   /* VLAN=0 (don't care) */
+                                   (0 << 29) |   /* KEY_TYPE=0 */
+                                   ((uint32_t)(mask & 3u) << 30);
+                        words[2] = (uint32_t)((mask >> 2) & 0xFFFFFFFFu);
+                        words[3] = (uint32_t)((mask >> 34) & 0x7FFFFFFFu);
+                        words[4] = (1 << 1);  /* COPY_TO_CPU=1 */
 
-                        int ipipe_blk = cdk_xgs_block_number(switchd.unit, BLKTYPE_IPIPE, 0);
-                        SCHAN_MSG_CLEAR(&schan_msg);
-                        SCMH_OPCODE_SET(schan_msg.gencmd.header, TABLE_INSERT_CMD_MSG);
-                        SCMH_SRCBLK_SET(schan_msg.gencmd.header, CDK_XGS_CMIC_BLOCK(switchd.unit));
-                        SCMH_DSTBLK_SET(schan_msg.gencmd.header, ipipe_blk);
-                        SCMH_DATALEN_SET(schan_msg.gencmd.header, 16);
-                        CDK_MEMCPY(schan_msg.gencmd.data, &l2x, sizeof(l2x));
-                        schan_msg.gencmd.address = L2Xm;
-                        cdk_xgs_schan_op(switchd.unit, &schan_msg, 6, 0);
+                        int rv2 = cdk_xgs_mem_write(switchd.unit, 0x06168000, tcam_idx, words, 5);
+                        syslog(LOG_INFO, "L2_USER[%d]: MAC %02x:%02x:%02x:%02x:%02x:%02x COPY_TO_CPU (rv=%d)",
+                               tcam_idx, mac.b[0], mac.b[1], mac.b[2],
+                               mac.b[3], mac.b[4], mac.b[5], rv2);
+                        if (rv2 == 0) tcam_idx++;
                     }
                     int rv = 0;
                     syslog(LOG_INFO, "L2: %s MAC %02x:%02x:%02x:%02x:%02x:%02x -> CPU (rv=%d)",
