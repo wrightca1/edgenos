@@ -173,6 +173,28 @@ static int datapath_cpu_punt_init(int unit)
             cdk_xgs_mem_write(unit, FP_POLICY_TABLEm, 0, fp_policy, 8);
 
             syslog(LOG_INFO, "IFP: entry 0 = COPY_TO_CPU for all frames");
+
+        /* Test: write IMAP0_7 via CDK register write (iowrite32 path).
+         * IMAP0_7 at BAR0+0x2C1C. Value = 0x18031001 (page + valid).
+         * If this works, we can access CMICm registers at 0x31xxx
+         * through sub-window 7 (BAR0+0x7000-0x7FFF). */
+        {
+            uint32_t imap_val = 0x18031001; /* AXI 0x18031000 + valid */
+            uint32_t imap_rb = 0;
+            CDK_DEV_WRITE32(unit, 0x2C1C, imap_val);
+            CDK_DEV_READ32(unit, 0x2C1C, &imap_rb);
+            syslog(LOG_INFO, "IMAP0_7: wrote=0x%08x readback=0x%08x",
+                   imap_val, imap_rb);
+
+            if (imap_rb == imap_val) {
+                /* IMAP works! Try reading a CMICm register through sub-window 7 */
+                uint32_t cmicm_val = 0;
+                /* CMIC_CMC_DMA_CTRLr at offset 0x31140.
+                 * Through sub-window 7: BAR0 + 0x7000 + (0x31140 & 0xFFF) = BAR0+0x7140 */
+                CDK_DEV_READ32(unit, 0x7140, &cmicm_val);
+                syslog(LOG_INFO, "CMICm DMA_CTRL via sub-window 7: 0x%08x", cmicm_val);
+            }
+        }
         }
 
         /* DIAGNOSTIC: Try L2 hash insert for our swp2 MAC → CPU port.

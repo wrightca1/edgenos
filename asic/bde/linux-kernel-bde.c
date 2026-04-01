@@ -553,16 +553,14 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -EINVAL;
 		/*
 		 * Register access routing:
-		 * - Addresses < 0x1000: direct BAR0 (sub-window 0).
-		 *   Covers SCHAN (0x050), legacy CMIC, PAXB config.
-		 * - Addresses >= 0x1000: AXI sub-window remap.
-		 *   Needed for CMICm DMA (0x31xxx), MIIM (0x32xxx),
-		 *   and other iProc peripheral registers.
-		 *
-		 * Direct BAR0 for sub-window 0 avoids timing issues
-		 * with SCHAN (atomic MSG+CTRL writes).
+		 * - Addresses < 0x8000: direct BAR0 (all 8 sub-windows).
+		 *   Sub-window 0 (0x0000-0x0FFF) = CMIC/SCHAN
+		 *   Sub-window 2 (0x2000-0x2FFF) = PAXB config (IMAP, OARR)
+		 *   Sub-window 7 (0x7000-0x7FFF) = dynamic AXI remap target
+		 * - Addresses >= 0x8000: AXI sub-window remap via IMAP0_7.
+		 *   For CMICm DMA (0x31xxx), MIIM (0x32xxx), etc.
 		 */
-		if (rio.addr >= PAXB_SUBWIN_SIZE)
+		if (rio.addr >= 0x8000)
 			rio.val = iproc_axi_read(bdev,
 						 PAXB_AXI_BASE + rio.addr);
 		else
@@ -581,7 +579,7 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -ENODEV;
 		if (rio.addr >= bdev->base_size)
 			return -EINVAL;
-		if (rio.addr >= PAXB_SUBWIN_SIZE)
+		if (rio.addr >= 0x8000)
 			iproc_axi_write(bdev,
 					PAXB_AXI_BASE + rio.addr, rio.val);
 		else
