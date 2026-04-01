@@ -107,14 +107,16 @@ static int datapath_cpu_punt_init(int unit)
     {
         static uint32_t ptab[10];
         int p, rv;
-        for (p = 1; p <= 72; p++) {
+        /* ALL ports including CPU: CML=0. No L2_ENTRY will be created.
+         * L2_USER_ENTRY COPY_TO_CPU triggers on L2 miss (direct punt). */
+        for (p = 0; p <= 72; p++) {
             memset(ptab, 0, sizeof(ptab));
             rv = cdk_xgs_mem_read(unit, PORT_TABm, p, ptab, 10);
             if (rv != 0) continue;
-            ptab[4] &= ~(0x1FE);  /* CML=0 on front-panel */
+            ptab[4] &= ~(0x1FE);  /* CML=0 */
             cdk_xgs_mem_write(unit, PORT_TABm, p, ptab, 10);
         }
-        syslog(LOG_INFO, "Front-panel ports CML=0 (learning disabled)");
+        syslog(LOG_INFO, "ALL ports CML=0 (learning disabled)");
 
         /* Configure MMU output queues for CPU port using OP_QUEUE_CONFIG registers.
          * From Cumulus rc.datapath_0: q_shared_limit_cell=2073, q_min_cell=307 */
@@ -145,6 +147,28 @@ static int datapath_cpu_punt_init(int unit)
             EGR_PORTm_EN_EFILTERf_SET(egr_port, 0);  /* DISABLE egress filter */
             WRITE_EGR_PORTm(unit, 0, egr_port);  /* lport 0 = CPU */
             syslog(LOG_INFO, "CPU port: egress VLAN filter DISABLED");
+
+        /* TEST: Add broadcast MAC to L2_USER_ENTRY to verify TCAM is searched.
+         * If we get EXTRA ARP copies (beyond protocol punt), TCAM works. */
+        {
+            uint32_t test_words[5];
+            /* Broadcast MAC: ff:ff:ff:ff:ff:ff */
+            uint64_t bcast_mac = 0xFFFFFFFFFFFFull;
+            uint64_t mask = 0x0000FFFFFFFFFFFFull;
+            test_words[0] = 1u | ((uint32_t)(bcast_mac & 0x7FFFFFFFu) << 1);
+            test_words[1] = (uint32_t)((bcast_mac >> 31) & 0x1FFFFu) |
+                           (0 << 17) | (0 << 29) |
+                           ((uint32_t)(mask & 3u) << 30);
+            test_words[2] = (uint32_t)((mask >> 2) & 0xFFFFFFFFu);
+            test_words[3] = (uint32_t)((mask >> 34) & 0x7FFFFFFFu);
+            test_words[4] = 0;  /* No CPU flag in TCAM key */
+            int rv3 = cdk_xgs_mem_write(unit, 0x06168000, 511, test_words, 5);
+            /* Write COPY_TO_CPU to the DATA table */
+            uint32_t bcast_data[2] = {0, 0};
+            bcast_data[0] = (1 << 6);  /* CPUf at bit 6 */
+            cdk_xgs_mem_write(unit, 0x0616c000, 511, bcast_data, 2);
+            syslog(LOG_INFO, "L2_USER[511]: BROADCAST COPY_TO_CPU test (rv=%d)", rv3);
+        }
         }
     }
 

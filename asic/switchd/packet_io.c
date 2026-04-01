@@ -221,9 +221,14 @@ int packet_io_init(void)
                                    ((uint32_t)(mask & 3u) << 30);
                         words[2] = (uint32_t)((mask >> 2) & 0xFFFFFFFFu);
                         words[3] = (uint32_t)((mask >> 34) & 0x7FFFFFFFu);
-                        words[4] = (1 << 1);  /* COPY_TO_CPU=1 */
+                        words[4] = 0;  /* TCAM key doesn't have CPU flag */
 
                         int rv2 = cdk_xgs_mem_write(switchd.unit, 0x06168000, tcam_idx, words, 5);
+
+                        /* Write COPY_TO_CPU to the DATA table (separate!) */
+                        uint32_t data[2] = {0, 0};
+                        data[0] = (1 << 6);  /* CPUf at bit 6 */
+                        cdk_xgs_mem_write(switchd.unit, 0x0616c000, tcam_idx, data, 2);
                         /* Read back and verify */
                         uint32_t rb[5] = {0};
                         cdk_xgs_mem_read(switchd.unit, 0x06168000, tcam_idx, rb, 5);
