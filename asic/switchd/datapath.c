@@ -154,7 +154,7 @@ static int datapath_cpu_punt_init(int unit)
             uint32_t test_words[5];
             /* Broadcast MAC: ff:ff:ff:ff:ff:ff */
             uint64_t bcast_mac = 0xFFFFFFFFFFFFull;
-            uint64_t mask = 0x0000FFFFFFFFFFFFull;
+            uint64_t mask = 0x1000FFFFFFFFFFFFull; /* KEY_TYPE mask + MAC mask */
             test_words[0] = 1u | ((uint32_t)(bcast_mac & 0x7FFFFFFFu) << 1);
             test_words[1] = (uint32_t)((bcast_mac >> 31) & 0x1FFFFu) |
                            (0 << 17) | (0 << 29) |

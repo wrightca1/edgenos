@@ -211,8 +211,8 @@ int packet_io_init(void)
                         uint64_t mac48 = (uint64_t)mac.b[0] << 40 | (uint64_t)mac.b[1] << 32 |
                                          (uint64_t)mac.b[2] << 24 | (uint64_t)mac.b[3] << 16 |
                                          (uint64_t)mac.b[4] << 8 | mac.b[5];
-                        /* MAC mask = all 1s (exact match), VLAN mask = 0 (any) */
-                        uint64_t mask = 0x0000FFFFFFFFFFFFull; /* 48-bit MAC mask only */
+                        /* MAC mask = all 1s, VLAN mask = 0 (any), KEY_TYPE mask = 1 */
+                        uint64_t mask = 0x1000FFFFFFFFFFFFull; /* bit 60=KEY_TYPE + 48-bit MAC */
 
                         words[0] = 1u | ((uint32_t)(mac48 & 0x7FFFFFFFu) << 1);
                         words[1] = (uint32_t)((mac48 >> 31) & 0x1FFFFu) |
@@ -221,14 +221,10 @@ int packet_io_init(void)
                                    ((uint32_t)(mask & 3u) << 30);
                         words[2] = (uint32_t)((mask >> 2) & 0xFFFFFFFFu);
                         words[3] = (uint32_t)((mask >> 34) & 0x7FFFFFFFu);
-                        words[4] = 0;  /* TCAM key doesn't have CPU flag */
+                        /* DATA section in same entry: CPU at w4[1], RPE at w4[0] */
+                        words[4] = (1 << 1);  /* CPU=1 (copy to CPU) */
 
                         int rv2 = cdk_xgs_mem_write(switchd.unit, 0x06168000, tcam_idx, words, 5);
-
-                        /* Write COPY_TO_CPU to the DATA table (separate!) */
-                        uint32_t data[2] = {0, 0};
-                        data[0] = (1 << 6);  /* CPUf at bit 6 */
-                        cdk_xgs_mem_write(switchd.unit, 0x0616c000, tcam_idx, data, 2);
                         /* Read back and verify */
                         uint32_t rb[5] = {0};
                         cdk_xgs_mem_read(switchd.unit, 0x06168000, tcam_idx, rb, 5);
