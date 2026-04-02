@@ -230,6 +230,13 @@ int portmap_configure_ports(void)
         {
             phy_ctrl_t *pc_fix = BMD_PORT_PHY_CTRL(switchd.unit, port);
             if (pc_fix) {
+                /* Set AER lane for per-lane register access.
+                 * Without this, writes go to lane 0 (swp1) instead of
+                 * the correct lane for this port (e.g., lane 1 for swp2). */
+                int fix_lane = PHY_CTRL_INST(pc_fix) & 0x3;
+                PHY_BUS_WRITE(pc_fix, 0x1f, 0xffd0);
+                PHY_BUS_WRITE(pc_fix, 0x1e, fix_lane);
+
                 /*
                  * Release TX/RX ASIC reset via MISC6r.
                  * MISC6r = CDK 0x8345 = block 0x8340, offset 0x5, CL22 reg 0x15
@@ -260,13 +267,27 @@ int portmap_configure_ports(void)
                  * XGXSCONTROLr = block 0x8000, offset 0x00, CL22 reg 0x10
                  * START_SEQUENCER = bit 13
                  */
+                /* Restart PLL sequencer — write the full known-good value.
+                 * Use AER=0 (broadcast) for XGXSCONTROLr. */
+                PHY_BUS_WRITE(pc_fix, 0x1f, 0xffd0);
+                PHY_BUS_WRITE(pc_fix, 0x1e, 0);
+
                 PHY_BUS_WRITE(pc_fix, 0x1f, 0x8000);
+                /* Write full known-good value: 0x242f with seq=1 */
+                PHY_BUS_WRITE(pc_fix, 0x10, 0x202f); /* seq=0 first */
+                usleep(1000);
+                PHY_BUS_WRITE(pc_fix, 0x10, 0x242f); /* seq=1 */
+                usleep(10000); /* Wait for PLL lock */
+
+                /* Read back */
                 uint32_t xgxs_ctrl = 0;
                 PHY_BUS_READ(pc_fix, 0x10, &xgxs_ctrl);
-                xgxs_ctrl &= ~(1 << 13);  /* Stop sequencer */
-                PHY_BUS_WRITE(pc_fix, 0x10, xgxs_ctrl);
-                xgxs_ctrl |= (1 << 13);   /* Start sequencer */
-                PHY_BUS_WRITE(pc_fix, 0x10, xgxs_ctrl);
+                syslog(LOG_INFO, "Port %s: XGXSCONTROLr after seq_restart=0x%04x",
+                       switchd.ports[i].ifname, xgxs_ctrl & 0xffff);
+
+                /* Restore AER */
+                PHY_BUS_WRITE(pc_fix, 0x1f, 0xffd0);
+                PHY_BUS_WRITE(pc_fix, 0x1e, fix_lane);
 
                 PHY_BUS_WRITE(pc_fix, 0x1f, 0x0000);
 

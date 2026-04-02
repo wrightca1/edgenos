@@ -317,49 +317,7 @@ static int bde_pci_probe(struct pci_dev *pdev,
 		pcie_set_readrq(pdev, maxpayload);
 	}
 
-	/* DEBUG: Test PAXB register writes via iowrite32 vs __raw_writel */
-	{
-		u32 before, after_io, after_raw;
-
-		/* Test ENDIAN_SEL at BAR0+0x174 */
-		iowrite32(0x0, bdev->base + 0x174);     /* Clear */
-		before = ioread32(bdev->base + 0x174);
-
-		iowrite32(0x06000006, bdev->base + 0x174);
-		after_io = ioread32(bdev->base + 0x174);
-
-		iowrite32(0x0, bdev->base + 0x174);     /* Clear */
-		__raw_writel(0x06000006, bdev->base + 0x174);
-		after_raw = __raw_readl(bdev->base + 0x174);
-
-		dev_info(&pdev->dev,
-			 "ENDIAN_SEL test: before=0x%08x iowrite32=0x%08x __raw_writel=0x%08x\n",
-			 before, after_io, after_raw);
-
-		/* Test OARR_2 at BAR0+0x2D60 */
-		before = ioread32(bdev->base + 0x2D60);
-		iowrite32(0x1, bdev->base + 0x2D60);
-		after_io = ioread32(bdev->base + 0x2D60);
-		__raw_writel(0x01000000, bdev->base + 0x2D60);
-		after_raw = __raw_readl(bdev->base + 0x2D60);
-
-		dev_info(&pdev->dev,
-			 "OARR_2 test: before=0x%08x iowrite32(0x1)=0x%08x __raw_writel(0x01000000)=0x%08x\n",
-			 before, after_io, after_raw);
-
-		/* Clean up — set OARR_2 to enable */
-		__raw_writel(0x01000000, bdev->base + 0x2D60);
-	}
-
-	/*
-	 * PAXB endianness: leave at default (no swap).
-	 * CDK with SYS_BE_PIO=1 handles endianness in software.
-	 */
-	{
-		u32 paxb_endian = __raw_readl(bdev->base + 0x2030);
-		dev_info(&pdev->dev, "PAXB endianness: 0x%08x (raw access mode)\n",
-			 paxb_endian);
-	}
+	/* No test writes to PAXB — they can disrupt I2C/GPIO on the platform */
 
 	/*
 	 * PAXB DMA configuration.
