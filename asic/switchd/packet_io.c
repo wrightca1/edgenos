@@ -38,13 +38,9 @@
 #include "packet_io.h"
 #include "portmap.h"
 
-/* BMD/CDK headers */
+/* BMD headers */
 #include <bmd/bmd.h>
 #include <bmd/bmd_dma.h>
-#include <cdk/chip/bcm56840_a0_defs.h>
-#include <cdk/arch/xgs_schan.h>
-#include <cdk/arch/xgs_chip.h>
-#include <bmdi/arch/xgs_mac_util.h>
 
 #define TUN_DEV     "/dev/net/tun"
 #define MAX_PKT_SIZE 9216  /* Jumbo frame support */
@@ -194,49 +190,10 @@ int packet_io_init(void)
                 if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0) {
                     bmd_mac_addr_t mac;
                     memcpy(mac.b, ifr.ifr_hwaddr.sa_data, 6);
-                    /*
-                     * Program L2_USER_ENTRY TCAM to COPY_TO_CPU for our MAC.
-                     * L2_USER_ENTRY at 0x06168000, 5 words per entry.
-                     * From open-nos-ref/sdk/src/l2.c:
-                     *   w0: VALID=1, MAC[30:0] in bits[31:1]
-                     *   w1: MAC[47:31], VLAN[28:17], KEY_TYPE@29, MASK[1:0]@31:30
-                     *   w2: MASK[33:2]
-                     *   w3: MASK[61:34]
-                     *   w4: COPY_TO_CPU@bit1, PORT_NUM[9:3]
-                     * MASK=all 1s for exact MAC match, VLAN mask=0 for any VLAN.
-                     */
-                    {
-                        static int tcam_idx = 0;
-                        uint32_t words[5];
-                        uint64_t mac48 = (uint64_t)mac.b[0] << 40 | (uint64_t)mac.b[1] << 32 |
-                                         (uint64_t)mac.b[2] << 24 | (uint64_t)mac.b[3] << 16 |
-                                         (uint64_t)mac.b[4] << 8 | mac.b[5];
-                        /* MAC mask = all 1s, VLAN mask = 0 (any), KEY_TYPE mask = 1 */
-                        uint64_t mask = 0x1000FFFFFFFFFFFFull; /* bit 60=KEY_TYPE + 48-bit MAC */
-
-                        words[0] = 1u | ((uint32_t)(mac48 & 0x7FFFFFFFu) << 1);
-                        words[1] = (uint32_t)((mac48 >> 31) & 0x1FFFFu) |
-                                   (0 << 17) |   /* VLAN=0 (don't care) */
-                                   (0 << 29) |   /* KEY_TYPE=0 */
-                                   ((uint32_t)(mask & 3u) << 30);
-                        words[2] = (uint32_t)((mask >> 2) & 0xFFFFFFFFu);
-                        words[3] = (uint32_t)((mask >> 34) & 0x7FFFFFFFu);
-                        /* DATA section in same entry: CPU at w4[1], RPE at w4[0] */
-                        words[4] = (1 << 1);  /* CPU=1 (copy to CPU) */
-
-                        int rv2 = cdk_xgs_mem_write(switchd.unit, 0x06168000, tcam_idx, words, 5);
-                        /* Read back and verify */
-                        uint32_t rb[5] = {0};
-                        cdk_xgs_mem_read(switchd.unit, 0x06168000, tcam_idx, rb, 5);
-                        syslog(LOG_INFO, "L2_USER[%d]: MAC %02x:%02x:%02x:%02x:%02x:%02x rv=%d "
-                               "w=[%08x %08x %08x %08x %08x] rb=[%08x %08x %08x %08x %08x]",
-                               tcam_idx, mac.b[0], mac.b[1], mac.b[2],
-                               mac.b[3], mac.b[4], mac.b[5], rv2,
-                               words[0], words[1], words[2], words[3], words[4],
-                               rb[0], rb[1], rb[2], rb[3], rb[4]);
-                        if (rv2 == 0) tcam_idx++;
-                    }
-                    int rv = 0;
+                    /* Use bmd_port_mac_addr_add on CPU port (0) — this writes
+                     * to L2_ENTRY with STATIC bit, which has priority over
+                     * hardware-learned dynamic entries. */
+                    int rv = bmd_port_mac_addr_add(switchd.unit, 0, 1, &mac);
                     syslog(LOG_INFO, "L2: %s MAC %02x:%02x:%02x:%02x:%02x:%02x -> CPU (rv=%d)",
                            switchd.ports[i].ifname,
                            mac.b[0], mac.b[1], mac.b[2],
@@ -368,7 +325,7 @@ static void handle_asic_rx(void)
     /* Debug: dump first RX packets */
     {
         static int rx_dbg_count = 0;
-        if (rx_dbg_count < 20) {
+        if (rx_dbg_count < 5) {
             char hex[97];
             int i, n = pkt->size < 32 ? pkt->size : 32;
             for (i = 0; i < n; i++)

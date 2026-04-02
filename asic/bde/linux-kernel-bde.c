@@ -197,11 +197,22 @@ static u32 iproc_axi_read(struct bde_device *bdev, u32 axi_addr)
 			return ioread32(bdev->base + (i * PAXB_SUBWIN_SIZE) + offset);
 	}
 
-	/* Remap sub-window 7 via iowrite32 to IMAP register. */
-	iowrite32(page | PAXB_IMAP_VALID,
-		  bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
-	bdev->subwin_base[PAXB_REMAP_SUBWIN] =
-		ioread32(bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN)) & ~0xfff;
+	/* No match — remap sub-window 7 via PCI config space.
+	 * BAR0 MMIO writes to PAXB IMAP registers don't persist on iProc.
+	 */
+	{
+		u32 imap_val = page | PAXB_IMAP_VALID;
+		u32 imap_rb;
+		pci_write_config_dword(bdev->pdev,
+			PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN), imap_val);
+		pci_read_config_dword(bdev->pdev,
+			PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN), &imap_rb);
+		bdev->subwin_base[PAXB_REMAP_SUBWIN] = imap_rb & ~0xfff;
+		if (printk_ratelimit())
+			dev_info(&bdev->pdev->dev,
+				 "AXI remap: page=0x%08x imap_rb=0x%08x bar_off=0x%x\n",
+				 page, imap_rb, PAXB_REMAP_BAR0_BASE + offset);
+	}
 
 	return ioread32(bdev->base + PAXB_REMAP_BAR0_BASE + offset);
 }
@@ -227,11 +238,16 @@ static void iproc_axi_write(struct bde_device *bdev, u32 axi_addr, u32 val)
 		}
 	}
 
-	/* Remap sub-window 7 via iowrite32 to IMAP register */
-	iowrite32(page | PAXB_IMAP_VALID,
-		  bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
-	bdev->subwin_base[PAXB_REMAP_SUBWIN] =
-		ioread32(bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN)) & ~0xfff;
+	/* No match — remap sub-window 7 via PCI config space */
+	{
+		u32 imap_val = page | PAXB_IMAP_VALID;
+		u32 imap_rb;
+		pci_write_config_dword(bdev->pdev,
+			PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN), imap_val);
+		pci_read_config_dword(bdev->pdev,
+			PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN), &imap_rb);
+		bdev->subwin_base[PAXB_REMAP_SUBWIN] = imap_rb & ~0xfff;
+	}
 
 	iowrite32(val, bdev->base + PAXB_REMAP_BAR0_BASE + offset);
 }
@@ -337,41 +353,12 @@ static int bde_pci_probe(struct pci_dev *pdev,
 
 	/*
 	 * PAXB endianness: leave at default (no swap).
+	 * CDK with SYS_BE_PIO=1 handles endianness in software.
 	 */
 	{
-		u32 paxb_endian = ioread32(bdev->base + 0x2030);
-		dev_info(&pdev->dev, "PAXB endianness: 0x%08x\n", paxb_endian);
-	}
-
-	/*
-	 * Test IMAP0_7 write via iowrite32 (direct BAR0 MMIO).
-	 * The Broadcom SDK (shbde_iproc.c) uses writel for IMAP.
-	 * Target: remap sub-window 7 to AXI 0x18031000 (CMICm DMA).
-	 */
-	{
-		u32 imap_before, imap_after, imap_after_raw;
-		u32 test_val = 0x18031001; /* AXI page 0x18031000 + valid */
-
-		imap_before = ioread32(bdev->base + 0x2C1C);
-
-		/* Try iowrite32 */
-		iowrite32(test_val, bdev->base + 0x2C1C);
-		imap_after = ioread32(bdev->base + 0x2C1C);
-
-		/* Try __raw_writel (no byte-swap) */
-		__raw_writel(test_val, bdev->base + 0x2C1C);
-		imap_after_raw = __raw_readl(bdev->base + 0x2C1C);
-
-		dev_info(&pdev->dev,
-			 "IMAP0_7: before=0x%08x iowrite32=0x%08x raw=0x%08x (target=0x%08x)\n",
-			 imap_before, imap_after, imap_after_raw, test_val);
-
-		/* If iowrite32 worked, try accessing CMICm through sub-window 7 */
-		if (imap_after == test_val || imap_after_raw == test_val) {
-			u32 cmicm_test = ioread32(bdev->base + 0x7140);
-			dev_info(&pdev->dev,
-				 "CMICm DMA_CTRL via subwin7: 0x%08x\n", cmicm_test);
-		}
+		u32 paxb_endian = __raw_readl(bdev->base + 0x2030);
+		dev_info(&pdev->dev, "PAXB endianness: 0x%08x (raw access mode)\n",
+			 paxb_endian);
 	}
 
 	/*
@@ -566,12 +553,14 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -EINVAL;
 		/*
 		 * Register access routing:
-		 * - Addresses < 0x8000: direct BAR0 (all 8 sub-windows).
-		 *   Sub-window 0 (0x0000-0x0FFF) = CMIC/SCHAN
-		 *   Sub-window 2 (0x2000-0x2FFF) = PAXB config (IMAP, OARR)
-		 *   Sub-window 7 (0x7000-0x7FFF) = dynamic AXI remap target
-		 * - Addresses >= 0x8000: AXI sub-window remap via IMAP0_7.
-		 *   For CMICm DMA (0x31xxx), MIIM (0x32xxx), etc.
+		 * - Addresses < 0x1000: direct BAR0 (sub-window 0).
+		 *   Covers SCHAN (0x050), legacy CMIC, PAXB config.
+		 * - Addresses >= 0x1000: AXI sub-window remap.
+		 *   Needed for CMICm DMA (0x31xxx), MIIM (0x32xxx),
+		 *   and other iProc peripheral registers.
+		 *
+		 * Direct BAR0 for sub-window 0 avoids timing issues
+		 * with SCHAN (atomic MSG+CTRL writes).
 		 */
 		if (rio.addr >= PAXB_SUBWIN_SIZE)
 			rio.val = iproc_axi_read(bdev,
