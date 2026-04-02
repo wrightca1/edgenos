@@ -519,9 +519,11 @@ int bmd_init_all(void)
     {
         uint32_t readback = 0;
 
-        CDK_DEV_WRITE32(switchd.unit, 0x174, 0x04000004);
+        /* Don't touch ENDIAN_SEL here — let bmd_switching_init→bmd_init
+         * set it via cdk_xgs_cmic_init. The final override happens in
+         * bde_set_dma_endianness() before packet_io_init. */
         CDK_DEV_READ32(switchd.unit, 0x174, &readback);
-        syslog(LOG_INFO, "BMD: ENDIAN_SEL = 0x%08x (wrote 0x04000004)",
+        syslog(LOG_INFO, "BMD: ENDIAN_SEL = 0x%08x (after bmd_init, untouched)",
                readback);
     }
 

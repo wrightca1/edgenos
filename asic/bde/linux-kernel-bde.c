@@ -197,21 +197,11 @@ static u32 iproc_axi_read(struct bde_device *bdev, u32 axi_addr)
 			return ioread32(bdev->base + (i * PAXB_SUBWIN_SIZE) + offset);
 	}
 
-	/* Remap sub-window 7 via raw (BE) write to IMAP register.
-	 * Cumulus BDE uses stw (native BE store), NOT stwbrx (LE).
-	 * The PAXB IMAP register is a BE register on iProc. */
-	{
-		u32 imap_val = page | PAXB_IMAP_VALID;
-		u32 imap_rb;
-		__raw_writel(imap_val, bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
-		mb();
-		imap_rb = __raw_readl(bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
-		bdev->subwin_base[PAXB_REMAP_SUBWIN] = imap_rb & ~0xfff;
-		if (printk_ratelimit())
-			dev_info(&bdev->pdev->dev,
-				 "AXI remap: wrote=0x%08x rb=0x%08x bar_off=0x%x\n",
-				 imap_val, imap_rb, PAXB_REMAP_BAR0_BASE + offset);
-	}
+	/* Remap sub-window 7 via iowrite32 to IMAP register. */
+	iowrite32(page | PAXB_IMAP_VALID,
+		  bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
+	bdev->subwin_base[PAXB_REMAP_SUBWIN] =
+		ioread32(bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN)) & ~0xfff;
 
 	return ioread32(bdev->base + PAXB_REMAP_BAR0_BASE + offset);
 }
@@ -237,13 +227,11 @@ static void iproc_axi_write(struct bde_device *bdev, u32 axi_addr, u32 val)
 		}
 	}
 
-	/* Remap sub-window 7 via raw (BE) write to IMAP register */
-	{
-		u32 imap_val = page | PAXB_IMAP_VALID;
-		__raw_writel(imap_val, bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
-		mb();
-		bdev->subwin_base[PAXB_REMAP_SUBWIN] = page;
-	}
+	/* Remap sub-window 7 via iowrite32 to IMAP register */
+	iowrite32(page | PAXB_IMAP_VALID,
+		  bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN));
+	bdev->subwin_base[PAXB_REMAP_SUBWIN] =
+		ioread32(bdev->base + PAXB_IMAP0_BASE + (4 * PAXB_REMAP_SUBWIN)) & ~0xfff;
 
 	iowrite32(val, bdev->base + PAXB_REMAP_BAR0_BASE + offset);
 }
