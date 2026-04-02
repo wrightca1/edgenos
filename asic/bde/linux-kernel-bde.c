@@ -585,7 +585,7 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		 * - Addresses >= 0x8000: AXI sub-window remap via IMAP0_7.
 		 *   For CMICm DMA (0x31xxx), MIIM (0x32xxx), etc.
 		 */
-		if (rio.addr >= 0x8000)
+		if (rio.addr >= PAXB_SUBWIN_SIZE)
 			rio.val = iproc_axi_read(bdev,
 						 PAXB_AXI_BASE + rio.addr);
 		else
@@ -604,7 +604,7 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -ENODEV;
 		if (rio.addr >= bdev->base_size)
 			return -EINVAL;
-		if (rio.addr >= 0x8000)
+		if (rio.addr >= PAXB_SUBWIN_SIZE)
 			iproc_axi_write(bdev,
 					PAXB_AXI_BASE + rio.addr, rio.val);
 		else
