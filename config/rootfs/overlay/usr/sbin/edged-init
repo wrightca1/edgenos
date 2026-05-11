@@ -1,25 +1,25 @@
 #!/bin/bash
-# switchd-init - Start/stop EdgeNOS switch daemon
+# edged-init - Start/stop EdgeNOS switch daemon
 #
 # Boot sequence (from Cumulus RE):
-#   platform-init.sh -> switchd-init start -> networking
+#   platform-init.sh -> edged-init start -> networking
 #
-# switchd internally does:
+# edged internally does:
 #   1. BDE open -> CDK probe -> BMD reset -> BMD init (Warpcore firmware)
 #   2. BMD switching init (L2 table, VLAN 1)
 #   3. Port mode set (10G/40G) + TX driver config (idriver=2, predriver=3)
 #   4. Create 52 TUN interfaces -> netlink listener -> main loop
 
 set -e
-log() { logger -t switchd-init "$*"; echo "switchd-init: $*"; }
+log() { logger -t edged-init "$*"; echo "edged-init: $*"; }
 
-SWITCHD=/usr/sbin/switchd
-PIDFILE=/var/run/switchd.pid
+EDGED=/usr/sbin/edged
+PIDFILE=/var/run/edged.pid
 CPLD="/sys/devices/ff705000.localbus/ea000000.cpld"
 
 case "$1" in
 start)
-    log "Starting EdgeNOS switchd..."
+    log "Starting EdgeNOS edged..."
 
     # Check BDE modules
     if [ ! -c /dev/linux-kernel-bde ]; then
@@ -42,24 +42,24 @@ start)
     fi
 
     # Ensure config exists
-    mkdir -p /etc/switchd
-    [ -f /etc/switchd/config.bcm ] || touch /etc/switchd/config.bcm
+    mkdir -p /etc/edged
+    [ -f /etc/edged/config.bcm ] || touch /etc/edged/config.bcm
 
-    # Start switchd in foreground mode, log to syslog
-    $SWITCHD -f 2>&1 | logger -t switchd &
+    # Start edged in foreground mode, log to syslog
+    $EDGED -f 2>&1 | logger -t edged &
     echo $! > $PIDFILE
 
     # Wait for ports to come up
     sleep 8
     port_count=$(ip link show 2>/dev/null | grep -c "swp" || true)
-    log "switchd started, $port_count ports created"
+    log "edged started, $port_count ports created"
 
     # Set system LED to green
     [ -f "${CPLD}/led_diag" ] && echo green > "${CPLD}/led_diag" 2>/dev/null
     ;;
 
 stop)
-    log "Stopping switchd..."
+    log "Stopping edged..."
     [ -f $PIDFILE ] && kill $(cat $PIDFILE) 2>/dev/null
     rm -f $PIDFILE
 
@@ -73,10 +73,10 @@ restart)
 
 status)
     if [ -f $PIDFILE ] && kill -0 $(cat $PIDFILE) 2>/dev/null; then
-        echo "switchd is running (PID $(cat $PIDFILE))"
+        echo "edged is running (PID $(cat $PIDFILE))"
         ip link show 2>/dev/null | grep -c "swp" | xargs echo "Ports:"
     else
-        echo "switchd is not running"
+        echo "edged is not running"
     fi
     ;;
 

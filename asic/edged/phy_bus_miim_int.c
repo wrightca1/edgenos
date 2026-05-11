@@ -24,6 +24,19 @@
 #include <cdk/cdk_device.h>
 #include <cdk/arch/xgs_miim.h>
 #include <phy/phy.h>
+#include <stdio.h>
+
+/* MIIM trace logging — writes every read/write to /tmp/miim_trace.log
+ * for diffing against captured Cumulus traces. Keep open for the life
+ * of the process. */
+static FILE *_miim_log = NULL;
+static void _miim_log_open(void) {
+    if (!_miim_log) {
+        _miim_log = fopen("/tmp/miim_trace.log", "w");
+        if (_miim_log)
+            setvbuf(_miim_log, NULL, _IOLBF, 0);
+    }
+}
 
 static uint32_t
 _phy_addr(int port)
@@ -39,13 +52,23 @@ _phy_addr(int port)
 static int
 _read(int unit, uint32_t addr, uint32_t reg, uint32_t *val)
 {
-    return cdk_xgs_miim_read(unit, addr, reg, val);
+    int rv = cdk_xgs_miim_read(unit, addr, reg, val);
+    _miim_log_open();
+    if (_miim_log)
+        fprintf(_miim_log, "R phy=0x%03x reg=0x%02x val=0x%04x rv=%d\n",
+                addr, reg, *val & 0xffff, rv);
+    return rv;
 }
 
 static int
 _write(int unit, uint32_t addr, uint32_t reg, uint32_t val)
 {
-    return cdk_xgs_miim_write(unit, addr, reg, val);
+    int rv = cdk_xgs_miim_write(unit, addr, reg, val);
+    _miim_log_open();
+    if (_miim_log)
+        fprintf(_miim_log, "W phy=0x%03x reg=0x%02x val=0x%04x rv=%d\n",
+                addr, reg, val & 0xffff, rv);
+    return rv;
 }
 
 phy_bus_t phy_bus_bcm56846_miim_int = {

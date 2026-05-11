@@ -30,7 +30,7 @@
     NLMSG_PAYLOAD((n), sizeof(struct ndmsg))
 #endif
 
-#include "switchd.h"
+#include "edged.h"
 #include "netlink.h"
 #include "portmap.h"
 #include "l2.h"
@@ -65,7 +65,7 @@ int netlink_init(void)
         return -1;
     }
 
-    switchd.netlink_fd = fd;
+    edged.netlink_fd = fd;
     syslog(LOG_INFO, "Netlink listener initialized");
     return 0;
 }
@@ -92,15 +92,15 @@ static void handle_link(struct nlmsghdr *nlh)
         return;
 
     int swp = atoi(ifname + 3);
-    if (swp < 1 || swp > SWITCHD_MAX_PORTS)
+    if (swp < 1 || swp > EDGED_MAX_PORTS)
         return;
 
     if (nlh->nlmsg_type == RTM_NEWLINK) {
         int up = (ifi->ifi_flags & IFF_UP) ? 1 : 0;
-        int was_up = switchd.ports[swp - 1].enabled;
+        int was_up = edged.ports[swp - 1].enabled;
 
         if (up != was_up) {
-            int port = switchd.ports[swp - 1].physical_lane;
+            int port = edged.ports[swp - 1].physical_lane;
             syslog(LOG_INFO, "Link %s %s (port %d)", ifname,
                    up ? "UP" : "DOWN", port);
 
@@ -113,21 +113,21 @@ static void handle_link(struct nlmsghdr *nlh)
                      * will re-enable when PHY link comes up).
                      */
                     bmd_port_mode_t mode;
-                    if (switchd.ports[swp - 1].speed >= 40000)
+                    if (edged.ports[swp - 1].speed >= 40000)
                         mode = bmdPortMode40000fd;
                     else
                         mode = bmdPortMode10000fd;
-                    bmd_port_mode_set(switchd.unit, port, mode, 0);
+                    bmd_port_mode_set(edged.unit, port, mode, 0);
                 } else {
                     /*
                      * Disable port: set mode to disabled.
                      * This disables MAC RX/TX and clears EPC_LINK_BMAP.
                      */
-                    bmd_port_mode_set(switchd.unit, port,
+                    bmd_port_mode_set(edged.unit, port,
                                       bmdPortModeDisabled, 0);
                 }
             }
-            switchd.ports[swp - 1].enabled = up;
+            edged.ports[swp - 1].enabled = up;
         }
     }
 }
@@ -224,10 +224,10 @@ void netlink_poll(void)
     ssize_t len;
     struct nlmsghdr *nlh;
 
-    if (switchd.netlink_fd <= 0)
+    if (edged.netlink_fd <= 0)
         return;
 
-    len = recv(switchd.netlink_fd, buf, sizeof(buf), MSG_DONTWAIT);
+    len = recv(edged.netlink_fd, buf, sizeof(buf), MSG_DONTWAIT);
     if (len <= 0)
         return;
 
@@ -259,8 +259,8 @@ void netlink_poll(void)
 
 void netlink_cleanup(void)
 {
-    if (switchd.netlink_fd > 0) {
-        close(switchd.netlink_fd);
-        switchd.netlink_fd = 0;
+    if (edged.netlink_fd > 0) {
+        close(edged.netlink_fd);
+        edged.netlink_fd = 0;
     }
 }

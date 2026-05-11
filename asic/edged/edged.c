@@ -1,5 +1,5 @@
 /*
- * switchd.c - EdgeNOS Switch Daemon
+ * edged.c - EdgeNOS Switch Daemon
  *
  * Main daemon that initializes the BCM56846 ASIC via OpenMDK,
  * creates TUN interfaces for each port, handles packet I/O
@@ -22,7 +22,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
-#include "switchd.h"
+#include "edged.h"
 #include "portmap.h"
 #include "packet_io.h"
 #include "netlink.h"
@@ -36,7 +36,7 @@
 #include <phy/phy.h>
 
 /* Global state */
-struct switchd_state switchd;
+struct edged_state edged;
 static volatile int running = 1;
 
 static void signal_handler(int sig)
@@ -51,7 +51,7 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
         "Usage: %s [options]\n"
-        "  -c, --config FILE   ASIC config file (default: /etc/switchd/config.bcm)\n"
+        "  -c, --config FILE   ASIC config file (default: /etc/edged/config.bcm)\n"
         "  -d, --debug         Enable debug logging\n"
         "  -f, --foreground    Run in foreground (don't daemonize)\n"
         "  -h, --help          Show this help\n",
@@ -146,7 +146,7 @@ static int asic_init(void)
     {
         int p;
         for (p = 0; p < BMD_CONFIG_MAX_PORTS; p++) {
-            phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(switchd.unit, p);
+            phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(edged.unit, p);
             if (pc && (PHY_CTRL_FLAGS(pc) & PHY_F_CLAUSE45)) {
                 PHY_CTRL_FLAGS(pc) &= ~PHY_F_CLAUSE45;
             }
@@ -188,7 +188,7 @@ static int asic_init(void)
 
 int main(int argc, char **argv)
 {
-    const char *config_file = "/etc/switchd/config.bcm";
+    const char *config_file = "/etc/edged/config.bcm";
     int foreground = 0;
     int debug = 0;
     int opt;
@@ -212,8 +212,8 @@ int main(int argc, char **argv)
     }
 
     /* Open syslog */
-    openlog("switchd", LOG_PID | (foreground ? LOG_PERROR : 0), LOG_DAEMON);
-    syslog(LOG_INFO, "EdgeNOS switchd starting");
+    openlog("edged", LOG_PID | (foreground ? LOG_PERROR : 0), LOG_DAEMON);
+    syslog(LOG_INFO, "EdgeNOS edged starting");
 
     if (debug)
         setlogmask(LOG_UPTO(LOG_DEBUG));
@@ -232,7 +232,7 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     /* Initialize state */
-    memset(&switchd, 0, sizeof(switchd));
+    memset(&edged, 0, sizeof(edged));
 
     /* Parse config */
     if (parse_config(config_file) < 0) {
@@ -281,7 +281,7 @@ int main(int argc, char **argv)
     /* Initialize L3 routing */
     l3_init();
 
-    syslog(LOG_INFO, "switchd ready, entering main loop");
+    syslog(LOG_INFO, "edged ready, entering main loop");
 
     /*
      * Main loop: poll for RX packets, netlink events, and link state.
@@ -313,7 +313,7 @@ int main(int argc, char **argv)
     }
 
     /* Cleanup */
-    syslog(LOG_INFO, "switchd shutting down");
+    syslog(LOG_INFO, "edged shutting down");
     netlink_cleanup();
     packet_io_cleanup();
     bde_close();

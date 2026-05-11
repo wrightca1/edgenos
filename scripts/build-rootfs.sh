@@ -75,18 +75,18 @@ assemble() {
     find "$TOPDIR/platform" -name "*.ko" -exec cp {} "$STAGING/lib/modules/extra/" \;
     find "$TOPDIR/asic/bde" -name "*.ko" -exec cp {} "$STAGING/lib/modules/extra/" \;
 
-    # Install switchd
-    if [ -f "$TOPDIR/asic/switchd/switchd" ]; then
-        echo "  Installing switchd..."
-        install -D -m 755 "$TOPDIR/asic/switchd/switchd" "$STAGING/usr/sbin/switchd"
+    # Install edged
+    if [ -f "$TOPDIR/asic/edged/edged" ]; then
+        echo "  Installing edged..."
+        install -D -m 755 "$TOPDIR/asic/edged/edged" "$STAGING/usr/sbin/edged"
     fi
 
     # Install OpenMDK shared libs
     find "$TOPDIR/output/sdk" -name "*.so*" -exec cp {} "$STAGING/usr/lib/" \; 2>/dev/null || true
 
     # Install ASIC config files
-    mkdir -p "$STAGING/etc/switchd"
-    cp "$TOPDIR/config/bcm/"* "$STAGING/etc/switchd/" 2>/dev/null || true
+    mkdir -p "$STAGING/etc/edged"
+    cp "$TOPDIR/config/bcm/"* "$STAGING/etc/edged/" 2>/dev/null || true
 
     # Apply rootfs overlay
     if [ -d "$TOPDIR/config/rootfs/overlay" ]; then

@@ -88,7 +88,7 @@ void _bde_dma_free(void *dvc, size_t size, void *laddr, dma_addr_t baddr)
 
 /*
  * AS5610-52X port configuration derived from Cumulus config.bcm
- * /etc/switchd/config.bcm on the switch.
+ * /etc/edged/config.bcm on the switch.
  *
  * The SVK board config (board_bcm56846_svk.c) has a WRONG port map for
  * the AS5610-52X. The actual PCB routes front-panel SFP+ ports to

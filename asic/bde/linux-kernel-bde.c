@@ -100,9 +100,15 @@ static int maxpayload = 256;
 module_param(maxpayload, int, 0644);
 MODULE_PARM_DESC(maxpayload, "PCIe max payload size (default 256)");
 
-static int dma_size = 4;  /* MB */
+/*
+ * DMA pool size. Cumulus 2.5 ships dma_size=64 (from rc.local boot args).
+ * On AS5610-52X this leaves headroom for many concurrent in-flight RX DCBs
+ * and the temporary S-Channel allocations during bmd_switching_init.
+ * Documented in cumulus_baseline_2013/TO_THE_SILICON.md §6.
+ */
+static int dma_size = 64;  /* MB */
 module_param(dma_size, int, 0644);
-MODULE_PARM_DESC(dma_size, "DMA pool size in MB (default 4)");
+MODULE_PARM_DESC(dma_size, "DMA pool size in MB (default 64, matches Cumulus 2.5)");
 
 /*
  * iProc PAXB sub-window register access.
@@ -302,14 +308,32 @@ static int bde_pci_probe(struct pci_dev *pdev,
 		goto err_release;
 	}
 
-	/* Allocate DMA pool */
-	bdev->dma_size = dma_size * 1024 * 1024;
-	bdev->dma_virt = dma_alloc_coherent(&pdev->dev, bdev->dma_size,
-					     &bdev->dma_phys, GFP_KERNEL);
-	if (!bdev->dma_virt) {
-		dev_warn(&pdev->dev, "Failed to allocate %u MB DMA pool\n",
-			 dma_size);
-		bdev->dma_size = 0;
+	/*
+	 * Allocate DMA pool. Try requested size, then degrade in halves
+	 * to 8 MB minimum. P2020 + 32 MB CMA can refuse a single 64 MB
+	 * alloc under memory fragmentation; smaller chunks still let the
+	 * BMD init + first few packets work.
+	 */
+	{
+		unsigned int try_mb = dma_size;
+		while (try_mb >= 8) {
+			bdev->dma_size = try_mb * 1024 * 1024;
+			bdev->dma_virt = dma_alloc_coherent(&pdev->dev,
+				bdev->dma_size, &bdev->dma_phys, GFP_KERNEL);
+			if (bdev->dma_virt) {
+				dev_info(&pdev->dev,
+					"DMA pool: %u MB allocated\n", try_mb);
+				break;
+			}
+			dev_warn(&pdev->dev,
+				"DMA alloc %u MB failed, halving\n", try_mb);
+			try_mb /= 2;
+		}
+		if (!bdev->dma_virt) {
+			dev_err(&pdev->dev,
+				"Failed to allocate DMA pool at any size\n");
+			bdev->dma_size = 0;
+		}
 	}
 
 	/* Set PCIe max payload if supported */

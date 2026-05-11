@@ -1,20 +1,20 @@
 /*
- * switchd.h - EdgeNOS Switch Daemon common definitions
+ * edged.h - EdgeNOS Switch Daemon common definitions
  *
  * Copyright (C) 2024 EdgeNOS Contributors.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#ifndef __SWITCHD_H__
-#define __SWITCHD_H__
+#ifndef __EDGED_H__
+#define __EDGED_H__
 
 #include <stdint.h>
 
 /* Port limits */
-#define SWITCHD_MAX_PORTS    52
-#define SWITCHD_SFP_PORTS    48
-#define SWITCHD_QSFP_PORTS   4
-#define SWITCHD_MAX_VLANS    4096
+#define EDGED_MAX_PORTS    52
+#define EDGED_SFP_PORTS    48
+#define EDGED_QSFP_PORTS   4
+#define EDGED_MAX_VLANS    4096
 
 /* Port types */
 #define PORT_TYPE_SFP   0
@@ -37,15 +37,15 @@ struct port_state {
     uint64_t tx_bytes;
 };
 
-/* Global switchd state */
-struct switchd_state {
-    struct port_state ports[SWITCHD_MAX_PORTS];
+/* Global edged state */
+struct edged_state {
+    struct port_state ports[EDGED_MAX_PORTS];
     int num_ports;
     int unit;             /* CDK/BMD unit number */
     int netlink_fd;       /* Netlink socket */
 };
 
-extern struct switchd_state switchd;
+extern struct edged_state edged;
 
 /* BDE interface */
 int bde_open(void);
@@ -61,4 +61,4 @@ int bmd_switching_init_all(void);
 /* Datapath configuration (CPU punt, hash, buffers) */
 int datapath_init(void);
 
-#endif /* __SWITCHD_H__ */
+#endif /* __EDGED_H__ */

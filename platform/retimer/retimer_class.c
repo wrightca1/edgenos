@@ -17,6 +17,7 @@
 #include <linux/device.h>
 #include <linux/slab.h>
 #include <linux/idr.h>
+#include <linux/kdev_t.h>   /* MKDEV() — 5.10 dropped the implicit include */
 
 #include "retimer_class.h"
 

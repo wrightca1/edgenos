@@ -34,7 +34,7 @@ cd edgenos
 # Build the Docker container (downloads kernel + buildroot, ~5 min first time)
 docker build --network host -t edgenos-builder .
 
-# Run the full build (kernel + SDK + switchd + rootfs + ONIE installer)
+# Run the full build (kernel + SDK + edged + rootfs + ONIE installer)
 mkdir -p output
 docker run --rm --network host \
     -v $(pwd)/output:/build/output \
@@ -57,7 +57,7 @@ docker run --rm -it --network host \
 ./docker-build.sh kernel      # Build Linux kernel + DTB (~5 min)
 ./docker-build.sh modules     # Build platform kernel modules
 ./docker-build.sh sdk          # Build OpenMDK libraries (CDK/BMD/PHY)
-./docker-build.sh switchd     # Build switch daemon
+./docker-build.sh edged     # Build switch daemon
 ./docker-build.sh rootfs      # Build root filesystem via Buildroot (~20 min)
 ./docker-build.sh image       # Create ONIE installer
 ./docker-build.sh all          # Full build
@@ -70,13 +70,13 @@ Mount source directories for live editing without rebuilding the container:
 ```bash
 docker run --rm -it --network host \
     -v $(pwd)/output:/build/output \
-    -v $(pwd)/asic/switchd:/build/asic/switchd \
+    -v $(pwd)/asic/edged:/build/asic/edged \
     -v $(pwd)/platform:/build/platform \
     -v $(pwd)/config:/build/config \
     edgenos-builder bash
 
 # Edit code on host, rebuild inside container:
-./docker-build.sh switchd     # Rebuild just switchd (~10 sec)
+./docker-build.sh edged     # Rebuild just edged (~10 sec)
 ./docker-build.sh image       # Repackage installer (~30 sec)
 ```
 
@@ -184,7 +184,7 @@ Linux 5.10.224 (PowerPC e500v2, SMP)
         |
 SquashFS rootfs (sda6) + ext2 overlay (sda3) + persist (sda1)
         |
-systemd -> platform-init.sh -> switchd -> networking
+systemd -> platform-init.sh -> edged -> networking
                 |                   |
                 |                   +-- OpenMDK CDK/BMD/PHY
                 |                   +-- bmd_reset -> bmd_init (WC firmware v0x0101)
@@ -233,9 +233,9 @@ config/
   rootfs/
     buildroot_defconfig          Buildroot config
     overlay/                    Files merged into rootfs
-      etc/systemd/system/       Service files (switchd, platform-init, thermal)
+      etc/systemd/system/       Service files (edged, platform-init, thermal)
       etc/modules-load.d/       Kernel module load order (12 modules)
-      usr/sbin/                 Init scripts (platform-init.sh, switchd-init, etc.)
+      usr/sbin/                 Init scripts (platform-init.sh, edged-init, etc.)
 kernel/
   dts/as5610-52x.dts            Device tree (full I2C mux topology)
 installer/
@@ -245,8 +245,8 @@ asic/
   bde/                          BDE kernel modules (PCI, DMA, IRQ, mmap)
     linux-kernel-bde.c          Kernel BDE (ioread32/iowrite32 with PPC barriers)
     linux-user-bde.c            Userspace BDE bridge
-  switchd/                      Switch daemon
-    switchd.c                   Main daemon (init, main loop)
+  edged/                        Switch daemon
+    edged.c                     Main daemon (init, main loop)
     bde_interface.c             BDE/CDK/BMD integration (register access, DMA)
     portmap.c                   Port config + link polling (bmd_port_mode_set)
     packet_io.c                 Packet I/O (TUN + bmd_tx/rx with DMA coherent)
@@ -350,8 +350,8 @@ be set — packet data is already in network byte order.
 DMA_STAT register. DMA_ACTIVE was set but DESC_DONE never appeared. Tested
 all ENDIAN_SEL values (0x00-0x07) via devmem. Discovered that
 `iowrite32(0x06000006)` works from kernel but CDK path doesn't persist
-after CPS reset. Added `bde_set_dma_endianness()` called from switchd.c.
-**Where**: `bde_interface.c` bde_set_dma_endianness(), `switchd.c`
+after CPS reset. Added `bde_set_dma_endianness()` called from edged.c.
+**Where**: `bde_interface.c` bde_set_dma_endianness(), `edged.c`
 
 ### 5. Single DCB TX (no scatter-gather)
 
@@ -434,6 +434,31 @@ RX counter didn't increase during ping → frame never reached CPU.
 Traced through BCM56840 L2 learning architecture: PORT_TABm CML_FLAGS
 controls per-port learning behavior. Setting to 0 on CPU port fixed it.
 **Where**: `datapath.c` datapath_cpu_punt_init()
+
+---
+
+## Documentation
+
+Local documents that go deeper than this README:
+
+| File | Topic |
+|------|-------|
+| [`BOOT.md`](BOOT.md) | Complete AS5610 boot flow: U-Boot env, FIT image format, kernel config (5.10.224), initramfs, ONIE recovery |
+| [`installer/ONIE_ISSUES.md`](installer/ONIE_ISSUES.md) | 13 ONIE BusyBox quirks and the workarounds baked into `install.sh` |
+| [`docs/IPROC_SUBWINDOW_ACCESS.md`](docs/IPROC_SUBWINDOW_ACCESS.md) | How the BDE remaps PAXB sub-window 7 via `pci_write_config_dword` to reach CMICm registers above `0x8000` |
+| [`docs/10G-LINK-BRINGUP-CHECKLIST.md`](docs/10G-LINK-BRINGUP-CHECKLIST.md) | Step-by-step SFP+ link bring-up checklist (10GBASE-R) |
+| [`docs/10gbase-r-linkup-checklist.md`](docs/10gbase-r-linkup-checklist.md) | Lower-level 10GBASE-R lane / signal checklist |
+| [`docs/802.3-10G-MDIO-reference.md`](docs/802.3-10G-MDIO-reference.md) | IEEE 802.3 Clause 45 MDIO register map for the 10G PHY layer |
+| [`docs/WC40-TX-DRIVER-ANALYSIS.md`](docs/WC40-TX-DRIVER-ANALYSIS.md) | Reverse-engineered Warpcore40 TX driver values used in `portmap.c` |
+
+Build-side documents:
+
+| File | Topic |
+|------|-------|
+| `scripts/build-all.sh` | Single-Docker full build: kernel → out-of-tree modules → initramfs → Debian rootfs → FIT → ONIE installer |
+| `scripts/pre-build-checks.sh` | Pre-build sanity assertions (IND_40BITIF=bit15, PAXB sub-window 7, no CPLD writes > 0x1F, CDR-reset wired) |
+| `installer/install.sh` | Single-slot ONIE installer header (self-extracting `.bin` payload) |
+| `installer/install-dual-slot.sh` | Cumulus-style dual-slot variant (sda5/6 = slot A, sda7/8 = slot B, `cl.active` env var) |
 
 ---
 

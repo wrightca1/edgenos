@@ -1,4 +1,4 @@
-# switchd Makefile
+# edged Makefile
 # Builds the EdgeNOS switch daemon with OpenMDK integration
 
 CROSS_COMPILE ?= powerpc-linux-gnu-
@@ -6,7 +6,7 @@ CC = $(CROSS_COMPILE)gcc
 CFLAGS = -Wall -Wextra -O2 -g
 # Static linking avoids glibc version mismatch between cross-compiler
 # (Ubuntu glibc 2.35) and rootfs (Buildroot glibc, version varies).
-# switchd needs GLIBC_2.34 symbols (__libc_start_main, __stack_chk_fail)
+# edged needs GLIBC_2.34 symbols (__libc_start_main, __stack_chk_fail)
 # which may not exist in Buildroot's glibc.
 LDFLAGS = -static -lpthread -lrt
 
@@ -61,7 +61,7 @@ SDK_LIBS = $(SDK_BLDDIR)/bmd/libbmdshell.a \
            $(SDK_BLDDIR)/cdk/libcdklibc.a \
            $(SDK_BLDDIR)/cdk/libcdkdsym.a
 
-SRCS = switchd.c \
+SRCS = edged.c \
        portmap.c \
        packet_io.c \
        netlink.c \
@@ -72,7 +72,7 @@ SRCS = switchd.c \
        bde_interface.c
 
 OBJS = $(SRCS:.c=.o)
-TARGET = switchd
+TARGET = edged
 
 .PHONY: all clean
 
@@ -88,11 +88,11 @@ clean:
 	rm -f $(OBJS) $(TARGET)
 
 # Dependencies
-switchd.o: switchd.h portmap.h packet_io.h netlink.h l2.h l3.h vlan.h
-portmap.o: switchd.h portmap.h
-packet_io.o: switchd.h packet_io.h portmap.h
-netlink.o: switchd.h netlink.h portmap.h l2.h l3.h
-l2.o: switchd.h l2.h portmap.h
-l3.o: switchd.h l3.h portmap.h
-vlan.o: switchd.h vlan.h
-bde_interface.o: switchd.h cdk_custom_config.h
+edged.o: edged.h portmap.h packet_io.h netlink.h l2.h l3.h vlan.h
+portmap.o: edged.h portmap.h
+packet_io.o: edged.h packet_io.h portmap.h
+netlink.o: edged.h netlink.h portmap.h l2.h l3.h
+l2.o: edged.h l2.h portmap.h
+l3.o: edged.h l3.h portmap.h
+vlan.o: edged.h vlan.h
+bde_interface.o: edged.h cdk_custom_config.h

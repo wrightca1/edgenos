@@ -43,9 +43,14 @@ load_mod() {
 log "=== Phase 1: Loading kernel modules ==="
 
 # BDE: ASIC PCI driver + DMA pool (must be first)
-# Try 4MB DMA first (32MB often fails on P2020 without CMA)
-load_mod linux-kernel-bde dma_size=4
+# 64MB matches Cumulus 2.5 (TO_THE_SILICON.md §6); falls back to 32M/16M/8M
+# automatically inside the kernel module if dma_alloc_coherent fails.
+load_mod linux-kernel-bde dma_size=64
 load_mod linux-user-bde
+
+# Chip die-temp sensor (depends on linux-kernel-bde for BAR0 ownership).
+# Exposes /sys/class/hwmon/hwmonN/temp1_input in milli-Celsius.
+load_mod linux-bde-tmon
 
 # TUN: packet I/O interfaces
 load_mod tun

@@ -106,7 +106,7 @@ case "$CMD" in
         echo "  kernel      Build Linux kernel + DTB"
         echo "  modules     Build platform kernel modules"
         echo "  sdk         Build OpenMDK libraries"
-        echo "  switchd     Build switch daemon"
+        echo "  edged       Build switch daemon"
         echo "  rootfs      Build root filesystem"
         echo "  image       Build ONIE installer"
         echo "  shell       Interactive shell in build container"

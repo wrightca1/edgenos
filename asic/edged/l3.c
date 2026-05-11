@@ -18,7 +18,7 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 
-#include "switchd.h"
+#include "edged.h"
 #include "l3.h"
 #include "portmap.h"
 
@@ -28,7 +28,7 @@ int l3_init(void)
 
     /*
      * With OpenMDK, L3 is software-forwarded via TUN interfaces.
-     * The kernel routes traffic, and switchd handles packet I/O.
+     * The kernel routes traffic, and edged handles packet I/O.
      *
      * For hardware L3 offload, OpenBCM SDK is needed:
      * - bcm_l3_init(unit)

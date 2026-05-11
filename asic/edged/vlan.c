@@ -16,12 +16,31 @@
 #include <stdio.h>
 #include <syslog.h>
 
-#include "switchd.h"
+#include "edged.h"
 #include "vlan.h"
 #include "portmap.h"
 
 /* BMD headers */
 #include <bmd/bmd.h>
+
+/*
+ * Reserved internal VLAN range for hardware L3.
+ *
+ * Matches Cumulus 2.5 default (/etc/cumulus/switchd.conf:
+ *   resv_vlan_range = 3300-3999).
+ *
+ * EdgeNOS today does host-routed L3 (CPU does the lookup), so we don't
+ * actually consume this range yet.  We still reject user creates inside
+ * it so that a future hardware-L3 implementation can allocate without
+ * colliding with anything an operator configured by hand.
+ */
+#define EDGED_RESV_VLAN_LO  3300
+#define EDGED_RESV_VLAN_HI  3999
+
+static int vid_is_reserved(int vid)
+{
+    return vid >= EDGED_RESV_VLAN_LO && vid <= EDGED_RESV_VLAN_HI;
+}
 
 int vlan_init_default(void)
 {
@@ -36,15 +55,15 @@ int vlan_init_default(void)
      * bmd_port_vlan_set() programs the PORT_TABm entry for each port
      * to set the default VLAN ID used for untagged ingress packets.
      */
-    for (i = 0; i < SWITCHD_MAX_PORTS; i++) {
-        if (!switchd.ports[i].valid)
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {
+        if (!edged.ports[i].valid)
             continue;
 
-        rv = bmd_port_vlan_set(switchd.unit,
-                               switchd.ports[i].physical_lane, 1);
+        rv = bmd_port_vlan_set(edged.unit,
+                               edged.ports[i].physical_lane, 1);
         if (rv < 0) {
             syslog(LOG_WARNING, "VLAN: failed to set PVID on port %d: %d",
-                   switchd.ports[i].physical_lane, rv);
+                   edged.ports[i].physical_lane, rv);
         }
     }
 
@@ -59,6 +78,12 @@ int vlan_create(int vid)
         syslog(LOG_ERR, "VLAN create: invalid VID %d", vid);
         return -1;
     }
+    if (vid_is_reserved(vid)) {
+        syslog(LOG_ERR,
+               "VLAN create: VID %d is reserved (range %d-%d) for hardware L3 use",
+               vid, EDGED_RESV_VLAN_LO, EDGED_RESV_VLAN_HI);
+        return -1;
+    }
 
     /*
      * bmd_vlan_create() programs:
@@ -66,7 +91,7 @@ int vlan_create(int vid)
      *   EGR_VLAN[vid]: valid=1, untagged bitmap=empty
      *   STG_TAB: default STP group (all ports forwarding)
      */
-    rv = bmd_vlan_create(switchd.unit, vid);
+    rv = bmd_vlan_create(edged.unit, vid);
     if (rv < 0) {
         syslog(LOG_ERR, "VLAN create %d failed: %d", vid, rv);
         return -1;
@@ -85,7 +110,7 @@ int vlan_destroy(int vid)
         return -1;
     }
 
-    rv = bmd_vlan_destroy(switchd.unit, vid);
+    rv = bmd_vlan_destroy(edged.unit, vid);
     if (rv < 0) {
         syslog(LOG_ERR, "VLAN destroy %d failed: %d", vid, rv);
         return -1;
@@ -111,7 +136,7 @@ int vlan_port_add(int vid, int swp, int tagged)
      * flags: 0 = untagged, BMD_VLAN_PORT_F_TAG = tagged
      */
     uint32_t flags = tagged ? 0 : BMD_VLAN_PORT_F_UNTAGGED;
-    rv = bmd_vlan_port_add(switchd.unit, vid, logical, flags);
+    rv = bmd_vlan_port_add(edged.unit, vid, logical, flags);
     if (rv < 0) {
         syslog(LOG_WARNING, "VLAN %d port add swp%d failed: %d",
                vid, swp, rv);
@@ -120,7 +145,7 @@ int vlan_port_add(int vid, int swp, int tagged)
 
     /* If untagged, set PVID to this VLAN */
     if (!tagged) {
-        bmd_port_vlan_set(switchd.unit, logical, vid);
+        bmd_port_vlan_set(edged.unit, logical, vid);
     }
 
     syslog(LOG_DEBUG, "VLAN %d: added swp%d (%s)", vid, swp,
@@ -136,7 +161,7 @@ int vlan_port_remove(int vid, int swp)
     if (logical < 0)
         return -1;
 
-    rv = bmd_vlan_port_remove(switchd.unit, vid, logical);
+    rv = bmd_vlan_port_remove(edged.unit, vid, logical);
     if (rv < 0) {
         syslog(LOG_WARNING, "VLAN %d port remove swp%d failed: %d",
                vid, swp, rv);

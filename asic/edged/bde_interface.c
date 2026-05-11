@@ -1,11 +1,11 @@
 /*
- * bde_interface.c - OpenMDK ASIC interface for switchd
+ * bde_interface.c - OpenMDK ASIC interface for edged
  *
  * Initializes BCM56846 via OpenMDK CDK/BMD.
  *
  * Register access architecture (from AS5610-52X RE):
  *
- *   USERSPACE (switchd)
+ *   USERSPACE (edged)
  *     |
  *     +-- CDK_DEV_READ32/WRITE32 (via dv.read32/write32 function pointers)
  *           |
@@ -35,7 +35,7 @@
 #include <sys/mman.h>
 #include <stdint.h>
 
-#include "switchd.h"
+#include "edged.h"
 
 /* CDK headers */
 #include <cdk_config.h>
@@ -456,7 +456,7 @@ int cdk_init(void)
         return -1;
     }
 
-    switchd.unit = unit;
+    edged.unit = unit;
     syslog(LOG_INFO, "CDK: BMD attached to unit %d", unit);
     return 0;
 }
@@ -465,7 +465,7 @@ int bmd_init_all(void)
 {
     int rv;
 
-    syslog(LOG_INFO, "BMD: resetting ASIC on unit %d", switchd.unit);
+    syslog(LOG_INFO, "BMD: resetting ASIC on unit %d", edged.unit);
 
     /*
      * bmd_reset() does:
@@ -475,7 +475,7 @@ int bmd_init_all(void)
      *   4. PLL lock verification
      *   5. Memory (TCAM, buffer) initialization
      */
-    rv = bmd_reset(switchd.unit);
+    rv = bmd_reset(edged.unit);
     if (rv < 0) {
         syslog(LOG_ERR, "BMD: bmd_reset failed: %d", rv);
         return -1;
@@ -494,7 +494,7 @@ int bmd_init_all(void)
      *   5. Default QoS configuration
      *   6. Enable packet DMA channels
      */
-    rv = bmd_init(switchd.unit);
+    rv = bmd_init(edged.unit);
     if (rv < 0) {
         syslog(LOG_ERR, "BMD: bmd_init failed: %d", rv);
         return -1;
@@ -519,8 +519,8 @@ int bmd_init_all(void)
     {
         uint32_t readback = 0;
 
-        CDK_DEV_WRITE32(switchd.unit, 0x174, 0x04000004);
-        CDK_DEV_READ32(switchd.unit, 0x174, &readback);
+        CDK_DEV_WRITE32(edged.unit, 0x174, 0x04000004);
+        CDK_DEV_READ32(edged.unit, 0x174, &readback);
         syslog(LOG_INFO, "BMD: ENDIAN_SEL = 0x%08x (wrote 0x04000004)",
                readback);
     }
@@ -532,7 +532,7 @@ int bmd_switching_init_all(void)
 {
     int rv;
 
-    syslog(LOG_INFO, "BMD: initializing L2 switching on unit %d", switchd.unit);
+    syslog(LOG_INFO, "BMD: initializing L2 switching on unit %d", edged.unit);
 
     /*
      * bmd_switching_init() does:
@@ -543,7 +543,7 @@ int bmd_switching_init_all(void)
      *   5. Set MAC_RSV_MASK for reserved MAC handling
      *   6. Enable CPU port in EPC_LINK_BMAP
      */
-    rv = bmd_switching_init(switchd.unit);
+    rv = bmd_switching_init(edged.unit);
     if (rv < 0) {
         syslog(LOG_ERR, "BMD: bmd_switching_init failed: %d", rv);
         return -1;
@@ -567,7 +567,7 @@ void bde_set_dma_endianness(void)
      */
     uint32_t readback = 0;
 
-    CDK_DEV_WRITE32(switchd.unit, 0x174, 0x04000004);
-    CDK_DEV_READ32(switchd.unit, 0x174, &readback);
+    CDK_DEV_WRITE32(edged.unit, 0x174, 0x04000004);
+    CDK_DEV_READ32(edged.unit, 0x174, &readback);
     syslog(LOG_INFO, "DMA endian: ENDIAN_SEL=0x%08x (wrote 0x04000004)", readback);
 }

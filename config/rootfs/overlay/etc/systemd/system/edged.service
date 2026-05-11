@@ -1,12 +1,12 @@
 [Unit]
-Description=EdgeNOS Switch Daemon (BCM56846 Trident+)
+Description=EdgeNOS edged - Switch Daemon (BCM56846 Trident+)
 After=platform-init.service local-fs.target
 Requires=platform-init.service
 ConditionPathExists=/dev/linux-kernel-bde
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/switchd -f -c /etc/switchd/config.bcm
+ExecStart=/usr/sbin/edged -f -c /etc/edged/config.bcm
 Restart=on-failure
 RestartSec=5
 LimitCORE=infinity
@@ -14,7 +14,7 @@ LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal
 
-# switchd needs raw memory access for ASIC registers
+# edged needs raw memory access for ASIC registers
 AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_RAWIO
 
 [Install]

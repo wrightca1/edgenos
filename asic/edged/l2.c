@@ -25,7 +25,7 @@
 #include <syslog.h>
 #include <net/if.h>
 
-#include "switchd.h"
+#include "edged.h"
 #include "l2.h"
 #include "portmap.h"
 
@@ -88,7 +88,7 @@ int l2_init(void)
      */
     read_mgmt_mac(&mgmt_mac);
 
-    rv = bmd_cpu_mac_addr_add(switchd.unit, DEFAULT_VLAN, &mgmt_mac);
+    rv = bmd_cpu_mac_addr_add(edged.unit, DEFAULT_VLAN, &mgmt_mac);
     if (rv < 0) {
         syslog(LOG_WARNING, "L2: failed to add CPU MAC: rv=%d", rv);
     } else {
@@ -114,11 +114,11 @@ int l2_mac_add(const uint8_t *mac, int ifindex)
         return 0;  /* Not our interface */
 
     swp = atoi(ifname + 3);
-    if (swp < 1 || swp > SWITCHD_MAX_PORTS)
+    if (swp < 1 || swp > EDGED_MAX_PORTS)
         return -1;
 
     /* Use CDK physical port for BMD calls */
-    logical = switchd.ports[swp - 1].physical_lane;
+    logical = edged.ports[swp - 1].physical_lane;
     if (logical <= 0)
         return -1;
 
@@ -142,7 +142,7 @@ int l2_mac_add(const uint8_t *mac, int ifindex)
      */
     bmd_mac_addr_t bmac;
     memcpy(bmac.b, mac, 6);
-    rv = bmd_port_mac_addr_add(switchd.unit, logical, DEFAULT_VLAN, &bmac);
+    rv = bmd_port_mac_addr_add(edged.unit, logical, DEFAULT_VLAN, &bmac);
     if (rv < 0) {
         syslog(LOG_WARNING, "L2 add failed: %02x:%02x:%02x:%02x:%02x:%02x "
                "port %d: rv=%d",
@@ -165,11 +165,11 @@ int l2_mac_del(const uint8_t *mac, int ifindex)
         return 0;
 
     swp = atoi(ifname + 3);
-    if (swp < 1 || swp > SWITCHD_MAX_PORTS)
+    if (swp < 1 || swp > EDGED_MAX_PORTS)
         return -1;
 
     /* Use CDK physical port for BMD calls */
-    logical = switchd.ports[swp - 1].physical_lane;
+    logical = edged.ports[swp - 1].physical_lane;
     if (logical <= 0)
         return -1;
 
@@ -182,7 +182,7 @@ int l2_mac_del(const uint8_t *mac, int ifindex)
      */
     bmd_mac_addr_t bmac;
     memcpy(bmac.b, mac, 6);
-    rv = bmd_port_mac_addr_remove(switchd.unit, logical, DEFAULT_VLAN, &bmac);
+    rv = bmd_port_mac_addr_remove(edged.unit, logical, DEFAULT_VLAN, &bmac);
     if (rv < 0) {
         syslog(LOG_DEBUG, "L2 del failed (may not exist): rv=%d", rv);
     }

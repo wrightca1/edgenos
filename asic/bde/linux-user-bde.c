@@ -1,7 +1,7 @@
 /*
  * linux-user-bde.c - Userspace BDE interface
  *
- * Provides /dev/linux-user-bde for switchd to access the ASIC.
+ * Provides /dev/linux-user-bde for edged to access the ASIC.
  * This is a thin proxy that relays register reads/writes and DMA
  * operations to the kernel BDE module.
  *

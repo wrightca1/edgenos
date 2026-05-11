@@ -17,7 +17,7 @@
 #include <syslog.h>
 #include <unistd.h>
 
-#include "switchd.h"
+#include "edged.h"
 #include "portmap.h"
 
 /* BMD headers */
@@ -31,7 +31,7 @@
 /* Port-to-SerDes lane mapping for AS5610-52X
  * Index = front-panel port (0-based), value = SerDes lane
  */
-static const int port_to_lane[SWITCHD_MAX_PORTS] = {
+static const int port_to_lane[EDGED_MAX_PORTS] = {
     /* SFP+ ports 1-8 */   65, 66, 67, 68, 69, 70, 71, 72,
     /* SFP+ ports 9-16 */   5,  6,  7,  8,  9, 10, 11, 12,
     /* SFP+ ports 17-24 */ 13, 14, 15, 16, 18, 17, 20, 19,
@@ -55,7 +55,7 @@ static const int port_to_lane[SWITCHD_MAX_PORTS] = {
  * Bus 1 → mux 0x76 ch1 → bus 55 → sub-mux 0x74 → buses 56-63 (swp41-48)
  * Bus 1 → mux 0x77 ch0-3 → buses 66-69 (QSFP swp49-52)
  */
-static const int port_to_i2c_bus[SWITCHD_MAX_PORTS] = {
+static const int port_to_i2c_bus[EDGED_MAX_PORTS] = {
     11, 12, 13, 14, 15, 16, 17, 18,   /* ports 1-8   (group 1, sub-mux on bus 10) */
     20, 21, 22, 23, 24, 25, 26, 27,   /* ports 9-16  (group 2, sub-mux on bus 19) */
     29, 30, 31, 32, 33, 34, 35, 36,   /* ports 17-24 (group 3, sub-mux on bus 28) */
@@ -76,16 +76,16 @@ void portmap_parse_config(const char *key, const char *val)
     if (sscanf(val, "%d:%d", &lane, &speed) != 2)
         return;
 
-    if (port < 1 || port > SWITCHD_MAX_PORTS)
+    if (port < 1 || port > EDGED_MAX_PORTS)
         return;
 
     int idx = port - 1;
-    switchd.ports[idx].valid = 1;
-    switchd.ports[idx].logical_port = port;
-    switchd.ports[idx].physical_lane = lane;
-    switchd.ports[idx].speed = speed * 1000;  /* Convert to Mbps */
-    switchd.ports[idx].port_type = (speed == 40) ? PORT_TYPE_QSFP : PORT_TYPE_SFP;
-    snprintf(switchd.ports[idx].ifname, sizeof(switchd.ports[idx].ifname),
+    edged.ports[idx].valid = 1;
+    edged.ports[idx].logical_port = port;
+    edged.ports[idx].physical_lane = lane;
+    edged.ports[idx].speed = speed * 1000;  /* Convert to Mbps */
+    edged.ports[idx].port_type = (speed == 40) ? PORT_TYPE_QSFP : PORT_TYPE_SFP;
+    snprintf(edged.ports[idx].ifname, sizeof(edged.ports[idx].ifname),
              "swp%d", port);
 }
 
@@ -95,31 +95,31 @@ int portmap_configure_ports(void)
     int configured = 0;
 
     /* If no ports were parsed from config, use hardcoded defaults */
-    if (switchd.ports[0].valid == 0) {
+    if (edged.ports[0].valid == 0) {
         syslog(LOG_INFO, "Using default port map");
-        for (i = 0; i < SWITCHD_MAX_PORTS; i++) {
-            switchd.ports[i].valid = 1;
-            switchd.ports[i].logical_port = i + 1;
-            switchd.ports[i].physical_lane = port_to_lane[i];
-            switchd.ports[i].speed = (i >= SWITCHD_SFP_PORTS) ? 40000 : 10000;
-            switchd.ports[i].port_type = (i >= SWITCHD_SFP_PORTS) ?
+        for (i = 0; i < EDGED_MAX_PORTS; i++) {
+            edged.ports[i].valid = 1;
+            edged.ports[i].logical_port = i + 1;
+            edged.ports[i].physical_lane = port_to_lane[i];
+            edged.ports[i].speed = (i >= EDGED_SFP_PORTS) ? 40000 : 10000;
+            edged.ports[i].port_type = (i >= EDGED_SFP_PORTS) ?
                                          PORT_TYPE_QSFP : PORT_TYPE_SFP;
-            snprintf(switchd.ports[i].ifname,
-                     sizeof(switchd.ports[i].ifname), "swp%d", i + 1);
+            snprintf(edged.ports[i].ifname,
+                     sizeof(edged.ports[i].ifname), "swp%d", i + 1);
         }
     }
 
     /* Configure each port on the ASIC via BMD */
-    for (i = 0; i < SWITCHD_MAX_PORTS; i++) {
-        if (!switchd.ports[i].valid)
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {
+        if (!edged.ports[i].valid)
             continue;
 
         /*
          * BMD functions expect CDK physical port number,
          * which is physical_lane on BCM56840.
          */
-        int port = switchd.ports[i].physical_lane;
-        int speed = switchd.ports[i].speed;
+        int port = edged.ports[i].physical_lane;
+        int speed = edged.ports[i].speed;
         bmd_port_mode_t mode;
         uint32_t flags = 0;
         int rv;
@@ -139,7 +139,7 @@ int portmap_configure_ports(void)
          *   - Enables XMAC RX/TX
          *   - Updates EPC_LINK_BMAP
          */
-        if (switchd.ports[i].port_type == PORT_TYPE_QSFP)
+        if (edged.ports[i].port_type == PORT_TYPE_QSFP)
             mode = bmdPortMode40000fd;
         else
             mode = bmdPortMode10000fd;
@@ -155,14 +155,14 @@ int portmap_configure_ports(void)
          * mode for 40G. Setting SERDES_MODE on QSFP causes
          * bmd_port_mode_set(40G) to fail with CDK_E_PARAM (-4).
          */
-        if (switchd.ports[i].port_type != PORT_TYPE_QSFP) {
-            rv = bmd_phy_mode_set(switchd.unit, port, "warpcore",
+        if (edged.ports[i].port_type != PORT_TYPE_QSFP) {
+            rv = bmd_phy_mode_set(edged.unit, port, "warpcore",
                              BMD_PHY_MODE_SERDES, 1);
         } else {
             rv = 0; /* QSFP: keep 4-lane mode */
         }
         {
-            phy_ctrl_t *pc_chk = BMD_PORT_PHY_CTRL(switchd.unit, port);
+            phy_ctrl_t *pc_chk = BMD_PORT_PHY_CTRL(edged.unit, port);
             if (pc_chk) {
                 /*
                  * CRITICAL FIX: Clear PHY_F_CLAUSE45 flag.
@@ -186,14 +186,14 @@ int portmap_configure_ports(void)
                 PHY_CTRL_FLAGS(pc_chk) &= ~PHY_F_CLAUSE45;
 
                 syslog(LOG_INFO, "Port %s: flags=0x%x (CLAUSE45 cleared) bus=%s phy_addr=0x%03x inst=%d",
-                       switchd.ports[i].ifname,
+                       edged.ports[i].ifname,
                        PHY_CTRL_FLAGS(pc_chk),
                        pc_chk->bus ? pc_chk->bus->drv_name : "NULL",
                        pc_chk->bus ? pc_chk->bus->phy_addr(port) : 0,
                        PHY_CTRL_INST(pc_chk));
             } else {
                 syslog(LOG_WARNING, "Port %s: no PHY ctrl for port %d",
-                       switchd.ports[i].ifname, port);
+                       edged.ports[i].ifname, port);
             }
         }
 
@@ -207,12 +207,12 @@ int portmap_configure_ports(void)
          * Without the Disable→Enable cycle, bmd_port_mode_set sees
          * "already at 10G" and skips the PHY speed_set entirely.
          */
-        bmd_port_mode_set(switchd.unit, port, bmdPortModeDisabled, 0);
+        bmd_port_mode_set(edged.unit, port, bmdPortModeDisabled, 0);
 
-        rv = bmd_port_mode_set(switchd.unit, port, mode, flags);
+        rv = bmd_port_mode_set(edged.unit, port, mode, flags);
         if (rv < 0) {
             syslog(LOG_ERR, "Port %s: bmd_port_mode_set(%d, %dG) failed: %d",
-                   switchd.ports[i].ifname, port, speed / 1000, rv);
+                   edged.ports[i].ifname, port, speed / 1000, rv);
             continue;
         }
 
@@ -228,7 +228,7 @@ int portmap_configure_ports(void)
          * the Disable call's MISC6r state overrides the Enable's write.
          */
         {
-            phy_ctrl_t *pc_fix = BMD_PORT_PHY_CTRL(switchd.unit, port);
+            phy_ctrl_t *pc_fix = BMD_PORT_PHY_CTRL(edged.unit, port);
             if (pc_fix) {
                 /* Set AER lane for per-lane register access.
                  * Without this, writes go to lane 0 (swp1) instead of
@@ -253,7 +253,12 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc_fix, 0x1f, 0x8330);
                 uint32_t misc3_val = 0;
                 PHY_BUS_READ(pc_fix, 0x1c, &misc3_val);
-                misc3_val |= (1 << 6);  /* IND_40BITIF = bit 6 */
+                /*
+                 * IND_40BITIF is bit 15 (NOT bit 6).
+                 * Cross-checked against open-nos-ref + OpenMDK symbol table.
+                 * Documented in memory/project_session_20260509.md.
+                 */
+                misc3_val |= (1 << 15);  /* IND_40BITIF = bit 15 */
                 PHY_BUS_WRITE(pc_fix, 0x1c, misc3_val);
 
                 /*
@@ -283,7 +288,7 @@ int portmap_configure_ports(void)
                 uint32_t xgxs_ctrl = 0;
                 PHY_BUS_READ(pc_fix, 0x10, &xgxs_ctrl);
                 syslog(LOG_INFO, "Port %s: XGXSCONTROLr after seq_restart=0x%04x",
-                       switchd.ports[i].ifname, xgxs_ctrl & 0xffff);
+                       edged.ports[i].ifname, xgxs_ctrl & 0xffff);
 
                 /* Restore AER */
                 PHY_BUS_WRITE(pc_fix, 0x1f, 0xffd0);
@@ -292,13 +297,13 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc_fix, 0x1f, 0x0000);
 
                 syslog(LOG_INFO, "Port %s: forced reset_rx=0 IND_40BITIF=1 seq_restart",
-                       switchd.ports[i].ifname);
+                       edged.ports[i].ifname);
             }
         }
 
         /* Debug: comprehensive register dump after config */
         {
-            phy_ctrl_t *pc_dbg = BMD_PORT_PHY_CTRL(switchd.unit, port);
+            phy_ctrl_t *pc_dbg = BMD_PORT_PHY_CTRL(edged.unit, port);
             if (pc_dbg && i < 2) {
                 uint32_t val = 0;
 
@@ -310,23 +315,23 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0xffd0);
                 PHY_BUS_WRITE(pc_dbg, 0x1e, wc_lane);
                 syslog(LOG_INFO, "Port %s: AER lane=%d (inst=0x%x)",
-                       switchd.ports[i].ifname, wc_lane,
+                       edged.ports[i].ifname, wc_lane,
                        (unsigned)PHY_CTRL_INST(pc_dbg));
 
                 /* XGXSBLK0: control/status, PLL lock */
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8000);
                 PHY_BUS_READ(pc_dbg, 0x10, &val);
                 syslog(LOG_INFO, "Port %s: XGXSCONTROLr=0x%04x seq=%d",
-                       switchd.ports[i].ifname, val & 0xffff, (val >> 13) & 1);
+                       edged.ports[i].ifname, val & 0xffff, (val >> 13) & 1);
                 PHY_BUS_READ(pc_dbg, 0x11, &val);
                 syslog(LOG_INFO, "Port %s: XGXSSTATUSr=0x%04x pll_lock=%d",
-                       switchd.ports[i].ifname, val & 0xffff, (val >> 11) & 1);
+                       edged.ports[i].ifname, val & 0xffff, (val >> 11) & 1);
 
                 /* MISC1r: speed[4:0], PLL mode */
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8300);
                 PHY_BUS_READ(pc_dbg, 0x18, &val);
                 syslog(LOG_INFO, "Port %s: MISC1r=0x%04x spd[4:0]=%d pll=0x%x",
-                       switchd.ports[i].ifname, val & 0xffff,
+                       edged.ports[i].ifname, val & 0xffff,
                        val & 0x1f, (val >> 8) & 0xf);
 
                 /* MISC3r: speed B5, IND_40BITIF */
@@ -337,7 +342,7 @@ int portmap_configure_ports(void)
                     uint32_t b5 = (m3 >> 7) & 1;
                     uint32_t ind40 = (m3 >> 6) & 1;
                     syslog(LOG_INFO, "Port %s: MISC3r=0x%04x B5=%d IND40=%d speed=0x%02x",
-                           switchd.ports[i].ifname, m3, b5, ind40,
+                           edged.ports[i].ifname, m3, b5, ind40,
                            (5) | (b5 << 5));
                 }
 
@@ -345,20 +350,20 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8340);
                 PHY_BUS_READ(pc_dbg, 0x15, &val);
                 syslog(LOG_INFO, "Port %s: MISC6r=0x%04x rst_rx=%d rst_tx=%d brcm6466=%d",
-                       switchd.ports[i].ifname, val & 0xffff,
+                       edged.ports[i].ifname, val & 0xffff,
                        (val >> 15) & 1, (val >> 14) & 1, (val >> 7) & 1);
 
                 /* MISC7r: force_oscdr, CL49 in all mode */
                 PHY_BUS_READ(pc_dbg, 0x19, &val);
                 syslog(LOG_INFO, "Port %s: MISC7r=0x%04x cl49_all=%d oscdr_force=%d oscdr_val=0x%x",
-                       switchd.ports[i].ifname, val & 0xffff,
+                       edged.ports[i].ifname, val & 0xffff,
                        (val >> 5) & 1, (val >> 9) & 1, (val >> 10) & 0xf);
 
                 /* FIRMWARE_MODEr */
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8200);
                 PHY_BUS_READ(pc_dbg, 0x1a, &val);
                 syslog(LOG_INFO, "Port %s: FWMODE=0x%04x l0=%d l1=%d l2=%d l3=%d",
-                       switchd.ports[i].ifname, val & 0xffff,
+                       edged.ports[i].ifname, val & 0xffff,
                        val & 0xf, (val >> 4) & 0xf,
                        (val >> 8) & 0xf, (val >> 12) & 0xf);
 
@@ -375,7 +380,7 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x8360);
                 PHY_BUS_READ(pc_dbg, 0x17, &val);
                 syslog(LOG_INFO, "Port %s: CL49_LSM=0x%04x block_lock=%d",
-                       switchd.ports[i].ifname, val & 0xffff,
+                       edged.ports[i].ifname, val & 0xffff,
                        (val >> 15) & 1);
 
                 /* ANARXSTATUSr: signal detect, CDR status
@@ -390,7 +395,7 @@ int portmap_configure_ports(void)
                         PHY_BUS_WRITE(pc_dbg, 0x11, rxctrl_new);
                         PHY_BUS_READ(pc_dbg, 0x10, &val);
                         syslog(LOG_INFO, "Port %s: ANARXSTAT[sel=%d]=0x%04x",
-                               switchd.ports[i].ifname, sel, val & 0xffff);
+                               edged.ports[i].ifname, sel, val & 0xffff);
                     }
                     /* Restore */
                     PHY_BUS_WRITE(pc_dbg, 0x11, rxctrl_orig);
@@ -401,7 +406,7 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x83c0);
                 PHY_BUS_READ(pc_dbg, 0x10, &val);
                 syslog(LOG_INFO, "Port %s: RX66_CTRL=0x%04x cc_en=%d cc_data=%d",
-                       switchd.ports[i].ifname, val & 0xffff,
+                       edged.ports[i].ifname, val & 0xffff,
                        val & 1, (val >> 1) & 1);
 
                 /* COMBO_MIICNTLr (IEEE MII control, reg 0x00 page 0)
@@ -409,13 +414,13 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0000);
                 PHY_BUS_READ(pc_dbg, 0x00, &val);
                 syslog(LOG_INFO, "Port %s: MII_CTRL=0x%04x an_en=%d loopback=%d",
-                       switchd.ports[i].ifname, val & 0xffff,
+                       edged.ports[i].ifname, val & 0xffff,
                        (val >> 12) & 1, (val >> 14) & 1);
 
                 /* MII_STATUS (IEEE reg 1): link, AN complete */
                 PHY_BUS_READ(pc_dbg, 0x01, &val);
                 syslog(LOG_INFO, "Port %s: MII_STAT=0x%04x link=%d an_done=%d",
-                       switchd.ports[i].ifname, val & 0xffff,
+                       edged.ports[i].ifname, val & 0xffff,
                        (val >> 2) & 1, (val >> 5) & 1);
 
                 /* AN_IEEECONTROL1r: CL73 AN enable
@@ -423,7 +428,7 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0010);
                 PHY_BUS_READ(pc_dbg, 0x10, &val);
                 syslog(LOG_INFO, "Port %s: AN_CTRL1=0x%04x cl73_an_en=%d restart=%d",
-                       switchd.ports[i].ifname, val & 0xffff,
+                       edged.ports[i].ifname, val & 0xffff,
                        (val >> 12) & 1, (val >> 9) & 1);
 
                 /* TENGBASE_KR_PMD_CONTROL_150r: CL72 training enable
@@ -432,7 +437,7 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0090);
                 PHY_BUS_READ(pc_dbg, 0x16, &val);
                 syslog(LOG_INFO, "Port %s: KR_PMD_CTRL=0x%04x training_en=%d",
-                       switchd.ports[i].ifname, val & 0xffff,
+                       edged.ports[i].ifname, val & 0xffff,
                        (val >> 1) & 1);
 
                 PHY_BUS_WRITE(pc_dbg, 0x1f, 0x0000);
@@ -461,9 +466,9 @@ int portmap_configure_ports(void)
          * ANATXACONTROL sets the FIR/pre-emphasis shaping.
          */
         {
-            phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(switchd.unit, port);
+            phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(edged.unit, port);
             if (pc) {
-                int is_qsfp = (switchd.ports[i].port_type == PORT_TYPE_QSFP);
+                int is_qsfp = (edged.ports[i].port_type == PORT_TYPE_QSFP);
                 int lane;
 
                 /*
@@ -475,13 +480,13 @@ int portmap_configure_ports(void)
                 rv = PHY_CONFIG_SET(pc, PhyConfig_TxIDrv, 10, NULL);
                 if (rv < 0)
                     syslog(LOG_WARNING, "Port %s: PhyConfig_TxIDrv failed: %d",
-                           switchd.ports[i].ifname, rv);
+                           edged.ports[i].ifname, rv);
 
                 rv = PHY_CONFIG_SET(pc, PhyConfig_TxPreIDrv,
                                     is_qsfp ? 15 : 12, NULL);
                 if (rv < 0)
                     syslog(LOG_WARNING, "Port %s: PhyConfig_TxPreIDrv failed: %d",
-                           switchd.ports[i].ifname, rv);
+                           edged.ports[i].ifname, rv);
 
                 /*
                  * Part 2: TX_ANATXACONTROL (block 0x8370) via direct
@@ -510,45 +515,45 @@ int portmap_configure_ports(void)
                 PHY_BUS_WRITE(pc, 0x1f, 0x0000);
 
                 syslog(LOG_INFO, "Port %s: TX driver idrv=10 ipre=%d + ANATX 0x%04x (%s)",
-                       switchd.ports[i].ifname,
+                       edged.ports[i].ifname,
                        is_qsfp ? 15 : 12,
                        is_qsfp ? 0x0AFF : 0x0ACC,
                        is_qsfp ? "40G QSFP" : "10G SFP+");
             } else {
                 syslog(LOG_WARNING, "Port %s: no PHY control (port %d)",
-                       switchd.ports[i].ifname, port);
+                       edged.ports[i].ifname, port);
             }
         }
 
-        switchd.ports[i].enabled = 1;
+        edged.ports[i].enabled = 1;
         configured++;
 
         syslog(LOG_INFO, "Port %s: logical=%d lane=%d speed=%dG type=%s mode=0x%x OK",
-               switchd.ports[i].ifname,
-               switchd.ports[i].logical_port,
-               switchd.ports[i].physical_lane,
-               switchd.ports[i].speed / 1000,
-               switchd.ports[i].port_type == PORT_TYPE_QSFP ? "QSFP" : "SFP",
+               edged.ports[i].ifname,
+               edged.ports[i].logical_port,
+               edged.ports[i].physical_lane,
+               edged.ports[i].speed / 1000,
+               edged.ports[i].port_type == PORT_TYPE_QSFP ? "QSFP" : "SFP",
                mode);
     }
 
-    switchd.num_ports = configured;
+    edged.num_ports = configured;
     syslog(LOG_INFO, "Configured %d ports", configured);
     return 0;
 }
 
 int portmap_swp_to_logical(int swp)
 {
-    if (swp < 1 || swp > SWITCHD_MAX_PORTS)
+    if (swp < 1 || swp > EDGED_MAX_PORTS)
         return -1;
-    return switchd.ports[swp - 1].logical_port;
+    return edged.ports[swp - 1].logical_port;
 }
 
 int portmap_logical_to_swp(int logical)
 {
     int i;
-    for (i = 0; i < SWITCHD_MAX_PORTS; i++) {
-        if (switchd.ports[i].logical_port == logical)
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {
+        if (edged.ports[i].logical_port == logical)
             return i + 1;
     }
     return -1;
@@ -558,8 +563,8 @@ int portmap_logical_to_swp(int logical)
 int portmap_phys_to_swp(int phys_port)
 {
     int i;
-    for (i = 0; i < SWITCHD_MAX_PORTS; i++) {
-        if (switchd.ports[i].physical_lane == phys_port)
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {
+        if (edged.ports[i].physical_lane == phys_port)
             return i + 1;
     }
     return -1;
@@ -567,7 +572,7 @@ int portmap_phys_to_swp(int phys_port)
 
 int portmap_swp_to_i2c_bus(int swp)
 {
-    if (swp < 1 || swp > SWITCHD_MAX_PORTS)
+    if (swp < 1 || swp > EDGED_MAX_PORTS)
         return -1;
     return port_to_i2c_bus[swp - 1];
 }
@@ -592,12 +597,12 @@ int portmap_link_poll(void)
     int changes = 0;
     int first_poll = (link_poll_count++ == 0);
 
-    for (i = 0; i < SWITCHD_MAX_PORTS; i++) {
-        if (!switchd.ports[i].valid || !switchd.ports[i].enabled)
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {
+        if (!edged.ports[i].valid || !edged.ports[i].enabled)
             continue;
 
-        int port = switchd.ports[i].physical_lane;  /* CDK port */
-        int old_link = switchd.ports[i].link_up;
+        int port = edged.ports[i].physical_lane;  /* CDK port */
+        int old_link = edged.ports[i].link_up;
 
         /*
          * bmd_port_mode_update() does the full link state machine:
@@ -616,19 +621,19 @@ int portmap_link_poll(void)
          * MAC enable + EPC_LINK_BMAP. If it fails, we still try
          * bmd_phy_link_get() to check the physical link state.
          */
-        bmd_port_mode_update(switchd.unit, port);
+        bmd_port_mode_update(edged.unit, port);
 
         /* Check physical link state */
         int link = 0;
         int autoneg_done = 0;
-        int rv = bmd_phy_link_get(switchd.unit, port, &link, &autoneg_done);
+        int rv = bmd_phy_link_get(edged.unit, port, &link, &autoneg_done);
         /* Log first poll result for debugging */
-        if (first_poll && (i < 3 || switchd.ports[i].port_type == PORT_TYPE_QSFP)) {
+        if (first_poll && (i < 3 || edged.ports[i].port_type == PORT_TYPE_QSFP)) {
             syslog(LOG_INFO, "link_poll[%s]: port=%d rv=%d link=%d an=%d",
-                   switchd.ports[i].ifname, port, rv, link, autoneg_done);
+                   edged.ports[i].ifname, port, rv, link, autoneg_done);
         }
         if (rv == 0) {
-            switchd.ports[i].link_up = link;
+            edged.ports[i].link_up = link;
 
             /*
              * Ensure BMD_PST_LINK_UP matches actual PHY link state.
@@ -637,15 +642,15 @@ int portmap_link_poll(void)
              * silently drops all packets.
              */
             if (link) {
-                BMD_PORT_STATUS_SET(switchd.unit, port, BMD_PST_LINK_UP);
+                BMD_PORT_STATUS_SET(edged.unit, port, BMD_PST_LINK_UP);
             } else {
-                BMD_PORT_STATUS_CLR(switchd.unit, port, BMD_PST_LINK_UP);
+                BMD_PORT_STATUS_CLR(edged.unit, port, BMD_PST_LINK_UP);
             }
 
             if (link != old_link) {
                 syslog(LOG_INFO, "BMD link %s: port %d (%s)",
                        link ? "UP" : "DOWN", port,
-                       switchd.ports[i].ifname);
+                       edged.ports[i].ifname);
                 changes++;
             }
         }

@@ -162,12 +162,12 @@ DEBIAN_FRONTEND=noninteractive chroot "$STAGING" apt-get install -y -q \
 if [ "$BUILD_ARTIFACTS" = "1" ]; then
 	BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/build}"
 	if [ -f "$BUILD_DIR/sdk/libbcm56846.so" ]; then
-		log "Installing libbcm56846.so, nos-switchd, BDE modules..."
+		log "Installing libbcm56846.so, edged, BDE modules..."
 		mkdir -p "$STAGING/usr/lib" "$STAGING/usr/sbin" "$STAGING/lib/modules/$KERNEL_VERSION"
 		cp -f "$BUILD_DIR/sdk/libbcm56846.so" "$STAGING/usr/lib/"
-		[ -f "$BUILD_DIR/switchd/nos-switchd" ] && \
-			cp -f "$BUILD_DIR/switchd/nos-switchd" "$STAGING/usr/sbin/" && \
-			chmod +x "$STAGING/usr/sbin/nos-switchd"
+		[ -f "$BUILD_DIR/edged/edged" ] && \
+			cp -f "$BUILD_DIR/edged/edged" "$STAGING/usr/sbin/" && \
+			chmod +x "$STAGING/usr/sbin/edged"
 		for ko in "$REPO_ROOT/bde/nos_kernel_bde.ko" "$REPO_ROOT/bde/nos_user_bde.ko" \
 		         "$REPO_ROOT/platform/drivers/accton_as5610_cpld.ko"; do
 			[ -f "$ko" ] && cp -f "$ko" "$STAGING/lib/modules/$KERNEL_VERSION/"
@@ -236,7 +236,7 @@ fi
 # --- Enable systemd services ---
 WANTS="$STAGING/etc/systemd/system/multi-user.target.wants"
 mkdir -p "$WANTS"
-for svc in nos-bde-modules nos-switchd platform-mgrd nos-boot-success; do
+for svc in nos-bde-modules edged platform-mgrd nos-boot-success; do
 	if [ -f "$STAGING/etc/systemd/system/${svc}.service" ]; then
 		ln -sfT "/etc/systemd/system/${svc}.service" "$WANTS/${svc}.service"
 		log "Enabled systemd service: $svc"

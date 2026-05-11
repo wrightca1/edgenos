@@ -26,7 +26,7 @@ IMGDIR    := $(OUTDIR)/images
 PLATFORM_MODS := platform/cpld platform/retimer
 
 .PHONY: all clean toolchain kernel modules rootfs-base rootfs image installer \
-        switchd bde openmdk help
+        edged bde openmdk tmon help
 
 all: image
 
@@ -39,7 +39,7 @@ help:
 	@echo "  modules      - Build platform kernel modules (CPLD, retimer)"
 	@echo "  bde          - Build BDE kernel modules"
 	@echo "  openmdk      - Build OpenMDK libraries (CDK, BMD, PHY)"
-	@echo "  switchd      - Build switch daemon"
+	@echo "  edged        - Build edged switch daemon"
 	@echo "  rootfs-base  - Build base root filesystem (Buildroot)"
 	@echo "  rootfs       - Assemble final rootfs with all components"
 	@echo "  image        - Build ONIE installer image"
@@ -91,17 +91,23 @@ bde: kernel
 	$(MAKE) -C $(TOPDIR)/asic/bde \
 		KSRC=$(KSRC) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS)
 
+# ── BDE temperature monitor (BCM5684x on-die sensor) ─────────────
+tmon: kernel
+	@echo "==> Building linux-bde-tmon"
+	$(MAKE) -C $(KSRC) M=$(TOPDIR)/asic/tmon \
+		ARCH=$(ARCH) CROSS_COMPILE=$(CROSS) modules
+
 # ── OpenMDK libraries ─────────────────────────────────────────────
 
 openmdk:
 	@echo "==> Building OpenMDK (CDK/BMD/PHY)"
 	@$(TOPDIR)/scripts/build-sdk.sh
 
-# ── Switch daemon ──────────────────────────────────────────────────
+# ── Switch daemon (edged) ──────────────────────────────────────────
 
-switchd: openmdk
-	@echo "==> Building switchd"
-	$(MAKE) -C $(TOPDIR)/asic/switchd \
+edged: openmdk
+	@echo "==> Building edged (switch daemon)"
+	$(MAKE) -C $(TOPDIR)/asic/edged \
 		CROSS_COMPILE=$(CROSS) OPENMDK=$(OPENMDK) TOPDIR=$(TOPDIR)
 
 # ── Root filesystem ───────────────────────────────────────────────
@@ -113,7 +119,7 @@ rootfs-base: rootfs-download
 	@echo "==> Building base rootfs with Buildroot"
 	@$(TOPDIR)/scripts/build-rootfs.sh build
 
-rootfs: rootfs-base kernel modules bde switchd
+rootfs: rootfs-base kernel modules bde edged
 	@echo "==> Assembling final rootfs"
 	@$(TOPDIR)/scripts/build-rootfs.sh assemble
 
@@ -137,7 +143,8 @@ clean:
 		[ -d "$$mod" ] && $(MAKE) -C $(KSRC) M=$(TOPDIR)/$$mod clean 2>/dev/null; \
 	done; true
 	$(MAKE) -C $(TOPDIR)/asic/bde clean 2>/dev/null; true
-	$(MAKE) -C $(TOPDIR)/asic/switchd clean 2>/dev/null; true
+	$(MAKE) -C $(KSRC) M=$(TOPDIR)/asic/tmon clean 2>/dev/null; true
+	$(MAKE) -C $(TOPDIR)/asic/edged clean 2>/dev/null; true
 
 distclean: clean
 	rm -rf $(TOPDIR)/build

@@ -75,6 +75,41 @@ build_kernel() {
     log "Kernel: $OUTDIR/kernel/uImage"
 }
 
+# ── Build out-of-tree platform kernel modules ───────────────
+#
+# These are linked against the kernel we just built. Order does not
+# matter (no cross-module dependencies); each invocation is a one-shot
+# make -C $KSRC M=<dir> modules.
+build_platform_modules() {
+    log "Building out-of-tree kernel modules (bde, tmon, cpld, retimer)..."
+
+    # Copy the source into the build area so we can write .ko alongside
+    # without dirtying the read-only /src bind mount. /src is mounted ro
+    # but the build needs to drop .ko/.o files into the module dir.
+    local MODSTAGE="/build/modules-src"
+    rm -rf "$MODSTAGE"
+    mkdir -p "$MODSTAGE"
+    cp -a "$SRCDIR/asic/bde"        "$MODSTAGE/bde"
+    cp -a "$SRCDIR/asic/tmon"       "$MODSTAGE/tmon"
+    cp -a "$SRCDIR/platform/cpld"   "$MODSTAGE/cpld"
+    cp -a "$SRCDIR/platform/retimer" "$MODSTAGE/retimer"
+
+    local KMAKE="make -C $KSRC ARCH=powerpc CROSS_COMPILE=powerpc-linux-gnu-"
+
+    for mod in bde tmon cpld retimer; do
+        log "  → $mod"
+        if ! $KMAKE M="$MODSTAGE/$mod" modules; then
+            log "ERROR: kernel module $mod failed to build"
+            exit 1
+        fi
+    done
+
+    # Stage the .ko's where build_rootfs() will copy them from.
+    mkdir -p "$OUTDIR/modules"
+    find "$MODSTAGE" -name '*.ko' -exec cp {} "$OUTDIR/modules/" \;
+    log "Built $(ls "$OUTDIR/modules/" | wc -l) kernel module(s)"
+}
+
 # ── Build initramfs ──────────────────────────────────────────
 build_initramfs() {
     log "Building initramfs..."
@@ -83,9 +118,16 @@ build_initramfs() {
     rm -rf "$INITROOT"
     mkdir -p "$INITROOT"/{bin,sbin,dev,proc,sys,newroot,lower,rw}
 
-    # Compile static init
+    # Compile static init.
+    #
+    # BOOT.md captures why we use the libc variant (initramfs-nos-init.c)
+    # rather than the raw-syscall version under initramfs/. The raw
+    # version defines its own _start, which collides with crt1.o unless
+    # built with -nostartfiles + -nostdlib + -lgcc — and even then it
+    # crashes on PPC e500v2 due to missing stack-frame setup.  The libc
+    # variant is larger (~767 K) but proven on this hardware.
     powerpc-linux-gnu-gcc -static -Os \
-        -o "$INITROOT/init" "$SRCDIR/initramfs/nos-init.c"
+        -o "$INITROOT/init" "$SRCDIR/initramfs-nos-init.c"
     chmod +x "$INITROOT/init"
 
     # Create cpio archive
@@ -184,18 +226,26 @@ EOF
     fi
 
     # Install ASIC config
-    mkdir -p "$STAGING/etc/switchd"
-    cp "$SRCDIR/config/bcm/"* "$STAGING/etc/switchd/" 2>/dev/null || true
+    mkdir -p "$STAGING/etc/edged"
+    cp "$SRCDIR/config/bcm/"* "$STAGING/etc/edged/" 2>/dev/null || true
 
-    # Install switchd binary if built
-    [ -f "$OUTDIR/switchd/switchd" ] && \
-        install -m 755 "$OUTDIR/switchd/switchd" "$STAGING/usr/sbin/switchd"
+    # Install edged binary if built
+    [ -f "$OUTDIR/edged/edged" ] && \
+        install -m 755 "$OUTDIR/edged/edged" "$STAGING/usr/sbin/edged"
 
     # Install platform modules
     local KMOD_DIR="$STAGING/lib/modules/extra"
     mkdir -p "$KMOD_DIR"
-    find "$SRCDIR/platform" -name "*.ko" -exec cp {} "$KMOD_DIR/" \; 2>/dev/null || true
-    find "$SRCDIR/asic/bde" -name "*.ko" -exec cp {} "$KMOD_DIR/" \; 2>/dev/null || true
+    # Pull freshly-built modules from build_platform_modules() output.
+    # Fallback to scanning the source tree (in case modules were
+    # pre-built outside Docker) so this isn't a hard dependency.
+    if [ -d "$OUTDIR/modules" ] && [ "$(ls -A "$OUTDIR/modules" 2>/dev/null)" ]; then
+        cp "$OUTDIR/modules/"*.ko "$KMOD_DIR/" 2>/dev/null || true
+    else
+        find "$SRCDIR/platform" -name "*.ko" -exec cp {} "$KMOD_DIR/" \; 2>/dev/null || true
+        find "$SRCDIR/asic/bde"  -name "*.ko" -exec cp {} "$KMOD_DIR/" \; 2>/dev/null || true
+        find "$SRCDIR/asic/tmon" -name "*.ko" -exec cp {} "$KMOD_DIR/" \; 2>/dev/null || true
+    fi
 
     # Boot success service (resets boot_count)
     mkdir -p "$STAGING/usr/sbin"
@@ -345,6 +395,7 @@ build_installer() {
 log "EdgeNOS full build starting..."
 install_deps
 build_kernel
+build_platform_modules
 build_initramfs
 build_rootfs
 build_fit

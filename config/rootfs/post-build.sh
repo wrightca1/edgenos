@@ -36,11 +36,11 @@ mkdir -p "$WANTS"
 ln -sf /usr/lib/systemd/system/systemd-networkd.service "$WANTS/systemd-networkd.service" 2>/dev/null
 ln -sf /usr/lib/systemd/system/systemd-resolved.service "$WANTS/systemd-resolved.service" 2>/dev/null
 
-# Enable platform-init and switchd
+# Enable platform-init and edged
 [ -f "${SYSD}/platform-init.service" ] && \
     ln -sf /etc/systemd/system/platform-init.service "$WANTS/platform-init.service" 2>/dev/null
-[ -f "${SYSD}/switchd.service" ] && \
-    ln -sf /etc/systemd/system/switchd.service "$WANTS/switchd.service" 2>/dev/null
+[ -f "${SYSD}/edged.service" ] && \
+    ln -sf /etc/systemd/system/edged.service "$WANTS/edged.service" 2>/dev/null
 [ -f "${SYSD}/thermal-mgmt.service" ] && \
     ln -sf /etc/systemd/system/thermal-mgmt.service "$WANTS/thermal-mgmt.service" 2>/dev/null
 

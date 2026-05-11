@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <syslog.h>
 
-#include "switchd.h"
+#include "edged.h"
 
 #include <cdk/chip/bcm56840_a0_defs.h>
 #include <cdk/arch/xgs_chip.h>
@@ -209,6 +209,107 @@ static int datapath_mac_init(int unit)
     ioerr += WRITE_IFP_METER_PARITY_CONTROLr(unit, ifp_meter);
     syslog(LOG_INFO, "MAC: IFP_METER_PARITY_CONTROL=0 (errata)");
 
+    /*
+     * RX/TX drop counter disaggregation (matches Cumulus rc.soc).
+     * These coupling registers route per-reason drop events into the
+     * RDBGCn / TDBGCn counters so ethtool -S can report:
+     *   rdbgc0 (aggregated): RIPD4+RIPD6+RDISC+RPORTD+PDISC+VLANDR
+     *   rdbgc3: RIPD4+RIPD6  (IPv4/IPv6 header drops)
+     *   rdbgc4: RDISC        (discard)
+     *   rdbgc5: RFILDR       (filter drop)
+     *   rdbgc6: RDROP        (generic RX drop)
+     *   tdbgc6: TPKTD        (TX packet drop)
+     * From cumulus_baseline_2013/binaries/extracted/etc/bcm.d/rc.soc.
+     */
+    {
+        RDBGC0_SELECTr_t r0; RDBGC3_SELECTr_t r3;
+        RDBGC4_SELECTr_t r4; RDBGC5_SELECTr_t r5;
+        RDBGC6_SELECTr_t r6; TDBGC6_SELECTr_t t6;
+        CDK_PBMP_ITER(pbmp, port) {
+            RDBGC0_SELECTr_SET(r0, 0x04000d11);
+            ioerr += WRITE_RDBGC0_SELECTr(unit, port, r0);
+            RDBGC3_SELECTr_SET(r3, 0x00000011);
+            ioerr += WRITE_RDBGC3_SELECTr(unit, port, r3);
+            RDBGC4_SELECTr_SET(r4, 0x00000100);
+            ioerr += WRITE_RDBGC4_SELECTr(unit, port, r4);
+            RDBGC5_SELECTr_SET(r5, 0x00002000);
+            ioerr += WRITE_RDBGC5_SELECTr(unit, port, r5);
+            RDBGC6_SELECTr_SET(r6, 0x00008000);
+            ioerr += WRITE_RDBGC6_SELECTr(unit, port, r6);
+            TDBGC6_SELECTr_SET(t6, 0x00040000);
+            ioerr += WRITE_TDBGC6_SELECTr(unit, port, t6);
+        }
+        syslog(LOG_INFO,
+               "MAC: drop-counter select wired (rdbgc0/3/4/5/6, tdbgc6)");
+    }
+
+    return ioerr;
+}
+
+/*
+ * MMU service-pool / priority-group buffer configuration.
+ *
+ * Captured from Cumulus rc.datapath_0 for the AS5610-52X (BCM56846,
+ * 46080 total cells of buffer memory).  These settings are the minimum
+ * subset required to keep CPU punt + line-rate forwarding from dropping
+ * under burst load.  The full rc.datapath_0 has ~140 register writes
+ * (per-port PG min cells, per-CoS shared limits, MMU scheduler weights);
+ * those are TODO and the chip defaults stand in until they are ported.
+ *
+ * Source: cumulus_baseline_2013/switchd-generated-state/rc.datapath_0
+ * Decoded: cumulus_baseline_2013/ASIC_INIT_COOKBOOK.md §6.
+ */
+static int datapath_buffer_init(int unit)
+{
+    int ioerr = 0;
+
+    /* Disable color-aware admission globally — Cumulus default. */
+    {
+        COLOR_AWAREr_t v;
+        COLOR_AWAREr_CLR(v);
+        ioerr += WRITE_COLOR_AWAREr(unit, v);
+    }
+
+    /* Service pool cell limits (46080 total cells available):
+     *   SP0 = 0        (disabled)
+     *   SP1 = 1382     (main bulk traffic)
+     *   SP2 = 921      (priority traffic)
+     *   SP3 = 0        (disabled)
+     * Plus cell_reset_limit_offset = 100 cells of hysteresis. */
+    {
+        BUFFER_CELL_LIMIT_SPr_t v;
+        CELL_RESET_LIMIT_OFFSET_SPr_t h;
+        unsigned int sp_limit[4] = { 0, 1382, 921, 0 };
+        unsigned int sp_hyst[4]  = { 0,  100, 100, 0 };
+        int sp;
+        for (sp = 0; sp < 4; sp++) {
+            BUFFER_CELL_LIMIT_SPr_CLR(v);
+            BUFFER_CELL_LIMIT_SPr_LIMITf_SET(v, sp_limit[sp]);
+            ioerr += WRITE_BUFFER_CELL_LIMIT_SPr(unit, sp, v);
+            CELL_RESET_LIMIT_OFFSET_SPr_CLR(h);
+            CELL_RESET_LIMIT_OFFSET_SPr_SET(h, sp_hyst[sp]);
+            ioerr += WRITE_CELL_RESET_LIMIT_OFFSET_SPr(unit, sp, h);
+        }
+    }
+
+    /* Global shared pool — 22742 cells. */
+    {
+        BUFFER_CELL_LIMIT_SP_SHAREDr_t v;
+        BUFFER_CELL_LIMIT_SP_SHAREDr_CLR(v);
+        BUFFER_CELL_LIMIT_SP_SHAREDr_SET(v, 22742);
+        ioerr += WRITE_BUFFER_CELL_LIMIT_SP_SHAREDr(unit, v);
+    }
+
+    /* Global headroom buffer for absorbed bursts — 2340 cells. */
+    {
+        GLOBAL_HDRM_LIMITr_t v;
+        GLOBAL_HDRM_LIMITr_CLR(v);
+        GLOBAL_HDRM_LIMITr_SET(v, 2340);
+        ioerr += WRITE_GLOBAL_HDRM_LIMITr(unit, v);
+    }
+
+    syslog(LOG_INFO,
+           "MMU: SP1=1382 SP2=921 shared=22742 hdrm=2340 (Cumulus values)");
     return ioerr;
 }
 
@@ -216,19 +317,20 @@ static int datapath_mac_init(int unit)
  * Initialize datapath configuration.
  *
  * Called after bmd_switching_init() and portmap_configure_ports().
- * Applies MAC config, CPU punt rules, hash config, and basic buffer setup.
+ * Applies MAC config, MMU buffer pools, CPU punt rules, and hash.
  *
- * Note: Full buffer threshold configuration (THDO tables from
- * rc.datapath_0) is not yet implemented. The ASIC defaults should
- * allow basic packet forwarding; full QoS tuning can be added later.
+ * Note: Per-port PG min/shared cell limits (the 40-port iteration in
+ * rc.datapath_0) are still TODO. Chip defaults work for low-rate
+ * forwarding and CPU punt; need real values for full line-rate.
  */
 int datapath_init(void)
 {
     int ioerr = 0;
 
-    ioerr += datapath_mac_init(switchd.unit);
-    ioerr += datapath_cpu_punt_init(switchd.unit);
-    ioerr += datapath_hash_init(switchd.unit);
+    ioerr += datapath_mac_init(edged.unit);
+    ioerr += datapath_buffer_init(edged.unit);
+    ioerr += datapath_cpu_punt_init(edged.unit);
+    ioerr += datapath_hash_init(edged.unit);
 
     if (ioerr) {
         syslog(LOG_ERR, "Datapath init had %d I/O errors", ioerr);
