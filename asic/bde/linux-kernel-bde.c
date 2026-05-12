@@ -310,13 +310,21 @@ static int bde_pci_probe(struct pci_dev *pdev,
 
 	/*
 	 * Allocate DMA pool. Try requested size, then degrade in halves
-	 * to 8 MB minimum. P2020 + 32 MB CMA can refuse a single 64 MB
-	 * alloc under memory fragmentation; smaller chunks still let the
-	 * BMD init + first few packets work.
+	 * down to 1 MB.
+	 *
+	 * PPC32 buddy allocator has MAX_ORDER=11, so the largest single
+	 * contiguous allocation the page allocator can return is
+	 * 2^10 * PAGE_SIZE = 4 MB.  Anything bigger needs CMA — and on
+	 * P2020 FSL boards CMA frequently fails to reserve at boot
+	 * (kernel logs "0K cma-reserved" even when CONFIG_CMA=y and
+	 * cma=32M is on the cmdline).  So 64 MB / 32 MB / 16 MB / 8 MB
+	 * requests are effectively guaranteed to fail; useful chunk sizes
+	 * here are 4 MB and below.  1 MB is plenty for ping/ARP-level
+	 * traffic (16 RX buffers x 2 KB + per-TX DMA-coherent allocs).
 	 */
 	{
 		unsigned int try_mb = dma_size;
-		while (try_mb >= 8) {
+		while (try_mb >= 1) {
 			bdev->dma_size = try_mb * 1024 * 1024;
 			bdev->dma_virt = dma_alloc_coherent(&pdev->dev,
 				bdev->dma_size, &bdev->dma_phys, GFP_KERNEL);
@@ -518,37 +526,29 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		if (!bdev->valid)
 			return -ENODEV;
 		/*
-		 * Register access routing:
+		 * Register access routing — corrected 2026-05-12.
 		 *
-		 * Addresses < 0x40000 (256KB BAR0) are CMIC register offsets.
-		 * These map to AXI 0x18000000 + offset and need sub-window
-		 * remapping for offsets above 0x1000 (CMICm DMA at 0x31xxx,
-		 * SCHAN at 0x33xxx, MIIM at 0x32xxx).
+		 * On BCM56846 the entire 256 KB BAR0 maps **directly** to AXI
+		 * 0x18000000 .. 0x1803FFFF. CMICm DMA (0x31xxx), SCHAN
+		 * (0x32xxx/0x33xxx), MIIM (0x32xxx) — all directly addressable
+		 * at their BAR0 offsets. NO sub-window remap needed.
 		 *
-		 * Addresses >= 0x40000 are S-Channel encoded register
-		 * addresses (block/port/type). These go through SCHAN_MSG
-		 * + SCHAN_CTRL at BAR0+0x050 — the CDK handles this
-		 * internally by writing to SCHAN_MSG first, then triggering
-		 * via SCHAN_CTRL. They should NOT be treated as AXI offsets.
+		 * We previously routed every offset ≥ 0x1000 through dynamic
+		 * sub-window 7 remap, which gave the wrong physical location
+		 * (the iProc IMAP register returns 0 on readback, so the
+		 * remap cache pointed at page 0 instead of the requested page).
+		 * That broke every DMA register access — chan 0 looked like
+		 * DIR=RX EN=1 (0xb2) when the real chip value was DIR=RX EN=1
+		 * (0x92) — i.e. our R/W path was reading and writing junk.
+		 *
+		 * The AXI sub-window mechanism is only needed for accesses
+		 * BEYOND the 256 KB BAR0 native window (other iProc peripheral
+		 * controllers etc.). Those aren't reachable on this chip
+		 * anyway, so we don't expose them here.
 		 */
 		if (rio.addr >= bdev->base_size)
 			return -EINVAL;
-		/*
-		 * Register access routing:
-		 * - Addresses < 0x1000: direct BAR0 (sub-window 0).
-		 *   Covers SCHAN (0x050), legacy CMIC, PAXB config.
-		 * - Addresses >= 0x1000: AXI sub-window remap.
-		 *   Needed for CMICm DMA (0x31xxx), MIIM (0x32xxx),
-		 *   and other iProc peripheral registers.
-		 *
-		 * Direct BAR0 for sub-window 0 avoids timing issues
-		 * with SCHAN (atomic MSG+CTRL writes).
-		 */
-		if (rio.addr >= PAXB_SUBWIN_SIZE)
-			rio.val = iproc_axi_read(bdev,
-						 PAXB_AXI_BASE + rio.addr);
-		else
-			rio.val = iproc_read(bdev, rio.addr);
+		rio.val = iproc_read(bdev, rio.addr);
 		if (copy_to_user((void __user *)arg, &rio, sizeof(rio)))
 			return -EFAULT;
 		return 0;
@@ -563,11 +563,8 @@ static long bde_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -ENODEV;
 		if (rio.addr >= bdev->base_size)
 			return -EINVAL;
-		if (rio.addr >= PAXB_SUBWIN_SIZE)
-			iproc_axi_write(bdev,
-					PAXB_AXI_BASE + rio.addr, rio.val);
-		else
-			iproc_write(bdev, rio.addr, rio.val);
+		/* Direct BAR0 access — see READ comment above. */
+		iproc_write(bdev, rio.addr, rio.val);
 		return 0;
 
 	case BDE_IOC_DMA_ALLOC:

@@ -43,7 +43,13 @@
 #include <linux/sysfs.h>
 #include <linux/mutex.h>
 
-#define DRIVER_NAME "linux-bde-tmon"
+/*
+ * hwmon names must match [A-Za-z0-9_]+ — no hyphens allowed.
+ * The module is still installed as linux-bde-tmon.ko for backward
+ * naming consistency with Cumulus, but the hwmon `name` attribute
+ * uses the underscore form.
+ */
+#define DRIVER_NAME "bde_tmon"
 
 #define PCI_VENDOR_ID_BROADCOM_NETXTREME 0x14e4
 

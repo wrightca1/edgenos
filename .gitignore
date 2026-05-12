@@ -11,3 +11,6 @@ modules.order
 *.swp
 *~
 asic/openmdk/
+
+# Cross-compiled edged binary (built by Docker; recreated on demand)
+asic/edged/edged

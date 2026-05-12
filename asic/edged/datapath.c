@@ -221,24 +221,28 @@ static int datapath_mac_init(int unit)
      *   tdbgc6: TPKTD        (TX packet drop)
      * From cumulus_baseline_2013/binaries/extracted/etc/bcm.d/rc.soc.
      */
+    /*
+     * RDBGC*_SELECT and TDBGC6_SELECT are global registers (one per
+     * chip, not per port). The Cumulus rc.soc issues exactly one
+     * `setreg <reg> <val>` for each — same here.
+     */
     {
         RDBGC0_SELECTr_t r0; RDBGC3_SELECTr_t r3;
         RDBGC4_SELECTr_t r4; RDBGC5_SELECTr_t r5;
         RDBGC6_SELECTr_t r6; TDBGC6_SELECTr_t t6;
-        CDK_PBMP_ITER(pbmp, port) {
-            RDBGC0_SELECTr_SET(r0, 0x04000d11);
-            ioerr += WRITE_RDBGC0_SELECTr(unit, port, r0);
-            RDBGC3_SELECTr_SET(r3, 0x00000011);
-            ioerr += WRITE_RDBGC3_SELECTr(unit, port, r3);
-            RDBGC4_SELECTr_SET(r4, 0x00000100);
-            ioerr += WRITE_RDBGC4_SELECTr(unit, port, r4);
-            RDBGC5_SELECTr_SET(r5, 0x00002000);
-            ioerr += WRITE_RDBGC5_SELECTr(unit, port, r5);
-            RDBGC6_SELECTr_SET(r6, 0x00008000);
-            ioerr += WRITE_RDBGC6_SELECTr(unit, port, r6);
-            TDBGC6_SELECTr_SET(t6, 0x00040000);
-            ioerr += WRITE_TDBGC6_SELECTr(unit, port, t6);
-        }
+
+        RDBGC0_SELECTr_SET(r0, 0x04000d11);
+        ioerr += WRITE_RDBGC0_SELECTr(unit, r0);
+        RDBGC3_SELECTr_SET(r3, 0x00000011);
+        ioerr += WRITE_RDBGC3_SELECTr(unit, r3);
+        RDBGC4_SELECTr_SET(r4, 0x00000100);
+        ioerr += WRITE_RDBGC4_SELECTr(unit, r4);
+        RDBGC5_SELECTr_SET(r5, 0x00002000);
+        ioerr += WRITE_RDBGC5_SELECTr(unit, r5);
+        RDBGC6_SELECTr_SET(r6, 0x00008000);
+        ioerr += WRITE_RDBGC6_SELECTr(unit, r6);
+        TDBGC6_SELECTr_SET(t6, 0x00040000);
+        ioerr += WRITE_TDBGC6_SELECTr(unit, t6);
         syslog(LOG_INFO,
                "MAC: drop-counter select wired (rdbgc0/3/4/5/6, tdbgc6)");
     }

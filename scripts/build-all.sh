@@ -110,6 +110,49 @@ build_platform_modules() {
     log "Built $(ls "$OUTDIR/modules/" | wc -l) kernel module(s)"
 }
 
+# ── Build edged userspace daemon (cross-compile) ────────────
+#
+# The Makefile's `make edged` chain expects to write into /src/asic/...
+# which is bind-mounted read-only here. Stage the source into /build
+# first, build openmdk (CDK/BMD/PHY libs), then build edged itself.
+build_edged() {
+    log "Building edged daemon (cross-compile to powerpc)..."
+    local EDGEDSRC="/build/edged-src"
+    rm -rf "$EDGEDSRC"
+    cp -a "$SRCDIR" "$EDGEDSRC"
+
+    # OpenMDK libs first (writes into asic/openmdk/.../*.a; needed by edged)
+    if [ -d "$EDGEDSRC/asic/openmdk" ]; then
+        log "  → OpenMDK (CDK/BMD/PHY)"
+        if ! "$EDGEDSRC/scripts/build-sdk.sh" 2>&1 | tail -20; then
+            log "ERROR: OpenMDK build failed"
+            return 1
+        fi
+    else
+        log "WARN: asic/openmdk not present, skipping edged build"
+        return 0
+    fi
+
+    log "  → edged"
+    if ! make -C "$EDGEDSRC/asic/edged" \
+        CROSS_COMPILE=powerpc-linux-gnu- \
+        OPENMDK="$EDGEDSRC/asic/openmdk" \
+        TOPDIR="$EDGEDSRC" \
+        SDK_BLDDIR="$EDGEDSRC/output/sdk" 2>&1 | tail -25; then
+        log "ERROR: edged build failed"
+        return 1
+    fi
+
+    mkdir -p "$OUTDIR/edged"
+    if [ -f "$EDGEDSRC/asic/edged/edged" ]; then
+        cp "$EDGEDSRC/asic/edged/edged" "$OUTDIR/edged/edged"
+        log "edged: $(ls -lh "$OUTDIR/edged/edged" | awk '{print $5}')"
+    else
+        log "ERROR: edged binary not produced"
+        return 1
+    fi
+}
+
 # ── Build initramfs ──────────────────────────────────────────
 build_initramfs() {
     log "Building initramfs..."
@@ -146,8 +189,11 @@ build_rootfs() {
 
     # Stage 1: debootstrap with key packages included
     log "debootstrap stage 1..."
+    # Stage-1 --include= runs natively (fast); use this for everything we
+    # actually need.  Don't try to install more later under qemu-ppc — it
+    # hangs.  tcpdump/less/ca-certificates/python added here.
     debootstrap --arch=powerpc --foreign --no-check-gpg \
-        --include=systemd,systemd-sysv,dbus,openssh-server,iproute2,isc-dhcp-client,ethtool,i2c-tools,pciutils,u-boot-tools,net-tools,nano,kmod,procps \
+        --include=systemd,systemd-sysv,dbus,openssh-server,iproute2,isc-dhcp-client,ethtool,i2c-tools,pciutils,u-boot-tools,net-tools,nano,kmod,procps,less,ca-certificates \
         jessie "$STAGING" "$JESSIE_MIRROR"
 
     # Copy qemu for PPC32 execution in chroot
@@ -183,14 +229,16 @@ EOF
     printf '#!/bin/sh\nexit 101\n' > "$STAGING/usr/sbin/policy-rc.d"
     chmod +x "$STAGING/usr/sbin/policy-rc.d"
 
-    # Packages already installed via debootstrap --include
-    # Only install extras that weren't in the include list
-    log "Installing additional packages..."
-    DEBIAN_FRONTEND=noninteractive chroot "$STAGING" apt-get update -q 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive chroot "$STAGING" apt-get install -y -q \
-        --no-install-recommends --allow-unauthenticated \
-        tcpdump less python3-minimal ca-certificates 2>&1 || \
-        log "WARN: some extra packages failed to install (non-fatal)"
+    # All required packages are already installed by debootstrap --include
+    # (systemd, openssh-server, iproute2, isc-dhcp-client, ethtool, etc).
+    #
+    # Skipping the in-chroot `apt-get update` + `apt-get install` for
+    # optional extras (tcpdump/less/python/ca-certs): on PPC32 those run
+    # under qemu-ppc-static and routinely hang during apt's SSL/DNS even
+    # though the mirror is fast natively.  If you actually need any of
+    # those packages, add them to the debootstrap --include list above
+    # (stage-1 install, runs natively, fast).
+    log "Skipping in-chroot apt-get extras (debootstrap --include covered the essentials)"
 
     # Set root password: as5610
     echo 'root:as5610' | chroot "$STAGING" chpasswd 2>/dev/null || true
@@ -233,12 +281,18 @@ EOF
     [ -f "$OUTDIR/edged/edged" ] && \
         install -m 755 "$OUTDIR/edged/edged" "$STAGING/usr/sbin/edged"
 
-    # Install platform modules
-    local KMOD_DIR="$STAGING/lib/modules/extra"
+    # Install platform modules into the kernel-version-stamped directory
+    # so depmod / modprobe / systemd-modules-load can find them.
+    local KVER="${KVER:-${KVER_DETECTED:-}}"
+    if [ -z "$KVER" ]; then
+        KVER=$(make -C "$KSRC" -s kernelrelease ARCH=powerpc \
+                CROSS_COMPILE=powerpc-linux-gnu- 2>/dev/null \
+                || cat "$KSRC/include/config/kernel.release" 2>/dev/null \
+                || echo "5.10.224-edgenos")
+    fi
+    log "Installing kernel modules for KVER=$KVER"
+    local KMOD_DIR="$STAGING/lib/modules/$KVER/extra"
     mkdir -p "$KMOD_DIR"
-    # Pull freshly-built modules from build_platform_modules() output.
-    # Fallback to scanning the source tree (in case modules were
-    # pre-built outside Docker) so this isn't a hard dependency.
     if [ -d "$OUTDIR/modules" ] && [ "$(ls -A "$OUTDIR/modules" 2>/dev/null)" ]; then
         cp "$OUTDIR/modules/"*.ko "$KMOD_DIR/" 2>/dev/null || true
     else
@@ -246,6 +300,11 @@ EOF
         find "$SRCDIR/asic/bde"  -name "*.ko" -exec cp {} "$KMOD_DIR/" \; 2>/dev/null || true
         find "$SRCDIR/asic/tmon" -name "*.ko" -exec cp {} "$KMOD_DIR/" \; 2>/dev/null || true
     fi
+    # depmod needs at least the empty `modules.builtin` / `modules.order`
+    # files; `make modules_install` creates them but we copied .ko's by hand.
+    touch "$STAGING/lib/modules/$KVER/modules.builtin"
+    touch "$STAGING/lib/modules/$KVER/modules.order"
+    chroot "$STAGING" depmod -a "$KVER" 2>&1 | tail -3 || true
 
     # Boot success service (resets boot_count)
     mkdir -p "$STAGING/usr/sbin"
@@ -276,13 +335,21 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-    # Enable services
+    # Enable services. Cannot run `systemctl enable` against the staged
+    # rootfs from outside (the host's systemctl talks to PID 1 here), so
+    # symlink the WantedBy=multi-user.target relationships by hand.
     local WANTS="$STAGING/etc/systemd/system/multi-user.target.wants"
     mkdir -p "$WANTS"
-    for svc in nos-boot-success; do
-        [ -f "$STAGING/etc/systemd/system/${svc}.service" ] && \
+    for svc in nos-boot-success platform-init edged; do
+        if [ -f "$STAGING/etc/systemd/system/${svc}.service" ]; then
             ln -sf "/etc/systemd/system/${svc}.service" "$WANTS/${svc}.service"
+            log "  enabled: ${svc}.service"
+        fi
     done
+
+    # Strip AmbientCapabilities= (systemd v229+) for jessie's systemd v215.
+    sed -i 's/^AmbientCapabilities=/#AmbientCapabilities=/' \
+        "$STAGING/etc/systemd/system/edged.service" 2>/dev/null || true
 
     # Persist mount point
     mkdir -p "$STAGING/mnt/persist"
@@ -396,6 +463,7 @@ log "EdgeNOS full build starting..."
 install_deps
 build_kernel
 build_platform_modules
+build_edged
 build_initramfs
 build_rootfs
 build_fit
