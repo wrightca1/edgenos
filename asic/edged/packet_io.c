@@ -282,6 +282,14 @@ static void handle_tun_tx(int port_idx)
     int rv;
 
     len = read(port->tun_fd, tx_buf, sizeof(tx_buf));
+    if (strcmp(port->ifname, "swp2") == 0) {
+        static int swp2_dbg = 0;
+        if (swp2_dbg < 100) {
+            syslog(LOG_ERR, "swp2 TX read: fd=%d len=%zd phy_lane=%d",
+                   port->tun_fd, (ssize_t)len, port->physical_lane);
+            swp2_dbg++;
+        }
+    }
     if (len <= 0)
         return;
 

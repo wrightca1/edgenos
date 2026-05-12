@@ -532,26 +532,35 @@ int bmd_switching_init_all(void)
 void bde_set_dma_endianness(void)
 {
     /*
-     * CMIC_ENDIANESS_SEL = 0x05050505.
+     * CMIC_ENDIANESS_SEL = 0x04050504.
      *
-     * Captured from a working Cumulus 2.5.0 chassis under live ping
-     * traffic (SESSION_2026-05-12-cumulus-diff.md).  Bit 0 of each
-     * byte is the byte-swap-enable flag for one of four endian
-     * domains (PIO, DMA_PACKET, DMA_OTHER, MSI). All four must be
-     * enabled on a big-endian PPC host or the chip reads DCBs / TX
-     * descriptors with reversed byte order, finds garbage at the
-     * length/flag fields, and either hangs the DMA channel or drops
-     * the descriptor silently.
+     * Byte breakdown (each byte controls one CMIC endian domain):
+     *   byte 0 (PIO)        = 0x04 — bit 0 OFF: no HW PIO byte-swap.
+     *                                 Required because we already byte-swap
+     *                                 in software (SYS_BE_PIO=1 in CDK).
+     *                                 If we also enable HW swap, SCHAN
+     *                                 messages get double-swapped and
+     *                                 every SCHAN MEM op times out.
+     *   byte 1 (DMA_PACKET) = 0x05 — bit 0 ON:  HW byte-swap on DCB.
+     *                                 Required for TX/RX DMA to read DCBs
+     *                                 in the correct order on PPC (BE) host.
+     *   byte 2 (DMA_OTHER)  = 0x05 — bit 0 ON:  HW byte-swap on descriptors.
+     *   byte 3 (MSI)        = 0x04 — unused (we don't enable MSI).
      *
-     * Previous code wrote 0x04000004 (only bit 2 in two bytes, no
-     * PIO swap) — that's what kept our TX DMA hung. Cumulus also
-     * confirms our older guess of "DMA_OTHER only" was wrong; the
-     * chip wants the full swap config.
+     * Cumulus uses 0x05050505 because their CDK has SYS_BE_PIO=0
+     * (no software swap) — they rely on the HW PIO byte-swap.
+     * We keep SYS_BE_PIO=1 because the rest of edged's BDE access
+     * path is built around it; flipping it project-wide is risky.
+     * Mixed 0x04050504 gives us correct behavior in both domains.
+     *
+     * SCHAN works at port_mode_set time (before this write) with the
+     * default 0x04040404. SCHAN MEM ops to EPC_LINK_BMAPm timed out
+     * (rd=-9 wr=-9) the moment we changed PIO byte to 0x05.
      */
     uint32_t readback = 0;
-    CDK_DEV_WRITE32(edged.unit, 0x174, 0x05050505);
+    CDK_DEV_WRITE32(edged.unit, 0x174, 0x04050504);
     CDK_DEV_READ32(edged.unit, 0x174, &readback);
-    syslog(LOG_INFO, "DMA endian: ENDIAN_SEL=0x%08x (wrote 0x05050505)", readback);
+    syslog(LOG_INFO, "DMA endian: ENDIAN_SEL=0x%08x (wrote 0x04050504)", readback);
 
     /*
      * PAXB endianness register.  Cumulus has 0x000000f3 here, we had
