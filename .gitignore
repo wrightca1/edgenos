@@ -1,16 +1,19 @@
-output/
-*.o
+
+*~
+asic/edged/edged
+asic/openmdk/
+bde_dump*
+*.cmd
+# Cross-compiled edged binary (built by Docker; recreated on demand)
 *.ko
 *.mod
 *.mod.c
 *.mod.o
-*.cmd
-.tmp_versions/
-Module.symvers
 modules.order
+Module.symvers
+*.o
+oarr_dump
+output/
 *.swp
-*~
-asic/openmdk/
-
-# Cross-compiled edged binary (built by Docker; recreated on demand)
-asic/edged/edged
+.tmp_versions/
+tools/diag/*_dump
