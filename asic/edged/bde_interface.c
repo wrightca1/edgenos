@@ -570,4 +570,34 @@ void bde_set_dma_endianness(void)
     CDK_DEV_WRITE32(edged.unit, 0x174, 0x04000004);
     CDK_DEV_READ32(edged.unit, 0x174, &readback);
     syslog(LOG_INFO, "DMA endian: ENDIAN_SEL=0x%08x (wrote 0x04000004)", readback);
+
+    /*
+     * Re-arm the iProc PAXB OARR windows after bmd_init / bmd_reset.
+     * The chip reset wipes our boot-time OARR_2 write (BDE probe sets
+     * OARR_2=0x1 via PCI config, but a live readback shows 0x0 after
+     * BMD init). Without an enabled OARR, the chip can't read TX DCBs
+     * from host memory — TX DMA hangs forever waiting for the chip to
+     * fetch descriptors that the PCIe bridge silently drops.
+     *
+     * Set all three packet-DMA windows enabled with base 0 so the full
+     * 4 GB host address space is reachable (32-bit DMA only on P2020):
+     *   OARR_n     = enable (bit 0) | base_lo (always 0 for full 4 GB)
+     *   OARR_n_UPPER = base_hi (0 = first 4 GB, sufficient for P2020)
+     * Note OARR_0 reads back as 0xf8 in our live capture; the chip
+     * may already be configured by some firmware default. Force a
+     * known value here so DMA chans 0-2 all have explicit windows.
+     */
+    CDK_DEV_WRITE32(edged.unit, 0x2104, 0x0);  /* PCIE_EP_AXI_CONFIG */
+    CDK_DEV_WRITE32(edged.unit, 0x2D10, 0x1);  /* OARR_0 enable */
+    CDK_DEV_WRITE32(edged.unit, 0x2D14, 0x0);  /* OARR_0_UPPER */
+    CDK_DEV_WRITE32(edged.unit, 0x2D50, 0x1);  /* OARR_1 enable */
+    CDK_DEV_WRITE32(edged.unit, 0x2D54, 0x0);  /* OARR_1_UPPER */
+    CDK_DEV_WRITE32(edged.unit, 0x2D60, 0x1);  /* OARR_2 enable */
+    CDK_DEV_WRITE32(edged.unit, 0x2D64, 0x0);  /* OARR_2_UPPER */
+
+    uint32_t o0 = 0, o1 = 0, o2 = 0;
+    CDK_DEV_READ32(edged.unit, 0x2D10, &o0);
+    CDK_DEV_READ32(edged.unit, 0x2D50, &o1);
+    CDK_DEV_READ32(edged.unit, 0x2D60, &o2);
+    syslog(LOG_INFO, "OARR re-armed: 0=0x%08x 1=0x%08x 2=0x%08x", o0, o1, o2);
 }
