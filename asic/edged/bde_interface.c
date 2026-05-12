@@ -263,46 +263,22 @@ int bde_open(void)
      *
      * We use sysfs PCI config access via /sys/bus/pci/devices/.
      */
-    {
-        char cfg_path[256];
-        int cfg_fd;
-        uint32_t val;
-
-        snprintf(cfg_path, sizeof(cfg_path),
-                 "/sys/bus/pci/devices/0001:01:00.0/config");
-        cfg_fd = open(cfg_path, O_RDWR);
-        if (cfg_fd >= 0) {
-            /* EP_AXI_CONFIG at PCI config offset 0x104 */
-            val = 0x0;
-            pwrite(cfg_fd, &val, 4, 0x2104);
-
-            /* OARR_2 at PCI config offset 0x2D60 */
-            val = 0x1;
-            pwrite(cfg_fd, &val, 4, 0x2D60);
-
-            /* OARR_2_UPPER at PCI config offset 0x2D64 */
-            val = 0x1;
-            pwrite(cfg_fd, &val, 4, 0x2D64);
-
-            /* Read back to verify */
-            pread(cfg_fd, &val, 4, 0x2D60);
-            syslog(LOG_INFO, "BDE: PAXB OARR_2=0x%08x via PCI config",
-                   val);
-            close(cfg_fd);
-        } else {
-            syslog(LOG_ERR, "BDE: Cannot open PCI config: %s",
-                   strerror(errno));
-            /* Fall back to BAR0 MMIO attempt */
-            if (bar0_map) {
-                volatile uint32_t *bar0 = (volatile uint32_t *)bar0_map;
-                bar0[0x2104 / 4] = 0x0;
-                bar0[0x2D60 / 4] = 0x1;
-                bar0[0x2D64 / 4] = 0x1;
-                syslog(LOG_INFO, "BDE: PAXB OARR_2=0x%08x (BAR0 fallback)",
-                       bar0[0x2D60 / 4]);
-            }
-        }
-    }
+    /*
+     * Do NOT zero PCIE_EP_AXI_CONFIG (0x2104) or write OARR_2 (0x2D60).
+     *
+     * A captured working Cumulus 2.5.0 chassis under live TX shows:
+     *   PCIE_EP_AXI_CONFIG = 0x00000058   (do NOT zero)
+     *   OARR_0             = 0x000000f8   (firmware default — leave alone)
+     *   OARR_0_UPPER       = 0x00000080   (firmware default — leave alone)
+     *   OARR_1, OARR_2     = 0x0          (disabled — leave alone)
+     *
+     * Our old code wrote OARR_2 = 0x1 and PCIE_EP_AXI_CONFIG = 0x0,
+     * which broke TX DMA. The chip TX path uses OARR_0's default
+     * mapping; touching OARR_1/2 or zeroing EP_AXI_CONFIG hangs the
+     * outbound bridge. Leaving these registers at their boot values
+     * is the correct behavior on this iProc revision.
+     */
+    syslog(LOG_INFO, "BDE: PAXB left at firmware defaults (per Cumulus capture)");
 
     return 0;
 }
@@ -556,48 +532,44 @@ int bmd_switching_init_all(void)
 void bde_set_dma_endianness(void)
 {
     /*
-     * Set CMIC_ENDIANESS_SEL for DMA byte-swapping on big-endian host.
-     * Must be called after all ASIC init (bmd_reset/bmd_init/bmd_switching_init)
-     * because CPS reset clears this register.
+     * CMIC_ENDIANESS_SEL = 0x05050505.
      *
-     * 0x04000004 = DMA_OTHER only (bit 2+26) — descriptor word swap.
-     * NOT DMA_PACKET — packet data is already in network byte order (BE)
-     * in host memory and must pass through to the wire as-is.
-     * No PIO endian bit because iowrite32 already provides LE on PPC.
+     * Captured from a working Cumulus 2.5.0 chassis under live ping
+     * traffic (SESSION_2026-05-12-cumulus-diff.md).  Bit 0 of each
+     * byte is the byte-swap-enable flag for one of four endian
+     * domains (PIO, DMA_PACKET, DMA_OTHER, MSI). All four must be
+     * enabled on a big-endian PPC host or the chip reads DCBs / TX
+     * descriptors with reversed byte order, finds garbage at the
+     * length/flag fields, and either hangs the DMA channel or drops
+     * the descriptor silently.
+     *
+     * Previous code wrote 0x04000004 (only bit 2 in two bytes, no
+     * PIO swap) — that's what kept our TX DMA hung. Cumulus also
+     * confirms our older guess of "DMA_OTHER only" was wrong; the
+     * chip wants the full swap config.
      */
     uint32_t readback = 0;
-
-    CDK_DEV_WRITE32(edged.unit, 0x174, 0x04000004);
+    CDK_DEV_WRITE32(edged.unit, 0x174, 0x05050505);
     CDK_DEV_READ32(edged.unit, 0x174, &readback);
-    syslog(LOG_INFO, "DMA endian: ENDIAN_SEL=0x%08x (wrote 0x04000004)", readback);
+    syslog(LOG_INFO, "DMA endian: ENDIAN_SEL=0x%08x (wrote 0x05050505)", readback);
 
     /*
-     * Re-arm the iProc PAXB OARR windows after bmd_init / bmd_reset.
-     * The chip reset wipes our boot-time OARR_2 write (BDE probe sets
-     * OARR_2=0x1 via PCI config, but a live readback shows 0x0 after
-     * BMD init). Without an enabled OARR, the chip can't read TX DCBs
-     * from host memory — TX DMA hangs forever waiting for the chip to
-     * fetch descriptors that the PCIe bridge silently drops.
-     *
-     * Set all three packet-DMA windows enabled with base 0 so the full
-     * 4 GB host address space is reachable (32-bit DMA only on P2020):
-     *   OARR_n     = enable (bit 0) | base_lo (always 0 for full 4 GB)
-     *   OARR_n_UPPER = base_hi (0 = first 4 GB, sufficient for P2020)
-     * Note OARR_0 reads back as 0xf8 in our live capture; the chip
-     * may already be configured by some firmware default. Force a
-     * known value here so DMA chans 0-2 all have explicit windows.
+     * PAXB endianness register.  Cumulus has 0x000000f3 here, we had
+     * 0x000000f2 — bit 0 differs.  Same family of PIO-swap config;
+     * matching it makes the BDE register reads/writes consistent with
+     * how the working chassis sees them.
      */
-    CDK_DEV_WRITE32(edged.unit, 0x2104, 0x0);  /* PCIE_EP_AXI_CONFIG */
-    CDK_DEV_WRITE32(edged.unit, 0x2D10, 0x1);  /* OARR_0 enable */
-    CDK_DEV_WRITE32(edged.unit, 0x2D14, 0x0);  /* OARR_0_UPPER */
-    CDK_DEV_WRITE32(edged.unit, 0x2D50, 0x1);  /* OARR_1 enable */
-    CDK_DEV_WRITE32(edged.unit, 0x2D54, 0x0);  /* OARR_1_UPPER */
-    CDK_DEV_WRITE32(edged.unit, 0x2D60, 0x1);  /* OARR_2 enable */
-    CDK_DEV_WRITE32(edged.unit, 0x2D64, 0x0);  /* OARR_2_UPPER */
+    CDK_DEV_WRITE32(edged.unit, 0x2030, 0xf3);
 
-    uint32_t o0 = 0, o1 = 0, o2 = 0;
-    CDK_DEV_READ32(edged.unit, 0x2D10, &o0);
-    CDK_DEV_READ32(edged.unit, 0x2D50, &o1);
-    CDK_DEV_READ32(edged.unit, 0x2D60, &o2);
-    syslog(LOG_INFO, "OARR re-armed: 0=0x%08x 1=0x%08x 2=0x%08x", o0, o1, o2);
+    /*
+     * OARR_0/OARR_0_UPPER: leave alone.  Cumulus boots with these at
+     * 0xf8 / 0x80 (default chip / firmware values).  Don't touch.
+     *
+     * OARR_1, OARR_2: leave at 0 (Cumulus does not enable these).
+     * Previous attempt to "fix" by enabling them was wrong — Cumulus
+     * runs TX/RX with only OARR_0's default mapping active.
+     *
+     * PCIE_EP_AXI_CONFIG: Cumulus has 0x58 here (do NOT zero it).
+     * Our previous bde_open() wrote 0, which the chip rejected.
+     */
 }
