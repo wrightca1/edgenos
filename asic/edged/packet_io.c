@@ -242,15 +242,29 @@ int packet_io_init(void)
                     /* Use bmd_port_mac_addr_add on CPU port (0) — this writes
                      * to L2_ENTRY with STATIC bit, which has priority over
                      * hardware-learned dynamic entries. */
-                    int rv = bmd_port_mac_addr_add(edged.unit, 0, 1, &mac);
-                    syslog(LOG_INFO, "L2: %s MAC %02x:%02x:%02x:%02x:%02x:%02x -> CPU (rv=%d)",
+                    /* Add the swpN MAC to its own service VID's L2 table,
+                     * pointing to CPU port.  This ensures the chip's L2
+                     * lookup for unicast frames (Nexus's IPv4 replies)
+                     * addressed to this swpN MAC finds CPU port directly,
+                     * not just via the flood-to-VLAN-members fallback. */
+                    int svid = edged_resv_vid_for_port(
+                        edged.ports[i].logical_port);
+                    int rv = bmd_port_mac_addr_add(edged.unit, 0, svid, &mac);
+                    syslog(LOG_INFO,
+                           "L2: %s MAC %02x:%02x:%02x:%02x:%02x:%02x -> CPU "
+                           "VID=%d (rv=%d)",
                            edged.ports[i].ifname,
                            mac.b[0], mac.b[1], mac.b[2],
-                           mac.b[3], mac.b[4], mac.b[5], rv);
-                    /* Also add MY_STATION_TCAM entry so chip recognizes
-                     * this MAC as a router endpoint and L3-terminates
-                     * IPv4/IPv6 unicast addressed to it. */
-                    l3_my_station_add(mac.b, 1);
+                           mac.b[3], mac.b[4], mac.b[5], svid, rv);
+                    /* NOT calling l3_my_station_add() — chip TX MAC
+                     * counter says all 10 ICMP frames hit the wire, but
+                     * Nexus replies to none of them while Cumulus 2.5
+                     * worked end-to-end on this same setup.  Suspect:
+                     * MY_STATION_TCAM triggers the chip's egress L3
+                     * pipeline on our TX (rewrites src MAC, decrements
+                     * TTL, may zero src MAC), making the wire frame
+                     * malformed.  ARP (0x0806) bypasses L3 so it goes
+                     * out clean. */
                 }
             }
             close(sock);
@@ -288,20 +302,52 @@ static void handle_tun_tx(int port_idx)
     int rv;
 
     len = read(port->tun_fd, tx_buf, sizeof(tx_buf));
-    if (strcmp(port->ifname, "swp2") == 0) {
-        static int swp2_dbg = 0;
-        if (swp2_dbg < 100) {
-            syslog(LOG_ERR, "swp2 TX read: fd=%d len=%zd phy_lane=%d",
-                   port->tun_fd, (ssize_t)len, port->physical_lane);
-            swp2_dbg++;
-        }
-    }
     if (len <= 0)
         return;
 
-    /* Pad to 64 bytes minimum. The MAC adds 4-byte FCS for 68 on wire.
-     * Extra 4 bytes beyond the standard 60-byte minimum compensates for
-     * the ASIC stripping a VLAN tag on untagged egress ports. */
+    /*
+     * Prepend a 802.1Q VLAN tag with this port's service VID
+     * (Cumulus 3300+logical_port).  Cumulus's chip configures one
+     * service VID per swpN with only that swpN as untagged egress
+     * member.  CPU TX'es tagged with the service VID; the chip's
+     * L2 forwarding sends to exactly one port and strips the tag
+     * on egress.  Tested to be the ICMP-working path in Cumulus
+     * 2.5 (see cumulus_baseline_2013/30_full_dump.txt: vlan 3302
+     * ports cpu,xe1 untagged xe1).
+     *
+     * Frame transform: insert 4 bytes at offset 12 (after dst+src MAC):
+     *   [dst MAC 6][src MAC 6][etype 2][payload...]
+     * -> [dst MAC 6][src MAC 6][0x8100][TCI 2][etype 2][payload...]
+     */
+    if (len >= 14 && (size_t)(len + 4) <= sizeof(tx_buf)) {
+        int vid = edged_resv_vid_for_port(port->logical_port);
+        memmove(tx_buf + 16, tx_buf + 12, len - 12);
+        tx_buf[12] = 0x81;
+        tx_buf[13] = 0x00;
+        tx_buf[14] = (vid >> 8) & 0x0f;   /* PCP=0 DEI=0, VID hi nibble */
+        tx_buf[15] = vid & 0xff;          /* VID low byte */
+        len += 4;
+    }
+
+    /* Dump first 46 bytes of every TX frame on swp2 (post-tag).  */
+    if (strcmp(port->ifname, "swp2") == 0 && len >= 46) {
+        static int swp2_dbg = 0;
+        if (swp2_dbg < 30) {
+            unsigned char *d = tx_buf;
+            unsigned int etype = (d[16] << 8) | d[17];   /* after VLAN tag */
+            char hex[3 * 46 + 1];
+            int i;
+            for (i = 0; i < 46; i++)
+                sprintf(hex + i*3, "%02x ", d[i]);
+            hex[3 * 46] = '\0';
+            syslog(LOG_INFO,
+                   "swp2 TX[%zd] etype-inner=0x%04x %s",
+                   (ssize_t)len, etype, hex);
+            swp2_dbg++;
+        }
+    }
+
+    /* Pad to 64 bytes minimum on the wire. */
     if (len < 64) {
         memset(tx_buf + len, 0, 64 - len);
         len = 64;
@@ -318,18 +364,20 @@ static void handle_tun_tx(int port_idx)
     /* Copy packet data into DMA buffer */
     memcpy(dma_buf, tx_buf, len);
 
-    /* Set up BMD packet structure */
+    /* Set up BMD packet structure.
+     *
+     * pkt.port = -1 tells bcm56840_a0_bmd_tx to skip the HiGig SOB
+     * module header and submit the frame as a single non-chained DCB.
+     * The chip's L2 lookup uses the 802.1Q tag we just prepended to
+     * pick the egress port (service VID has exactly one untagged
+     * member), strips the tag on egress, and puts a clean Ethernet
+     * frame on the wire — same shape Cumulus 2.5 produced. */
     memset(&pkt, 0, sizeof(pkt));
-    /*
-     * pkt.port must be the CDK physical port number (not front-panel).
-     * BMD_PORT_VALID checks BMD_PORT_PROPERTIES which is indexed by
-     * CDK port. On BCM56840, physical_lane IS the CDK port number.
-     */
-    pkt.port = port->physical_lane;
+    pkt.port = -1;
     pkt.data = dma_buf;
     pkt.size = len;
     pkt.baddr = baddr;
-    pkt.flags = 0;  /* Don't set UNTAGGED — avoids hdr_size/hdr_offset mismatch in DCB scatter-gather */
+    pkt.flags = 0;
 
     /* Debug: dump first 32 bytes of packet */
     if (port->tx_packets < 3) {

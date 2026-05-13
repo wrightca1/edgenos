@@ -11,6 +11,11 @@
 /* Initialize default VLAN 1 with all ports untagged */
 int vlan_init_default(void);
 
+/* Create one chip-internal service VLAN per swpN (Cumulus 3301-3352)
+ * so CPU TX can direct frames via 802.1Q tag instead of HiGig SOB. */
+int vlan_init_resv_per_port(void);
+int edged_resv_vid_for_port(int logical_port);
+
 /* Create/destroy VLANs */
 int vlan_create(int vid);
 int vlan_destroy(int vid);

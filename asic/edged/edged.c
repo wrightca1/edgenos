@@ -175,6 +175,16 @@ static int asic_init(void)
         return rv;
     }
 
+    /* Per-port service VLANs (Cumulus's 3301-3352 scheme).  Required so
+     * CPU TX can direct frames via 802.1Q tag instead of HiGig SOB —
+     * the SOB path works for ARP but Nexus drops our IPv4 SOB-directed
+     * frames, while Cumulus did it this way and ICMP worked. */
+    rv = vlan_init_resv_per_port();
+    if (rv < 0) {
+        syslog(LOG_WARNING,
+               "Per-port service VLAN init failed (continuing anyway)");
+    }
+
     /* Configure datapath: CPU punt, hash, buffer thresholds */
     rv = datapath_init();
     if (rv < 0) {
@@ -299,6 +309,7 @@ int main(int argc, char **argv)
      *      on page 0x1800 and enables/disables MAC on change)
      */
     int poll_count = 0;
+    int stat_count = 0;
     while (running) {
         packet_io_rx_poll();
         netlink_poll();
@@ -307,6 +318,32 @@ int main(int argc, char **argv)
         if (++poll_count >= 300) {
             portmap_link_poll();
             poll_count = 0;
+        }
+
+        /* Dump swp2 chip-level RX counters every 5 seconds.  Lets us
+         * see whether IPv4 frames are arriving at the chip from the
+         * wire but getting dropped before CPU punt, vs not arriving
+         * at all (Nexus side issue).  Uses BMD stat API. */
+        if (++stat_count >= 2000) {
+            stat_count = 0;
+            bmd_counter_t rx_pkts, rx_drops, rx_errors, tx_pkts, tx_errors;
+            int rv;
+            int port = 66; /* swp2 physical_lane */
+            memset(&rx_pkts, 0, sizeof(rx_pkts));
+            memset(&rx_drops, 0, sizeof(rx_drops));
+            memset(&rx_errors, 0, sizeof(rx_errors));
+            memset(&tx_pkts, 0, sizeof(tx_pkts));
+            memset(&tx_errors, 0, sizeof(tx_errors));
+            rv = bmd_stat_get(edged.unit, port, bmdStatRxPackets, &rx_pkts);
+            (void)bmd_stat_get(edged.unit, port, bmdStatRxDrops, &rx_drops);
+            (void)bmd_stat_get(edged.unit, port, bmdStatRxErrors, &rx_errors);
+            (void)bmd_stat_get(edged.unit, port, bmdStatTxPackets, &tx_pkts);
+            (void)bmd_stat_get(edged.unit, port, bmdStatTxErrors, &tx_errors);
+            syslog(LOG_INFO,
+                   "swp2 chip stats: rx_pkts=%u rx_drops=%u "
+                   "rx_err=%u tx_pkts=%u tx_err=%u (rv=%d)",
+                   rx_pkts.v[0], rx_drops.v[0], rx_errors.v[0],
+                   tx_pkts.v[0], tx_errors.v[0], rv);
         }
 
         usleep(100);  /* 100us poll interval */

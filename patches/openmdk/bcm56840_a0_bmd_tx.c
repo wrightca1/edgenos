@@ -58,20 +58,23 @@ bcm56840_a0_bmd_tx(int unit, const bmd_pkt_t *pkt)
 
     BMD_CHECK_UNIT(unit);
 
-    if (BMD_PORT_VALID(unit, pkt->port)) {
-        /* Cumulus 2.5 proved this chassis links up end-to-end. Our
-         * MII_STAT-based link probe reads 0x0109 (no bit 2 / no link)
-         * even though the physical link IS up — the Warpcore's MII
-         * status register isn't being populated by our PHY init path,
-         * so BMD_PST_LINK_UP never gets set, and bmd_tx silently
-         * drops every userspace-originated frame. Bypass the gate;
-         * if a port is genuinely down, the DCB will just sit in the
-         * ASIC TX fifo until link comes back. Don't return early. */
-        (void)BMD_PORT_STATUS(unit, pkt->port);
-    } else if (pkt->port >= 0) {
-        /* Port not valid and not negative */
-        return CDK_E_PORT;
+    if (pkt->port >= 0) {
+        if (BMD_PORT_VALID(unit, pkt->port)) {
+            /* Cumulus 2.5 proved this chassis links up end-to-end. Our
+             * MII_STAT-based link probe reads 0x0109 (no bit 2 / no link)
+             * even though the physical link IS up — the Warpcore's MII
+             * status register isn't being populated by our PHY init path,
+             * so BMD_PST_LINK_UP never gets set, and bmd_tx silently
+             * drops every userspace-originated frame. Bypass the gate. */
+            (void)BMD_PORT_STATUS(unit, pkt->port);
+        } else {
+            return CDK_E_PORT;
+        }
     }
+    /* pkt->port < 0: VLAN-directed mode (Cumulus service VID scheme).
+     * Frame already 802.1Q-tagged with a VID whose only untagged member
+     * is the target front-panel port, so chip's L2 forwarding does the
+     * routing and strips the tag on egress.  Skip the HiGig SOB path. */
 
     /* Check for valid physical bus address */
     CDK_ASSERT(pkt->baddr);
@@ -82,7 +85,26 @@ bcm56840_a0_bmd_tx(int unit, const bmd_pkt_t *pkt)
         return CDK_E_MEMORY;
     }
 
-    /* Optionally strip VLAN tag */
+    if (pkt->port < 0) {
+        /* Single non-chained DCB, no HG SOB. */
+        _dcb_init(unit, &dcb[0], pkt);   /* TX_DCB_CLR only since port<0 */
+        TX_DCB_ADDRf_SET(dcb[0], pkt->baddr);
+        TX_DCB_BYTE_COUNTf_SET(dcb[0], pkt->size);
+        TX_DCB_SGf_SET(dcb[0], 0);
+        TX_DCB_CHAINf_SET(dcb[0], 0);
+
+        BMD_DMA_CACHE_FLUSH(dcb, sizeof(*dcb));
+        bmd_xgs_dma_tx_start(unit, bdcb);
+
+        if (bmd_xgs_dma_tx_poll(unit, BMD_CONFIG_DMA_MAX_POLLS) < 0) {
+            rv = CDK_E_TIMEOUT;
+        }
+        BMD_DMA_CACHE_INVAL(dcb, sizeof(*dcb));
+        bmd_dma_free_coherent(unit, 2 * sizeof(*dcb), dcb, bdcb);
+        return rv;
+    }
+
+    /* Optionally strip VLAN tag (HG mode only). */
     hdr_offset = 16;
     hdr_size = 16;
     if (BMD_PORT_PROPERTIES(unit, pkt->port) & BMD_PORT_HG) {
@@ -97,24 +119,24 @@ bcm56840_a0_bmd_tx(int unit, const bmd_pkt_t *pkt)
         }
 #endif
     } else if (pkt->flags & BMD_PKT_F_UNTAGGED) {
-        hdr_size = 12; 
+        hdr_size = 12;
     }
 
     /* Set up first DMA descriptor */
-    _dcb_init(unit, &dcb[0], pkt); 
-    TX_DCB_ADDRf_SET(dcb[0], pkt->baddr); 
+    _dcb_init(unit, &dcb[0], pkt);
+    TX_DCB_ADDRf_SET(dcb[0], pkt->baddr);
     TX_DCB_BYTE_COUNTf_SET(dcb[0], hdr_size);
-    TX_DCB_SGf_SET(dcb[0], 1); 
-    TX_DCB_CHAINf_SET(dcb[0], 1); 
+    TX_DCB_SGf_SET(dcb[0], 1);
+    TX_DCB_CHAINf_SET(dcb[0], 1);
 
     /* Set up second DMA descriptor */
-    _dcb_init(unit, &dcb[1], pkt); 
-    TX_DCB_ADDRf_SET(dcb[1], pkt->baddr + hdr_offset); 
-    TX_DCB_BYTE_COUNTf_SET(dcb[1], pkt->size - hdr_offset); 
+    _dcb_init(unit, &dcb[1], pkt);
+    TX_DCB_ADDRf_SET(dcb[1], pkt->baddr + hdr_offset);
+    TX_DCB_BYTE_COUNTf_SET(dcb[1], pkt->size - hdr_offset);
 
     /* Start DMA */
     BMD_DMA_CACHE_FLUSH(dcb, 2 * sizeof(*dcb));
-    bmd_xgs_dma_tx_start(unit, bdcb); 
+    bmd_xgs_dma_tx_start(unit, bdcb);
 
     /* Poll for DMA completion */
     if (bmd_xgs_dma_tx_poll(unit, BMD_CONFIG_DMA_MAX_POLLS) < 0) {
@@ -127,7 +149,7 @@ bcm56840_a0_bmd_tx(int unit, const bmd_pkt_t *pkt)
     /* Free DMA descriptor */
     bmd_dma_free_coherent(unit, 2 * sizeof(*dcb), dcb, bdcb);
 
-    return rv; 
+    return rv;
 #else
     return CDK_E_UNAVAIL;
 #endif
