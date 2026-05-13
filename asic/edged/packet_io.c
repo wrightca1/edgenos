@@ -37,6 +37,8 @@
 #include "edged.h"
 #include "packet_io.h"
 #include "portmap.h"
+#include "vlan.h"
+#include "l3.h"
 
 /* BMD headers */
 #include <bmd/bmd.h>
@@ -245,6 +247,10 @@ int packet_io_init(void)
                            edged.ports[i].ifname,
                            mac.b[0], mac.b[1], mac.b[2],
                            mac.b[3], mac.b[4], mac.b[5], rv);
+                    /* Also add MY_STATION_TCAM entry so chip recognizes
+                     * this MAC as a router endpoint and L3-terminates
+                     * IPv4/IPv6 unicast addressed to it. */
+                    l3_my_station_add(mac.b, 1);
                 }
             }
             close(sock);
