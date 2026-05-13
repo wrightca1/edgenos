@@ -251,6 +251,38 @@ void netlink_poll(void)
             handle_neigh(nlh);
             break;
 
+        case RTM_NEWADDR: {
+            /* Kernel just assigned an IPv4 address to one of our
+             * swpN TUN interfaces.  Program the chip's L3_HOST entry
+             * for it with next-hop = CPU port, so frames addressed
+             * to this IP HIT in L3 lookup and get delivered instead
+             * of dropped (V4L3DSTMISS_TOCPU=1 alone DROPS rather
+             * than traps; verified by Nexus's pings incrementing
+             * rx_drops). */
+            struct ifaddrmsg *ifa = NLMSG_DATA(nlh);
+            if (ifa->ifa_family != AF_INET) break;
+
+            char ifname[IFNAMSIZ] = "";
+            if (!if_indextoname(ifa->ifa_index, ifname)) break;
+            if (strncmp(ifname, "swp", 3) != 0) break;
+            int logical_port = atoi(ifname + 3);
+            if (logical_port < 1 || logical_port > EDGED_MAX_PORTS) break;
+
+            /* Walk RTA attrs to find IFA_LOCAL / IFA_ADDRESS. */
+            struct rtattr *rta = IFA_RTA(ifa);
+            int rta_len = IFA_PAYLOAD(nlh);
+            uint32_t ip = 0;
+            for (; RTA_OK(rta, rta_len); rta = RTA_NEXT(rta, rta_len)) {
+                if (rta->rta_type == IFA_LOCAL || rta->rta_type == IFA_ADDRESS) {
+                    ip = ntohl(*(uint32_t *)RTA_DATA(rta));
+                    break;
+                }
+            }
+            if (ip)
+                l3_local_host_add(ip, logical_port);
+            break;
+        }
+
         default:
             break;
         }

@@ -290,6 +290,141 @@ static int l3_egr_intf_program(int logical_port, const uint8_t *src_mac, int vid
     return idx;
 }
 
+/*
+ * Add a CPU-bound L3 host route for one of our own swpN IPv4 addresses.
+ *
+ * BCM Trident default behaviour: when MY_STATION_TCAM matches the dst
+ * MAC and the L3 lookup misses, V4L3DSTMISS_TOCPU=1 *should* trap to
+ * CPU.  In practice on this chip (verified by `rx_drops` incrementing
+ * exactly N times when Nexus sends N pings to us), the miss-trap path
+ * just drops the frame.  Cumulus avoids that by programming *its own*
+ * IP as an L3_HOST entry whose next-hop egresses to the CPU port,
+ * making the L3 lookup HIT instead of miss.
+ */
+int l3_local_host_add(uint32_t ipv4_addr, int logical_port)
+{
+    int nh_idx, intf_idx, vid, rv;
+    uint8_t our_mac[6];
+    uint32_t mac_fval[2];
+    int port_idx = logical_port - 1;
+    int phys;
+
+    if (port_idx < 0 || port_idx >= EDGED_MAX_PORTS)
+        return -1;
+    phys = edged.ports[port_idx].physical_lane;
+    vid = edged_resv_vid_for_port(logical_port);
+
+    /* Read swpN's MAC. */
+    char ifname[IFNAMSIZ];
+    snprintf(ifname, sizeof(ifname), "swp%d", logical_port);
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    unsigned int m[6];
+    if (fscanf(f, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != 6) {
+        fclose(f); return -1;
+    }
+    fclose(f);
+    for (int i = 0; i < 6; i++) our_mac[i] = (uint8_t)m[i];
+
+    /* Reuse the same EGR_L3_INTF index as the swpN's other host
+     * entries — src MAC + service VID are identical. */
+    intf_idx = l3_egr_intf_program(logical_port, our_mac, vid);
+    if (intf_idx < 0) return -1;
+
+    nh_idx = next_hop_idx++;
+
+    /* ING_L3_NEXT_HOP with COPY_TO_CPU=1.  This is the chip-side
+     * equivalent of bcm_l3_host_add with BCM_L3_COPY_TO_CPU flag:
+     * the chip's L3 lookup hit on our own IP and this next-hop
+     * carries the frame straight to the CMIC queue our RX DMA
+     * is polling.  Without COPY_TO_CPU, the chip merely picked
+     * the egress port number 0 from PORT_NUM and tried to
+     * "transmit" there as if it were a regular Ethernet port —
+     * frame went nowhere (rx_drops stayed 0 but no CPU RX). */
+    {
+        ING_L3_NEXT_HOPm_t ing;
+        ING_L3_NEXT_HOPm_CLR(ing);
+        ING_L3_NEXT_HOPm_COPY_TO_CPUf_SET(ing, 1);    /* punt to CPU */
+        ING_L3_NEXT_HOPm_PORT_NUMf_SET(ing, 0);       /* CMIC */
+        ING_L3_NEXT_HOPm_MODULE_IDf_SET(ing, 0);
+        ING_L3_NEXT_HOPm_ENTRY_TYPEf_SET(ing, 0);
+        rv = WRITE_ING_L3_NEXT_HOPm(edged.unit, nh_idx, ing);
+        if (rv < 0) {
+            syslog(LOG_WARNING, "local-host ING_L3_NEXT_HOP[%d] wr=%d",
+                   nh_idx, rv); return -1;
+        }
+    }
+
+    /* EGR_L3_NEXT_HOP: dst MAC = our own MAC (so the frame egresses
+     * to CPU port still has a sane L2 header), VLAN/SA/DA/TTL
+     * rewrites all DISABLED — the chip should pass the frame through
+     * unmodified for CPU delivery. */
+    {
+        EGR_L3_NEXT_HOPm_t egr;
+        EGR_L3_NEXT_HOPm_CLR(egr);
+        mac_to_fval(our_mac, mac_fval);
+        EGR_L3_NEXT_HOPm_L3_MAC_ADDRESSf_SET(egr, mac_fval);
+        EGR_L3_NEXT_HOPm_L3_INTF_NUMf_SET(egr, intf_idx);
+        EGR_L3_NEXT_HOPm_L3_OVIDf_SET(egr, vid);
+        EGR_L3_NEXT_HOPm_ENTRY_TYPEf_SET(egr, 0);
+        EGR_L3_NEXT_HOPm_L3_L3_UC_VLAN_DISABLEf_SET(egr, 1);
+        EGR_L3_NEXT_HOPm_L3_L3_UC_SA_DISABLEf_SET(egr, 1);
+        EGR_L3_NEXT_HOPm_L3_L3_UC_DA_DISABLEf_SET(egr, 1);
+        EGR_L3_NEXT_HOPm_L3_L3_UC_TTL_DISABLEf_SET(egr, 1);
+        rv = WRITE_EGR_L3_NEXT_HOPm(edged.unit, nh_idx, egr);
+        if (rv < 0) {
+            syslog(LOG_WARNING, "local-host EGR_L3_NEXT_HOP[%d] wr=%d",
+                   nh_idx, rv); return -1;
+        }
+    }
+
+    /* L3 host entry: our IP -> nh_idx (-> CPU port).
+     *
+     * L3_ENTRY_IPV4_UNICASTm is a hash-indexed table — the chip's
+     * lookup hashes (IP, VRF) to pick a bucket.  Since we don't know
+     * the exact CRC the chip uses, brute-force this for the local IP:
+     * write the same entry into the first N slots of every bank.
+     * If the chip's hash for our IP falls anywhere in [0..N), the
+     * lookup hits and we deliver to CPU.  This is just a diagnostic;
+     * a proper implementation would compute the chip's hash. */
+    {
+        L3_ENTRY_IPV4_UNICASTm_t hst;
+        L3_ENTRY_IPV4_UNICASTm_CLR(hst);
+        L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_V6f_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(hst, ipv4_addr);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_NEXT_HOP_INDEXf_SET(hst, nh_idx);
+        L3_ENTRY_IPV4_UNICASTm_HITf_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(hst, 1);
+
+        int i, ok = 0;
+        /* Write all 8192 slots so the chip's hash bucket — whatever
+         * it is — finds our entry.  Crude but eliminates the hash-
+         * mismatch variable while we debug the rest. */
+        for (i = 0; i <= L3_ENTRY_IPV4_UNICASTm_MAX; i++) {
+            int wr = WRITE_L3_ENTRY_IPV4_UNICASTm(edged.unit, i, hst);
+            if (wr == 0) ok++;
+        }
+        syslog(LOG_INFO,
+               "local-host L3_HOST: wrote IP %u.%u.%u.%u -> CPU "
+               "across %d/%d slots (full table)",
+               (ipv4_addr >> 24) & 0xff, (ipv4_addr >> 16) & 0xff,
+               (ipv4_addr >> 8) & 0xff, ipv4_addr & 0xff,
+               ok, L3_ENTRY_IPV4_UNICASTm_MAX + 1);
+    }
+
+    syslog(LOG_INFO,
+           "L3 local-host: %u.%u.%u.%u -> CPU (nh_idx=%d intf_idx=%d "
+           "vid=%d phys=%d swp%d)",
+           (ipv4_addr >> 24) & 0xff, (ipv4_addr >> 16) & 0xff,
+           (ipv4_addr >> 8) & 0xff, ipv4_addr & 0xff,
+           nh_idx, intf_idx, vid, phys, logical_port);
+    return 0;
+}
+
 int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
 {
     char addr_str[INET6_ADDRSTRLEN] = "?";

@@ -25,4 +25,14 @@ int l3_host_del(int family, const void *addr);
  */
 int l3_my_station_add(const uint8_t *mac, int vlan);
 
+/*
+ * Add a CPU-bound L3 host route for one of our own swpN IPv4 addresses.
+ * The chip's L3 lookup will hit this entry and the next-hop will direct
+ * the packet to the CPU port — converting "IPv4 destined to this router"
+ * from a drop into a CPU punt.  Without this, V4L3DSTMISS_TOCPU=1 in
+ * the chip's default config still drops the frame (verified at runtime:
+ * Nexus-initiated pings increment chip rx_drops, never reach CPU).
+ */
+int l3_local_host_add(uint32_t ipv4_addr, int logical_port);
+
 #endif /* __L3_H__ */

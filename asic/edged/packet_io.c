@@ -257,13 +257,14 @@ int packet_io_init(void)
                            mac.b[0], mac.b[1], mac.b[2],
                            mac.b[3], mac.b[4], mac.b[5], svid, rv);
                     /* MY_STATION_TCAM is REQUIRED so chip's L3 pipeline
-                     * recognises this MAC as a router endpoint and
-                     * actually delivers IPv4 frames addressed to it
-                     * (either via L3_HOST hit or V4L3DSTMISS_TOCPU
-                     * trap).  Without it, the chip's L2 lookup happens
-                     * but L3-bound IPv4 frames never enter the L3 stage
-                     * that produces the CPU punt action. */
+                     * recognises this MAC as a router endpoint. */
                     l3_my_station_add(mac.b, svid);
+
+                    /* l3_local_host_add for the swpN's IPv4 (so the
+                     * chip can deliver received-IPv4-for-our-IP to
+                     * CPU instead of dropping) is handled by the
+                     * netlink RTM_NEWADDR handler.  Don't duplicate
+                     * here. */
                 }
             }
             close(sock);
