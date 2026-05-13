@@ -372,7 +372,14 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
     }
 
     /* Egress L3 next-hop — dst MAC + L3_INTF_NUM pointing at our
-     * EGR_L3_INTF entry. */
+     * EGR_L3_INTF entry.
+     *
+     * Disable VLAN tag manipulation on this next-hop: the chip's
+     * per-port VLAN egress profile already strips the service VID
+     * tag for untagged members (which is what we want).  If we let
+     * the L3 pipeline force its own OVID, the wire frame ends up
+     * tagged when the Nexus's L3 routed eth1/34 expects untagged.
+     */
     {
         EGR_L3_NEXT_HOPm_t egr;
         EGR_L3_NEXT_HOPm_CLR(egr);
@@ -380,7 +387,8 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
         EGR_L3_NEXT_HOPm_L3_MAC_ADDRESSf_SET(egr, mac_fval);
         EGR_L3_NEXT_HOPm_L3_INTF_NUMf_SET(egr, intf_idx);
         EGR_L3_NEXT_HOPm_L3_OVIDf_SET(egr, vid);
-        EGR_L3_NEXT_HOPm_ENTRY_TYPEf_SET(egr, 0);   /* L3 unicast */
+        EGR_L3_NEXT_HOPm_ENTRY_TYPEf_SET(egr, 0);          /* L3 unicast */
+        EGR_L3_NEXT_HOPm_L3_L3_UC_VLAN_DISABLEf_SET(egr, 1); /* don't add tag */
         rv = WRITE_EGR_L3_NEXT_HOPm(edged.unit, nh_idx, egr);
         if (rv < 0) {
             syslog(LOG_WARNING,
