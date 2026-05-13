@@ -121,17 +121,83 @@ int l3_init(void)
      * isn't in the L2 table — e.g. before MAC learning settles).
      */
     ioerr += READ_CPU_CONTROL_1r(edged.unit, &cpuc1);
+    syslog(LOG_INFO, "L3: CPU_CONTROL_1 before = 0x%08x", cpuc1.cpu_control_1[0]);
     CPU_CONTROL_1r_V4L3DSTMISS_TOCPUf_SET(cpuc1, 1);
     CPU_CONTROL_1r_V6L3DSTMISS_TOCPUf_SET(cpuc1, 1);
     CPU_CONTROL_1r_UUCAST_TOCPUf_SET(cpuc1, 1);
     ioerr += WRITE_CPU_CONTROL_1r(edged.unit, cpuc1);
+
+    /* Read back to confirm the write actually stuck.  Some chip registers
+     * are SCHAN-only and silently fail if the BLKTYPE is wrong; some are
+     * read-write but only certain bits are mutable. */
+    {
+        CPU_CONTROL_1r_t verify;
+        int rb = READ_CPU_CONTROL_1r(edged.unit, &verify);
+        syslog(LOG_INFO,
+               "L3: CPU_CONTROL_1 after  = 0x%08x  (V4=%d V6=%d UUCAST=%d rb=%d)",
+               verify.cpu_control_1[0],
+               CPU_CONTROL_1r_V4L3DSTMISS_TOCPUf_GET(verify),
+               CPU_CONTROL_1r_V6L3DSTMISS_TOCPUf_GET(verify),
+               CPU_CONTROL_1r_UUCAST_TOCPUf_GET(verify),
+               rb);
+    }
     if (ioerr) {
         syslog(LOG_WARNING,
-               "L3: CPU_CONTROL_1 write returned ioerr=%d (continuing)",
-               ioerr);
-    } else {
+               "L3: CPU_CONTROL_1 write ioerr=%d (continuing)", ioerr);
+    }
+
+    /* Also read back MY_STATION_TCAM[0] and [1] (swp1, swp2) to verify
+     * the encoding matches what the chip actually stored. */
+    {
+        MY_STATION_TCAMm_t my;
+        uint32_t mac_fval[2] = {0, 0};
+        int rb = READ_MY_STATION_TCAMm(edged.unit, 1, &my);
+        MY_STATION_TCAMm_MAC_ADDRf_GET(my, mac_fval);
         syslog(LOG_INFO,
-               "L3: CPU_CONTROL_1 V4/V6 L3 DST miss + L2 UUCAST -> CPU");
+               "L3: MY_STATION_TCAM[1] = mac=%04x:%08x vid=%d "
+               "valid=%d ipv4_term=%d (rb=%d)",
+               (unsigned)mac_fval[1], (unsigned)mac_fval[0],
+               MY_STATION_TCAMm_VLAN_IDf_GET(my),
+               MY_STATION_TCAMm_VALIDf_GET(my),
+               MY_STATION_TCAMm_IPV4_TERMINATION_ALLOWEDf_GET(my),
+               rb);
+    }
+
+    /* Enable per-port L3 IPv4/IPv6 forwarding via LPORT_TAB.
+     *
+     * Without LPORT_TAB.V4L3_ENABLE=1 on the ingress port, the chip
+     * never enters the L3 pipeline for IPv4 frames received on that
+     * port — MY_STATION_TCAM is irrelevant because it's queried only
+     * inside the L3 pipeline.  Iterating over all 52 front-panel ports
+     * and the CPU port to make sure the V4/V6 L3 ENABLE bits are set. */
+    {
+        int p, enabled = 0;
+        for (p = 0; p < EDGED_MAX_PORTS; p++) {
+            int phys = edged.ports[p].physical_lane;
+            if (!edged.ports[p].valid || phys <= 0)
+                continue;
+            if (phys > LPORT_TABm_MAX) continue;
+
+            LPORT_TABm_t lp;
+            int rb = READ_LPORT_TABm(edged.unit, phys, &lp);
+            uint32_t was = lp.lport_tab[0];
+            LPORT_TABm_V4L3_ENABLEf_SET(lp, 1);
+            LPORT_TABm_V6L3_ENABLEf_SET(lp, 1);
+            int wr = WRITE_LPORT_TABm(edged.unit, phys, lp);
+            if (rb || wr) {
+                syslog(LOG_WARNING,
+                       "LPORT_TAB[%d] rb=%d wr=%d", phys, rb, wr);
+            } else {
+                if (p < 3 || phys == 66) {
+                    syslog(LOG_INFO,
+                           "LPORT_TAB[%d] (%s): was=0x%08x now=0x%08x "
+                           "V4=1 V6=1", phys, edged.ports[p].ifname,
+                           was, lp.lport_tab[0]);
+                }
+                enabled++;
+            }
+        }
+        syslog(LOG_INFO, "L3: enabled V4/V6 L3 on %d ports", enabled);
     }
 
     return 0;
