@@ -1805,22 +1805,21 @@ bcm56840_a0_bmd_init(int unit)
      * every VLAN points at a valid profile regardless of its
      * VLAN_PROFILE_PTR (which bmd_vlan_create leaves at default 0,
      * not VLAN_PROFILE_TABm_MAX). */
-    /* Force L3 OFF at the VLAN level so the chip ignores the L3
-     * pipeline entirely and just bridges every frame by dst MAC.
-     * Our L2 table has the swpN MACs -> CPU port, so IPv4 frames
-     * addressed to our interfaces should now reach the CPU even
-     * without L3_HOST entries.  Multicast L2_ENABLE bits stay on
-     * so broadcast / multicast (ARP) keeps working as before. */
+    /* L3 ENABLED at the VLAN level.  edged programs L3_HOST,
+     * L3_INTF, MY_STATION_TCAM and friends at runtime (l3.c) so
+     * the chip can route IPv4 frames to and from the CPU.  Without
+     * those tables programmed AND IPV4L3_ENABLE=1, the chip drops
+     * IPv4 unicast at the L3 stage.  Cumulus does exactly this. */
     VLAN_PROFILE_TABm_CLR(vlan_profile);
     VLAN_PROFILE_TABm_L2_PFMf_SET(vlan_profile, 1);
     VLAN_PROFILE_TABm_L3_IPV4_PFMf_SET(vlan_profile, 1);
     VLAN_PROFILE_TABm_L3_IPV6_PFMf_SET(vlan_profile, 1);
-    VLAN_PROFILE_TABm_IPMCV6_ENABLEf_SET(vlan_profile, 0);
-    VLAN_PROFILE_TABm_IPMCV4_ENABLEf_SET(vlan_profile, 0);
+    VLAN_PROFILE_TABm_IPMCV6_ENABLEf_SET(vlan_profile, 1);
+    VLAN_PROFILE_TABm_IPMCV4_ENABLEf_SET(vlan_profile, 1);
     VLAN_PROFILE_TABm_IPMCV6_L2_ENABLEf_SET(vlan_profile, 1);
     VLAN_PROFILE_TABm_IPMCV4_L2_ENABLEf_SET(vlan_profile, 1);
-    VLAN_PROFILE_TABm_IPV6L3_ENABLEf_SET(vlan_profile, 0);
-    VLAN_PROFILE_TABm_IPV4L3_ENABLEf_SET(vlan_profile, 0);
+    VLAN_PROFILE_TABm_IPV6L3_ENABLEf_SET(vlan_profile, 1);
+    VLAN_PROFILE_TABm_IPV4L3_ENABLEf_SET(vlan_profile, 1);
     {
         int _vpi;
         for (_vpi = 0; _vpi <= VLAN_PROFILE_TABm_MAX; _vpi++) {

@@ -21,6 +21,7 @@
 #include "edged.h"
 #include "l3.h"
 #include "portmap.h"
+#include "vlan.h"   /* edged_resv_vid_for_port */
 
 /* BMD/CDK headers — for SCHAN memory writes into chip L3 tables */
 #include <bmd/bmd.h>
@@ -245,21 +246,183 @@ int l3_route_del(int family, const void *dst, int prefix_len)
     return 0;
 }
 
+/*
+ * Index allocation for the four-table L3 chain.
+ *
+ *   L3_ENTRY_IPV4_UNICAST  [hash of {ip, vrf}] -> IPV4UC_NEXT_HOP_INDEX
+ *   ING_L3_NEXT_HOP        [next_hop_idx]      -> egress port info
+ *   EGR_L3_NEXT_HOP        [next_hop_idx]      -> dst MAC, L3_INTF_NUM
+ *   EGR_L3_INTF            [l3_intf_num]       -> src MAC, VID
+ *
+ * One next-hop index per kernel neighbor.
+ * One L3_INTF index per L3 interface (one per swpN).  We use
+ *   l3_intf_num = logical_port (1..52), since the chip has 4096
+ *   L3_INTFm entries.
+ */
+static int next_hop_idx = 1;   /* index 0 reserved as 'invalid' */
+
+/* Map a swpN logical port to its L3_INTF index.  Simple 1:1. */
+static int l3_intf_for_logical_port(int logical_port)
+{
+    return logical_port;
+}
+
+/*
+ * Ensure EGR_L3_INTF for the given swpN is programmed.
+ * Idempotent: writing the same data again is fine.
+ */
+static int l3_egr_intf_program(int logical_port, const uint8_t *src_mac, int vid)
+{
+    EGR_L3_INTFm_t intf;
+    uint32_t mac_fval[2];
+    int idx = l3_intf_for_logical_port(logical_port);
+
+    EGR_L3_INTFm_CLR(intf);
+    mac_to_fval(src_mac, mac_fval);
+    EGR_L3_INTFm_MAC_ADDRESSf_SET(intf, mac_fval);
+    EGR_L3_INTFm_VIDf_SET(intf, vid);
+
+    int rv = WRITE_EGR_L3_INTFm(edged.unit, idx, intf);
+    if (rv < 0) {
+        syslog(LOG_WARNING, "EGR_L3_INTF[%d] write failed: %d", idx, rv);
+        return -1;
+    }
+    return idx;
+}
+
 int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
 {
     char addr_str[INET6_ADDRSTRLEN] = "?";
+    char ifname[IFNAMSIZ] = "?";
+    int swp, port_idx, logical_port, phys, vid, nh_idx, intf_idx;
+    uint32_t mac_fval[2];
+    int rv = 0;
+
     inet_ntop(family, addr, addr_str, sizeof(addr_str));
+    if (ifindex)
+        if_indextoname(ifindex, ifname);
 
-    syslog(LOG_DEBUG, "L3 host add: %s → %02x:%02x:%02x:%02x:%02x:%02x",
-           addr_str, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    if (family != AF_INET) {
+        /* IPv6 path not implemented yet — kernel still routes via TUN. */
+        syslog(LOG_DEBUG, "L3 host add (v6 not chip-routed): %s dev %s",
+               addr_str, ifname);
+        return 0;
+    }
 
-    /*
-     * TODO: bcm_l3_host_add(unit, &host)
-     *   - host.l3a_ip_addr = addr
-     *   - host.l3a_nexthop_mac = mac
-     *   - host.l3a_intf = egress_intf_for(ifindex)
-     */
+    /* Map dev "swpN" -> our port_state -> physical_lane + service VID. */
+    if (strncmp(ifname, "swp", 3) != 0) {
+        syslog(LOG_DEBUG, "L3 host add: %s on non-swp dev %s, skipping chip",
+               addr_str, ifname);
+        return 0;
+    }
+    swp = atoi(ifname + 3);
+    if (swp < 1 || swp > EDGED_MAX_PORTS)
+        return -1;
+    port_idx = swp - 1;
+    logical_port = edged.ports[port_idx].logical_port;
+    phys = edged.ports[port_idx].physical_lane;
+    vid = edged_resv_vid_for_port(logical_port);  /* service VID per port */
 
+    /* 1) EGR_L3_INTF — needs the swpN's MAC as src MAC for routed
+     * packets exiting this L3 interface.  Get the MAC from
+     * /sys/class/net/swpN/address. */
+    uint8_t our_mac[6];
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname);
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        syslog(LOG_WARNING, "L3 host add: can't read %s", path);
+        return -1;
+    }
+    unsigned int m[6];
+    if (fscanf(f, "%x:%x:%x:%x:%x:%x",
+               &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != 6) {
+        fclose(f);
+        syslog(LOG_WARNING, "L3 host add: can't parse MAC from %s", path);
+        return -1;
+    }
+    fclose(f);
+    for (int i = 0; i < 6; i++) our_mac[i] = (uint8_t)m[i];
+
+    intf_idx = l3_egr_intf_program(logical_port, our_mac, vid);
+    if (intf_idx < 0)
+        return -1;
+
+    /* 2) Allocate a next-hop index and program both halves. */
+    nh_idx = next_hop_idx++;
+
+    /* Ingress L3 next-hop — tells egress port + module for routed pkt.
+     * We need to encode the physical port into the chip's "MODULE+PORT"
+     * format.  For local-only forwarding mod=0, port=phys. */
+    {
+        ING_L3_NEXT_HOPm_t ing;
+        ING_L3_NEXT_HOPm_CLR(ing);
+        /* The chip's "PORT_NUM" + "MODULE_ID" fields together identify
+         * where the frame egresses.  For our chassis everything is local
+         * (single switch) so MODULE_ID=0. */
+        ING_L3_NEXT_HOPm_PORT_NUMf_SET(ing, phys);
+        ING_L3_NEXT_HOPm_MODULE_IDf_SET(ing, 0);
+        ING_L3_NEXT_HOPm_ENTRY_TYPEf_SET(ing, 0);   /* L3 unicast */
+        rv = WRITE_ING_L3_NEXT_HOPm(edged.unit, nh_idx, ing);
+        if (rv < 0) {
+            syslog(LOG_WARNING,
+                   "ING_L3_NEXT_HOP[%d] write failed: %d", nh_idx, rv);
+            return -1;
+        }
+    }
+
+    /* Egress L3 next-hop — dst MAC + L3_INTF_NUM pointing at our
+     * EGR_L3_INTF entry. */
+    {
+        EGR_L3_NEXT_HOPm_t egr;
+        EGR_L3_NEXT_HOPm_CLR(egr);
+        mac_to_fval(mac, mac_fval);
+        EGR_L3_NEXT_HOPm_L3_MAC_ADDRESSf_SET(egr, mac_fval);
+        EGR_L3_NEXT_HOPm_L3_INTF_NUMf_SET(egr, intf_idx);
+        EGR_L3_NEXT_HOPm_L3_OVIDf_SET(egr, vid);
+        EGR_L3_NEXT_HOPm_ENTRY_TYPEf_SET(egr, 0);   /* L3 unicast */
+        rv = WRITE_EGR_L3_NEXT_HOPm(edged.unit, nh_idx, egr);
+        if (rv < 0) {
+            syslog(LOG_WARNING,
+                   "EGR_L3_NEXT_HOP[%d] write failed: %d", nh_idx, rv);
+            return -1;
+        }
+    }
+
+    /* 3) L3 host entry: map host IP -> our nh_idx. */
+    {
+        L3_ENTRY_IPV4_UNICASTm_t hst;
+        const uint8_t *ipb = (const uint8_t *)addr;
+        uint32_t ip_be = ((uint32_t)ipb[0] << 24) | ((uint32_t)ipb[1] << 16)
+                       | ((uint32_t)ipb[2] <<  8) |  (uint32_t)ipb[3];
+
+        L3_ENTRY_IPV4_UNICASTm_CLR(hst);
+        L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(hst, 0);   /* unicast host key */
+        L3_ENTRY_IPV4_UNICASTm_V6f_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(hst, ip_be);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_NEXT_HOP_INDEXf_SET(hst, nh_idx);
+        L3_ENTRY_IPV4_UNICASTm_HITf_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(hst, 1);
+
+        /* Pick an index by hashing IP and trying that slot.  For now
+         * just use nh_idx as the slot — works as long as no two
+         * neighbors collide there. */
+        rv = WRITE_L3_ENTRY_IPV4_UNICASTm(edged.unit, nh_idx, hst);
+        if (rv < 0) {
+            syslog(LOG_WARNING,
+                   "L3_ENTRY_IPV4_UNICAST[%d] write failed: %d",
+                   nh_idx, rv);
+            return -1;
+        }
+    }
+
+    syslog(LOG_INFO,
+           "L3 host add: %s -> %02x:%02x:%02x:%02x:%02x:%02x via %s "
+           "(nh_idx=%d intf_idx=%d vid=%d port=%d)",
+           addr_str,
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           ifname, nh_idx, intf_idx, vid, phys);
     return 0;
 }
 

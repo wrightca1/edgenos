@@ -256,15 +256,14 @@ int packet_io_init(void)
                            edged.ports[i].ifname,
                            mac.b[0], mac.b[1], mac.b[2],
                            mac.b[3], mac.b[4], mac.b[5], svid, rv);
-                    /* NOT calling l3_my_station_add() — chip TX MAC
-                     * counter says all 10 ICMP frames hit the wire, but
-                     * Nexus replies to none of them while Cumulus 2.5
-                     * worked end-to-end on this same setup.  Suspect:
-                     * MY_STATION_TCAM triggers the chip's egress L3
-                     * pipeline on our TX (rewrites src MAC, decrements
-                     * TTL, may zero src MAC), making the wire frame
-                     * malformed.  ARP (0x0806) bypasses L3 so it goes
-                     * out clean. */
+                    /* MY_STATION_TCAM is REQUIRED so chip's L3 pipeline
+                     * recognises this MAC as a router endpoint and
+                     * actually delivers IPv4 frames addressed to it
+                     * (either via L3_HOST hit or V4L3DSTMISS_TOCPU
+                     * trap).  Without it, the chip's L2 lookup happens
+                     * but L3-bound IPv4 frames never enter the L3 stage
+                     * that produces the CPU punt action. */
+                    l3_my_station_add(mac.b, svid);
                 }
             }
             close(sock);
