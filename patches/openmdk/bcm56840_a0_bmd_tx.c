@@ -14,6 +14,7 @@
 #include <bmd/bmd_dma.h>
 
 #include <bmdi/arch/xgs_dma.h>
+#include <bmdi/arch/xgsd_dma.h>
 
 #include <cdk/cdk_assert.h>
 #include <cdk/cdk_debug.h>

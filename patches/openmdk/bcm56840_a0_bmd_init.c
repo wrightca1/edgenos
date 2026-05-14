@@ -14,6 +14,7 @@
 #include <bmd/bmd_device.h>
 
 #include <bmdi/arch/xgs_dma.h>
+#include <bmdi/arch/xgsd_dma.h>
 
 #include <cdk/chip/bcm56840_a0_defs.h>
 #include <cdk/arch/xgs_chip.h>
@@ -1880,7 +1881,68 @@ bcm56840_a0_bmd_init(int unit)
     ioerr += _port_init(unit, CMIC_PORT);
 
     if (CDK_SUCCESS(rv)) {
+        /* Initialise BOTH DMA paths.
+         *   - xgs_dma_init programs the legacy CMIC scatter/gather + per-
+         *     channel direction; the TX path (bcm56840_a0_bmd_tx) uses it
+         *     and TX has been verified working through these registers.
+         *   - xgsd_dma_init releases EP credits to the RX buffer, enables
+         *     48 CPU COS RX queues, and primes CMICm per-CMC packet/desc
+         *     endianness; the RX path (bcm56840_a0_bmd_rx) uses CMICm.
+         * The two register banks coexist; missing either init leaves
+         * one direction permanently stalled. */
         rv = bmd_xgs_dma_init(unit);
+        if (CDK_SUCCESS(rv)) {
+            rv = bmd_xgsd_dma_init(unit);
+        }
+    }
+
+    /* Cumulus-mirror chip config (from /etc/bcm.d/rc.soc on live Cumulus 2.5.0).
+     * Source: cumulus_baseline_2013_run2/deep_mine_XXX/06_bcm_files/etc_bcm.d_rc.soc
+     */
+    {
+        IFP_METER_PARITY_CONTROLr_t ifp_parity;
+        RDBGC0_SELECTr_t rdbgc0;
+        RDBGC3_SELECTr_t rdbgc3;
+        RDBGC4_SELECTr_t rdbgc4;
+        RDBGC5_SELECTr_t rdbgc5;
+        RDBGC6_SELECTr_t rdbgc6;
+        TDBGC6_SELECTr_t tdbgc6;
+
+        /* `setreg IFP_METER_PARITY_CONTROL 0` — Trident errata workaround
+         * from rc.soc to avoid false FP_METER parity errors. */
+        IFP_METER_PARITY_CONTROLr_CLR(ifp_parity);
+        ioerr += WRITE_IFP_METER_PARITY_CONTROLr(unit, ifp_parity);
+
+        /* Drop-counter select registers from rc.soc.  These configure the
+         * chip's per-port disaggregated RX/TX drop counters that
+         * ethtool / snmp consume.  Hex values are exactly as Cumulus uses. */
+        RDBGC0_SELECTr_CLR(rdbgc0);
+        RDBGC0_SELECTr_SET(rdbgc0, 0x04000d11);  /* RIPD4,RIPD6,RDISC,RPORTD,PDISC,VLANDR */
+        ioerr += WRITE_RDBGC0_SELECTr(unit, rdbgc0);
+
+        RDBGC3_SELECTr_CLR(rdbgc3);
+        RDBGC3_SELECTr_SET(rdbgc3, 0x00000011);  /* RIPD4, RIPD6 */
+        ioerr += WRITE_RDBGC3_SELECTr(unit, rdbgc3);
+
+        RDBGC4_SELECTr_CLR(rdbgc4);
+        RDBGC4_SELECTr_SET(rdbgc4, 0x00000100);  /* RDISC */
+        ioerr += WRITE_RDBGC4_SELECTr(unit, rdbgc4);
+
+        RDBGC5_SELECTr_CLR(rdbgc5);
+        RDBGC5_SELECTr_SET(rdbgc5, 0x00002000);  /* RFILDR */
+        ioerr += WRITE_RDBGC5_SELECTr(unit, rdbgc5);
+
+        RDBGC6_SELECTr_CLR(rdbgc6);
+        RDBGC6_SELECTr_SET(rdbgc6, 0x00008000);  /* RDROP */
+        ioerr += WRITE_RDBGC6_SELECTr(unit, rdbgc6);
+
+        TDBGC6_SELECTr_CLR(tdbgc6);
+        TDBGC6_SELECTr_SET(tdbgc6, 0x00040000);  /* TPKTD */
+        ioerr += WRITE_TDBGC6_SELECTr(unit, tdbgc6);
+
+        CDK_PRINTF("bmd_init[%d]: Cumulus-mirror config applied "
+                   "(IFP_METER parity errata workaround + drop counter selects)\n",
+                   unit);
     }
 #endif
 
