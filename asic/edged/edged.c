@@ -33,6 +33,8 @@
 /* BMD/PHY headers for CLAUSE45 fix */
 #include <bmd/bmd.h>
 #include <bmd/bmd_phy_ctrl.h>
+#include <cdk/cdk_device.h>
+#include <cdk/arch/xgs_chip.h>
 #include <phy/phy.h>
 
 /* Global state */
@@ -223,6 +225,51 @@ static int asic_init(void)
     }
 
     syslog(LOG_INFO, "ASIC initialization complete");
+
+    /*
+     * If /tmp/regdump.in exists, read every (address, name) pair from
+     * it and write our chip's actual values to /tmp/regdump.out so we
+     * can diff vs Cumulus's dump_soc_diff.txt.
+     *
+     * Input  format (matches Cumulus dump):
+     *     0x0f180d34 NAME.scope = 0x00000001
+     * Output format:
+     *     0x0f180d34 NAME.scope cum=0x00000001 ours=0x????????
+     */
+    {
+        FILE *fi = fopen("/tmp/regdump.in", "r");
+        if (fi) {
+            FILE *fo = fopen("/tmp/regdump.out", "w");
+            if (fo) {
+                char line[512];
+                int matched = 0, read_err = 0;
+                while (fgets(line, sizeof(line), fi)) {
+                    unsigned long addr;
+                    char namebuf[200] = {0};
+                    unsigned long cumval;
+                    int n = sscanf(line, "%lx %199s = %lx",
+                                   &addr, namebuf, &cumval);
+                    if (n != 3) continue;
+                    uint32_t our_val = 0;
+                    int rv = cdk_xgs_reg32_read(edged.unit,
+                                                (uint32_t)addr,
+                                                &our_val);
+                    if (rv != 0) { read_err++; }
+                    fprintf(fo, "0x%08lx %s cum=0x%08lx ours=0x%08x%s\n",
+                            addr, namebuf, cumval, our_val,
+                            (rv == 0 && our_val == cumval) ? "" : " DIFF");
+                    matched++;
+                }
+                fclose(fo);
+                syslog(LOG_INFO,
+                       "regdump: %d registers read, %d read-errors, "
+                       "output in /tmp/regdump.out",
+                       matched, read_err);
+            }
+            fclose(fi);
+        }
+    }
+
     return 0;
 }
 
