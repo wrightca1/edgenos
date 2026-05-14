@@ -439,6 +439,292 @@ static int datapath_disable_vt(int unit)
     return ioerr;
 }
 
+/*
+ * Systematic port of Cumulus rc.datapath_0 — the bits not already
+ * covered by datapath_buffer_init / datapath_cpu_buffer_init.
+ *
+ * Each block has the original Cumulus DSL line as a comment so the
+ * mapping is auditable.  Without this set, the chip drops frames at
+ * the MMU/bridge stage before they reach the CPU port (verified
+ * 2026-05-14: chip RX counter increments, CMICm DCB ring never fills,
+ * rx_drops=0).
+ */
+static int datapath_rc_full(int unit)
+{
+    int ioerr = 0;
+    int p, port;
+    cdk_pbmp_t xlpbmp;
+
+    bcm56840_a0_xlport_pbmp_get(unit, &xlpbmp);
+
+    /* port_pg_spid pg0_spid=0 pg1_spid=0 pg2_spid=2 pg3_spid=0
+     * pg4_spid=0 pg5_spid=0 pg6_spid=0 pg7_spid=1 — per-PG service
+     * pool mapping.  Default has every PG → SP3 (which we disable).
+     * Without this, every ingress frame lands in SP3 → drop. */
+    {
+        PORT_PG_SPIDr_t v;
+        PORT_PG_SPIDr_CLR(v);
+        PORT_PG_SPIDr_PG0_SPIDf_SET(v, 0);
+        PORT_PG_SPIDr_PG1_SPIDf_SET(v, 0);
+        PORT_PG_SPIDr_PG2_SPIDf_SET(v, 2);
+        PORT_PG_SPIDr_PG3_SPIDf_SET(v, 0);
+        PORT_PG_SPIDr_PG4_SPIDf_SET(v, 0);
+        PORT_PG_SPIDr_PG5_SPIDf_SET(v, 0);
+        PORT_PG_SPIDr_PG6_SPIDf_SET(v, 0);
+        PORT_PG_SPIDr_PG7_SPIDf_SET(v, 1);
+        /* Apply to CPU + all XLPORT ports. */
+        ioerr += WRITE_PORT_PG_SPIDr(unit, 0, v);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_PORT_PG_SPIDr(unit, port, v);
+        }
+    }
+
+    /* setreg use_sp_shared 0x7 — enable shared pool fallback for SP0/1/2
+     * Without this, when a PG's main SP runs out of cells (or has 0
+     * cells like our SP0/SP3) the chip can't fall back to the shared
+     * pool, so frames are dropped at admission. */
+    {
+        USE_SP_SHAREDr_t v;
+        USE_SP_SHAREDr_CLR(v);
+        USE_SP_SHAREDr_SET(v, 0x7);
+        ioerr += WRITE_USE_SP_SHAREDr(unit, v);
+    }
+
+    /* pg_shared_limit_cell per-port per-PG.
+     * Cumulus: pg_shared_limit_cell(0)=4548, (2)=909, (7)=10006
+     * (with pg_shared_dynamic=0).  Apply to CPU + XLPORT ports. */
+    {
+        PG_SHARED_LIMIT_CELLr_t v;
+        struct { int pg; uint32_t lim; } pgs[] = {
+            { 0, 4548 }, { 2, 909 }, { 7, 10006 },
+        };
+        size_t i;
+        int mport;
+        for (i = 0; i < sizeof(pgs)/sizeof(pgs[0]); i++) {
+            PG_SHARED_LIMIT_CELLr_CLR(v);
+            PG_SHARED_LIMIT_CELLr_PG_SHARED_LIMITf_SET(v, pgs[i].lim);
+            /* mport 0 (CPU) */
+            ioerr += WRITE_PG_SHARED_LIMIT_CELLr(unit, 0, pgs[i].pg, v);
+            CDK_PBMP_ITER(xlpbmp, port) {
+                mport = port;  /* phys mport — close enough for our setup */
+                ioerr += WRITE_PG_SHARED_LIMIT_CELLr(unit, mport,
+                                                    pgs[i].pg, v);
+            }
+        }
+    }
+
+    /* op_buffer_shared_limit_cell[0..3] + resume — output buffer
+     * shared limits per service pool.  Defaults are 0 → no shared
+     * buffer = chip can't queue anything.
+     * Cumulus: [0]=20736 [1]=41472 [2]=41472 [3]=135 (with resume
+     * = limit - 100). */
+    {
+        OP_BUFFER_SHARED_LIMIT_CELLr_t v;
+        OP_BUFFER_SHARED_LIMIT_RESUME_CELLr_t r;
+        uint32_t lim[4] = { 20736, 41472, 41472, 135 };
+        uint32_t res[4] = { 20636, 41372, 41372,  35 };
+        int sp;
+        for (sp = 0; sp < 4; sp++) {
+            OP_BUFFER_SHARED_LIMIT_CELLr_CLR(v);
+            OP_BUFFER_SHARED_LIMIT_CELLr_SET(v, lim[sp]);
+            ioerr += WRITE_OP_BUFFER_SHARED_LIMIT_CELLr(unit, sp, v);
+
+            OP_BUFFER_SHARED_LIMIT_RESUME_CELLr_CLR(r);
+            OP_BUFFER_SHARED_LIMIT_RESUME_CELLr_SET(r, res[sp]);
+            ioerr += WRITE_OP_BUFFER_SHARED_LIMIT_RESUME_CELLr(unit, sp, r);
+        }
+    }
+
+    /* op_queue_config_cell[0..2].$allports — per-port output queue
+     * default config (for non-CPU ports; CPU-port specifics handled
+     * in datapath_cpu_buffer_init).
+     *   Q0:  q_shared_limit=2073 q_min=921, q_spid=0, q_limit_en=1
+     *   Q1:                                 q_spid=1
+     *   Q2:                                 q_spid=2 */
+    {
+        OP_QUEUE_CONFIG_CELLr_t qc;
+        OP_QUEUE_CONFIG1_CELLr_t qc1;
+
+        OP_QUEUE_CONFIG_CELLr_CLR(qc);
+        OP_QUEUE_CONFIG_CELLr_Q_MIN_CELLf_SET(qc, 921);
+        OP_QUEUE_CONFIG_CELLr_Q_SHARED_LIMIT_CELLf_SET(qc, 2073);
+
+        OP_QUEUE_CONFIG1_CELLr_CLR(qc1);
+        OP_QUEUE_CONFIG1_CELLr_Q_SPIDf_SET(qc1, 0);
+        OP_QUEUE_CONFIG1_CELLr_Q_LIMIT_ENABLE_CELLf_SET(qc1, 1);
+
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_OP_QUEUE_CONFIG_CELLr(unit, port, 0, qc);
+            ioerr += WRITE_OP_QUEUE_CONFIG1_CELLr(unit, port, 0, qc1);
+
+            OP_QUEUE_CONFIG1_CELLr_CLR(qc1);
+            OP_QUEUE_CONFIG1_CELLr_Q_SPIDf_SET(qc1, 1);
+            ioerr += WRITE_OP_QUEUE_CONFIG1_CELLr(unit, port, 1, qc1);
+
+            OP_QUEUE_CONFIG1_CELLr_CLR(qc1);
+            OP_QUEUE_CONFIG1_CELLr_Q_SPIDf_SET(qc1, 2);
+            ioerr += WRITE_OP_QUEUE_CONFIG1_CELLr(unit, port, 2, qc1);
+        }
+    }
+
+    /* modreg cosmask cosmaskrxen=1 — enable the COS-mask RX gate
+     * Without COSMASKRXEN, the chip may filter all priority classes
+     * → ALL frames dropped at RX even though the MAC accepted them.
+     * COSMASK is a per-port register; apply to CPU + every XLPORT. */
+    {
+        COSMASKr_t v;
+        ioerr += READ_COSMASKr(unit, 0, &v);
+        COSMASKr_COSMASKRXENf_SET(v, 1);
+        ioerr += WRITE_COSMASKr(unit, 0, v);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            COSMASKr_t pv;
+            ioerr += READ_COSMASKr(unit, port, &pv);
+            COSMASKr_COSMASKRXENf_SET(pv, 1);
+            ioerr += WRITE_COSMASKr(unit, port, pv);
+        }
+    }
+
+    /* modreg aux_arb_control l2_mod_fifo_enable_l2_delete=0 */
+    {
+        AUX_ARB_CONTROLr_t v;
+        ioerr += READ_AUX_ARB_CONTROLr(unit, &v);
+        AUX_ARB_CONTROLr_L2_MOD_FIFO_ENABLE_L2_DELETEf_SET(v, 0);
+        ioerr += WRITE_AUX_ARB_CONTROLr(unit, v);
+    }
+
+    /* setreg ing_cos_mode queue_mode=0 cos_mode=0 — per-port. */
+    {
+        ING_COS_MODEr_t v;
+        ING_COS_MODEr_CLR(v);
+        ING_COS_MODEr_QUEUE_MODEf_SET(v, 0);
+        ING_COS_MODEr_COS_MODEf_SET(v, 0);
+        ioerr += WRITE_ING_COS_MODEr(unit, 0, v);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_ING_COS_MODEr(unit, port, v);
+        }
+    }
+
+    /* setreg op_voq_port_config q_sel_p{34..37,1..4}=0 — disable
+     * VoQ port selection on these ports (so output queues are
+     * straight, not VoQ-multiplexed).  We just clear the whole reg. */
+    {
+        OP_VOQ_PORT_CONFIGr_t v;
+        OP_VOQ_PORT_CONFIGr_CLR(v);
+        ioerr += WRITE_OP_VOQ_PORT_CONFIGr(unit, v);
+    }
+
+    /* modreg ovq_flowcontrol_threshold ovq_fc_enable=0 */
+    {
+        OVQ_FLOWCONTROL_THRESHOLDr_t v;
+        ioerr += READ_OVQ_FLOWCONTROL_THRESHOLDr(unit, &v);
+        OVQ_FLOWCONTROL_THRESHOLDr_OVQ_FC_ENABLEf_SET(v, 0);
+        ioerr += WRITE_OVQ_FLOWCONTROL_THRESHOLDr(unit, v);
+    }
+
+    /* modreg es_tdm_config en_cpu_slot_sharing=0 */
+    {
+        ES_TDM_CONFIGr_t v;
+        ioerr += READ_ES_TDM_CONFIGr(unit, &v);
+        ES_TDM_CONFIGr_EN_CPU_SLOT_SHARINGf_SET(v, 0);
+        ioerr += WRITE_ES_TDM_CONFIGr(unit, v);
+    }
+
+    /* setreg port_max_pkt_size 45 — Cumulus sets this to 45 cells
+     * for jumbo support.  bmd_init already programs this but with
+     * its own value; force Cumulus's 45 explicitly. */
+    {
+        PORT_MAX_PKT_SIZEr_t v;
+        PORT_MAX_PKT_SIZEr_CLR(v);
+        PORT_MAX_PKT_SIZEr_PORT_MAX_PKT_SIZEf_SET(v, 45);
+        ioerr += WRITE_PORT_MAX_PKT_SIZEr(unit, 0, v);   /* CPU port */
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_PORT_MAX_PKT_SIZEr(unit, port, v);
+        }
+    }
+
+    /* setreg es_queue_to_prio prio_N=N — identity mapping */
+    {
+        ES_QUEUE_TO_PRIOr_t v;
+        ES_QUEUE_TO_PRIOr_CLR(v);
+        ES_QUEUE_TO_PRIOr_PRIO_0f_SET(v, 0);
+        ES_QUEUE_TO_PRIOr_PRIO_1f_SET(v, 1);
+        ES_QUEUE_TO_PRIOr_PRIO_2f_SET(v, 2);
+        ES_QUEUE_TO_PRIOr_PRIO_3f_SET(v, 3);
+        ES_QUEUE_TO_PRIOr_PRIO_4f_SET(v, 4);
+        ES_QUEUE_TO_PRIOr_PRIO_5f_SET(v, 5);
+        ES_QUEUE_TO_PRIOr_PRIO_6f_SET(v, 6);
+        ioerr += WRITE_ES_QUEUE_TO_PRIOr(unit, v);
+    }
+
+    /* Egress scheduler (ES) config + cosweights — per-port (incl CPU).
+     * Without these the egress scheduler may never dequeue. */
+    {
+        ESCONFIGr_t esc;
+        COSWEIGHTSr_t cw;
+        ESCONFIGr_CLR(esc);
+        ESCONFIGr_SCHEDULING_SELECTf_SET(esc, 0x3);
+        /* CPU + every XLPORT */
+        ioerr += WRITE_ESCONFIGr(unit, 0, esc);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_ESCONFIGr(unit, port, esc);
+        }
+
+        /* cosweights(0)=16, (1)=32, (2)=0 */
+        struct { int i; uint32_t w; } cws[] = {
+            { 0, 16 }, { 1, 32 }, { 2, 0 },
+        };
+        size_t k;
+        for (k = 0; k < sizeof(cws)/sizeof(cws[0]); k++) {
+            COSWEIGHTSr_CLR(cw);
+            COSWEIGHTSr_SET(cw, cws[k].w);
+            ioerr += WRITE_COSWEIGHTSr(unit, 0, cws[k].i, cw);
+            CDK_PBMP_ITER(xlpbmp, port) {
+                ioerr += WRITE_COSWEIGHTSr(unit, port, cws[k].i, cw);
+            }
+        }
+    }
+
+    /* S3 scheduler config + minspconfig + S3_CONFIG_MC.use_mc_group=0
+     * — top-level egress scheduler for each port (incl CPU). */
+    {
+        S3_CONFIGr_t s3c;
+        S3_CONFIG_MCr_t s3mc;
+        S3_CONFIGr_CLR(s3c);
+        S3_CONFIGr_ROUTE_UC_TO_S2f_SET(s3c, 1);
+        S3_CONFIGr_SCHEDULING_SELECTf_SET(s3c, 0xff);
+        S3_CONFIG_MCr_CLR(s3mc);
+        /* USE_MC_GROUP field default 0, leave it. */
+        ioerr += WRITE_S3_CONFIGr(unit, 0, s3c);
+        ioerr += WRITE_S3_CONFIG_MCr(unit, 0, s3mc);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_S3_CONFIGr(unit, port, s3c);
+            ioerr += WRITE_S3_CONFIG_MCr(unit, port, s3mc);
+        }
+    }
+
+    /* S2 scheduler config + cosweights/routing — per-port (incl CPU). */
+    {
+        S2_CONFIGr_t s2c;
+        S2_CONFIGr_CLR(s2c);
+        S2_CONFIGr_SCHEDULING_SELECTf_SET(s2c, 0x3f);
+        ioerr += WRITE_S2_CONFIGr(unit, 0, s2c);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_S2_CONFIGr(unit, port, s2c);
+        }
+    }
+
+    /* Suppress unused-variable warning */
+    (void)p;
+
+    syslog(LOG_INFO,
+           "rc_full: PG_SPID, USE_SP_SHARED, OP_BUFFER_SHARED, "
+           "OP_QUEUE_CONFIG.allports, COSMASKRXEN, AUX_ARB_CONTROL, "
+           "ING_COS_MODE, OP_VOQ_PORT_CFG, OVQ_FC, ES_TDM_CONFIG, "
+           "PORT_MAX_PKT_SIZE, ES_QUEUE_TO_PRIO, ESCONFIG, COSWEIGHTS, "
+           "S3_CONFIG, S2_CONFIG (Cumulus rc.datapath_0 mirror)");
+    return ioerr;
+}
+
 int datapath_init(void)
 {
     int ioerr = 0;
@@ -446,6 +732,7 @@ int datapath_init(void)
     ioerr += datapath_mac_init(edged.unit);
     ioerr += datapath_buffer_init(edged.unit);
     ioerr += datapath_cpu_buffer_init(edged.unit);
+    ioerr += datapath_rc_full(edged.unit);
     ioerr += datapath_disable_vt(edged.unit);
     ioerr += datapath_cpu_punt_init(edged.unit);
     ioerr += datapath_hash_init(edged.unit);
