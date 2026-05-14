@@ -35,4 +35,12 @@ int l3_my_station_add(const uint8_t *mac, int vlan);
  */
 int l3_local_host_add(uint32_t ipv4_addr, int logical_port);
 
+/*
+ * Create an ECMP group from the given chip-side next-hop indices.
+ * Returns the group's base slot in L3_ECMP table (= the ECMP_PTR value
+ * to put in L3_DEFIP entries that route via this group), or -1 on error.
+ * Mirrors Cumulus's multipath model (project_cumulus_chip_init_complete).
+ */
+int l3_ecmp_group_create(const int *intf_ids, int count);
+
 #endif /* __L3_H__ */

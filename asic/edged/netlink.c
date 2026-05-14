@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <syslog.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/neighbour.h>
@@ -235,6 +236,8 @@ void netlink_poll(void)
          NLMSG_OK(nlh, (unsigned int)len);
          nlh = NLMSG_NEXT(nlh, len)) {
 
+        syslog(LOG_INFO, "NL: recv nlmsg_type=%d len=%d",
+               nlh->nlmsg_type, nlh->nlmsg_len);
         switch (nlh->nlmsg_type) {
         case RTM_NEWLINK:
         case RTM_DELLINK:
@@ -252,23 +255,25 @@ void netlink_poll(void)
             break;
 
         case RTM_NEWADDR: {
-            /* Kernel just assigned an IPv4 address to one of our
-             * swpN TUN interfaces.  Program the chip's L3_HOST entry
-             * for it with next-hop = CPU port, so frames addressed
-             * to this IP HIT in L3 lookup and get delivered instead
-             * of dropped (V4L3DSTMISS_TOCPU=1 alone DROPS rather
-             * than traps; verified by Nexus's pings incrementing
-             * rx_drops). */
             struct ifaddrmsg *ifa = NLMSG_DATA(nlh);
-            if (ifa->ifa_family != AF_INET) break;
-
             char ifname[IFNAMSIZ] = "";
-            if (!if_indextoname(ifa->ifa_index, ifname)) break;
-            if (strncmp(ifname, "swp", 3) != 0) break;
+            if_indextoname(ifa->ifa_index, ifname);
+            syslog(LOG_INFO,
+                   "RTM_NEWADDR: family=%d ifidx=%d ifname=%s prefix=%d",
+                   ifa->ifa_family, ifa->ifa_index, ifname, ifa->ifa_prefixlen);
+            if (ifa->ifa_family != AF_INET) break;
+            if (strncmp(ifname, "swp", 3) != 0) {
+                syslog(LOG_INFO, "RTM_NEWADDR: %s not swp*, skip", ifname);
+                break;
+            }
             int logical_port = atoi(ifname + 3);
-            if (logical_port < 1 || logical_port > EDGED_MAX_PORTS) break;
+            if (logical_port < 1 || logical_port > EDGED_MAX_PORTS) {
+                syslog(LOG_WARNING,
+                       "RTM_NEWADDR: %s logical_port=%d out of range",
+                       ifname, logical_port);
+                break;
+            }
 
-            /* Walk RTA attrs to find IFA_LOCAL / IFA_ADDRESS. */
             struct rtattr *rta = IFA_RTA(ifa);
             int rta_len = IFA_PAYLOAD(nlh);
             uint32_t ip = 0;
@@ -278,12 +283,15 @@ void netlink_poll(void)
                     break;
                 }
             }
+            syslog(LOG_INFO, "RTM_NEWADDR: %s ip=0x%08x logical_port=%d",
+                   ifname, ip, logical_port);
             if (ip)
                 l3_local_host_add(ip, logical_port);
             break;
         }
 
         default:
+            syslog(LOG_INFO, "NL: unhandled nlmsg_type=%d", nlh->nlmsg_type);
             break;
         }
     }

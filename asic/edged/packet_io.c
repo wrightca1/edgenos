@@ -160,38 +160,27 @@ static int tun_create(const char *name, int port_num)
  * buffers. We poll for completed buffers via bmd_rx_poll().
  */
 /*
- * OpenMDK RX DMA is single-buffer: one bmd_rx_start() at a time.
- * After bmd_rx_poll() returns a packet, we must resubmit via
- * bmd_rx_start() before the next packet can be received.
+ * RX DMA — multi-DCB ring model (matches Cumulus's CMICm setup).
+ *
+ * `bmd_rx_start` now allocates a 64-DCB ring internally (in
+ * bcm56840_a0_bmd_rx.c) on its first call; subsequent calls are no-ops.
+ * The chip walks the ring autonomously via CONTINUOUS_DMA + DESC_HALT_ADDR
+ * and refills each DCB via RELOAD=1.  `bmd_rx_poll` returns a packet whose
+ * lifetime is tied to the ring (don't free it — chip will reuse the slot).
  */
-static bmd_pkt_t rx_pkt;
-static dma_addr_t rx_baddr;
-
 static int rx_dma_init(void)
 {
     int rv;
 
-    memset(&rx_pkt, 0, sizeof(rx_pkt));
-
-    rx_pkt.data = bmd_dma_alloc_coherent(edged.unit, RX_BUF_SIZE, &rx_baddr);
-    if (!rx_pkt.data) {
-        syslog(LOG_ERR, "Failed to allocate RX DMA buffer");
-        return -1;
-    }
-
-    rx_pkt.size = RX_BUF_SIZE;
-    rx_pkt.baddr = rx_baddr;
-    rx_pkt.port = -1;
-
-    rv = bmd_rx_start(edged.unit, &rx_pkt);
+    /* bmd_rx_start ignores its pkt arg now — it manages its own ring.
+     * Pass NULL for clarity. */
+    rv = bmd_rx_start(edged.unit, NULL);
     if (rv < 0) {
-        syslog(LOG_ERR, "bmd_rx_start failed: %d", rv);
-        bmd_dma_free_coherent(edged.unit, RX_BUF_SIZE, rx_pkt.data, rx_baddr);
-        rx_pkt.data = NULL;
+        syslog(LOG_ERR, "bmd_rx_start (ring init) failed: %d", rv);
         return -1;
     }
 
-    syslog(LOG_INFO, "RX DMA initialized (single buffer, %d bytes)", RX_BUF_SIZE);
+    syslog(LOG_INFO, "RX DMA initialized (64-DCB ring, CMICm CONTINUOUS_DMA)");
     rx_initialized = 1;
     return 0;
 }
@@ -479,13 +468,11 @@ static void handle_asic_rx(void)
     }
 
 resubmit:
-    /* Re-submit buffer to RX DMA ring */
-    pkt->port = -1;
-    pkt->size = RX_BUF_SIZE;
-    rv = bmd_rx_start(edged.unit, pkt);
-    if (rv < 0) {
-        syslog(LOG_WARNING, "RX: failed to resubmit buffer: %d", rv);
-    }
+    /* With the multi-DCB ring (CONTINUOUS_DMA + RELOAD=1), the chip auto-
+     * reuses each DCB after we consume it.  bmd_rx_poll already reset the
+     * just-consumed DCB's DONE bit and advanced the read pointer.  Nothing
+     * for us to do here. */
+    (void)rv;
 }
 
 void packet_io_rx_poll(void)
@@ -516,19 +503,11 @@ void packet_io_cleanup(void)
 {
     int i;
 
-    /* Stop RX DMA */
+    /* Stop RX DMA — bmd_rx_stop frees the entire 64-DCB ring + its buffers
+     * (managed internally by bcm56840_a0_bmd_rx.c, no per-slot cleanup here). */
     if (rx_initialized) {
         bmd_rx_stop(edged.unit);
         rx_initialized = 0;
-    }
-
-    /* Free RX DMA buffers */
-    for (i = 0; i < NUM_RX_BUFS; i++) {
-        if (rx_pkts[i].data) {
-            bmd_dma_free_coherent(edged.unit, RX_BUF_SIZE,
-                                  rx_pkts[i].data, rx_pkts[i].baddr);
-            rx_pkts[i].data = NULL;
-        }
     }
 
     /* Close TUN fds */

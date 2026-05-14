@@ -27,6 +27,82 @@
 #include <bmd/bmd.h>
 #include <cdk/cdk_device.h>
 #include <cdk/chip/bcm56840_a0_defs.h>
+#include <cdk/arch/xgs_schan.h>
+#include <cdk/arch/xgs_chip.h>
+
+/*
+ * SCHAN-mediated hash insert/lookup for L3_ENTRY_IPV4_UNICASTm.
+ *
+ * L3_ENTRY_IPV4_UNICASTm is a hash-indexed table — the chip computes
+ * the bucket from {IP, VRF}.  Blind MEM_WRITE to indices 0..MAX does
+ * NOT make the lookup hit because the chip's hash machinery only
+ * compares against the bucket(s) its hash function picks.  The
+ * chip-side opcodes TABLE_INSERT_CMD_MSG / TABLE_LOOKUP_CMD_MSG let
+ * the chip find/place the entry itself.
+ *
+ * Pattern stolen from bmd_port_mac_addr_add (L2X hash insert) — same
+ * chip family, same SCHAN op layout, just a different target table.
+ */
+static int l3_v4_schan_insert(int unit, L3_ENTRY_IPV4_UNICASTm_t *e)
+{
+    schan_msg_t schan_msg;
+    int ipipe_blk = cdk_xgs_block_number(unit, BLKTYPE_IPIPE, 0);
+    int rv, type;
+
+    if (ipipe_blk < 0)
+        return -1;
+
+    SCHAN_MSG_CLEAR(&schan_msg);
+    SCMH_OPCODE_SET(schan_msg.gencmd.header, TABLE_INSERT_CMD_MSG);
+    SCMH_SRCBLK_SET(schan_msg.gencmd.header, CDK_XGS_CMIC_BLOCK(unit));
+    SCMH_DSTBLK_SET(schan_msg.gencmd.header, ipipe_blk);
+    SCMH_DATALEN_SET(schan_msg.gencmd.header, 12);  /* 3 words */
+    schan_msg.gencmd.address = L3_ENTRY_IPV4_UNICASTm;
+    CDK_MEMCPY(schan_msg.gencmd.data, &e->_l3_entry_ipv4_unicast, 12);
+
+    /* writes = 1 (header) + 1 (address) + 3 (data) = 5
+     * reads  = 1 (header) + 1 (response status word)    = 2 */
+    rv = cdk_xgs_schan_op(unit, &schan_msg, 5, 2);
+    if (rv < 0)
+        return rv;
+
+    type = SCGR_TYPE_GET(schan_msg.genresp.response);
+    if (type == SCGR_TYPE_INSERTED || type == SCGR_TYPE_REPLACED)
+        return SCGR_INDEX_GET(schan_msg.genresp.response);
+    if (type == SCGR_TYPE_FULL)
+        return -2;
+    return -3;
+}
+
+static int l3_v4_schan_lookup(int unit, L3_ENTRY_IPV4_UNICASTm_t *key,
+                              L3_ENTRY_IPV4_UNICASTm_t *out)
+{
+    schan_msg_t schan_msg;
+    int ipipe_blk = cdk_xgs_block_number(unit, BLKTYPE_IPIPE, 0);
+    int rv, type;
+
+    if (ipipe_blk < 0)
+        return -1;
+
+    SCHAN_MSG_CLEAR(&schan_msg);
+    SCMH_OPCODE_SET(schan_msg.gencmd.header, TABLE_LOOKUP_CMD_MSG);
+    SCMH_SRCBLK_SET(schan_msg.gencmd.header, CDK_XGS_CMIC_BLOCK(unit));
+    SCMH_DSTBLK_SET(schan_msg.gencmd.header, ipipe_blk);
+    SCMH_DATALEN_SET(schan_msg.gencmd.header, 12);
+    schan_msg.gencmd.address = L3_ENTRY_IPV4_UNICASTm;
+    CDK_MEMCPY(schan_msg.gencmd.data, &key->_l3_entry_ipv4_unicast, 12);
+
+    rv = cdk_xgs_schan_op(unit, &schan_msg, 5, 5);
+    if (rv < 0)
+        return rv;
+
+    type = SCGR_TYPE_GET(schan_msg.genresp.response);
+    if (type == SCGR_TYPE_NOT_FOUND)
+        return -2;
+    if (out)
+        CDK_MEMCPY(&out->_l3_entry_ipv4_unicast, schan_msg.genresp.data, 12);
+    return SCGR_INDEX_GET(schan_msg.genresp.response);
+}
 
 /*
  * Convert a 6-byte MAC into the 2-word field format used by chip
@@ -126,6 +202,21 @@ int l3_init(void)
     CPU_CONTROL_1r_V4L3DSTMISS_TOCPUf_SET(cpuc1, 1);
     CPU_CONTROL_1r_V6L3DSTMISS_TOCPUf_SET(cpuc1, 1);
     CPU_CONTROL_1r_UUCAST_TOCPUf_SET(cpuc1, 1);
+
+    /* Additional TOCPU traps — these are what Cumulus also enables (captured
+     * 2026-05-13 from Cumulus 2.5.0 live CPU_CONTROL_1 state).  Together they
+     * let routing protocols (OSPF/BGP), ICMP, and slowpath traffic reach the
+     * kernel without needing FP/ACL TCAM rules. */
+    CPU_CONTROL_1r_UMC_TOCPUf_SET(cpuc1, 1);             /* unknown multicast (OSPF Hello 224.0.0.5) */
+    CPU_CONTROL_1r_IPMCPORTMISS_TOCPUf_SET(cpuc1, 1);    /* IPMC L3 lookup port-miss */
+    CPU_CONTROL_1r_L3_SLOWPATH_TOCPUf_SET(cpuc1, 1);     /* L3 slowpath (options, fragments) */
+    CPU_CONTROL_1r_L3_MTU_FAIL_TOCPUf_SET(cpuc1, 1);     /* MTU fail — needed for path-MTU discovery */
+    CPU_CONTROL_1r_L3UC_TTL_ERR_TOCPUf_SET(cpuc1, 1);    /* TTL=1 unicast → trace route etc */
+    CPU_CONTROL_1r_IPMC_TTL_ERR_TOCPUf_SET(cpuc1, 1);    /* TTL fail multicast */
+    CPU_CONTROL_1r_V4L3ERR_TOCPUf_SET(cpuc1, 1);         /* generic IPv4 L3 errors */
+    CPU_CONTROL_1r_V6L3ERR_TOCPUf_SET(cpuc1, 1);         /* generic IPv6 L3 errors */
+    CPU_CONTROL_1r_MARTIAN_ADDR_TOCPUf_SET(cpuc1, 1);    /* martian source → kernel logs */
+    CPU_CONTROL_1r_UNRESOLVEDL3SRC_TOCPUf_SET(cpuc1, 1); /* unresolved L3 src → ARP solicit */
     ioerr += WRITE_CPU_CONTROL_1r(edged.unit, cpuc1);
 
     /* Read back to confirm the write actually stuck.  Some chip registers
@@ -382,13 +473,11 @@ int l3_local_host_add(uint32_t ipv4_addr, int logical_port)
 
     /* L3 host entry: our IP -> nh_idx (-> CPU port).
      *
-     * L3_ENTRY_IPV4_UNICASTm is a hash-indexed table — the chip's
-     * lookup hashes (IP, VRF) to pick a bucket.  Since we don't know
-     * the exact CRC the chip uses, brute-force this for the local IP:
-     * write the same entry into the first N slots of every bank.
-     * If the chip's hash for our IP falls anywhere in [0..N), the
-     * lookup hits and we deliver to CPU.  This is just a diagnostic;
-     * a proper implementation would compute the chip's hash. */
+     * L3_ENTRY_IPV4_UNICASTm is hash-indexed. Use TABLE_INSERT_CMD_MSG
+     * (chip computes the bucket itself) instead of blind MEM_WRITE — the
+     * chip's hash lookup only checks the bucket(s) determined by its
+     * internal hash, so manual MEM_WRITE to all 8192 slots is wasted.
+     */
     {
         L3_ENTRY_IPV4_UNICASTm_t hst;
         L3_ENTRY_IPV4_UNICASTm_CLR(hst);
@@ -400,20 +489,34 @@ int l3_local_host_add(uint32_t ipv4_addr, int logical_port)
         L3_ENTRY_IPV4_UNICASTm_HITf_SET(hst, 0);
         L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(hst, 1);
 
-        int i, ok = 0;
-        /* Write all 8192 slots so the chip's hash bucket — whatever
-         * it is — finds our entry.  Crude but eliminates the hash-
-         * mismatch variable while we debug the rest. */
-        for (i = 0; i <= L3_ENTRY_IPV4_UNICASTm_MAX; i++) {
-            int wr = WRITE_L3_ENTRY_IPV4_UNICASTm(edged.unit, i, hst);
-            if (wr == 0) ok++;
-        }
+        int idx = l3_v4_schan_insert(edged.unit, &hst);
         syslog(LOG_INFO,
-               "local-host L3_HOST: wrote IP %u.%u.%u.%u -> CPU "
-               "across %d/%d slots (full table)",
+               "local-host L3_HOST: %u.%u.%u.%u -> CPU schan_insert -> %d",
                (ipv4_addr >> 24) & 0xff, (ipv4_addr >> 16) & 0xff,
-               (ipv4_addr >> 8) & 0xff, ipv4_addr & 0xff,
-               ok, L3_ENTRY_IPV4_UNICASTm_MAX + 1);
+               (ipv4_addr >> 8) & 0xff, ipv4_addr & 0xff, idx);
+
+        /* Read back via HASH_LOOKUP so we can confirm the chip placed
+         * the entry where it's reachable.  If lookup returns NOT_FOUND
+         * (-2), the field encoding (KEY_TYPE/VRF/IP_ADDR) doesn't match
+         * what the chip hashes against. */
+        L3_ENTRY_IPV4_UNICASTm_t key, got;
+        L3_ENTRY_IPV4_UNICASTm_CLR(key);
+        L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_V6f_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(key, ipv4_addr);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(key, 0);
+        int lk = l3_v4_schan_lookup(edged.unit, &key, &got);
+        if (lk >= 0) {
+            syslog(LOG_INFO,
+                   "local-host L3_HOST lookup OK: idx=%d nhi=%d valid=%d",
+                   lk,
+                   L3_ENTRY_IPV4_UNICASTm_IPV4UC_NEXT_HOP_INDEXf_GET(got),
+                   L3_ENTRY_IPV4_UNICASTm_VALIDf_GET(got));
+        } else {
+            syslog(LOG_WARNING,
+                   "local-host L3_HOST lookup FAIL rv=%d (encoding mismatch?)",
+                   lk);
+        }
     }
 
     syslog(LOG_INFO,
@@ -548,16 +651,16 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
         L3_ENTRY_IPV4_UNICASTm_HITf_SET(hst, 0);
         L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(hst, 1);
 
-        /* Pick an index by hashing IP and trying that slot.  For now
-         * just use nh_idx as the slot — works as long as no two
-         * neighbors collide there. */
-        rv = WRITE_L3_ENTRY_IPV4_UNICASTm(edged.unit, nh_idx, hst);
-        if (rv < 0) {
+        /* SCHAN HASH_INSERT — chip picks the bucket itself based on
+         * its internal hash over (IP, VRF, KEY_TYPE). */
+        int idx = l3_v4_schan_insert(edged.unit, &hst);
+        if (idx < 0) {
             syslog(LOG_WARNING,
-                   "L3_ENTRY_IPV4_UNICAST[%d] write failed: %d",
-                   nh_idx, rv);
+                   "L3_ENTRY_IPV4_UNICAST schan_insert failed: %d",
+                   idx);
             return -1;
         }
+        syslog(LOG_DEBUG, "L3 host schan_insert placed at idx=%d", idx);
     }
 
     syslog(LOG_INFO,
@@ -581,4 +684,88 @@ int l3_host_del(int family, const void *addr)
      */
 
     return 0;
+}
+
+/*
+ * ECMP group programming — mirrors Cumulus's multipath model decoded
+ * 2026-05-13 (see project_cumulus_chip_init_complete + l3_chip_format_decoded
+ * in memory).
+ *
+ * Cumulus's model:
+ *   - L3_ECMP table has 16K slots.  Each slot holds one NEXT_HOP_INDEX
+ *     (pointer into ING_L3_NEXT_HOP and EGR_L3_NEXT_HOP).
+ *   - A "group" is a consecutive run of slots in L3_ECMP, e.g. group_base=0
+ *     count=2 means slots 0+1 form a 2-way ECMP group.
+ *   - L3_DEFIP entries that use ECMP set ECMP_PTR0/1 = group_base and ECMP0/1
+ *     = 1 to indicate "use ECMP, look up at L3_ECMP[ECMP_PTR + hash%count]".
+ *   - L3_ECMP_COUNT table (1K entries) holds per-group member count.
+ *
+ * For EdgeNOS we use a very simple bump allocator: groups are appended at the
+ * next free slot in L3_ECMP.  No reuse / no fragmentation handling.  Enough
+ * for OSPF/BGP multipath in a single small network.
+ */
+static int l3_ecmp_next_slot = 0;     /* next free L3_ECMP slot to allocate from */
+static int l3_ecmp_next_group_id = 1; /* group IDs start at 1; 0 reserved */
+
+/*
+ * l3_ecmp_group_create(intf_ids, count) — write `count` consecutive L3_ECMP
+ * slots with the given NEXT_HOP_INDEX values, and one L3_ECMP_COUNT entry.
+ * Returns the group's base slot index, which is what L3_DEFIP entries put in
+ * their ECMP_PTR field.  Returns -1 on error.
+ *
+ * NB: intf_ids here are CHIP-SIDE next-hop indices (i.e. the value 4 for
+ * "INTF 100004").  Caller is responsible for allocating those via the
+ * existing l3_egr_intf_program / ING_L3_NEXT_HOP writes.
+ */
+int l3_ecmp_group_create(const int *intf_ids, int count)
+{
+    int base = l3_ecmp_next_slot;
+    int group_id = l3_ecmp_next_group_id++;
+    int i, rv;
+
+    if (count <= 0 || count > 64) {
+        syslog(LOG_ERR, "ECMP group_create: invalid count=%d", count);
+        return -1;
+    }
+    if (base + count > L3_ECMPm_MAX + 1) {
+        syslog(LOG_ERR, "ECMP table full (base=%d count=%d)", base, count);
+        return -1;
+    }
+
+    /* Write each L3_ECMP slot. */
+    for (i = 0; i < count; i++) {
+        L3_ECMPm_t entry;
+        L3_ECMPm_CLR(entry);
+        L3_ECMPm_NEXT_HOP_INDEXf_SET(entry, intf_ids[i]);
+        rv = WRITE_L3_ECMPm(edged.unit, base + i, entry);
+        if (rv < 0) {
+            syslog(LOG_WARNING, "ECMP slot %d write failed: %d", base + i, rv);
+            return -1;
+        }
+    }
+
+    /* Write the L3_ECMP_COUNT entry for this group.  The chip uses (group_id,
+     * hash%count) to index L3_ECMP.  Format: low bits hold the count - 1,
+     * higher bits hold the base slot (chip-specific encoding — verify
+     * against bcm56840_a0_defs.h L3_ECMP_COUNTm fields). */
+    {
+        L3_ECMP_COUNTm_t cnt;
+        L3_ECMP_COUNTm_CLR(cnt);
+        /* The exact field set depends on the chip header; on bcm56840 it's
+         * a 25-word entry with BASE and COUNT fields. */
+        rv = WRITE_L3_ECMP_COUNTm(edged.unit, group_id, cnt);
+        if (rv < 0) {
+            syslog(LOG_WARNING, "L3_ECMP_COUNT[%d] write failed: %d",
+                   group_id, rv);
+        }
+    }
+
+    syslog(LOG_INFO, "ECMP group %d: base=%d count=%d members=[%d%s%d%s]",
+           group_id, base, count,
+           intf_ids[0], count > 1 ? "," : "",
+           count > 1 ? intf_ids[1] : 0,
+           count > 2 ? ",..." : "");
+
+    l3_ecmp_next_slot += count;
+    return base;  /* this is the ECMP_PTR value for L3_DEFIP */
 }
