@@ -226,26 +226,41 @@ NUM_RETIMERS=32
 if [ -d "$RDIR" ]; then
     retimer_count=$(ls "$RDIR" 2>/dev/null | wc -l)
     if [ "$retimer_count" -eq "$NUM_RETIMERS" ]; then
+        # Two passes: program everything first (with output still muted),
+        # then release CDR reset all at once. Matches Cumulus's
+        # S20retimer_init.sh sequence in /etc/init.d.
         for i in $(seq 0 $((NUM_RETIMERS - 1))); do
             rdev="${RDIR}/retimer${i}/device"
             [ -d "$rdev" ] || continue
             label=$(cat "${RDIR}/retimer${i}/label" 2>/dev/null)
             cd "$rdev"
 
-            # Common settings for all retimers
-            echo 12 > channels 2>/dev/null || true
-            echo 1  > veo_clk_cdr_cap 2>/dev/null || true
-            echo 28 > cdr_rst 2>/dev/null || true
-            echo 16 > cdr_rst 2>/dev/null || true
+            echo 12 > channels         2>/dev/null || true   # broadcast all 4 ch
+            echo 1  > veo_clk_cdr_cap  2>/dev/null || true   # no 25 MHz ref clk
 
-            # QSFP and SFP RX EQ get additional tap_dem
+            # pfd_prbs_dfe=0 UNMUTES the retimer's output to the ASIC
+            # and enables DFE — without this PCS block_lock stays 0
+            # regardless of CDR state. adapt_eq_sm=64 puts the RX in
+            # CTLE+DFE adaptive-equalization mode (mandatory for 10G).
+            echo 0  > pfd_prbs_dfe     2>/dev/null || true
+            echo 64 > adapt_eq_sm      2>/dev/null || true
+
+            # QSFP and SFP RX EQ get additional tap_dem pre-emphasis
             case "$label" in
                 qsfp*|sfp_rx_eq_*)
-                    echo 23 > tap_dem 2>/dev/null || true
+                    echo 23 > tap_dem  2>/dev/null || true
                     ;;
             esac
+
+            echo 28 > cdr_rst          2>/dev/null || true   # CDR rst ASSERT
         done
-        log "Programmed $NUM_RETIMERS retimers"
+        usleep 20000  # 20 ms settling before deassert (matches Cumulus)
+        for i in $(seq 0 $((NUM_RETIMERS - 1))); do
+            rdev="${RDIR}/retimer${i}/device"
+            [ -d "$rdev" ] || continue
+            echo 16 > "${rdev}/cdr_rst" 2>/dev/null || true  # CDR rst RELEASE
+        done
+        log "Programmed $NUM_RETIMERS retimers (pfd_prbs_dfe=0, adapt_eq_sm=64, CDR cycled)"
     else
         log "WARN: Expected $NUM_RETIMERS retimers, found $retimer_count"
     fi

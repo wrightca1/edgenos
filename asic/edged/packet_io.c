@@ -318,24 +318,6 @@ static void handle_tun_tx(int port_idx)
         len += 4;
     }
 
-    /* Dump first 46 bytes of every TX frame on swp2 (post-tag).  */
-    if (strcmp(port->ifname, "swp2") == 0 && len >= 46) {
-        static int swp2_dbg = 0;
-        if (swp2_dbg < 30) {
-            unsigned char *d = tx_buf;
-            unsigned int etype = (d[16] << 8) | d[17];   /* after VLAN tag */
-            char hex[3 * 46 + 1];
-            int i;
-            for (i = 0; i < 46; i++)
-                sprintf(hex + i*3, "%02x ", d[i]);
-            hex[3 * 46] = '\0';
-            syslog(LOG_INFO,
-                   "swp2 TX[%zd] etype-inner=0x%04x %s",
-                   (ssize_t)len, etype, hex);
-            swp2_dbg++;
-        }
-    }
-
     /* Pad to 64 bytes minimum on the wire. */
     if (len < 64) {
         memset(tx_buf + len, 0, 64 - len);
@@ -367,17 +349,6 @@ static void handle_tun_tx(int port_idx)
     pkt.size = len;
     pkt.baddr = baddr;
     pkt.flags = 0;
-
-    /* Debug: dump first 32 bytes of packet */
-    if (port->tx_packets < 3) {
-        char hex[97];
-        int i, n = len < 32 ? len : 32;
-        for (i = 0; i < n; i++)
-            sprintf(hex + i*3, "%02x ", ((unsigned char*)dma_buf)[i]);
-        hex[n*3] = '\0';
-        syslog(LOG_INFO, "TX %s: port=%d len=%d baddr=0x%08x: %s",
-               port->ifname, pkt.port, len, (unsigned)baddr, hex);
-    }
 
     /* Send to ASIC */
     rv = bmd_tx(edged.unit, &pkt);
@@ -419,21 +390,6 @@ static void handle_asic_rx(void)
     rv = bmd_rx_poll(edged.unit, &pkt);
     if (rv < 0 || !pkt)
         return;
-
-    /* Debug: dump first RX packets */
-    {
-        static int rx_dbg_count = 0;
-        if (rx_dbg_count < 5) {
-            char hex[97];
-            int i, n = pkt->size < 32 ? pkt->size : 32;
-            for (i = 0; i < n; i++)
-                sprintf(hex + i*3, "%02x ", ((unsigned char*)pkt->data)[i]);
-            hex[n*3] = '\0';
-            syslog(LOG_INFO, "RX: port=%d size=%d baddr=0x%08x: %s",
-                   pkt->port, pkt->size, (unsigned)pkt->baddr, hex);
-            rx_dbg_count++;
-        }
-    }
 
     /* Map ASIC ingress port (CDK physical port) to swpN */
     int swp = portmap_phys_to_swp(pkt->port);

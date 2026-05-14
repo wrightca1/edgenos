@@ -431,6 +431,21 @@ int portmap_configure_ports(void)
                        edged.ports[i].ifname, val & 0xffff,
                        (val >> 12) & 1, (val >> 9) & 1);
 
+                /*
+                 * Enable CL73 AN so MII_LINK follows AN_DONE.
+                 * Nexus eth1/33+1/34 have AN turned on; without AN our
+                 * side the chip MAC keeps link=0 even though PCS
+                 * block_lock=1, and BMD never enables RX. Setting
+                 * cl73_an_en=1 + restart_an=1 lets the handshake fire.
+                 */
+                val |= (1 << 12);    /* cl73_an_en = 1 */
+                val |= (1 << 9);     /* restart_an  = 1 */
+                PHY_BUS_WRITE(pc_dbg, 0x10, val & 0xffff);
+                usleep(50000);       /* 50 ms for AN to start */
+                PHY_BUS_READ(pc_dbg, 0x10, &val);
+                syslog(LOG_INFO, "Port %s: AN_CTRL1 after enable=0x%04x",
+                       edged.ports[i].ifname, val & 0xffff);
+
                 /* TENGBASE_KR_PMD_CONTROL_150r: CL72 training enable
                  * CDK 0x0096 → IEEE CL45 device 1, reg 0x96
                  * In CL22 AER block: block 0x0090, offset 6, reg 0x16 */
@@ -591,6 +606,41 @@ int portmap_swp_to_i2c_bus(int swp)
  */
 static int link_poll_count;
 
+/*
+ * Read CL49 PCS block_lock for a port.  Returns 1 if the chip's
+ * 10G 64b/66b framer has acquired sync, else 0.  block_lock=1 is
+ * the true L1 indicator for SFP+ optical links — Warpcore's MII
+ * STATUS bit never asserts in forced-10G no-AN mode (which is what
+ * SFP+ optical effectively is), so we have to drive link state
+ * from the PCS layer directly.  This mirrors what Cumulus's
+ * switchd linkscan does on the same hardware.
+ */
+static int pcs_block_lock_get(int unit, int port)
+{
+    phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(unit, port);
+    uint32_t val = 0;
+    int lane;
+
+    if (!pc)
+        return 0;
+
+    lane = PHY_CTRL_INST(pc) & 0x3;
+
+    /* AER lane select (Warpcore per-lane register addressing).
+     * Without this, reads from a 4-lane WC slice always hit lane 0. */
+    PHY_BUS_WRITE(pc, 0x1f, 0xffd0);
+    PHY_BUS_WRITE(pc, 0x1e, lane);
+
+    /* CL49_LSM_STATUSr — block 0x8360 / reg 0x17.
+     * Bit 15 is BLOCK_LOCK (PCS 64b/66b synced). */
+    PHY_BUS_WRITE(pc, 0x1f, 0x8360);
+    PHY_BUS_READ(pc, 0x17, &val);
+
+    PHY_BUS_WRITE(pc, 0x1f, 0x0000);
+
+    return (val >> 15) & 1;
+}
+
 int portmap_link_poll(void)
 {
     int i;
@@ -605,54 +655,43 @@ int portmap_link_poll(void)
         int old_link = edged.ports[i].link_up;
 
         /*
-         * bmd_port_mode_update() does the full link state machine:
-         *   - Calls bmd_phy_link_get() which reads WC MII_STATUS
-         *   - If link changed: calls port_enable_set() to update MAC + EPC
-         *   - Updates LED linkscan data at 0x80+port
+         * Drive link state from PCS block_lock, NOT MII_STATUS.
          *
-         * From bcm56840_a0_bmd_port_mode_update.c:
-         *   bmd_link_update() -> bmd_phy_link_get() -> warpcore link_get()
-         *   -> READ page 0x1800 reg 0x01 (MII_STATUS)
-         *   -> if link: port_enable_set(1) -> XMAC_CTRL RX_EN=1
-         *   -> else:    port_enable_set(0) -> XMAC_CTRL RX_EN=0
+         * SFP+ optical links (our case for swp1..swp48) come up as
+         * forced 10G with no autoneg.  In that mode Warpcore's
+         * MII_STATUS link bit never asserts, so bmd_phy_link_get()
+         * returns link=0 forever even when the wire is healthy.
+         *
+         * BMD supports overriding this — if BMD_PST_FORCE_LINK is set
+         * on a port, bmd_link_update() skips phy_link_get and uses
+         * whatever BMD_PST_LINK_UP we set.  We pre-set both flags
+         * based on the PCS block_lock state read straight from the
+         * Warpcore CL49 LSM register, then call bmd_port_mode_update
+         * — it transitions MAC RX_EN + EPC_LINK_BMAP through the
+         * normal SDK code path, just without trusting MII_STATUS.
          */
-        /*
-         * bmd_port_mode_update() reads PHY link status and updates
-         * MAC enable + EPC_LINK_BMAP. If it fails, we still try
-         * bmd_phy_link_get() to check the physical link state.
-         */
+        int pcs_link = pcs_block_lock_get(edged.unit, port);
+        if (pcs_link) {
+            BMD_PORT_STATUS_SET(edged.unit, port,
+                                BMD_PST_FORCE_LINK | BMD_PST_LINK_UP);
+        } else {
+            BMD_PORT_STATUS_CLR(edged.unit, port,
+                                BMD_PST_FORCE_LINK | BMD_PST_LINK_UP);
+        }
+
         bmd_port_mode_update(edged.unit, port);
 
-        /* Check physical link state */
-        int link = 0;
-        int autoneg_done = 0;
-        int rv = bmd_phy_link_get(edged.unit, port, &link, &autoneg_done);
-        /* Log first poll result for debugging */
         if (first_poll && (i < 3 || edged.ports[i].port_type == PORT_TYPE_QSFP)) {
-            syslog(LOG_INFO, "link_poll[%s]: port=%d rv=%d link=%d an=%d",
-                   edged.ports[i].ifname, port, rv, link, autoneg_done);
+            syslog(LOG_INFO, "link_poll[%s]: port=%d pcs_link=%d",
+                   edged.ports[i].ifname, port, pcs_link);
         }
-        if (rv == 0) {
-            edged.ports[i].link_up = link;
 
-            /*
-             * Ensure BMD_PST_LINK_UP matches actual PHY link state.
-             * bmd_port_mode_update may fail on some ports but the
-             * PHY link is real. Without BMD_PST_LINK_UP, bmd_tx
-             * silently drops all packets.
-             */
-            if (link) {
-                BMD_PORT_STATUS_SET(edged.unit, port, BMD_PST_LINK_UP);
-            } else {
-                BMD_PORT_STATUS_CLR(edged.unit, port, BMD_PST_LINK_UP);
-            }
-
-            if (link != old_link) {
-                syslog(LOG_INFO, "BMD link %s: port %d (%s)",
-                       link ? "UP" : "DOWN", port,
-                       edged.ports[i].ifname);
-                changes++;
-            }
+        edged.ports[i].link_up = pcs_link;
+        if (pcs_link != old_link) {
+            syslog(LOG_INFO, "BMD link %s: port %d (%s) via PCS block_lock",
+                   pcs_link ? "UP" : "DOWN", port,
+                   edged.ports[i].ifname);
+            changes++;
         }
     }
 
