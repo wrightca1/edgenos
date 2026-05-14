@@ -844,12 +844,90 @@ static int datapath_rc_full(int unit)
         }
     }
 
+    /* Surfaced by chip-state vs Cumulus regdump diff
+     * (commit ebf43a8) — these have THE biggest gaps and are very
+     * likely to be the silent-drop point.
+     *
+     * OP_QUEUE_LIMIT_COLOR_CELL: per (port, queue-idx).  Cumulus
+     * has 313 scopes set to 0x7; ours all default to 0.  Default 0
+     * is interpreted as "drop every frame entering this queue at
+     * color-check stage" → matches our chip-RX-OK / CPU-tx=0 symptom.
+     * Write 0x7 to queue indices 0..7 per port. */
+    {
+        OP_QUEUE_LIMIT_COLOR_CELLr_t v;
+        int q;
+        OP_QUEUE_LIMIT_COLOR_CELLr_CLR(v);
+        OP_QUEUE_LIMIT_COLOR_CELLr_SET(v, 0x7);
+        for (q = 0; q < 8; q++) {
+            ioerr += WRITE_OP_QUEUE_LIMIT_COLOR_CELLr(unit, 0, q, v);
+            CDK_PBMP_ITER(xlpbmp, port) {
+                ioerr += WRITE_OP_QUEUE_LIMIT_COLOR_CELLr(unit, port, q, v);
+            }
+        }
+    }
+
+    /* OP_QUEUE_RESET_OFFSET_CELL: per (port, queue-idx) = 0x3 in
+     * Cumulus, default 0x1.  Reset offset for queue draining.  Apply
+     * same as above. */
+    {
+        OP_QUEUE_RESET_OFFSET_CELLr_t v;
+        int q;
+        OP_QUEUE_RESET_OFFSET_CELLr_CLR(v);
+        OP_QUEUE_RESET_OFFSET_CELLr_SET(v, 0x3);
+        for (q = 0; q < 8; q++) {
+            ioerr += WRITE_OP_QUEUE_RESET_OFFSET_CELLr(unit, 0, q, v);
+            CDK_PBMP_ITER(xlpbmp, port) {
+                ioerr += WRITE_OP_QUEUE_RESET_OFFSET_CELLr(unit, port, q, v);
+            }
+        }
+    }
+
+    /* XLPORT_CONFIG per XLPORT = 0x00010040.
+     * bit 6  = xpause_rx_en (enable receive of pause frames)
+     * bit 16 = ?? (some XLPORT-level enable Cumulus sets)
+     * Cumulus has 0x10040 on every XLPORT; ours are all 0.
+     * This is THE most-likely-critical per-XLPORT write we missed. */
+    {
+        XLPORT_CONFIGr_t v;
+        XLPORT_CONFIGr_CLR(v);
+        XLPORT_CONFIGr_SET(v, 0x00010040);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_XLPORT_CONFIGr(unit, port, v);
+        }
+    }
+
+    /* OP_UC_PORT_LIMIT_COLOR_CELL per port = 0x0261730b.
+     * Unicast egress port color limit.  All 52 ports have ours=0
+     * vs Cumulus's 0x0261730b — could drop unicast traffic
+     * destined to / from us. */
+    {
+        OP_UC_PORT_LIMIT_COLOR_CELLr_t v;
+        OP_UC_PORT_LIMIT_COLOR_CELLr_CLR(v);
+        OP_UC_PORT_LIMIT_COLOR_CELLr_SET(v, 0x0261730b);
+        ioerr += WRITE_OP_UC_PORT_LIMIT_COLOR_CELLr(unit, 0, 0, v);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_OP_UC_PORT_LIMIT_COLOR_CELLr(unit, port, 0, v);
+        }
+    }
+
+    /* XMODID_DUAL_EN per XLPORT = 0x1 (Cumulus).  Default 0. */
+    {
+        XMODID_DUAL_ENr_t v;
+        XMODID_DUAL_ENr_CLR(v);
+        XMODID_DUAL_ENr_SET(v, 0x1);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_XMODID_DUAL_ENr(unit, port, v);
+        }
+    }
+
     /* Suppress unused-variable warning */
     (void)p;
 
     syslog(LOG_INFO,
-           "rc_full: ...prior writes... + STORM_CONTROL_METER=0xfa0, "
-           "XMAC_RX_MAX_SIZE=1522, XMAC_CTRL=0x3 (TX+RX_EN) per XLPORT");
+           "rc_full: ... + OP_QUEUE_LIMIT_COLOR_CELL=0x7 (8q×53p), "
+           "OP_QUEUE_RESET_OFFSET_CELL=0x3, XLPORT_CONFIG=0x10040, "
+           "OP_UC_PORT_LIMIT_COLOR_CELL=0x261730b, XMODID_DUAL_EN=1 "
+           "(per-regdump-diff fix)");
     return ioerr;
 }
 
