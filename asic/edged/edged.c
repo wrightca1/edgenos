@@ -185,6 +185,36 @@ static int asic_init(void)
                "Per-port service VLAN init failed (continuing anyway)");
     }
 
+    /* Diagnostic: dump VID 3301/3302 membership after setup so we can
+     * confirm CPU (port 0) is in the bitmap. */
+    {
+        int v;
+        for (v = 3301; v <= 3302; v++) {
+            int plist[BMD_CONFIG_MAX_PORTS + 1];
+            int utlist[BMD_CONFIG_MAX_PORTS + 1];
+            int i;
+            char pbuf[128] = "";
+            char ubuf[128] = "";
+            int rc = bmd_vlan_port_get(0, v, plist, utlist);
+            if (rc != 0) {
+                syslog(LOG_INFO, "VID %d dump: bmd_vlan_port_get rc=%d", v, rc);
+                continue;
+            }
+            for (i = 0; plist[i] != -1 && i < 32; i++) {
+                char tmp[8];
+                snprintf(tmp, sizeof(tmp), "%d ", plist[i]);
+                strncat(pbuf, tmp, sizeof(pbuf) - strlen(pbuf) - 1);
+            }
+            for (i = 0; utlist[i] != -1 && i < 32; i++) {
+                char tmp[8];
+                snprintf(tmp, sizeof(tmp), "%d ", utlist[i]);
+                strncat(ubuf, tmp, sizeof(ubuf) - strlen(ubuf) - 1);
+            }
+            syslog(LOG_INFO, "VID %d members: [%s] untagged: [%s]",
+                   v, pbuf, ubuf);
+        }
+    }
+
     /* Configure datapath: CPU punt, hash, buffer thresholds */
     rv = datapath_init();
     if (rv < 0) {
@@ -309,6 +339,7 @@ int main(int argc, char **argv)
      *      on page 0x1800 and enables/disables MAC on change)
      */
     int poll_count = 0;
+    int stat_poll_count = 0;
     while (running) {
         packet_io_rx_poll();
         netlink_poll();
@@ -317,6 +348,45 @@ int main(int argc, char **argv)
         if (++poll_count >= 300) {
             portmap_link_poll();
             poll_count = 0;
+        }
+
+        /* Chip-level RX/TX counter sample every ~3s. */
+        if (++stat_poll_count >= 30000) {
+            stat_poll_count = 0;
+            int chip_port;
+            int probe_ports[] = {0, 65, 66, -1};   /* CPU + swp1 + swp2 */
+            int pi;
+            for (pi = 0; (chip_port = probe_ports[pi]) >= 0; pi++) {
+                bmd_counter_t rx_pkts, rx_drops, rx_err, tx_pkts, tx_err;
+                int r1, r2, r3, r4, r5;
+                memset(&rx_pkts,  0, sizeof(rx_pkts));
+                memset(&rx_drops, 0, sizeof(rx_drops));
+                memset(&rx_err,   0, sizeof(rx_err));
+                memset(&tx_pkts,  0, sizeof(tx_pkts));
+                memset(&tx_err,   0, sizeof(tx_err));
+                r1 = bmd_stat_get(edged.unit, chip_port,
+                                  bmdStatRxPackets, &rx_pkts);
+                r2 = bmd_stat_get(edged.unit, chip_port,
+                                  bmdStatRxDrops,   &rx_drops);
+                r3 = bmd_stat_get(edged.unit, chip_port,
+                                  bmdStatRxErrors,  &rx_err);
+                r4 = bmd_stat_get(edged.unit, chip_port,
+                                  bmdStatTxPackets, &tx_pkts);
+                r5 = bmd_stat_get(edged.unit, chip_port,
+                                  bmdStatTxErrors,  &tx_err);
+                const char *label =
+                    (chip_port == 0) ? "CPU" :
+                    (chip_port == 65) ? "swp1" :
+                    (chip_port == 66) ? "swp2" : "???";
+                syslog(LOG_INFO,
+                       "chip stats %s (port %d): "
+                       "rx_pkts=%u rx_drops=%u rx_err=%u tx_pkts=%u tx_err=%u "
+                       "(rv=%d/%d/%d/%d/%d)",
+                       label, chip_port,
+                       rx_pkts.v[0], rx_drops.v[0], rx_err.v[0],
+                       tx_pkts.v[0], tx_err.v[0],
+                       r1, r2, r3, r4, r5);
+            }
         }
 
         usleep(100);  /* 100us poll interval */
