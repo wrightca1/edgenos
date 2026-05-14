@@ -920,14 +920,136 @@ static int datapath_rc_full(int unit)
         }
     }
 
+    /* Round 3: more per-port gaps from regdump-diff.
+     *
+     * Per-port chip MAC addresses (MAC_0/MAC_1/XMAC_RX_MAC_SA/
+     * XMAC_TX_MAC_SA).  We literally never wrote these, leaving the
+     * chip's MAC unit with addr=0.  Compute per-port MAC = base + swpN
+     * the same way packet_io.c does for TAP devices. */
+    {
+        uint8_t base[6];
+        FILE *f = fopen("/sys/class/net/eth0/address", "r");
+        int got = 0;
+        if (f) {
+            unsigned int m[6];
+            if (fscanf(f, "%x:%x:%x:%x:%x:%x",
+                       &m[0],&m[1],&m[2],&m[3],&m[4],&m[5]) == 6) {
+                int j;
+                for (j = 0; j < 6; j++) base[j] = (uint8_t)m[j];
+                got = 1;
+            }
+            fclose(f);
+        }
+        if (!got) {
+            /* Cumulus captured default. */
+            base[0]=0x80; base[1]=0xa2; base[2]=0x35;
+            base[3]=0x81; base[4]=0xca; base[5]=0xae;
+        }
+
+        int swp;
+        for (swp = 1; swp <= EDGED_MAX_PORTS; swp++) {
+            if (!edged.ports[swp-1].valid) continue;
+            int phys = edged.ports[swp-1].physical_lane;
+            if (phys <= 0) continue;
+
+            uint8_t mac[6];
+            int j;
+            for (j = 0; j < 6; j++) mac[j] = base[j];
+            unsigned int low = (unsigned int)mac[5] + (unsigned int)swp;
+            mac[5] = low & 0xff;
+            if (low > 0xff) mac[4] = (mac[4] + 1) & 0xff;
+
+            uint32_t mac_hi = ((uint32_t)mac[0] << 24)
+                            | ((uint32_t)mac[1] << 16)
+                            | ((uint32_t)mac[2] << 8)
+                            |  (uint32_t)mac[3];
+            uint32_t mac_lo16 = ((uint32_t)mac[4] << 8) | mac[5];
+            uint32_t mac_low32 = ((uint32_t)mac[2] << 24)
+                               | ((uint32_t)mac[3] << 16)
+                               | ((uint32_t)mac[4] << 8)
+                               |  (uint32_t)mac[5];
+            uint32_t mac_high16 = ((uint32_t)mac[0] << 8)
+                                |  (uint32_t)mac[1];
+
+            MAC_0r_t v0; MAC_0r_CLR(v0); MAC_0r_SET(v0, mac_hi);
+            ioerr += WRITE_MAC_0r(unit, phys, v0);
+            MAC_1r_t v1; MAC_1r_CLR(v1); MAC_1r_SET(v1, mac_lo16);
+            ioerr += WRITE_MAC_1r(unit, phys, v1);
+
+            XMAC_RX_MAC_SAr_t rx; XMAC_RX_MAC_SAr_CLR(rx);
+            XMAC_RX_MAC_SAr_SET(rx, 0, mac_low32);
+            XMAC_RX_MAC_SAr_SET(rx, 1, mac_high16);
+            ioerr += WRITE_XMAC_RX_MAC_SAr(unit, phys, rx);
+
+            XMAC_TX_MAC_SAr_t tx; XMAC_TX_MAC_SAr_CLR(tx);
+            XMAC_TX_MAC_SAr_SET(tx, 0, mac_low32);
+            XMAC_TX_MAC_SAr_SET(tx, 1, mac_high16);
+            ioerr += WRITE_XMAC_TX_MAC_SAr(unit, phys, tx);
+        }
+    }
+
+    /* XMAC_RX_CTRL per XLPORT = 0x408 (Cumulus); ours is 0x8.
+     * Bit 10 controls a key RX feature (likely STRIP_CRC or
+     * RUNT_FILTER); flipping it to match Cumulus exactly. */
+    {
+        XMAC_RX_CTRLr_t v;
+        XMAC_RX_CTRLr_CLR(v);
+        XMAC_RX_CTRLr_SET(v, 0, 0x408);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_XMAC_RX_CTRLr(unit, port, v);
+        }
+    }
+
+    /* OP_UC_PORT_LIMIT_RESUME_COLOR_CELL per port = 0x0261530a.
+     * Sibling of OP_UC_PORT_LIMIT_COLOR_CELL we already write. */
+    {
+        OP_UC_PORT_LIMIT_RESUME_COLOR_CELLr_t v;
+        OP_UC_PORT_LIMIT_RESUME_COLOR_CELLr_CLR(v);
+        OP_UC_PORT_LIMIT_RESUME_COLOR_CELLr_SET(v, 0x0261530a);
+        ioerr += WRITE_OP_UC_PORT_LIMIT_RESUME_COLOR_CELLr(unit, 0, 0, v);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_OP_UC_PORT_LIMIT_RESUME_COLOR_CELLr(unit,
+                                                              port, 0, v);
+        }
+    }
+
+    /* OP_UC_PORT_CONFIG1_CELL per port = 0x8040.  Unicast egress
+     * port config — sibling of the OP_UC_PORT_CONFIG_CELL that
+     * bmd_init already programs.  We never touched the _1 variant. */
+    {
+        OP_UC_PORT_CONFIG1_CELLr_t v;
+        OP_UC_PORT_CONFIG1_CELLr_CLR(v);
+        OP_UC_PORT_CONFIG1_CELLr_SET(v, 0x8040);
+        ioerr += WRITE_OP_UC_PORT_CONFIG1_CELLr(unit, 0, v);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_OP_UC_PORT_CONFIG1_CELLr(unit, port, v);
+        }
+    }
+
+    /* OP_PORT_LIMIT_RESUME_COLOR_CELL per (port, color) = 0x130a. */
+    {
+        OP_PORT_LIMIT_RESUME_COLOR_CELLr_t v;
+        int color;
+        OP_PORT_LIMIT_RESUME_COLOR_CELLr_CLR(v);
+        OP_PORT_LIMIT_RESUME_COLOR_CELLr_SET(v, 0x130a);
+        for (color = 0; color < 2; color++) {
+            ioerr += WRITE_OP_PORT_LIMIT_RESUME_COLOR_CELLr(unit, 0,
+                                                            color, v);
+            CDK_PBMP_ITER(xlpbmp, port) {
+                ioerr += WRITE_OP_PORT_LIMIT_RESUME_COLOR_CELLr(unit,
+                                                        port, color, v);
+            }
+        }
+    }
+
     /* Suppress unused-variable warning */
     (void)p;
 
     syslog(LOG_INFO,
-           "rc_full: ... + OP_QUEUE_LIMIT_COLOR_CELL=0x7 (8q×53p), "
-           "OP_QUEUE_RESET_OFFSET_CELL=0x3, XLPORT_CONFIG=0x10040, "
-           "OP_UC_PORT_LIMIT_COLOR_CELL=0x261730b, XMODID_DUAL_EN=1 "
-           "(per-regdump-diff fix)");
+           "rc_full: ... + per-port chip MAC (MAC_0/1, XMAC_RX/TX_MAC_SA), "
+           "XMAC_RX_CTRL=0x408, OP_UC_PORT_LIMIT_RESUME_COLOR_CELL=0x261530a, "
+           "OP_UC_PORT_CONFIG1_CELL=0x8040, OP_PORT_LIMIT_RESUME_COLOR_CELL=0x130a "
+           "(round 3 of regdump-diff fixes)");
     return ioerr;
 }
 
