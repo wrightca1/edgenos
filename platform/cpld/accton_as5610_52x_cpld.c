@@ -177,7 +177,7 @@ static ssize_t fan_pwm_store(struct device *dev,
 	err = kstrtoul(buf, 10, &val);
 	if (err)
 		return err;
-	if (val > 15)
+	if (val > 31)
 		return -EINVAL;
 
 	mutex_lock(&cpld->lock);
@@ -331,7 +331,7 @@ static struct platform_driver as5610_cpld_driver = {
 	.remove = as5610_cpld_remove,
 	.driver = {
 		.name  = DRIVER_NAME,
-		.groups = cpld_groups,
+		.dev_groups = cpld_groups,
 	},
 };
 
