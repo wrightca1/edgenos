@@ -170,44 +170,52 @@ static int asic_init(void)
         return rv;
     }
 
-    /* Set up default VLAN (all ports in VLAN 1) */
+    /* Set up default VLAN (all ports in VLAN 1).
+     *
+     * OpenMDK's `bmd_switching_init` (called earlier) already
+     * configures the chip for forwarding via VLAN 1:
+     *   - VLAN 1 created with STG=1
+     *   - Every XLPORT added as UNTAGGED member, STG=1 FORWARDING
+     *   - CMIC (CPU port 0) added as TAGGED member
+     * This is the canonical "switch comes up working" config.
+     *
+     * We previously dismantled this by removing every port from
+     * VLAN 1 and creating service VIDs 3301+ (vlan_init_resv_per_port).
+     * That left a ton of chip-side defaults un-replicated and was
+     * the underlying reason chip→CPU forwarding silently dropped.
+     * Going back to OpenMDK's canonical VLAN 1 setup. */
     rv = vlan_init_default();
     if (rv < 0) {
         syslog(LOG_ERR, "VLAN init failed");
         return rv;
     }
 
-    /* Per-port service VLANs (Cumulus's 3301-3352 scheme).  Required so
-     * CPU TX can direct frames via 802.1Q tag instead of HiGig SOB —
-     * the SOB path works for ARP but Nexus drops our IPv4 SOB-directed
-     * frames, while Cumulus did it this way and ICMP worked. */
-    rv = vlan_init_resv_per_port();
-    if (rv < 0) {
-        syslog(LOG_WARNING,
-               "Per-port service VLAN init failed (continuing anyway)");
-    }
+    /* DISABLED: service-VID scheme (was rebuilding the chip from scratch
+     * and missing pieces).  See commit history if you want it back. */
+    /* rv = vlan_init_resv_per_port(); */
 
-    /* Diagnostic: dump VID 3301/3302 membership after setup so we can
-     * confirm CPU (port 0) is in the bitmap. */
+    /* Diagnostic: dump VLAN 1 membership after switching_init+vlan_init_default
+     * so we can confirm CPU + all swpN are in the bitmap.  Was for VIDs
+     * 3301/3302 but we're back on VLAN 1 now. */
     {
         int v;
-        for (v = 3301; v <= 3302; v++) {
+        for (v = 1; v <= 1; v++) {
             int plist[BMD_CONFIG_MAX_PORTS + 1];
             int utlist[BMD_CONFIG_MAX_PORTS + 1];
             int i;
-            char pbuf[128] = "";
-            char ubuf[128] = "";
+            char pbuf[256] = "";
+            char ubuf[256] = "";
             int rc = bmd_vlan_port_get(0, v, plist, utlist);
             if (rc != 0) {
                 syslog(LOG_INFO, "VID %d dump: bmd_vlan_port_get rc=%d", v, rc);
                 continue;
             }
-            for (i = 0; plist[i] != -1 && i < 32; i++) {
+            for (i = 0; plist[i] != -1 && i < 64; i++) {
                 char tmp[8];
                 snprintf(tmp, sizeof(tmp), "%d ", plist[i]);
                 strncat(pbuf, tmp, sizeof(pbuf) - strlen(pbuf) - 1);
             }
-            for (i = 0; utlist[i] != -1 && i < 32; i++) {
+            for (i = 0; utlist[i] != -1 && i < 64; i++) {
                 char tmp[8];
                 snprintf(tmp, sizeof(tmp), "%d ", utlist[i]);
                 strncat(ubuf, tmp, sizeof(ubuf) - strlen(ubuf) - 1);
