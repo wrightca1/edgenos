@@ -807,18 +807,49 @@ static int datapath_rc_full(int unit)
         ioerr += WRITE_OP_BUFFER_LIMIT_RESUME_YELLOW_CELLr(unit, 0, ry);
     }
 
+    /* STORM_CONTROL_METER_CONFIG per port = 0x0fa0 (Cumulus).
+     * Default 0 → storm control rate-limits broadcast/unknown-ucast
+     * to 0 pps → every such frame dropped at meter stage with no
+     * easy-to-find counter.  0xfa0 = 4000 (allow 4000 pps). */
+    {
+        STORM_CONTROL_METER_CONFIGr_t v;
+        STORM_CONTROL_METER_CONFIGr_CLR(v);
+        STORM_CONTROL_METER_CONFIGr_SET(v, 0x0fa0);
+        ioerr += WRITE_STORM_CONTROL_METER_CONFIGr(unit, 0, v);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_STORM_CONTROL_METER_CONFIGr(unit, port, v);
+        }
+    }
+
+    /* XMAC_RX_MAX_SIZE per XLPORT = 0x5f2 (1522 bytes).
+     * Default may be 0 → MAC rejects everything as oversize. */
+    {
+        XMAC_RX_MAX_SIZEr_t v;
+        XMAC_RX_MAX_SIZEr_CLR(v);
+        XMAC_RX_MAX_SIZEr_SET(v, 0, 1522);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_XMAC_RX_MAX_SIZEr(unit, port, v);
+        }
+    }
+
+    /* XMAC_CTRL per XLPORT = 0x3 (TX_EN + RX_EN).
+     * BMD's port_enable_set should set RX_EN already, but
+     * Cumulus's captured value also has TX_EN; force both. */
+    {
+        XMAC_CTRLr_t v;
+        XMAC_CTRLr_CLR(v);
+        XMAC_CTRLr_SET(v, 0, 0x3);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_XMAC_CTRLr(unit, port, v);
+        }
+    }
+
     /* Suppress unused-variable warning */
     (void)p;
 
     syslog(LOG_INFO,
-           "rc_full: PG_SPID, USE_SP_SHARED, OP_BUFFER_SHARED, "
-           "OP_QUEUE_CONFIG.allports, COSMASKRXEN, AUX_ARB_CONTROL, "
-           "ING_COS_MODE, OP_VOQ_PORT_CFG, OVQ_FC, ES_TDM_CONFIG, "
-           "PORT_MAX_PKT_SIZE, ES_QUEUE_TO_PRIO, ESCONFIG, COSWEIGHTS, "
-           "S3_CONFIG, S2_CONFIG, EGR_MTU=1522, COMMAND_CONFIG=0x11800158, "
-           "EGR_VLAN_CONTROL_1=0x2001, AUX_ARB_CONTROL_2=0x0327f863, "
-           "OP_PORT_LIMIT_COLOR/OP_BUFFER_LIMIT_*_CELL=0x130b "
-           "(Cumulus rc.datapath_0 mirror)");
+           "rc_full: ...prior writes... + STORM_CONTROL_METER=0xfa0, "
+           "XMAC_RX_MAX_SIZE=1522, XMAC_CTRL=0x3 (TX+RX_EN) per XLPORT");
     return ioerr;
 }
 
