@@ -713,6 +713,100 @@ static int datapath_rc_full(int unit)
         }
     }
 
+    /* EGR_MTU per port (CPU + all XLPORTs).
+     * Default has MTU_ENABLE=0 and MTU_SIZE=0; *some* chip stages
+     * test this register before queueing → with default value every
+     * egress frame fails MTU check and gets silently dropped.
+     * Cumulus value 0x45f2 = MTU_ENABLE=1 + MTU_SIZE=1522 (standard
+     * 802.1Q-tagged Ethernet). */
+    {
+        EGR_MTUr_t v;
+        EGR_MTUr_CLR(v);
+        EGR_MTUr_MTU_ENABLEf_SET(v, 1);
+        EGR_MTUr_MTU_SIZEf_SET(v, 1522);
+        ioerr += WRITE_EGR_MTUr(unit, 0, v);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_EGR_MTUr(unit, port, v);
+        }
+    }
+
+    /* COMMAND_CONFIG per XLPORT — XGMAC MAC command register.
+     * Cumulus writes 0x11800158 on every XLPORT.  The bits cover
+     * pause/length-check/SFD-checks/etc.  We write the captured
+     * value verbatim. */
+    {
+        COMMAND_CONFIGr_t v;
+        COMMAND_CONFIGr_CLR(v);
+        COMMAND_CONFIGr_SET(v, 0x11800158);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_COMMAND_CONFIGr(unit, port, v);
+        }
+    }
+
+    /* EGR_VLAN_CONTROL_1 per port = 0x2001 (Cumulus).
+     * bit 0 = enable egress VLAN-translation lookup
+     * bit 13 = ?
+     * We write the literal captured value. */
+    {
+        EGR_VLAN_CONTROL_1r_t v;
+        EGR_VLAN_CONTROL_1r_CLR(v);
+        EGR_VLAN_CONTROL_1r_SET(v, 0x2001);
+        ioerr += WRITE_EGR_VLAN_CONTROL_1r(unit, 0, v);
+        CDK_PBMP_ITER(xlpbmp, port) {
+            ioerr += WRITE_EGR_VLAN_CONTROL_1r(unit, port, v);
+        }
+    }
+
+    /* AUX_ARB_CONTROL_2 = 0x0327f863 (Cumulus capture).
+     * Sibling of AUX_ARB_CONTROL — controls internal arbitration
+     * timing (clk_gran + sbus_spacing).  Critical for SBUS access
+     * stability; we already write AUX_ARB_CONTROL but missed _2. */
+    {
+        AUX_ARB_CONTROL_2r_t v;
+        AUX_ARB_CONTROL_2r_CLR(v);
+        AUX_ARB_CONTROL_2r_SET(v, 0x0327f863);
+        ioerr += WRITE_AUX_ARB_CONTROL_2r(unit, v);
+    }
+
+    /* OP_PORT_LIMIT_COLOR_CELL per port = 0x130b (RED=0x130b).
+     * MMU color-aware egress port limit.  Default 0 = no color
+     * tolerance → frames with non-zero color tag dropped. */
+    {
+        OP_PORT_LIMIT_COLOR_CELLr_t v;
+        int color;
+        OP_PORT_LIMIT_COLOR_CELLr_CLR(v);
+        OP_PORT_LIMIT_COLOR_CELLr_REDf_SET(v, 0x130b);
+        for (color = 0; color < 2; color++) {
+            ioerr += WRITE_OP_PORT_LIMIT_COLOR_CELLr(unit, 0, color, v);
+            CDK_PBMP_ITER(xlpbmp, port) {
+                ioerr += WRITE_OP_PORT_LIMIT_COLOR_CELLr(unit, port,
+                                                        color, v);
+            }
+        }
+    }
+
+    /* OP_BUFFER_LIMIT_RED_CELL + RESUME_RED_CELL +
+     * YELLOW_CELL + RESUME_YELLOW_CELL — global color thresholds.
+     * Cumulus all = 0x130b. */
+    {
+        OP_BUFFER_LIMIT_RED_CELLr_t r;
+        OP_BUFFER_LIMIT_RESUME_RED_CELLr_t rr;
+        OP_BUFFER_LIMIT_YELLOW_CELLr_t y;
+        OP_BUFFER_LIMIT_RESUME_YELLOW_CELLr_t ry;
+        OP_BUFFER_LIMIT_RED_CELLr_CLR(r);
+        OP_BUFFER_LIMIT_RED_CELLr_SET(r, 0x130b);
+        OP_BUFFER_LIMIT_RESUME_RED_CELLr_CLR(rr);
+        OP_BUFFER_LIMIT_RESUME_RED_CELLr_SET(rr, 0x130b);
+        OP_BUFFER_LIMIT_YELLOW_CELLr_CLR(y);
+        OP_BUFFER_LIMIT_YELLOW_CELLr_SET(y, 0x130b);
+        OP_BUFFER_LIMIT_RESUME_YELLOW_CELLr_CLR(ry);
+        OP_BUFFER_LIMIT_RESUME_YELLOW_CELLr_SET(ry, 0x130b);
+        ioerr += WRITE_OP_BUFFER_LIMIT_RED_CELLr(unit, 0, r);
+        ioerr += WRITE_OP_BUFFER_LIMIT_RESUME_RED_CELLr(unit, 0, rr);
+        ioerr += WRITE_OP_BUFFER_LIMIT_YELLOW_CELLr(unit, 0, y);
+        ioerr += WRITE_OP_BUFFER_LIMIT_RESUME_YELLOW_CELLr(unit, 0, ry);
+    }
+
     /* Suppress unused-variable warning */
     (void)p;
 
@@ -721,7 +815,10 @@ static int datapath_rc_full(int unit)
            "OP_QUEUE_CONFIG.allports, COSMASKRXEN, AUX_ARB_CONTROL, "
            "ING_COS_MODE, OP_VOQ_PORT_CFG, OVQ_FC, ES_TDM_CONFIG, "
            "PORT_MAX_PKT_SIZE, ES_QUEUE_TO_PRIO, ESCONFIG, COSWEIGHTS, "
-           "S3_CONFIG, S2_CONFIG (Cumulus rc.datapath_0 mirror)");
+           "S3_CONFIG, S2_CONFIG, EGR_MTU=1522, COMMAND_CONFIG=0x11800158, "
+           "EGR_VLAN_CONTROL_1=0x2001, AUX_ARB_CONTROL_2=0x0327f863, "
+           "OP_PORT_LIMIT_COLOR/OP_BUFFER_LIMIT_*_CELL=0x130b "
+           "(Cumulus rc.datapath_0 mirror)");
     return ioerr;
 }
 
