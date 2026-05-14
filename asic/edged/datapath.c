@@ -327,12 +327,126 @@ static int datapath_buffer_init(int unit)
  * rc.datapath_0) are still TODO. Chip defaults work for low-rate
  * forwarding and CPU punt; need real values for full line-rate.
  */
+/*
+ * CPU port (MMU port 0) buffer + queue allocation.
+ *
+ * Without these writes the chip's MMU has no buffer cells assigned to
+ * the CMIC/CPU port, so any frame the forwarding pipeline tries to
+ * enqueue for CPU is silently dropped at the MMU stage — no rx_drops
+ * counter, no error, the CMICm DCB ring just never fills.  Identified
+ * 2026-05-14 by adding a stat probe on chip port 0 vs swp1: swp1 chip
+ * RX counters climbed, port-0 stats stayed at zero, CMICm IRQ count
+ * stayed at zero.
+ *
+ * Values are exactly what Cumulus writes via `rc.datapath_0`:
+ *   pg_min_cell[0/2/7].cpu0       = 45
+ *   op_queue_config_cell[0..6].cpu0  q_min=307  q_shared_limit=2073
+ *   op_queue_config1_cell[0/1/3/4/5/6].cpu0   q_spid=0 q_limit_en=1
+ *   op_queue_config1_cell[2].cpu0  q_spid=2
+ *   op_queue_config1_cell[7].cpu0  q_spid=1
+ *   op_queue_config_cell[32/33/34].cpu0  q_min={100,1,500}
+ */
+static int datapath_cpu_buffer_init(int unit)
+{
+    int ioerr = 0;
+    int mport = 0;        /* CMIC_MPORT for bcm56840 */
+    int i;
+
+    /* pg_min_cell[0/2/7].cpu0 = 45 */
+    {
+        PG_MIN_CELLr_t pg;
+        int pg_idx[] = {0, 2, 7};
+        for (i = 0; i < 3; i++) {
+            PG_MIN_CELLr_CLR(pg);
+            PG_MIN_CELLr_PG_MINf_SET(pg, 45);
+            ioerr += WRITE_PG_MIN_CELLr(unit, mport, pg_idx[i], pg);
+        }
+    }
+
+    /* op_queue_config_cell + op_queue_config1_cell for queues 0..7 */
+    {
+        OP_QUEUE_CONFIG_CELLr_t  qc;
+        OP_QUEUE_CONFIG1_CELLr_t qc1;
+        /* Queues with min=307 shared=2073 q_spid=0 q_limit_en=1:
+         * idx 0, 1, 3, 4, 5, 6.  Queue 2 is q_spid=2 only,
+         * queue 7 is q_spid=1 only. */
+        int fwd_q[] = {0, 1, 3, 4, 5, 6};
+        for (i = 0; i < (int)(sizeof(fwd_q)/sizeof(fwd_q[0])); i++) {
+            int q = fwd_q[i];
+            OP_QUEUE_CONFIG_CELLr_CLR(qc);
+            OP_QUEUE_CONFIG_CELLr_Q_MIN_CELLf_SET(qc, 307);
+            OP_QUEUE_CONFIG_CELLr_Q_SHARED_LIMIT_CELLf_SET(qc, 2073);
+            ioerr += WRITE_OP_QUEUE_CONFIG_CELLr(unit, mport, q, qc);
+
+            OP_QUEUE_CONFIG1_CELLr_CLR(qc1);
+            OP_QUEUE_CONFIG1_CELLr_Q_SPIDf_SET(qc1, 0);
+            OP_QUEUE_CONFIG1_CELLr_Q_LIMIT_ENABLE_CELLf_SET(qc1, 1);
+            ioerr += WRITE_OP_QUEUE_CONFIG1_CELLr(unit, mport, q, qc1);
+        }
+        /* Queue 2: q_spid=2 only */
+        OP_QUEUE_CONFIG1_CELLr_CLR(qc1);
+        OP_QUEUE_CONFIG1_CELLr_Q_SPIDf_SET(qc1, 2);
+        ioerr += WRITE_OP_QUEUE_CONFIG1_CELLr(unit, mport, 2, qc1);
+        /* Queue 7: q_spid=1 only */
+        OP_QUEUE_CONFIG1_CELLr_CLR(qc1);
+        OP_QUEUE_CONFIG1_CELLr_Q_SPIDf_SET(qc1, 1);
+        ioerr += WRITE_OP_QUEUE_CONFIG1_CELLr(unit, mport, 7, qc1);
+
+        /* Queues 32, 33, 34: q_min={100, 1, 500} only */
+        OP_QUEUE_CONFIG_CELLr_CLR(qc);
+        OP_QUEUE_CONFIG_CELLr_Q_MIN_CELLf_SET(qc, 100);
+        ioerr += WRITE_OP_QUEUE_CONFIG_CELLr(unit, mport, 32, qc);
+        OP_QUEUE_CONFIG_CELLr_CLR(qc);
+        OP_QUEUE_CONFIG_CELLr_Q_MIN_CELLf_SET(qc, 1);
+        ioerr += WRITE_OP_QUEUE_CONFIG_CELLr(unit, mport, 33, qc);
+        OP_QUEUE_CONFIG_CELLr_CLR(qc);
+        OP_QUEUE_CONFIG_CELLr_Q_MIN_CELLf_SET(qc, 500);
+        ioerr += WRITE_OP_QUEUE_CONFIG_CELLr(unit, mport, 34, qc);
+    }
+
+    syslog(LOG_INFO,
+           "CPU buffer: pg_min[0/2/7]=45, op_q[0..7]=307/2073, q[32/33/34]=100/1/500");
+    return ioerr;
+}
+
+/*
+ * Disable VLAN translation on every port (including CPU port 0).
+ *
+ * Cumulus does this via `modify port 0 67 port_pri=0 pri_mapping=0
+ * trust_incoming_vid=0 vt_enable=0` in rc.datapath_0.  Defaults
+ * have VT_ENABLE=1 which forces every ingress frame through the
+ * VLAN-translation lookup; with no VT rules programmed, that lookup
+ * fails and the frame is silently dropped before bridging.
+ */
+static int datapath_disable_vt(int unit)
+{
+    int ioerr = 0;
+    int p;
+    for (p = 0; p <= 67; p++) {
+        LPORT_TABm_t lpt;
+        if (READ_LPORT_TABm(unit, p, &lpt) != 0) {
+            continue;
+        }
+        LPORT_TABm_VT_ENABLEf_SET(lpt, 0);
+        LPORT_TABm_VT_MISS_DROPf_SET(lpt, 0);
+        LPORT_TABm_TRUST_INCOMING_VIDf_SET(lpt, 0);
+        LPORT_TABm_PORT_PRIf_SET(lpt, 0);
+        ioerr += WRITE_LPORT_TABm(unit, p, lpt);
+    }
+    syslog(LOG_INFO,
+           "LPORT_TAB: VT_ENABLE=0 VT_MISS_DROP=0 TRUST_INCOMING_VID=0 "
+           "PORT_PRI=0 on ports 0..67 (mirrors Cumulus)");
+    return ioerr;
+}
+
 int datapath_init(void)
 {
     int ioerr = 0;
 
     ioerr += datapath_mac_init(edged.unit);
     ioerr += datapath_buffer_init(edged.unit);
+    ioerr += datapath_cpu_buffer_init(edged.unit);
+    ioerr += datapath_disable_vt(edged.unit);
     ioerr += datapath_cpu_punt_init(edged.unit);
     ioerr += datapath_hash_init(edged.unit);
 

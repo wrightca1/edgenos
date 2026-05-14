@@ -382,12 +382,27 @@ static void handle_asic_rx(void)
 {
     bmd_pkt_t *pkt = NULL;
     int rv;
+    static uint32_t enter_cnt = 0, ok_cnt = 0, last_rv_neg = 0;
 
     if (!rx_initialized)
         return;
 
     /* Poll for a completed RX packet */
     rv = bmd_rx_poll(edged.unit, &pkt);
+
+    /* Once-every-30s diagnostic so we can see whether bmd_rx_poll is
+     * being entered, returning E_TIMEOUT (no packet) or actually
+     * succeeding.  Without this we can't tell if frames reach the
+     * CMICm DCB ring at all. */
+    enter_cnt++;
+    if (rv >= 0 && pkt) ok_cnt++;
+    if (rv < 0) last_rv_neg = -rv;
+    if ((enter_cnt % 300000) == 0) {
+        syslog(LOG_INFO,
+               "handle_asic_rx: enters=%u ok=%u last_rv_neg=%u",
+               enter_cnt, ok_cnt, last_rv_neg);
+    }
+
     if (rv < 0 || !pkt)
         return;
 

@@ -157,6 +157,50 @@ int vlan_init_resv_per_port(void)
     syslog(LOG_INFO,
            "VLAN: %d service VIDs created, %d port-adds, %d cmic-adds",
            created, port_added, cmic_added);
+
+    /*
+     * Set STP state to FORWARDING for CPU + every swpN port in STG 1.
+     *
+     * `bmd_vlan_create` puts every new VLAN in STG 1 (verified —
+     * VLAN_TABm.STG = 1 after creation), but the chip defaults all
+     * ports in non-default STGs to BLOCKING.  Without this, frames
+     * classified into our service VIDs hit STP_BLOCKING at the
+     * bridging stage and get silently dropped (no rx_drops counter
+     * fires for STP drops on Trident+).  That's the actual reason
+     * our chip MAC RX worked but RX never reached the CPU port.
+     *
+     * bcm56840_a0_bmd_port_stp_set always targets STG 1 (the value
+     * is hardcoded in its READ_STG_TABm call).
+     */
+    {
+        int fwd_count = 0;
+        rv = bmd_port_stp_set(edged.unit, 0 /* CMIC */,
+                              bmdSpanningTreeForwarding);
+        if (rv == 0) {
+            fwd_count++;
+        } else {
+            syslog(LOG_WARNING,
+                   "STG1: FORWARDING on CPU port failed: %d", rv);
+        }
+        for (i = 0; i < EDGED_MAX_PORTS; i++) {
+            struct port_state *p = &edged.ports[i];
+            if (!p->valid)
+                continue;
+            rv = bmd_port_stp_set(edged.unit, p->physical_lane,
+                                  bmdSpanningTreeForwarding);
+            if (rv == 0) {
+                fwd_count++;
+            } else {
+                syslog(LOG_WARNING,
+                       "STG1: FORWARDING on %s (port %d) failed: %d",
+                       p->ifname, p->physical_lane, rv);
+            }
+        }
+        syslog(LOG_INFO,
+               "STG1: FORWARDING set on %d ports (CPU + %d swpN)",
+               fwd_count, fwd_count - 1);
+    }
+
     return 0;
 }
 
