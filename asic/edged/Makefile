@@ -69,6 +69,7 @@ SRCS = edged.c \
        l3.c \
        vlan.c \
        datapath.c \
+       cumulus_replicate.c \
        bde_interface.c
 
 OBJS = $(SRCS:.c=.o)

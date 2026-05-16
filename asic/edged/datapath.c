@@ -1065,6 +1065,12 @@ int datapath_init(void)
     ioerr += datapath_cpu_punt_init(edged.unit);
     ioerr += datapath_hash_init(edged.unit);
 
+    /* Replicate Cumulus chip-memory state: EPC_LINK_BMAP, L2_USER_ENTRY,
+     * EGR_VLAN/STG, FP_TCAM/POLICY.  See cumulus_replicate.c. */
+    if (cumulus_replicate_init() < 0) {
+        ioerr++;
+    }
+
     if (ioerr) {
         syslog(LOG_ERR, "Datapath init had %d I/O errors", ioerr);
         return -1;

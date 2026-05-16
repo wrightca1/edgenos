@@ -61,4 +61,8 @@ int bmd_switching_init_all(void);
 /* Datapath configuration (CPU punt, hash, buffers) */
 int datapath_init(void);
 
+/* Replicate Cumulus chip-memory state (EPC_LINK_BMAP, L2_USER_ENTRY,
+ * EGR_VLAN, FP_TCAM, FP_POLICY_TABLE) from captured dumps. */
+int cumulus_replicate_init(void);
+
 #endif /* __EDGED_H__ */

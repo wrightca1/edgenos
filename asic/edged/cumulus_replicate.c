@@ -1,0 +1,276 @@
+/*
+ * cumulus_replicate.c - replicate Cumulus's chip-memory state for
+ *                       four documented chip→CPU drop causes.
+ *
+ * Cross-correlating dump_soc_diff.txt with dump_socmem_diff.txt
+ * (decoded.md/14_register_memory_code_crosscorrelation.md) surfaced
+ * four chip memories that Cumulus populates and our edged didn't:
+ *
+ *   1) EPC_LINK_BMAP       — egress-pipeline port bitmap (1 row)
+ *   2) L2_USER_ENTRY       — 63 protocol-MAC CPU-trap rules
+ *   3) EGR_VLAN(_STG)      — 53 service-VID egress rows + STG state
+ *   4) FP_TCAM / FP_POLICY — 100 chip-side trap rules
+ *
+ * Each loader function below mirrors Cumulus's captured row contents
+ * into our chip.  Auto-generated row data lives under generated/.
+ *
+ * Copyright (C) 2026 EdgeNOS Contributors.
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <syslog.h>
+
+#include "edged.h"
+
+#include <cdk/chip/bcm56840_a0_defs.h>
+#include <cdk/arch/xgs_chip.h>
+
+#include "generated/cumulus_l2_user_entry.h"
+#include "generated/cumulus_egr_vlan.h"
+#include "generated/cumulus_egr_vlan_stg.h"
+#include "generated/cumulus_fp_tcam.h"
+#include "generated/cumulus_fp_policy_table.h"
+
+/*
+ * 1) EPC_LINK_BMAP
+ *
+ * Cumulus capture (decoded.md/14): PORT_BITMAP = 0x020000000000000007.
+ * That's W0=0x7 (CPU port 0 + device ports 1+2 = swp1+swp2) and
+ * W2=0x2 (bit 65, an internal aggregate/loopback port Cumulus always
+ * sets).  Without this the egress pipeline drops every frame after
+ * the MMU, including egress-to-CPU.
+ */
+static int cumulus_replicate_epc_link_bmap(int unit)
+{
+    EPC_LINK_BMAPm_t bmp;
+    int rv;
+
+    EPC_LINK_BMAPm_CLR(bmp);
+    EPC_LINK_BMAPm_PORT_BITMAP_W0f_SET(bmp, 0x00000007);
+    EPC_LINK_BMAPm_PORT_BITMAP_W1f_SET(bmp, 0x00000000);
+    EPC_LINK_BMAPm_PORT_BITMAP_W2f_SET(bmp, 0x00000002);
+
+    rv = WRITE_EPC_LINK_BMAPm(unit, 0, bmp);
+    if (rv < 0) {
+        syslog(LOG_ERR, "EPC_LINK_BMAP write failed: %d", rv);
+        return 1;
+    }
+    syslog(LOG_INFO,
+           "EPC_LINK_BMAP[0] = 0x020000000000000007 (CPU+swp1+swp2+bit65)");
+    return 0;
+}
+
+/*
+ * 2) L2_USER_ENTRY — protocol-MAC CPU-trap table.
+ *
+ * Cumulus populates 63 rows (indices 0..62) with the standard
+ * 01:80:c2:00:00:XX BPDU/LLDP/LACP/STP family.  Each row sets
+ * CPU=1, BPDU=1 so the chip copies matching frames to CPU instead
+ * of forwarding.  KEY_TYPE=1 rows carry an extra protocol-pkt bit.
+ */
+static int cumulus_replicate_l2_user_entry(int unit)
+{
+    int errs = 0;
+    unsigned int i;
+
+    for (i = 0; i < CUMULUS_L2_USER_ENTRY_COUNT; i++) {
+        const struct cumulus_l2_user_entry_row *r =
+            &cumulus_l2_user_entry_rows[i];
+        L2_USER_ENTRYm_t e;
+        uint32_t mac_fval[2];
+        uint32_t key_fval[2];
+        uint32_t mask_fval[2];
+        int rv;
+
+        L2_USER_ENTRYm_CLR(e);
+
+        mac_fval[0] = (uint32_t)(r->mac_addr & 0xFFFFFFFF);
+        mac_fval[1] = (uint32_t)((r->mac_addr >> 32) & 0xFFFF);
+        L2_USER_ENTRYm_MAC_ADDRf_SET(e, mac_fval);
+
+        key_fval[0] = (uint32_t)(r->key & 0xFFFFFFFF);
+        key_fval[1] = (uint32_t)((r->key >> 32) & 0x1FFFFFFFu);
+        L2_USER_ENTRYm_KEYf_SET(e, key_fval);
+
+        /* MASK from Cumulus capture: 0x1000ffffffffffff = top bit (1 << 60)
+         * plus low 48 bits of MAC.  Identical across all rows. */
+        mask_fval[0] = 0xFFFFFFFFu;
+        mask_fval[1] = 0x1000FFFFu;
+        L2_USER_ENTRYm_MASKf_SET(e, mask_fval);
+
+        L2_USER_ENTRYm_VALIDf_SET(e, r->valid);
+        if (r->key_type)             L2_USER_ENTRYm_KEY_TYPEf_SET(e, 1);
+        if (r->l2_protocol_pkt)      L2_USER_ENTRYm_L2_PROTOCOL_PKTf_SET(e, 1);
+        if (r->do_not_learn_macsa)   L2_USER_ENTRYm_DO_NOT_LEARN_MACSAf_SET(e, 1);
+        L2_USER_ENTRYm_CPUf_SET(e, r->cpu);
+        L2_USER_ENTRYm_BPDUf_SET(e, r->bpdu);
+
+        rv = WRITE_L2_USER_ENTRYm(unit, r->index, e);
+        if (rv < 0) {
+            syslog(LOG_ERR,
+                   "L2_USER_ENTRY[%u] write failed: %d", r->index, rv);
+            errs++;
+        }
+    }
+    syslog(LOG_INFO,
+           "L2_USER_ENTRY: programmed %u rows (Cumulus protocol-MAC traps), "
+           "errors=%d", (unsigned)CUMULUS_L2_USER_ENTRY_COUNT, errs);
+    return errs;
+}
+
+/*
+ * 3) EGR_VLAN + EGR_VLAN_STG
+ *
+ * Cumulus's service-VID scheme: VID 1 = baseline, VID 3301..3352 =
+ * per-port (CPU + port_N) bidirectional service VIDs.  Each row also
+ * sets STG=1 so EGR_VLAN_STG[1] governs forwarding.
+ */
+static int cumulus_replicate_egr_vlan(int unit)
+{
+    int errs = 0;
+    unsigned int i;
+
+    for (i = 0; i < CUMULUS_EGR_VLAN_COUNT; i++) {
+        const struct cumulus_egr_vlan_row *r = &cumulus_egr_vlan_rows[i];
+        EGR_VLANm_t v;
+        int rv;
+
+        EGR_VLANm_CLR(v);
+        EGR_VLANm_VALIDf_SET(v, r->valid);
+        EGR_VLANm_STGf_SET(v, r->stg);
+        EGR_VLANm_PORT_BITMAP_W0f_SET(v, r->port_bitmap_w0);
+        EGR_VLANm_PORT_BITMAP_W1f_SET(v, r->port_bitmap_w1);
+        EGR_VLANm_PORT_BITMAP_W2f_SET(v, r->port_bitmap_w2);
+        EGR_VLANm_UT_PORT_BITMAP_W0f_SET(v, r->ut_port_bitmap_w0);
+        EGR_VLANm_UT_PORT_BITMAP_W1f_SET(v, r->ut_port_bitmap_w1);
+        EGR_VLANm_UT_PORT_BITMAP_W2f_SET(v, r->ut_port_bitmap_w2);
+        EGR_VLANm_UT_BITMAP_W0f_SET(v, r->ut_bitmap_w0);
+        EGR_VLANm_UT_BITMAP_W1f_SET(v, r->ut_bitmap_w1);
+        EGR_VLANm_UT_BITMAP_W2f_SET(v, r->ut_bitmap_w2);
+
+        rv = WRITE_EGR_VLANm(unit, r->index, v);
+        if (rv < 0) {
+            syslog(LOG_ERR, "EGR_VLAN[%u] write failed: %d", r->index, rv);
+            errs++;
+        }
+    }
+
+    /*
+     * EGR_VLAN_STG[1] — per-port spanning-tree state for STG 1.
+     * Cumulus's capture only set PORT1=PORT2=3 (FORWARDING) because they
+     * had only swp1+swp2 active.  We set every port 0..65 to FORWARDING
+     * so any of our up ports works.  Two bits per port slot, so
+     * 0xFFFFFFFF in each word = 16 ports × 3.  Ports 64,65 sit in
+     * word 4's low nibble (0xF).
+     */
+    {
+        EGR_VLAN_STGm_t stg;
+        int rv;
+        EGR_VLAN_STGm_CLR(stg);
+        stg.egr_vlan_stg[0] = 0xFFFFFFFFu;  /* ports 0..15  -> all FORWARDING */
+        stg.egr_vlan_stg[1] = 0xFFFFFFFFu;  /* ports 16..31 -> all FORWARDING */
+        stg.egr_vlan_stg[2] = 0xFFFFFFFFu;  /* ports 32..47 -> all FORWARDING */
+        stg.egr_vlan_stg[3] = 0xFFFFFFFFu;  /* ports 48..63 -> all FORWARDING */
+        stg.egr_vlan_stg[4] = 0x0000000Fu;  /* ports 64,65  -> FORWARDING */
+
+        rv = WRITE_EGR_VLAN_STGm(unit, 1, stg);
+        if (rv < 0) {
+            syslog(LOG_ERR, "EGR_VLAN_STG[1] write failed: %d", rv);
+            errs++;
+        }
+    }
+
+    syslog(LOG_INFO,
+           "EGR_VLAN: programmed %u rows + STG[1]=FORWARDING (errors=%d)",
+           (unsigned)CUMULUS_EGR_VLAN_COUNT, errs);
+    return errs;
+}
+
+/*
+ * 4) FP_TCAM + FP_POLICY_TABLE — chip-side CPU-trap rules
+ *
+ * 100 entries each at chip indices 256..355.  Policy rows set
+ * Y_COPY_TO_CPU=3 / R_COPY_TO_CPU=3 / G_COPY_TO_CPU=3 (copy on every
+ * meter color) and DROP=1 (drop the forwarded copy, only the CPU
+ * copy survives).  This is what 00control_plane.rules compiles into.
+ */
+static int cumulus_replicate_fp(int unit)
+{
+    int errs = 0;
+    unsigned int i;
+
+    for (i = 0; i < CUMULUS_FP_TCAM_COUNT; i++) {
+        const struct cumulus_fp_tcam_row *r = &cumulus_fp_tcam_rows[i];
+        FP_TCAMm_t t;
+        uint32_t key_fval[8];
+        uint32_t mask_fval[8];
+        int rv;
+
+        memcpy(key_fval,  r->key,  sizeof(key_fval));
+        memcpy(mask_fval, r->mask, sizeof(mask_fval));
+
+        FP_TCAMm_CLR(t);
+        FP_TCAMm_VALIDf_SET(t, r->valid);
+        FP_TCAMm_KEYf_SET(t,  key_fval);
+        FP_TCAMm_MASKf_SET(t, mask_fval);
+
+        rv = WRITE_FP_TCAMm(unit, r->index, t);
+        if (rv < 0) {
+            syslog(LOG_ERR, "FP_TCAM[%u] write failed: %d", r->index, rv);
+            errs++;
+        }
+    }
+
+    for (i = 0; i < CUMULUS_FP_POLICY_TABLE_COUNT; i++) {
+        const struct cumulus_fp_policy_table_row *r =
+            &cumulus_fp_policy_table_rows[i];
+        FP_POLICY_TABLEm_t p;
+        int rv;
+
+        FP_POLICY_TABLEm_CLR(p);
+        FP_POLICY_TABLEm_Y_DROPf_SET(p, r->y_drop);
+        FP_POLICY_TABLEm_Y_COPY_TO_CPUf_SET(p, r->y_copy_to_cpu);
+        FP_POLICY_TABLEm_R_DROPf_SET(p, r->r_drop);
+        FP_POLICY_TABLEm_R_COPY_TO_CPUf_SET(p, r->r_copy_to_cpu);
+        FP_POLICY_TABLEm_G_DROPf_SET(p, r->g_drop);
+        FP_POLICY_TABLEm_G_COPY_TO_CPUf_SET(p, r->g_copy_to_cpu);
+        /* METER_PAIR_MODE_MODIFIER + COUNTER_MODE captured but not yet ported;
+         * Cumulus uses them for paired-meter accounting which we don't have
+         * meter tables programmed for. */
+
+        rv = WRITE_FP_POLICY_TABLEm(unit, r->index, p);
+        if (rv < 0) {
+            syslog(LOG_ERR, "FP_POLICY_TABLE[%u] write failed: %d",
+                   r->index, rv);
+            errs++;
+        }
+    }
+
+    syslog(LOG_INFO,
+           "FP: programmed %u TCAM + %u POLICY rows (errors=%d)",
+           (unsigned)CUMULUS_FP_TCAM_COUNT,
+           (unsigned)CUMULUS_FP_POLICY_TABLE_COUNT, errs);
+    return errs;
+}
+
+int cumulus_replicate_init(void)
+{
+    int ioerr = 0;
+    int unit = edged.unit;
+
+    syslog(LOG_INFO, "cumulus_replicate: applying captured chip-memory state");
+
+    ioerr += cumulus_replicate_epc_link_bmap(unit);
+    ioerr += cumulus_replicate_l2_user_entry(unit);
+    ioerr += cumulus_replicate_egr_vlan(unit);
+    ioerr += cumulus_replicate_fp(unit);
+
+    if (ioerr) {
+        syslog(LOG_ERR, "cumulus_replicate: %d I/O errors", ioerr);
+        return -1;
+    }
+    syslog(LOG_INFO, "cumulus_replicate: complete");
+    return 0;
+}
