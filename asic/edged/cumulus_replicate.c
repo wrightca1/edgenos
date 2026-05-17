@@ -158,6 +158,35 @@ static int cumulus_replicate_egr_vlan(int unit)
     }
 
     /*
+     * EGR_VLAN[1] override: Cumulus left VID 1's PORT_BITMAP empty
+     * because their traffic ran on service VIDs 3301..3352.  Our
+     * kernel-originated traffic (ARP, IPv4) defaults to PVID=1 with
+     * untagged egress.  An empty PORT_BITMAP causes the egress pipe
+     * to drop everything on VID 1, including CPU-trapped frames.
+     *
+     * Override to {CPU, swp1, swp2} = bits 0,1,2 → 0x7.  UT_* bitmaps
+     * mirror that so untagged egress is allowed on every member port.
+     */
+    {
+        EGR_VLANm_t v;
+        int rv;
+        EGR_VLANm_CLR(v);
+        EGR_VLANm_VALIDf_SET(v, 1);
+        EGR_VLANm_STGf_SET(v, 1);
+        EGR_VLANm_PORT_BITMAP_W0f_SET(v, 0x7);
+        EGR_VLANm_UT_PORT_BITMAP_W0f_SET(v, 0x7);
+        EGR_VLANm_UT_BITMAP_W0f_SET(v, 0x7);
+        rv = WRITE_EGR_VLANm(unit, 1, v);
+        if (rv < 0) {
+            syslog(LOG_ERR, "EGR_VLAN[1] override write failed: %d", rv);
+            errs++;
+        } else {
+            syslog(LOG_INFO,
+                   "EGR_VLAN[1] override: PORT_BITMAP=0x7 (CPU+swp1+swp2)");
+        }
+    }
+
+    /*
      * EGR_VLAN_STG[1] — per-port spanning-tree state for STG 1.
      * Cumulus's capture only set PORT1=PORT2=3 (FORWARDING) because they
      * had only swp1+swp2 active.  We set every port 0..65 to FORWARDING
