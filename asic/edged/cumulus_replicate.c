@@ -255,6 +255,114 @@ static int cumulus_replicate_fp(int unit)
     return errs;
 }
 
+/*
+ * Read back one row from each table and log it.  Confirms the
+ * WRITE_*m calls actually reached the chip (errors=0 from the writer
+ * only means the s-channel transaction completed, not that the chip
+ * stored the value — verifying with a chip-side read closes that gap).
+ */
+static void cumulus_replicate_readback(int unit)
+{
+    /* EPC_LINK_BMAP[0].  READ_*m macros expect &struct (cdk uses
+     * `&m._member` precedence trick), unlike WRITE_*m which already
+     * has the & built in. */
+    {
+        EPC_LINK_BMAPm_t bmp;
+        int rv = READ_EPC_LINK_BMAPm(unit, 0, &bmp);
+        if (rv < 0) {
+            syslog(LOG_ERR, "readback EPC_LINK_BMAP rv=%d", rv);
+        } else {
+            uint32_t w0 = EPC_LINK_BMAPm_PORT_BITMAP_W0f_GET(bmp);
+            uint32_t w1 = EPC_LINK_BMAPm_PORT_BITMAP_W1f_GET(bmp);
+            uint32_t w2 = EPC_LINK_BMAPm_PORT_BITMAP_W2f_GET(bmp);
+            syslog(LOG_INFO,
+                   "readback EPC_LINK_BMAP[0]: W0=0x%08x W1=0x%08x W2=0x%08x",
+                   w0, w1, w2);
+        }
+    }
+
+    /* L2_USER_ENTRY[0] — LLDP MAC trap */
+    {
+        L2_USER_ENTRYm_t e;
+        int rv = READ_L2_USER_ENTRYm(unit, 0, &e);
+        if (rv < 0) {
+            syslog(LOG_ERR, "readback L2_USER_ENTRY[0] rv=%d", rv);
+        } else {
+            uint32_t valid = L2_USER_ENTRYm_VALIDf_GET(e);
+            uint32_t cpu   = L2_USER_ENTRYm_CPUf_GET(e);
+            uint32_t bpdu  = L2_USER_ENTRYm_BPDUf_GET(e);
+            uint32_t mac_buf[2] = {0, 0};
+            L2_USER_ENTRYm_MAC_ADDRf_GET(e, mac_buf);
+            syslog(LOG_INFO,
+                   "readback L2_USER_ENTRY[0]: VALID=%u CPU=%u BPDU=%u "
+                   "MAC=0x%04x%08x", valid, cpu, bpdu, mac_buf[1], mac_buf[0]);
+        }
+    }
+
+    /* EGR_VLAN[1] = default VLAN */
+    {
+        EGR_VLANm_t v;
+        int rv = READ_EGR_VLANm(unit, 1, &v);
+        if (rv < 0) {
+            syslog(LOG_ERR, "readback EGR_VLAN[1] rv=%d", rv);
+        } else {
+            uint32_t valid = EGR_VLANm_VALIDf_GET(v);
+            uint32_t stg   = EGR_VLANm_STGf_GET(v);
+            uint32_t pb0   = EGR_VLANm_PORT_BITMAP_W0f_GET(v);
+            syslog(LOG_INFO,
+                   "readback EGR_VLAN[1]: VALID=%u STG=%u PB_W0=0x%08x",
+                   valid, stg, pb0);
+        }
+    }
+
+    /* EGR_VLAN_STG[1] */
+    {
+        EGR_VLAN_STGm_t stg;
+        int rv = READ_EGR_VLAN_STGm(unit, 1, &stg);
+        if (rv < 0) {
+            syslog(LOG_ERR, "readback EGR_VLAN_STG[1] rv=%d", rv);
+        } else {
+            syslog(LOG_INFO,
+                   "readback EGR_VLAN_STG[1]: w0=0x%08x w1=0x%08x w2=0x%08x "
+                   "w3=0x%08x w4=0x%08x",
+                   stg.egr_vlan_stg[0], stg.egr_vlan_stg[1],
+                   stg.egr_vlan_stg[2], stg.egr_vlan_stg[3],
+                   stg.egr_vlan_stg[4]);
+        }
+    }
+
+    /* FP_TCAM[256] = first programmed rule */
+    {
+        FP_TCAMm_t t;
+        int rv = READ_FP_TCAMm(unit, 256, &t);
+        if (rv < 0) {
+            syslog(LOG_ERR, "readback FP_TCAM[256] rv=%d", rv);
+        } else {
+            uint32_t valid = FP_TCAMm_VALIDf_GET(t);
+            syslog(LOG_INFO,
+                   "readback FP_TCAM[256]: VALID=%u w0=0x%08x w1=0x%08x "
+                   "w14=0x%08x",
+                   valid, t.fp_tcam[0], t.fp_tcam[1], t.fp_tcam[14]);
+        }
+    }
+
+    /* FP_POLICY_TABLE[256] */
+    {
+        FP_POLICY_TABLEm_t p;
+        int rv = READ_FP_POLICY_TABLEm(unit, 256, &p);
+        if (rv < 0) {
+            syslog(LOG_ERR, "readback FP_POLICY_TABLE[256] rv=%d", rv);
+        } else {
+            uint32_t yc = FP_POLICY_TABLEm_Y_COPY_TO_CPUf_GET(p);
+            uint32_t rc = FP_POLICY_TABLEm_R_COPY_TO_CPUf_GET(p);
+            uint32_t gc = FP_POLICY_TABLEm_G_COPY_TO_CPUf_GET(p);
+            syslog(LOG_INFO,
+                   "readback FP_POLICY_TABLE[256]: G_COPY_TO_CPU=%u "
+                   "Y_COPY_TO_CPU=%u R_COPY_TO_CPU=%u", gc, yc, rc);
+        }
+    }
+}
+
 int cumulus_replicate_init(void)
 {
     int ioerr = 0;
@@ -266,6 +374,8 @@ int cumulus_replicate_init(void)
     ioerr += cumulus_replicate_l2_user_entry(unit);
     ioerr += cumulus_replicate_egr_vlan(unit);
     ioerr += cumulus_replicate_fp(unit);
+
+    cumulus_replicate_readback(unit);
 
     if (ioerr) {
         syslog(LOG_ERR, "cumulus_replicate: %d I/O errors", ioerr);
