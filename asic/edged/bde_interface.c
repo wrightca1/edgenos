@@ -114,15 +114,21 @@ static unsigned long bar0_phys;         /* BAR0 physical address */
 
 /*
  * Register read via BDE kernel module ioctl.
- * Uses ioread32() in kernel which has proper PPC MMIO barriers.
- * Required for CMICm registers (S-Channel, DMA, IRQ at 0x31000+).
+ *
+ * NOTE on Cumulus parity:  Cumulus's switchd accesses BAR0 via /dev/mem
+ * mmap (project_cumulus_dma_decoded).  We have the mmap set up in
+ * bar0_map but use ioctl here because plain userspace stores miss the
+ * PPC MMIO barriers + endianness that the kernel's ioread32/iowrite32
+ * applies.  Tried direct mmap once — broke S-Channel within seconds.
+ *
+ * Reproducing Cumulus's mmap path would need explicit eieio barriers
+ * and confirming the PAXB endianness register (BAR0+0x2030) state.
+ * See TODO in this file's tail.
  */
 static int bde_read32(void *dvc, uint32_t addr, uint32_t *data)
 {
     struct bde_reg_io rio;
 
-    /* All register access goes through BDE ioctl.
-     * Direct mmap writes are silently dropped on P2020 PPC. */
     rio.dev = 0;
     rio.addr = addr;
     rio.val = 0;
@@ -145,7 +151,6 @@ static int bde_write32(void *dvc, uint32_t addr, uint32_t data)
 {
     struct bde_reg_io rio;
 
-    /* All writes via BDE ioctl (mmap writes silently dropped on PPC) */
     rio.dev = 0;
     rio.addr = addr;
     rio.val = data;
