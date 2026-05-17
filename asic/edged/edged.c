@@ -302,6 +302,14 @@ int main(int argc, char **argv)
     openlog("edged", LOG_PID | (foreground ? LOG_PERROR : 0), LOG_DAEMON);
     syslog(LOG_INFO, "EdgeNOS edged starting");
 
+    /* OpenMDK/CDK debug prints go through CDK_PRINTF → printf → stdout.
+     * Under systemd stdout is a pipe (not a TTY) so glibc block-buffers
+     * it: 4 KB of printf output sits in the FILE* buffer and never reaches
+     * journald until process exit.  Force line buffering so each \n
+     * flushes and we can actually see CMICm DMA diagnostics. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
     if (debug)
         setlogmask(LOG_UPTO(LOG_DEBUG));
 
