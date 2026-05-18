@@ -26,6 +26,7 @@
 
 #include <cdk/chip/bcm56840_a0_defs.h>
 #include <cdk/arch/xgs_chip.h>
+#include <cdk/arch/xgs_reg.h>
 
 #include "generated/cumulus_l2_user_entry.h"
 #include "generated/cumulus_egr_vlan.h"
@@ -285,6 +286,81 @@ static int cumulus_replicate_fp(int unit)
 }
 
 /*
+ * Enable CMICm CMC0 PCIE IRQ mask + read back DMA state for diagnostics.
+ *
+ * Symptom: /proc/interrupts shows linux-kernel-bde IRQ count = 0;
+ * handle_asic_rx polls CDK_E_TIMEOUT forever.  Either the chip doesn't
+ * raise IRQs because the mask is empty (most likely; bmd_init never
+ * touches it) or the DMA channel state is broken.  This function makes
+ * both visible and fixes the mask half:
+ *
+ *   CMIC_CMC0_PCIE_IRQ_MASK0r (0x31414) bits:
+ *     15  CH0_CHAIN_DONE  (TX channel chain completion)
+ *     14  CH0_DESC_DONE
+ *     13  CH1_CHAIN_DONE  (RX channel chain completion)
+ *     12  CH1_DESC_DONE
+ *
+ *   CMIC_CMC_DMA_CTRLr (0x31140) + 4*chan: per-channel CTRL
+ *   CMIC_CMC_DMA_STATr (0x31150): channel state bits (sticky)
+ *   CMIC_CMC_DMA_DESCr (0x31158) + 4*chan: current DCB ptr
+ */
+static void cumulus_enable_cmicm_irq(int unit)
+{
+    /* PCIE_IRQ_MASK0 — enable our two channels (TX=0, RX=1).
+     *
+     * Compare two access paths.  Direct (cdk_xgs_reg32) was observed
+     * to not stick (write of 0xf000 read back as 0).  iProc-AXI
+     * sub-window 7 is the alternative and is what the Cumulus BDE
+     * uses; if it sticks via that path but not direct, BAR0 doesn't
+     * really cover the full 256 KB AXI window like the kernel-bde
+     * comment claims. */
+    const uint32_t want = (1u << 12) | (1u << 13) | (1u << 14) | (1u << 15);
+    uint32_t direct_before = 0, direct_after = 0;
+    uint32_t iproc_before = 0, iproc_after = 0;
+    uint32_t tmp;
+
+    /* Path A: direct via cdk_xgs_reg32 (BDE_IOC_REG_WRITE → iowrite32) */
+    cdk_xgs_reg32_read(unit, 0x31414, &direct_before);
+    tmp = direct_before | want;
+    cdk_xgs_reg32_write(unit, 0x31414, &tmp);
+    cdk_xgs_reg32_read(unit, 0x31414, &direct_after);
+
+    /* Path B: iProc AXI sub-window 7 remap */
+    bde_iproc_read32(0x31414, &iproc_before);
+    bde_iproc_write32(0x31414, iproc_before | want);
+    bde_iproc_read32(0x31414, &iproc_after);
+
+    syslog(LOG_INFO,
+           "CMICm PCIE_IRQ_MASK0: direct(before=0x%08x after=0x%08x) "
+           "iproc(before=0x%08x after=0x%08x) want=0x%08x",
+           direct_before, direct_after, iproc_before, iproc_after, want);
+
+    /* Per-channel state dump (direct vs iProc) for CTRL + STAT + DESC */
+    {
+        uint32_t d_ctrl0 = 0, d_ctrl1 = 0, d_stat = 0, d_desc0 = 0, d_desc1 = 0;
+        uint32_t i_ctrl0 = 0, i_ctrl1 = 0, i_stat = 0, i_desc0 = 0, i_desc1 = 0;
+        cdk_xgs_reg32_read(unit, 0x31140 + 0,  &d_ctrl0);
+        cdk_xgs_reg32_read(unit, 0x31140 + 4,  &d_ctrl1);
+        cdk_xgs_reg32_read(unit, 0x31150,      &d_stat);
+        cdk_xgs_reg32_read(unit, 0x31158 + 0,  &d_desc0);
+        cdk_xgs_reg32_read(unit, 0x31158 + 4,  &d_desc1);
+        bde_iproc_read32(0x31140 + 0, &i_ctrl0);
+        bde_iproc_read32(0x31140 + 4, &i_ctrl1);
+        bde_iproc_read32(0x31150,     &i_stat);
+        bde_iproc_read32(0x31158 + 0, &i_desc0);
+        bde_iproc_read32(0x31158 + 4, &i_desc1);
+        syslog(LOG_INFO,
+               "CMICm direct: ctrl0=0x%08x ctrl1=0x%08x stat=0x%08x "
+               "desc0=0x%08x desc1=0x%08x",
+               d_ctrl0, d_ctrl1, d_stat, d_desc0, d_desc1);
+        syslog(LOG_INFO,
+               "CMICm iproc:  ctrl0=0x%08x ctrl1=0x%08x stat=0x%08x "
+               "desc0=0x%08x desc1=0x%08x",
+               i_ctrl0, i_ctrl1, i_stat, i_desc0, i_desc1);
+    }
+}
+
+/*
  * Read back one row from each table and log it.  Confirms the
  * WRITE_*m calls actually reached the chip (errors=0 from the writer
  * only means the s-channel transaction completed, not that the chip
@@ -404,6 +480,7 @@ int cumulus_replicate_init(void)
     ioerr += cumulus_replicate_egr_vlan(unit);
     ioerr += cumulus_replicate_fp(unit);
 
+    cumulus_enable_cmicm_irq(unit);
     cumulus_replicate_readback(unit);
 
     if (ioerr) {

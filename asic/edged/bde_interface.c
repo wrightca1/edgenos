@@ -101,6 +101,13 @@ struct bde_dma_info {
 #define BDE_IOC_REG_WRITE    _PPC_IOC(2, BDE_IOC_MAGIC, 2, sizeof(struct bde_reg_io))
 #define BDE_IOC_DMA_ALLOC    _PPC_IOC(3, BDE_IOC_MAGIC, 3, sizeof(struct bde_dma_info))
 #define BDE_IOC_GET_NUM_DEVS _PPC_IOC(1, BDE_IOC_MAGIC, 4, sizeof(int))
+/* iProc AXI sub-window path — kernel uses pci_config_dword writes to
+ * IMAP0_7, then accesses BAR0+0x7000+(offset & 0xFFF).  Required for
+ * any CMICm register write that must persist on direct read-back
+ * (PCIE_IRQ_MASK0, etc.).  Direct BAR0 writes do reach the chip but
+ * appear not to stick for these registers. */
+#define BDE_IOC_IPROC_READ   _PPC_IOC(3, BDE_IOC_MAGIC, 7, sizeof(struct bde_reg_io))
+#define BDE_IOC_IPROC_WRITE  _PPC_IOC(2, BDE_IOC_MAGIC, 8, sizeof(struct bde_reg_io))
 
 /* BMD/PHY sleep function */
 int _usleep(uint32_t usecs) { return usleep(usecs); }
@@ -140,6 +147,44 @@ static int bde_read32(void *dvc, uint32_t addr, uint32_t *data)
     }
 
     *data = rio.val;
+    return 0;
+}
+
+/*
+ * iProc AXI register read via sub-window 7 remap.  Use for CMICm
+ * registers whose writes don't persist via direct BAR0 access
+ * (PCIE_IRQ_MASK0 has been observed empty after direct write).
+ *
+ * AXI address = BAR0 phys base + offset.  For BCM56846 the BAR0 base
+ * in AXI space is 0x18000000, so iProc_addr = 0x18000000 + offset.
+ */
+int bde_iproc_read32(uint32_t offset, uint32_t *data)
+{
+    struct bde_reg_io rio;
+    rio.dev = 0;
+    rio.addr = 0x18000000 + offset;
+    rio.val = 0;
+    if (ioctl(bde_fd, BDE_IOC_IPROC_READ, &rio) < 0) {
+        syslog(LOG_ERR, "BDE iproc_read at 0x%x failed: %s",
+               offset, strerror(errno));
+        *data = 0;
+        return -1;
+    }
+    *data = rio.val;
+    return 0;
+}
+
+int bde_iproc_write32(uint32_t offset, uint32_t data)
+{
+    struct bde_reg_io rio;
+    rio.dev = 0;
+    rio.addr = 0x18000000 + offset;
+    rio.val = data;
+    if (ioctl(bde_fd, BDE_IOC_IPROC_WRITE, &rio) < 0) {
+        syslog(LOG_ERR, "BDE iproc_write at 0x%x = 0x%x failed: %s",
+               offset, data, strerror(errno));
+        return -1;
+    }
     return 0;
 }
 

@@ -65,4 +65,9 @@ int datapath_init(void);
  * EGR_VLAN, FP_TCAM, FP_POLICY_TABLE) from captured dumps. */
 int cumulus_replicate_init(void);
 
+/* iProc AXI sub-window register I/O (for CMICm regs whose writes
+ * don't stick via direct BAR0 access). */
+int bde_iproc_read32(uint32_t offset, uint32_t *data);
+int bde_iproc_write32(uint32_t offset, uint32_t data);
+
 #endif /* __EDGED_H__ */
