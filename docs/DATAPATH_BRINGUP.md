@@ -84,12 +84,29 @@ The verbose chip/DMA debug dumps were removed after bring-up (see the RE
 
 ---
 
-## 5. Known gaps / next
+## 5. Verified after a clean reboot (2026-06-02)
 
-- swpN IP config is manual + needs an edged restart (item in §3) — make it
-  config-driven and reboot-persistent.
-- swp48 (chip 44) doesn't link — per-lane Warpcore RX-EQ not converging
-  (not needed for the Nexus path).
+A cold boot brings the whole datapath up reproducibly: `platform-init.service`
+programs the retimers, then (after `systemctl start edged`) **all four links come
+up** — swp1/swp2 (Nexus) and swp47/swp48 (loopback). The **swp47↔swp48 loopback
+passes traffic** (frames sent out swp47 punt to the CPU on swp48), and the
+**Nexus ping is 4/4, 0% loss**.
+
+Note: swp48 had appeared "stuck down" mid-session — that was **accumulated state
+from dozens of edged restarts** repeatedly re-arming the Warpcore lanes, *not* an
+RX-EQ wall. A reboot clears it. Rule of thumb: if a port won't link after many
+edged restarts, reboot before chasing SerDes.
+
+## 6. Known gaps / next
+
+- **edged does not auto-start at boot** (`edged.service` is `disabled`;
+  `platform-init.sh` doesn't launch it). `systemctl enable edged` or start it
+  manually. (mgmt `end0`/`10.1.1.212` is independent and always up.)
+- swpN IP config is manual + needs an edged restart (item in §3) so the
+  `RTM_GETADDR` dump programs the L3 local host — make it config-driven and
+  reboot-persistent.
+- Repeated edged restarts can degrade Warpcore lane state (see §5) — a reboot
+  is the reset.
 - Broadcast/multicast-to-CPU (OSPF, etc.) traps rely on the FP, which isn't
   fully initialised (`project_init_all_insight` / `soc_init` foundation gap) —
   unicast control traffic (ARP/ICMP) works via L2/L3 punt today.
