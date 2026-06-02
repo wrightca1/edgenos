@@ -8,6 +8,11 @@ Open-source NOS for the Edgecore AS5610-52X bare metal switch.
 - **Kernel**: Linux 5.10.224 LTS
 - **Root**: SquashFS + OverlayFS (read-only base + writable overlay)
 
+> **Status (2026-06-02): working datapath.** Links up, L2 forwarding, TX egress,
+> RX→CPU punt, and L3 local-host — the switch **pings a live Cisco Nexus
+> neighbor** end-to-end. See [`docs/DATAPATH_BRINGUP.md`](docs/DATAPATH_BRINGUP.md)
+> for the architecture, the fixes, and how to bring a port up.
+
 ---
 
 ## Requirements

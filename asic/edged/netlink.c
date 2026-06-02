@@ -68,6 +68,35 @@ int netlink_init(void)
 
     edged.netlink_fd = fd;
     syslog(LOG_INFO, "Netlink listener initialized");
+
+    /*
+     * Dump existing IPv4 addresses (RTM_GETADDR + NLM_F_DUMP).  The kernel
+     * only sends RTM_NEWADDR on a *change*, so an swpN IP that already
+     * exists when edged starts (e.g. configured before edged, or surviving
+     * an edged restart) is never seen -> its L3 local-host CPU-punt is never
+     * programmed -> IP traffic to the switch's own IP (ping replies) is not
+     * punted to the CPU.  The kernel answers this dump with RTM_NEWADDR
+     * messages that netlink_poll() handles exactly like live events.
+     */
+    {
+        struct {
+            struct nlmsghdr nlh;
+            struct ifaddrmsg ifa;
+        } req;
+        memset(&req, 0, sizeof(req));
+        req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifaddrmsg));
+        req.nlh.nlmsg_type = RTM_GETADDR;
+        req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+        req.nlh.nlmsg_seq = 1;
+        req.ifa.ifa_family = AF_INET;
+        if (send(fd, &req, req.nlh.nlmsg_len, 0) < 0) {
+            syslog(LOG_WARNING, "Netlink: RTM_GETADDR dump request failed: %s",
+                   strerror(errno));
+        } else {
+            syslog(LOG_INFO, "Netlink: requested IPv4 address dump");
+        }
+    }
+
     return 0;
 }
 
@@ -236,8 +265,6 @@ void netlink_poll(void)
          NLMSG_OK(nlh, (unsigned int)len);
          nlh = NLMSG_NEXT(nlh, len)) {
 
-        syslog(LOG_INFO, "NL: recv nlmsg_type=%d len=%d",
-               nlh->nlmsg_type, nlh->nlmsg_len);
         switch (nlh->nlmsg_type) {
         case RTM_NEWLINK:
         case RTM_DELLINK:

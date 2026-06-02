@@ -24,7 +24,7 @@ apt-get install -y -qq --no-install-recommends \
 CC=powerpc-linux-gnu-gcc
 AR=powerpc-linux-gnu-ar
 LIB=output/sdk/bmd/libbmdpkgsrc.a
-SRCS="bcm56840_a0_bmd_rx bcm56840_a0_bmd_tx"
+SRCS="bcm56840_a0_bmd_rx bcm56840_a0_bmd_tx bcm56840_a0_bmd_attach bcm56840_a0_bmd_switching_init"
 
 # Same flags used in the original build (extracted from a working .d/.o pair)
 CFLAGS="-Wall -O2 -g"
@@ -33,15 +33,17 @@ CPPFLAGS="-DBCM56846_A0 -DBCM56840_B0 -DBCM56840_A0 \
   -DCDK_CONFIG_INCLUDE_BCM56840_A0=1 \
   -DCDK_CONFIG_INCLUDE_BCM56840_B0=1 \
   -DBMD_CONFIG_INCLUDE_DMA=1 \
-  -DCDK_CONFIG_MEMMAP_DIRECT=1 \
   -DCDK_INCLUDE_CUSTOM_CONFIG \
   -DSYS_BE_PIO=1 -DSYS_BE_PACKET=1 -DSYS_BE_OTHER=1 \
   -DBMD_SYS_USLEEP=_usleep -DPHY_SYS_USLEEP=_usleep \
   -DBMD_SYS_DMA_ALLOC_COHERENT=_bde_dma_alloc \
   -DBMD_SYS_DMA_FREE_COHERENT=_bde_dma_free \
+  -DBMD_SYS_DMA_CACHE_FLUSH(addr,len)= \
+  -DBMD_SYS_DMA_CACHE_INVAL(addr,len)= \
   -I/src/asic/edged \
   -I/src/asic/openmdk/cdk/include \
   -I/src/asic/openmdk/bmd/include \
+  -I/src/asic/openmdk/phy/include \
   -I/src/asic/openmdk/bmd/pkgsrc"
 
 for name in $SRCS; do

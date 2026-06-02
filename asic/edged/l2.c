@@ -28,6 +28,7 @@
 #include "edged.h"
 #include "l2.h"
 #include "portmap.h"
+#include "vlan.h"   /* edged_resv_vid_for_port */
 
 /* BMD headers */
 #include <bmd/bmd.h>
@@ -96,6 +97,53 @@ int l2_init(void)
                mgmt_mac.b[0], mgmt_mac.b[1], mgmt_mac.b[2],
                mgmt_mac.b[3], mgmt_mac.b[4], mgmt_mac.b[5],
                DEFAULT_VLAN);
+    }
+
+    /*
+     * Per-port CPU punt for unicast destined to swpN's OWN MAC.
+     *
+     * A peer's ARP reply / ICMP reply is unicast to the swpN netdev MAC in
+     * that port's service VID (3300+logical).  Without an L2 entry the chip
+     * does a destination-lookup-failure (DLF) and floods; on this build that
+     * flood-to-CPU does not resolve, so the reply never reaches the host and
+     * ARP/ping fail.  Add a static {swpN_mac, service_VID} -> CPU entry so the
+     * reply hits L2 and is punted directly (no flood).  Mirrors how the chip
+     * must treat each front-panel port's host address.  Runs after the TUNs
+     * exist (packet_io_init), so /sys/class/net/swpN/address is readable.
+     */
+    {
+        int i, added = 0;
+        for (i = 0; i < EDGED_MAX_PORTS; i++) {
+            struct port_state *p = &edged.ports[i];
+            char path[64];
+            FILE *f;
+            unsigned int m[6];
+            bmd_mac_addr_t pm;
+            int vid, k, prv;
+
+            if (!p->valid || !p->enabled)
+                continue;
+            snprintf(path, sizeof(path), "/sys/class/net/%s/address",
+                     p->ifname);
+            f = fopen(path, "r");
+            if (!f)
+                continue;
+            if (fscanf(f, "%x:%x:%x:%x:%x:%x",
+                       &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) == 6) {
+                for (k = 0; k < 6; k++)
+                    pm.b[k] = (uint8_t)m[k];
+                vid = edged_resv_vid_for_port(p->logical_port);
+                prv = bmd_cpu_mac_addr_add(edged.unit, vid, &pm);
+                if (prv < 0)
+                    syslog(LOG_WARNING,
+                           "L2: %s MAC->CPU vid %d failed: %d",
+                           p->ifname, vid, prv);
+                else
+                    added++;
+            }
+            fclose(f);
+        }
+        syslog(LOG_INFO, "L2: per-port MAC->CPU punt entries added: %d", added);
     }
 
     syslog(LOG_INFO, "L2 forwarding initialized");

@@ -1,0 +1,92 @@
+diff --git a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_attach.c b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_attach.c
+index 9761986..7236e5d 100644
+--- a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_attach.c
++++ b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_attach.c
+@@ -431,11 +431,35 @@ bcm56840_a0_has_qgport(int unit)
+     return has_qgport;
+ }
+ 
++/*
++ * Physical->logical port map captured from the working Cumulus Linux
++ * baseline on this exact AS5610-52X board (ING_PHYSICAL_TO_LOGICAL_PORT_
++ * NUMBER_MAPPING_TABLE, 2026-05-13 dump).  Index = physical port, value =
++ * logical port; 0x7f = unmapped.  This REPLACES OpenMDK's default
++ * contiguous-by-physical-order fallback, which produced a different
++ * logical numbering (e.g. swp2/phys66 -> logical 58 instead of 2) and so
++ * disagreed with both edged.ports[].logical_port (i+1) and the Cumulus
++ * tables replicated verbatim by cumulus_replicate.c.  Note the non-trivial
++ * lane swizzle at phys 17-24 -- a contiguous fallback can never reproduce it.
++ *   phys 65-72 -> swp1-8 (logical 1-8); phys 5-44 -> swp9-48 (logical 9-48);
++ *   QSFP phys 49/45/61/57 -> swp49/50/51/52; phys 0 -> CPU; phys 73 -> LB(65).
++ */
++#define P2L_UNMAPPED 0x7f
++static const unsigned char bcm56840_a0_cumulus_p2l[NUM_PHYS_PORTS] = {
++    /* 0*/   0, 0x7f, 0x7f, 0x7f, 0x7f,    9,   10,   11,   12,   13,
++    /*10*/  14,   15,   16,   17,   18,   19,   20,   22,   21,   24,
++    /*20*/  23,   26,   25,   28,   27,   29,   30,   31,   32,   33,
++    /*30*/  34,   35,   36,   37,   38,   39,   40,   41,   42,   43,
++    /*40*/  44,   45,   46,   47,   48,   50, 0x7f, 0x7f, 0x7f,   49,
++    /*50*/0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f,   52, 0x7f, 0x7f,
++    /*60*/0x7f,   51, 0x7f, 0x7f, 0x7f,    1,    2,    3,    4,    5,
++    /*70*/   6,    7,    8,   65,
++};
++
+ int
+ bcm56840_a0_p2l(int unit, int port, int inverse)
+ {
+-    cdk_pbmp_t pbmp;
+-    int pp, lp = 1;
++    int pp;
+ 
+     /* Fixed mappings */
+     if (port == CMIC_PORT) {
+@@ -448,33 +472,26 @@ bcm56840_a0_p2l(int unit, int port, int inverse)
+         return LB_PORT;
+     }
+ 
+-    /* Use per-port config if available */
+-    if (CDK_NUM_PORT_CONFIGS(unit) != 0) {
+-        if (inverse) {
+-            for (pp = 0; pp < NUM_PHYS_PORTS; pp++) {
+-                if (port == CDK_PORT_CONFIG_SYS_PORT(unit, pp)) {
+-                    return pp;
+-                }
++    /*
++     * Use the captured Cumulus map.  This is authoritative for this board;
++     * it keeps ING_PHYS_TO_LOGIC_MAPm / EGR_LOGIC_TO_PHYS_MAPr / the VLAN/L2
++     * port bitmaps / and cumulus_replicate.c all in one logical numbering.
++     */
++    if (inverse) {
++        /* logical -> physical */
++        for (pp = 0; pp < NUM_PHYS_PORTS; pp++) {
++            if (bcm56840_a0_cumulus_p2l[pp] == port) {
++                return pp;
+             }
+-            return -1;
+-        } else {
+-            return CDK_PORT_CONFIG_SYS_PORT(unit, port);
+         }
++        return -1;
+     }
+-
+-    /* By default logical ports are contiguous starting from 1 */
+-    bcm56840_a0_xlport_pbmp_get(unit, &pbmp);
+-    CDK_PBMP_ITER(pbmp, pp) {
+-        if (inverse) {
+-            if (port == lp) {
+-                return pp;
+-            }
+-        } else {
+-            if (port == pp) {
+-                return lp;
+-            }
++    /* physical -> logical */
++    if (port >= 0 && port < NUM_PHYS_PORTS) {
++        int lp = bcm56840_a0_cumulus_p2l[port];
++        if (lp != P2L_UNMAPPED) {
++            return lp;
+         }
+-        lp++;
+     }
+     return -1;
+ }

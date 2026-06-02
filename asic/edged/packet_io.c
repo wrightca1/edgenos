@@ -56,6 +56,9 @@
 #define RX_BUF_SIZE  2048
 
 static int max_tun_fd = -1;
+
+/* TX-path counters (2026-05-31 datapath debug), summarized in edged.c stat poll. */
+unsigned g_tx_calls = 0, g_tx_ok = 0, g_tx_fail = 0, g_tx_lastrv = 0;
 static fd_set tun_fds;
 
 /* RX DMA buffers submitted to the ASIC */
@@ -294,21 +297,34 @@ static void handle_tun_tx(int port_idx)
     if (len <= 0)
         return;
 
+    g_tx_calls++;
+
     /*
-     * Prepend a 802.1Q VLAN tag with this port's service VID
-     * (Cumulus 3300+logical_port).  Cumulus's chip configures one
-     * service VID per swpN with only that swpN as untagged egress
-     * member.  CPU TX'es tagged with the service VID; the chip's
-     * L2 forwarding sends to exactly one port and strips the tag
-     * on egress.  Tested to be the ICMP-working path in Cumulus
-     * 2.5 (see cumulus_baseline_2013/30_full_dump.txt: vlan 3302
-     * ports cpu,xe1 untagged xe1).
+     * TX path selection (2026-06-02):
      *
-     * Frame transform: insert 4 bytes at offset 12 (after dst+src MAC):
-     *   [dst MAC 6][src MAC 6][etype 2][payload...]
-     * -> [dst MAC 6][src MAC 6][0x8100][TCI 2][etype 2][payload...]
+     * DIRECTED injection (link-up ports) — the real path.  We hand the
+     * raw frame to bcm56840_a0_bmd_tx with pkt.port = physical_lane; the
+     * SOBMH module header (sob[2]=P2L(port)) directs it straight out that
+     * physical port, UNTAGGED, bypassing the ingress L2 lookup entirely.
+     * This is the correct L2 model (each swpN TUN frame egresses swpN) and
+     * it is the path proven to put frames on the wire (swp47 tx_pkts>0).
+     * No service-VID tag is needed or wanted here — a tag would make the
+     * far end (e.g. swp48 in the loopback) classify into the wrong VID and
+     * drop the frame.
+     *
+     * FLOOD fallback (link-down ports) — keep the Cumulus service-VID
+     * scheme (prepend 3300+logical_port, pkt.port=-1) so behaviour is
+     * unchanged for ports we can't direct to yet.  These can't egress
+     * anyway (link down); the tag keeps the old code path intact.
+     *
+     * NOTE the service VID is still used for the RX direction (swpN frame
+     * -> PVID 33xx -> flood to CPU); only TX changes here.
      */
-    if (len >= 14 && (size_t)(len + 4) <= sizeof(tx_buf)) {
+    int directed = port->link_up;
+    if (!directed && len >= 14 && (size_t)(len + 4) <= sizeof(tx_buf)) {
+        /* Insert 4 bytes at offset 12 (after dst+src MAC):
+         *   [dst 6][src 6][etype 2][payload]
+         * -> [dst 6][src 6][0x8100][TCI 2][etype 2][payload]  */
         int vid = edged_resv_vid_for_port(port->logical_port);
         memmove(tx_buf + 16, tx_buf + 12, len - 12);
         tx_buf[12] = 0x81;
@@ -344,7 +360,7 @@ static void handle_tun_tx(int port_idx)
      * member), strips the tag on egress, and puts a clean Ethernet
      * frame on the wire — same shape Cumulus 2.5 produced. */
     memset(&pkt, 0, sizeof(pkt));
-    pkt.port = -1;
+    pkt.port = directed ? port->physical_lane : -1;
     pkt.data = dma_buf;
     pkt.size = len;
     pkt.baddr = baddr;
@@ -352,9 +368,12 @@ static void handle_tun_tx(int port_idx)
 
     /* Send to ASIC */
     rv = bmd_tx(edged.unit, &pkt);
+    g_tx_lastrv = (unsigned)rv;
     if (rv < 0) {
+        g_tx_fail++;
         syslog(LOG_DEBUG, "TX: bmd_tx failed on %s: %d", port->ifname, rv);
     } else {
+        g_tx_ok++;
         port->tx_packets++;
         port->tx_bytes += len;
     }
@@ -382,26 +401,12 @@ static void handle_asic_rx(void)
 {
     bmd_pkt_t *pkt = NULL;
     int rv;
-    static uint32_t enter_cnt = 0, ok_cnt = 0, last_rv_neg = 0;
 
     if (!rx_initialized)
         return;
 
     /* Poll for a completed RX packet */
     rv = bmd_rx_poll(edged.unit, &pkt);
-
-    /* Once-every-30s diagnostic so we can see whether bmd_rx_poll is
-     * being entered, returning E_TIMEOUT (no packet) or actually
-     * succeeding.  Without this we can't tell if frames reach the
-     * CMICm DCB ring at all. */
-    enter_cnt++;
-    if (rv >= 0 && pkt) ok_cnt++;
-    if (rv < 0) last_rv_neg = -rv;
-    if ((enter_cnt % 300000) == 0) {
-        syslog(LOG_INFO,
-               "handle_asic_rx: enters=%u ok=%u last_rv_neg=%u",
-               enter_cnt, ok_cnt, last_rv_neg);
-    }
 
     if (rv < 0 || !pkt)
         return;

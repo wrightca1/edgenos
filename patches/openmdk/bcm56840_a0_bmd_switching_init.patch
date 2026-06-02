@@ -1,0 +1,21 @@
+diff --git a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_switching_init.c b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_switching_init.c
+index fffa269..c397da6 100644
+--- a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_switching_init.c
++++ b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_switching_init.c
+@@ -65,6 +65,16 @@ bcm56840_a0_bmd_switching_init(int unit)
+ 
+     bcm56840_a0_xlport_pbmp_get(unit, &pbmp);
+     CDK_PBMP_ITER(pbmp, port) {
++        /*
++         * Skip physical ports that have no logical-port mapping in the
++         * captured Cumulus P2L table (value 0x7f -> P2L returns -1).
++         * These are unused lanes; Cumulus does not configure them either.
++         * Without this guard, _config_port()->bmd_vlan_port_add() fails on
++         * an invalid logical port and aborts the whole switching init.
++         */
++        if (P2L(unit, port) < 0) {
++            continue;
++        }
+         port_mode_flags = 0;
+         if (BMD_PORT_PROPERTIES(unit, port) & BMD_PORT_HG) {
+             /* Select HiGig mode based on dynamic configuration */

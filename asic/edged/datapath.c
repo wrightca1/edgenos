@@ -210,6 +210,71 @@ static int datapath_mac_init(int unit)
     syslog(LOG_INFO, "MAC: IFP_METER_PARITY_CONTROL=0 (errata)");
 
     /*
+     * ING_CONFIG_64 — ingress pipeline master config.  soc_init FOUNDATION
+     * that OpenMDK's bmd_init AND edged never set (verified 2026-06-01).
+     * At its reset default the ingress pipeline produces no L2/L3 forward
+     * decision, so received & CPU-injected frames are RDROP'd at ingress
+     * (the core blocker).  Values from OpenBCM soc_trident_misc_init():
+     *   L3SRC_HIT_ENABLE=1, L2DST_HIT_ENABLE=1, APPLY_EGR_MASK_ON_L2/L3=1,
+     *   ARP_RARP_TO_FP=3, ARP_VALIDATION_EN=1.
+     */
+    {
+        ING_CONFIG_64r_t ingc;
+        int rd = READ_ING_CONFIG_64r(unit, &ingc);
+        /*
+         * Keep ONLY the safe hit-enable bits.  Cumulus's ING_CONFIG_64 also
+         * sets APPLY_EGR_MASK_ON_L2/L3, ARP_RARP_TO_FP=3 and ARP_VALIDATION_EN
+         * (full value 0x000401802080300e) -- but those depend on subsystems
+         * Cumulus has up and we do NOT:
+         *   - ARP_RARP_TO_FP / ARP_VALIDATION_EN divert ARP/RARP into the VFP
+         *     for validation.  Our field processor is uninitialised, so ARP
+         *     gets shunted to a dead FP and dropped instead of L2-flooded
+         *     (this is why the swp47->swp48 ARP loopback RDROP'd).
+         *   - APPLY_EGR_MASK_ON_L2/L3 AND the L2/L3 flood with the source
+         *     port's EGR_MASK, which edged never populates -> flood masked to
+         *     empty -> generic RDROP.
+         * Until the FP and egress masks are programmed, leave these OFF so
+         * broadcast/multicast fall back to plain VLAN flooding.
+         */
+        ING_CONFIG_64r_L3SRC_HIT_ENABLEf_SET(ingc, 1);
+        ING_CONFIG_64r_L2DST_HIT_ENABLEf_SET(ingc, 1);
+        ioerr += WRITE_ING_CONFIG_64r(unit, ingc);
+        syslog(LOG_INFO,
+               "MAC: ING_CONFIG_64 L2DST/L3SRC hit-enable only "
+               "(ARP_TO_FP/EGR_MASK OFF until FP+masks init'd) (rd=%d)",
+               rd);
+    }
+
+    /*
+     * VLAN_PROFILE[127] L2_PFM fix — THE RDROP ROOT CAUSE (2026-06-01).
+     * OpenMDK's bmd_init writes VLAN_PROFILE_TABm[127] with L2_PFM=1 (and
+     * L3_*_PFM=1), and bmd_vlan_create points every VLAN at profile 127.
+     * L2_PFM=1 restricts L2 flooding, so broadcast (ARP) / multicast (OSPF)
+     * / unknown frames get NO flood destination and are RDROP'd at ingress
+     * (never reach CPU -> punt2cpu=0, the core blocker).  Cumulus's working
+     * profile (VLAN_PROFILE.ipipe0[2]) uses L2_PFM=0 (flood to VLAN members).
+     * Rewrite profile 127 to match Cumulus: PFM=0, L3/IPMC enables on,
+     * LEARN_DISABLE=1.
+     */
+    {
+        VLAN_PROFILE_TABm_t vp;
+        VLAN_PROFILE_TABm_CLR(vp);
+        VLAN_PROFILE_TABm_L2_PFMf_SET(vp, 0);
+        VLAN_PROFILE_TABm_L3_IPV4_PFMf_SET(vp, 0);
+        VLAN_PROFILE_TABm_L3_IPV6_PFMf_SET(vp, 0);
+        VLAN_PROFILE_TABm_IPV4L3_ENABLEf_SET(vp, 1);
+        VLAN_PROFILE_TABm_IPV6L3_ENABLEf_SET(vp, 1);
+        VLAN_PROFILE_TABm_IPMCV4_ENABLEf_SET(vp, 1);
+        VLAN_PROFILE_TABm_IPMCV6_ENABLEf_SET(vp, 1);
+        VLAN_PROFILE_TABm_IPMCV4_L2_ENABLEf_SET(vp, 1);
+        VLAN_PROFILE_TABm_IPMCV6_L2_ENABLEf_SET(vp, 1);
+        VLAN_PROFILE_TABm_LEARN_DISABLEf_SET(vp, 1);
+        ioerr += WRITE_VLAN_PROFILE_TABm(unit, VLAN_PROFILE_TABm_MAX, vp);
+        syslog(LOG_INFO,
+               "MAC: VLAN_PROFILE[127] L2_PFM=0 (flood enable, matches Cumulus)");
+    }
+
+    /*
      * RX/TX drop counter disaggregation (matches Cumulus rc.soc).
      * These coupling registers route per-reason drop events into the
      * RDBGCn / TDBGCn counters so ethtool -S can report:

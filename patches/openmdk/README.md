@@ -1,9 +1,30 @@
 # OpenMDK BMD patches — Cumulus-alignment
 
-These four files are hand-modified BMD sources that diverge from
+These files are hand-modified BMD sources that diverge from
 stock Broadcom OpenMDK 2.10.9. They are the BMD half of the changes
-that gave EdgeNOS its first end-to-end ping to a Nexus neighbor on
-2026-05-14 (the matching `asic/edged/` changes are committed alongside).
+that gave EdgeNOS its working end-to-end datapath — links → TX egress →
+RX→CPU punt → **ping to a Nexus neighbor** (matching `asic/edged/`
+changes committed alongside).
+
+> **2026-06-02 — full bidirectional datapath / ping works.** RX was
+> rewritten and two files added. See
+> `../../../edgecore-5610-reverse-engineering/TX_DATAPATH_PORTMAP_AND_INJECTION_2026_06_02.md`.
+>
+> - **`bcm56840_a0_bmd_rx.c` — REWRITTEN to the XGS DMA path.** The 64-DCB
+>   CMICm (xgsd) ring never armed: the CMICm per-channel DMA registers at
+>   `0x31xxx` don't accept writes on this chip (arm read-backs were 0). The
+>   working TX path uses the XGS *packed* `CMIC_DMA` regs at `0x100`, so RX
+>   now uses the same XGS DMA (`bmd_xgs_dma_init` +
+>   `bmd_xgs_dma_rx_start/rx_poll`), single-DCB, re-arm deferred to next
+>   poll. This is what made RX→CPU punt fire.
+> - **`bcm56840_a0_bmd_attach.c` — NEW.** `bcm56840_a0_p2l()` rewritten to
+>   the captured Cumulus physical→logical port map (was a contiguous fallback
+>   that put swp2 at logical 58 instead of 2).
+> - **`bcm56840_a0_bmd_switching_init.c` — NEW.** `if (P2L(unit,port)<0)
+>   continue;` so init doesn't abort on the now-`0x7f` unused lanes.
+> - **`bcm56840_a0_bmd_stat_get.c` + `bmd.h` — NEW.** `RDBGC3/4/5/6`+`RIPC4`
+>   drop-localization stat readers (reusable telemetry; dormant after the
+>   debug strip).
 
 `asic/openmdk/` itself is a nested clone of `Broadcom/OpenMDK` and is
 gitignored by the parent edgenos repo, so we keep canonical copies of

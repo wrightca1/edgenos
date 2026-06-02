@@ -148,12 +148,13 @@ bmd_xgsd_dma_chan_poll(int unit, int chan, int polls)
     
     for (px = 0; px < polls; px++) {
         ioerr += READ_CMIC_CMC_DMA_STATr(unit, &dma_stat);
-        /* CMICm fires CHAIN_DONE on completion of a DCB chain.  For the
-         * OpenMDK single-DCB RX path the lone DCB IS the chain, so we
-         * check CHAIN_DONE for both directions.  DESC_DONE is for
-         * intermediate descriptors and is not reliable in single-DCB
-         * mode (we observed channels 0 and 3 with sticky DESC_DONE bits
-         * even when no DMA had been initiated on them). */
+        /* CMICm fires CHAIN_DONE on completion of a DCB chain.  NOTE: the RX
+         * path no longer uses this poll — bcm56840_a0_bmd_rx.c runs a 64-DCB
+         * CONTINUOUS_DMA ring and polls the per-DCB DONE bit in descriptor
+         * memory instead (STAT.CHAIN_DONE is sticky-1 at idle on this chip).
+         * This CHAIN_DONE poll remains only for the single-DCB TX path and the
+         * legacy bmd_xgsd_dma_chan_poll callers.  DESC_DONE is unreliable here
+         * (channels 0 and 3 show sticky DESC_DONE even with no DMA armed). */
         done = CMIC_CMC_DMA_STATr_CHAIN_DONEf_GET(dma_stat);
         if (done & (1 << chan)) {
             /* DMA complete. Clear the channel */

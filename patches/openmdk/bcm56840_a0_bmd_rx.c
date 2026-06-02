@@ -76,11 +76,6 @@ _cpu_port_enable_set(int unit, int enable)
     EPC_LINK_BMAPm_PORT_BITMAP_W0f_SET(epc_link, epc_pbm_after);
     wr_err = WRITE_EPC_LINK_BMAPm(unit, 0, epc_link);
 
-    CDK_PRINTF("EPC_LINK_BMAP: rd=%d wr=%d pbm_before=0x%08x pbm_after=0x%08x "
-               "CMIC_PORT=%d enable=%d\n",
-               rd_err, wr_err, epc_pbm_before, epc_pbm_after,
-               CMIC_PORT, enable);
-
     if (rd_err) return rd_err;
     if (wr_err) return wr_err;
     return CDK_E_NONE;
@@ -104,7 +99,7 @@ bcm56840_a0_bmd_rx_start(int unit, bmd_pkt_t *pkt)
 {
 #if BMD_CONFIG_INCLUDE_DMA == 1
     xgs_rx_ring_t *ring = &_rx_ring[unit];
-    int i, rv;
+    int rv;
     (void)pkt;  /* unused — we manage buffers internally */
 
     BMD_CHECK_UNIT(unit);
@@ -114,41 +109,41 @@ bcm56840_a0_bmd_rx_start(int unit, bmd_pkt_t *pkt)
         return CDK_E_NONE;
     }
 
-    /* Allocate the DCB ring as one contiguous block so DESC pointers are
-     * sequential in bus-address space.  This lets us set DESC_HALT_ADDR to
-     * bdcbs + (N-1)*sizeof(DCB) and have the chip wrap cleanly. */
-    ring->dcbs = bmd_dma_alloc_coherent(unit,
-                                        BMD_RX_RING_DEPTH * sizeof(RX_DCB_t),
-                                        &ring->bdcbs);
+    /*
+     * XGS DMA path (2026-06-02 root-cause fix): the CMICm/xgsd per-channel
+     * DMA registers at 0x31xxx do NOT accept writes on this chip (the RX
+     * channel never armed — desc/ctrl read back 0), but the XGS *packed*
+     * CMIC_DMA registers at 0x100 DO (proven by the working TX path, which
+     * uses bmd_xgs_dma_tx_start).  So RX now uses the XGS single-DCB model:
+     * one DCB + one buffer; arm -> poll DESC_DONE -> consume -> re-arm.
+     * Re-arm is deferred to the next poll (rd_idx as flag) so the chip can't
+     * overwrite the buffer while edged is still reading the delivered frame.
+     */
+    ring->dcbs = bmd_dma_alloc_coherent(unit, sizeof(RX_DCB_t), &ring->bdcbs);
     if (ring->dcbs == NULL) {
         return CDK_E_MEMORY;
     }
-    CDK_MEMSET(ring->dcbs, 0, BMD_RX_RING_DEPTH * sizeof(RX_DCB_t));
+    CDK_MEMSET(ring->dcbs, 0, sizeof(RX_DCB_t));
 
-    /* Per-slot RX buffers and DCB init. */
-    for (i = 0; i < BMD_RX_RING_DEPTH; i++) {
-        ring->pkts[i].data = bmd_dma_alloc_coherent(unit, BMD_RX_BUF_SIZE,
-                                                    &ring->pkt_baddrs[i]);
-        if (ring->pkts[i].data == NULL) {
-            CDK_PRINTF("rx_start: failed to allocate buf slot %d\n", i);
-            return CDK_E_MEMORY;
-        }
-        ring->pkts[i].size  = BMD_RX_BUF_SIZE;
-        ring->pkts[i].baddr = ring->pkt_baddrs[i];
-        ring->pkts[i].port  = -1;
-
-        RX_DCB_CLR(ring->dcbs[i]);
-        RX_DCB_ADDRf_SET(ring->dcbs[i], ring->pkt_baddrs[i]);
-        RX_DCB_BYTE_COUNTf_SET(ring->dcbs[i], BMD_RX_BUF_SIZE);
-        /* RELOAD=1 — chip auto-reuses this DCB after delivering a packet.
-         * Without it the chip treats each DCB as one-shot and stops at end of
-         * chain. */
-        RX_DCB_RELOADf_SET(ring->dcbs[i], 1);
-        /* CHAIN=0 on all entries (no chain to next), SG=0 (no scatter-gather).
-         * DESC_HALT_ADDR-based wrap takes care of ring topology. */
+    ring->pkts[0].data = bmd_dma_alloc_coherent(unit, BMD_RX_BUF_SIZE,
+                                                &ring->pkt_baddrs[0]);
+    if (ring->pkts[0].data == NULL) {
+        return CDK_E_MEMORY;
     }
+    ring->pkts[0].size  = BMD_RX_BUF_SIZE;
+    ring->pkts[0].baddr = ring->pkt_baddrs[0];
+    ring->pkts[0].port  = -1;
 
-    ring->rd_idx = 0;
+    RX_DCB_CLR(ring->dcbs[0]);
+    RX_DCB_ADDRf_SET(ring->dcbs[0], ring->pkt_baddrs[0]);
+    RX_DCB_BYTE_COUNTf_SET(ring->dcbs[0], BMD_RX_BUF_SIZE);
+
+    /* Init the XGS DMA engine: CMIC_CONFIG SG+reload + chan directions.
+     * Idempotent and read-modify-write, so it preserves the working TX
+     * channel (CH0); it (re)asserts RX channel direction (CH1=RX). */
+    bmd_xgs_dma_init(unit);
+
+    ring->rd_idx = 0;   /* re-arm flag: 0 = freshly armed, 1 = needs re-arm */
 
     /* Enable CPU port forwarding BEFORE arming DMA. */
     rv = _cpu_port_enable_set(unit, 1);
@@ -156,30 +151,13 @@ bcm56840_a0_bmd_rx_start(int unit, bmd_pkt_t *pkt)
         CDK_PRINTF("rx_start: _cpu_port_enable_set failed: %d (continuing)\n", rv);
     }
 
-    BMD_DMA_CACHE_FLUSH(ring->dcbs, BMD_RX_RING_DEPTH * sizeof(RX_DCB_t));
+    BMD_DMA_CACHE_FLUSH(ring->dcbs, sizeof(RX_DCB_t));
 
-    /* Write DESC_HALT_ADDR — address one past the last DCB. Chip walks
-     * the ring from DESC pointer forward; when its internal pointer reaches
-     * HALT_ADDR it wraps (because we set CONTINUOUS_DMA=1 in chan_init).
-     *
-     * Register addr verified from bcm53400 CDK header (same CMICm block):
-     * `CMIC_CMC0_DMA_CH0_DESC_HALT_ADDRr = 0x00031120`, per-channel stride 4.
-     * (NOT 0x31144 — that's CTRL.1, different register.)
-     * The bcm56840 CDK header doesn't expose this register by name. */
-    {
-        dma_addr_t halt_addr = ring->bdcbs +
-                               (BMD_RX_RING_DEPTH * sizeof(RX_DCB_t));
-        uint32_t halt_reg = 0x00031120 + 4 * XGSD_DMA_RX_CHAN;
-        CDK_XGSD_CMC_WRITE(unit, halt_reg, halt_addr);
-        CDK_PRINTF("rx_start: ring base=0x%08x halt=0x%08x depth=%d "
-                   "(halt_reg=0x%05x)\n",
-                   (unsigned)ring->bdcbs, (unsigned)halt_addr,
-                   BMD_RX_RING_DEPTH, halt_reg);
-    }
-
-    /* Start DMA — point DESC at head of ring; chan_init already set
-     * direction=RX, CONTINUOUS_DMA=1, DROP_RX_PKT_ON_CHAIN_END=0. */
-    bmd_xgsd_dma_rx_start(unit, ring->bdcbs);
+    /* Arm the RX channel via the XGS packed CMIC_DMA registers (0x100):
+     * write the DCB bus address to CMIC_DMA_DESC0r+4*chan, set DMA_EN in
+     * CMIC_DMA_STATr.  These low/mapped offsets accept writes (unlike the
+     * 0x31xxx CMICm regs). */
+    bmd_xgs_dma_rx_start(unit, ring->bdcbs);
 
     ring->armed = 1;
 
@@ -209,9 +187,7 @@ bcm56840_a0_bmd_rx_poll(int unit, bmd_pkt_t **ppkt)
 {
 #if BMD_CONFIG_INCLUDE_DMA == 1
     xgs_rx_ring_t *ring = &_rx_ring[unit];
-    RX_DCB_t *dcb;
-    uint32_t idx;
-    static uint32_t _enter_cnt = 0, _ok_cnt = 0;
+    RX_DCB_t *dcb = &ring->dcbs[0];
 
     BMD_CHECK_UNIT(unit);
 
@@ -219,45 +195,41 @@ bcm56840_a0_bmd_rx_poll(int unit, bmd_pkt_t **ppkt)
         return CDK_E_DISABLED;
     }
 
-    if ((++_enter_cnt & 0xffff) == 0) {
-        CDK_PRINTF("RX poll: cnt=%u ok=%u rd_idx=%u armed=%d\n",
-                   _enter_cnt, _ok_cnt, ring->rd_idx, ring->armed);
+    /*
+     * Deferred re-arm: a previous poll delivered a packet and set rd_idx=1.
+     * edged has since consumed (written to TUN) the buffer, so it is now
+     * safe to reset the DCB and re-arm the XGS RX channel for the next frame.
+     */
+    if (ring->rd_idx) {
+        RX_DCB_CLR(*dcb);
+        RX_DCB_ADDRf_SET(*dcb, ring->pkt_baddrs[0]);
+        RX_DCB_BYTE_COUNTf_SET(*dcb, BMD_RX_BUF_SIZE);
+        BMD_DMA_CACHE_FLUSH(dcb, sizeof(*dcb));
+        bmd_xgs_dma_rx_start(unit, ring->bdcbs);
+        ring->rd_idx = 0;
     }
 
-    idx = ring->rd_idx;
-    dcb = &ring->dcbs[idx];
-
-    /* Invalidate cache on just this DCB.  In our build CACHE_INVAL is a
-     * no-op (BMD_SYS_DMA_CACHE_INVAL=) so this is free. */
+    /* Non-blocking single poll for DESC_DONE on the RX channel. */
+    if (bmd_xgs_dma_rx_poll(unit, 1) < 0) {
+        return CDK_E_TIMEOUT;
+    }
     BMD_DMA_CACHE_INVAL(dcb, sizeof(*dcb));
 
     if (RX_DCB_DONEf_GET(*dcb) == 0) {
-        /* No packet in this slot yet. */
         return CDK_E_TIMEOUT;
     }
 
-    /* Got one. */
-    _ok_cnt++;
-    ring->pkts[idx].size = RX_DCB_BYTES_TRANSFERREDf_GET(*dcb);
-    ring->pkts[idx].port = L2P(unit, RX_DCB_SRC_PORTf_GET(*dcb));
+    /* Got a packet. */
+    ring->pkts[0].size = RX_DCB_BYTES_TRANSFERREDf_GET(*dcb);
+    ring->pkts[0].port = L2P(unit, RX_DCB_SRC_PORTf_GET(*dcb));
 
-    bmd_xgsd_parse_higig2(unit, &ring->pkts[idx],
+    bmd_xgsd_parse_higig2(unit, &ring->pkts[0],
                           RX_DCB_MODULE_HEADERf_PTR(*dcb));
 
-    *ppkt = &ring->pkts[idx];
+    *ppkt = &ring->pkts[0];
 
-    CDK_PRINTF("RX poll: slot=%u port=%d size=%d (ok=%u)\n",
-               idx, ring->pkts[idx].port, ring->pkts[idx].size, _ok_cnt);
-
-    /* Reset DCB so chip can RELOAD it.  DONE=0, BYTES_TRANSFERRED=0,
-     * BYTE_COUNT back to buffer size.  Address + RELOAD bit stay. */
-    RX_DCB_DONEf_SET(*dcb, 0);
-    RX_DCB_BYTES_TRANSFERREDf_SET(*dcb, 0);
-    RX_DCB_BYTE_COUNTf_SET(*dcb, BMD_RX_BUF_SIZE);
-    BMD_DMA_CACHE_FLUSH(dcb, sizeof(*dcb));
-
-    /* Advance to next slot for the next poll. */
-    ring->rd_idx = (idx + 1) & (BMD_RX_RING_DEPTH - 1);
+    /* Defer re-arm to the next poll (after edged consumes this buffer). */
+    ring->rd_idx = 1;
 
     return CDK_E_NONE;
 #else
