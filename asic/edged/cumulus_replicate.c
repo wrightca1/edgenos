@@ -115,8 +115,43 @@ static int cumulus_replicate_l2_user_entry(int unit)
             errs++;
         }
     }
+
+    /* OSPF multicast CPU traps — not in the captured Cumulus L2_USER table
+     * (Cumulus relied on UMC + FP rules for these). Add deterministic exact-MAC
+     * copy-to-CPU entries for AllSPFRouters 01:00:5e:00:00:05 and AllDRouters
+     * 01:00:5e:00:00:06 so the OSPF daemon hears the Nexus regardless of the
+     * VLAN UMC-flood configuration. Same encoding as the captured rows:
+     * key_type=0 -> key = 0x0000<mac>, mask = 0x1000ffffffffffff, cpu=1. */
+    {
+        static const uint64_t ospf_macs[] = {
+            0x01005e000005ULL, 0x01005e000006ULL,
+        };
+        unsigned base_idx = CUMULUS_L2_USER_ENTRY_COUNT;  /* after captured rows */
+        for (unsigned k = 0; k < 2; k++) {
+            L2_USER_ENTRYm_t e;
+            uint32_t mac_fval[2], key_fval[2], mask_fval[2];
+            L2_USER_ENTRYm_CLR(e);
+            mac_fval[0] = (uint32_t)(ospf_macs[k] & 0xFFFFFFFF);
+            mac_fval[1] = (uint32_t)((ospf_macs[k] >> 32) & 0xFFFF);
+            L2_USER_ENTRYm_MAC_ADDRf_SET(e, mac_fval);
+            key_fval[0] = mac_fval[0];
+            key_fval[1] = mac_fval[1];          /* key_type 0 -> top bits clear */
+            L2_USER_ENTRYm_KEYf_SET(e, key_fval);
+            mask_fval[0] = 0xFFFFFFFFu;
+            mask_fval[1] = 0x1000FFFFu;
+            L2_USER_ENTRYm_MASKf_SET(e, mask_fval);
+            L2_USER_ENTRYm_VALIDf_SET(e, 1);
+            L2_USER_ENTRYm_DO_NOT_LEARN_MACSAf_SET(e, 1);
+            L2_USER_ENTRYm_CPUf_SET(e, 1);
+            int rv2 = WRITE_L2_USER_ENTRYm(unit, base_idx + k, e);
+            syslog(LOG_INFO, "L2_USER_ENTRY[%u] OSPF %012llx -> CPU wr=%d",
+                   base_idx + k, (unsigned long long)ospf_macs[k], rv2);
+            if (rv2 < 0) errs++;
+        }
+    }
+
     syslog(LOG_INFO,
-           "L2_USER_ENTRY: programmed %u rows (Cumulus protocol-MAC traps), "
+           "L2_USER_ENTRY: programmed %u rows (Cumulus protocol-MAC traps) + 2 OSPF, "
            "errors=%d", (unsigned)CUMULUS_L2_USER_ENTRY_COUNT, errs);
     return errs;
 }

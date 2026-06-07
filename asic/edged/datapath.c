@@ -54,6 +54,15 @@ static int datapath_cpu_punt_init(int unit)
      * CPU_CONTROL_1 UMC trap. */
     CPU_CONTROL_1r_UMC_TOCPUf_SET(cpu_ctrl1, 1);
 
+    /* IP-multicast port miss to CPU. swp1/swp2 are L3 interfaces, so the chip
+     * takes IPv4 link-local multicast (224.0.0.5/6) down the IPMC path, not L2 —
+     * with no IPMC group it's an IPMC lookup miss and gets dropped. UMC alone
+     * doesn't catch it (that's the L2 path). This is the bit that actually
+     * delivers OSPF hellos on an L3 port (confirmed: Nexus stuck in INIT because
+     * our hellos egress fine but its hellos never reached our CPU). Cumulus set
+     * this too. */
+    CPU_CONTROL_1r_IPMCPORTMISS_TOCPUf_SET(cpu_ctrl1, 1);
+
     ioerr += WRITE_CPU_CONTROL_1r(unit, cpu_ctrl1);
 
     /* Enable ARP and DHCP punt to CPU on all valid ports.
