@@ -16,6 +16,7 @@
 #include <string.h>
 #include <syslog.h>
 #include <unistd.h>
+#include <time.h>
 
 #include "edged.h"
 #include "portmap.h"
@@ -759,6 +760,20 @@ int portmap_swp_to_i2c_bus(int swp)
  */
 static int link_poll_count;
 
+/* 40G QSFP auto re-init/retry state (2026-06-07).
+ *
+ * A QSFP port that comes up at boot before its loopback/link peer's TX is live
+ * ends up at am_lock=0x3 with deskew NEVER engaging. Re-initializing the port
+ * AFTER both peers' TX are live (a "hot-plug retry") engages deskew and shifts
+ * to am_lock=0x6 — verified live. So we retry: any QSFP port that is up but not
+ * fully AM-locked (am_lock != 0xf) gets re-initialized (bmd_port_mode_set
+ * disable->40G) after QSFP_RETRY_GRACE_S of being unlocked, up to
+ * QSFP_RETRY_MAX times. Wall-clock timed (poll cadence-independent). */
+#define QSFP_RETRY_GRACE_S 40
+#define QSFP_RETRY_MAX     8
+static time_t qsfp_unlocked_since[EDGED_MAX_PORTS];
+static int    qsfp_retry_count[EDGED_MAX_PORTS];
+
 /*
  * Read CL49 PCS block_lock for a port.  Returns 1 if the chip's
  * 10G 64b/66b framer has acquired sync, else 0.  block_lock=1 is
@@ -991,6 +1006,33 @@ int portmap_link_poll(void)
         }
 
         bmd_port_mode_update(edged.unit, port);
+
+        /* 40G QSFP auto re-init/retry: re-init a port that's up but not fully
+         * AM-locked, once its peer's TX has had time to come live. Engages
+         * deskew (which never fires from the boot-order init) and re-adapts. */
+        if (edged.ports[i].port_type == PORT_TYPE_QSFP) {
+            if (cl82_am == 0xf) {
+                qsfp_unlocked_since[i] = 0;   /* fully locked: clear timer */
+                qsfp_retry_count[i] = 0;
+            } else {
+                time_t now = time(NULL);
+                if (qsfp_unlocked_since[i] == 0) {
+                    qsfp_unlocked_since[i] = now;   /* start grace window */
+                } else if (qsfp_retry_count[i] < QSFP_RETRY_MAX &&
+                           (now - qsfp_unlocked_since[i]) >= QSFP_RETRY_GRACE_S) {
+                    bmd_port_mode_t m = (edged.ports[i].speed >= 40000)
+                                        ? bmdPortMode40000fd : bmdPortMode10000fd;
+                    syslog(LOG_INFO,
+                        "qsfp_retry[%s]: port=%d re-init #%d (am_lock=0x%x deskew=%d)",
+                        edged.ports[i].ifname, port, qsfp_retry_count[i] + 1,
+                        cl82_am, cl82_deskew);
+                    bmd_port_mode_set(edged.unit, port, bmdPortModeDisabled, 0);
+                    bmd_port_mode_set(edged.unit, port, m, 0);
+                    qsfp_retry_count[i]++;
+                    qsfp_unlocked_since[i] = now;   /* restart grace for next retry */
+                }
+            }
+        }
 
         if (first_poll && (i < 3 || edged.ports[i].port_type == PORT_TYPE_QSFP)) {
             if (edged.ports[i].port_type == PORT_TYPE_QSFP)
