@@ -320,10 +320,18 @@ static int datapath_mac_init(int unit)
         VLAN_PROFILE_TABm_IPMCV6_ENABLEf_SET(vp, 1);
         VLAN_PROFILE_TABm_IPMCV4_L2_ENABLEf_SET(vp, 1);
         VLAN_PROFILE_TABm_IPMCV6_L2_ENABLEf_SET(vp, 1);
+        /* Unknown (no IPMC group) IP multicast -> CPU. With IPMCV4_ENABLE=1 the
+         * chip takes IPv4 multicast down the IPMC path; 224.0.0.5/6 (OSPF) have
+         * no IPMC group, so without this they hit an IPMC miss and are silently
+         * dropped (arrives at the port — RMCA increments — but no CPU copy, no
+         * rdbgc). This is the per-profile equivalent of Cumulus's service VIDs
+         * being MCAST_FLOOD_ALL: it delivers routing-protocol hellos to the CPU. */
+        VLAN_PROFILE_TABm_UNKNOWN_IPV4_MC_TOCPUf_SET(vp, 1);
+        VLAN_PROFILE_TABm_UNKNOWN_IPV6_MC_TOCPUf_SET(vp, 1);
         VLAN_PROFILE_TABm_LEARN_DISABLEf_SET(vp, 1);
         ioerr += WRITE_VLAN_PROFILE_TABm(unit, VLAN_PROFILE_TABm_MAX, vp);
         syslog(LOG_INFO,
-               "MAC: VLAN_PROFILE[127] L2_PFM=0 (flood enable, matches Cumulus)");
+               "MAC: VLAN_PROFILE[127] L2_PFM=0 + UNKNOWN_IPV4/6_MC_TOCPU=1 (OSPF hellos to CPU)");
     }
 
     /*
@@ -1310,11 +1318,12 @@ void datapath_rx_diag(void)
         int phys = p->physical_lane;
         int vid  = edged_resv_vid_for_port(p->logical_port);
 
-        RUCr_t ruc;
+        RUCr_t ruc; RMCAr_t rmc;
         RDBGC0r_t d0; RDBGC3r_t d3; RDBGC4r_t d4; RDBGC5r_t d5; RDBGC6r_t d6;
         PORT_TABm_t pt; VLAN_TABm_t vt;
 
         READ_RUCr(unit, phys, &ruc);
+        READ_RMCAr(unit, phys, &rmc);
         READ_RDBGC0r(unit, phys, &d0);
         READ_RDBGC3r(unit, phys, &d3);
         READ_RDBGC4r(unit, phys, &d4);
@@ -1322,10 +1331,10 @@ void datapath_rx_diag(void)
         READ_RDBGC6r(unit, phys, &d6);
 
         syslog(LOG_INFO,
-               "RX-DIAG %s phys=%d: RUC(rx-ucast)=%u | rdbgc0(agg)=%u "
+               "RX-DIAG %s phys=%d: RUC(ucast)=%u RMCA(mcast)=%u | rdbgc0(agg)=%u "
                "rdbgc3(L3hdr)=%u rdbgc4(disc)=%u rdbgc5(filt)=%u rdbgc6(drop)=%u",
                p->ifname, phys,
-               RUCr_GET(ruc),
+               RUCr_GET(ruc), RMCAr_GET(rmc, 0),
                RDBGC0r_GET(d0), RDBGC3r_GET(d3), RDBGC4r_GET(d4),
                RDBGC5r_GET(d5), RDBGC6r_GET(d6));
 

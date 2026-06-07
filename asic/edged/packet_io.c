@@ -424,11 +424,32 @@ static void handle_asic_rx(void)
     if (rv < 0 || !pkt)
         return;
 
+    uint8_t *frame = pkt->data;
+    int frame_len = pkt->size;
+
+    /* 802.1Q service VID the ASIC tagged the CPU-bound frame with (3300+logical). */
+    int vid = 0;
+    if (frame_len >= 16 && frame[12] == 0x81 && frame[13] == 0x00)
+        vid = ((frame[14] << 8) | frame[15]) & 0x0fff;
+
     /* Map ASIC ingress port (CDK physical port) to swpN */
     int swp = portmap_phys_to_swp(pkt->port);
     if (swp < 1 || swp > EDGED_MAX_PORTS) {
-        syslog(LOG_DEBUG, "RX: unknown ingress port %d", pkt->port);
-        goto resubmit;
+        /* Flooded / CPU-copied multicast (e.g. OSPF AllSPFRouters 224.0.0.5)
+         * can arrive with a source port that doesn't map to a front-panel port.
+         * The frame is still tagged with its per-port service VID, so fall back
+         * to that to find the ingress swp. This is what delivers OSPF hellos to
+         * the routing daemon. */
+        if (vid >= 3301 && vid <= 3300 + EDGED_MAX_PORTS) {
+            swp = vid - 3300;
+            syslog(LOG_INFO,
+                   "RX: src port %d unmapped, delivered via service VID %d -> swp%d",
+                   pkt->port, vid, swp);
+        } else {
+            syslog(LOG_DEBUG, "RX: unknown ingress port %d (vid=%d)",
+                   pkt->port, vid);
+            goto resubmit;
+        }
     }
 
     int port_idx = swp - 1;
@@ -442,8 +463,6 @@ static void handle_asic_rx(void)
     /* Strip 802.1Q VLAN tag if present (ASIC adds it for CPU-bound frames).
      * VLAN tag is 4 bytes at offset 12: [81 00] [TCI].
      * Remove it so the kernel sees a clean untagged Ethernet frame. */
-    uint8_t *frame = pkt->data;
-    int frame_len = pkt->size;
     if (frame_len >= 18 && frame[12] == 0x81 && frame[13] == 0x00) {
         memmove(frame + 12, frame + 16, frame_len - 16);
         frame_len -= 4;
