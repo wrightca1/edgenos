@@ -375,6 +375,41 @@ int l3_route_del(int family, const void *dst, int prefix_len)
  */
 static int next_hop_idx = 1;   /* index 0 reserved as 'invalid' */
 
+/*
+ * Gateway -> chip next-hop index map.  Populated by l3_host_add() whenever the
+ * kernel resolves a neighbor (ARP/ND) on a swpN port.  ECMP route programming
+ * looks up each gateway IP here to find the chip next-hop to put in the group.
+ * Host byte order (MSB = first octet), matching l3_local_host_add()'s convention.
+ */
+#define L3_NEIGH_MAX 256
+static struct { uint32_t ip; int nh_idx; int valid; } l3_neigh_nh[L3_NEIGH_MAX];
+
+static void l3_neigh_nh_record(uint32_t ip_host, int nh_idx)
+{
+    int free_slot = -1;
+    for (int i = 0; i < L3_NEIGH_MAX; i++) {
+        if (l3_neigh_nh[i].valid && l3_neigh_nh[i].ip == ip_host) {
+            l3_neigh_nh[i].nh_idx = nh_idx;   /* refresh */
+            return;
+        }
+        if (free_slot < 0 && !l3_neigh_nh[i].valid)
+            free_slot = i;
+    }
+    if (free_slot >= 0) {
+        l3_neigh_nh[free_slot].ip = ip_host;
+        l3_neigh_nh[free_slot].nh_idx = nh_idx;
+        l3_neigh_nh[free_slot].valid = 1;
+    }
+}
+
+static int l3_neigh_nh_lookup(uint32_t ip_host)
+{
+    for (int i = 0; i < L3_NEIGH_MAX; i++)
+        if (l3_neigh_nh[i].valid && l3_neigh_nh[i].ip == ip_host)
+            return l3_neigh_nh[i].nh_idx;
+    return -1;
+}
+
 /* Map a swpN logical port to its L3_INTF index.  Simple 1:1. */
 static int l3_intf_for_logical_port(int logical_port)
 {
@@ -745,6 +780,10 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
             return -1;
         }
         syslog(LOG_DEBUG, "L3 host schan_insert placed at idx=%d", idx);
+
+        /* Register this resolved neighbor's chip next-hop so ECMP route
+         * programming can reference it by gateway IP. */
+        l3_neigh_nh_record(ip_be, nh_idx);
     }
 
     syslog(LOG_INFO,
@@ -828,19 +867,21 @@ int l3_ecmp_group_create(const int *intf_ids, int count)
         }
     }
 
-    /* Write the L3_ECMP_COUNT entry for this group.  The chip uses (group_id,
-     * hash%count) to index L3_ECMP.  Format: low bits hold the count - 1,
-     * higher bits hold the base slot (chip-specific encoding — verify
-     * against bcm56840_a0_defs.h L3_ECMP_COUNTm fields). */
+    /* Write the L3_ECMP_COUNT (group) entry.  The chip indexes this table by
+     * the L3_DEFIP ECMP_PTR0 field (= group_id here), reads BASE_PTR + COUNT,
+     * then selects L3_ECMP[BASE_PTR + (hash % COUNT)].  Encoding verified on a
+     * live Cumulus 56846: BASE_PTR_0[21:10], COUNT_0[9:0], COUNT = #members
+     * (project_cumulus_route_storage_decoded / L3_NEXTHOP_FORMAT). */
     {
         L3_ECMP_COUNTm_t cnt;
         L3_ECMP_COUNTm_CLR(cnt);
-        /* The exact field set depends on the chip header; on bcm56840 it's
-         * a 25-word entry with BASE and COUNT fields. */
+        L3_ECMP_COUNTm_BASE_PTR_0f_SET(cnt, base);
+        L3_ECMP_COUNTm_COUNT_0f_SET(cnt, count);
         rv = WRITE_L3_ECMP_COUNTm(edged.unit, group_id, cnt);
         if (rv < 0) {
             syslog(LOG_WARNING, "L3_ECMP_COUNT[%d] write failed: %d",
                    group_id, rv);
+            return -1;
         }
     }
 
@@ -851,5 +892,89 @@ int l3_ecmp_group_create(const int *intf_ids, int count)
            count > 2 ? ",..." : "");
 
     l3_ecmp_next_slot += count;
-    return base;  /* this is the ECMP_PTR value for L3_DEFIP */
+    return group_id;  /* ECMP_PTR0 value for L3_DEFIP (index into L3_ECMP_COUNT) */
+}
+
+/*
+ * l3_route_add_paths() — program a transit IPv4 prefix route into L3_DEFIP.
+ *
+ *   dst_host   : destination prefix, host byte order (MSB = first octet)
+ *   prefix_len : 0..32
+ *   gw_host[]  : nexthop gateway IPs (host byte order), each already resolved
+ *                (l3_host_add ran on its ARP) so it has a chip next-hop
+ *   ngw        : number of nexthops; 1 = single path, >1 = ECMP
+ *
+ * For ngw==1 the DEFIP entry points straight at the next-hop. For ngw>1 we
+ * build an L3_ECMP group and point the DEFIP entry at it (ECMP0=1). The chip
+ * then hashes each flow across the members → load-balance across swp ports.
+ */
+int l3_route_add_paths(uint32_t dst_host, int prefix_len,
+                       const uint32_t *gw_host, int ngw)
+{
+    static int defip_transit_slot = 1536;   /* transit band: above /32 (2560),
+                                               below the /0 catch-all (8000) */
+    int nh_idx[64];
+    int n = 0, rv;
+
+    if (ngw < 1) return -1;
+    if (ngw > 64) ngw = 64;
+
+    /* Resolve each gateway IP to its chip next-hop (programmed by l3_host_add
+     * when the kernel ARP'd it). Skip unresolved ones. */
+    for (int i = 0; i < ngw; i++) {
+        int nh = l3_neigh_nh_lookup(gw_host[i]);
+        if (nh < 0) {
+            syslog(LOG_WARNING,
+                   "route %u.%u.%u.%u/%d: gw %u.%u.%u.%u has no chip next-hop "
+                   "(not ARP-resolved yet?) — skipping this path",
+                   (dst_host>>24)&0xff,(dst_host>>16)&0xff,(dst_host>>8)&0xff,dst_host&0xff,
+                   prefix_len,
+                   (gw_host[i]>>24)&0xff,(gw_host[i]>>16)&0xff,
+                   (gw_host[i]>>8)&0xff,gw_host[i]&0xff);
+            continue;
+        }
+        nh_idx[n++] = nh;
+    }
+    if (n == 0) {
+        syslog(LOG_WARNING, "route %u.%u.%u.%u/%d: no resolved next-hops, not programmed",
+               (dst_host>>24)&0xff,(dst_host>>16)&0xff,(dst_host>>8)&0xff,dst_host&0xff,
+               prefix_len);
+        return -1;
+    }
+
+    uint32_t mask = (prefix_len == 0) ? 0 :
+                    (prefix_len >= 32) ? 0xffffffffu :
+                    (0xffffffffu << (32 - prefix_len));
+
+    int slot = defip_transit_slot++;
+    L3_DEFIPm_t d;
+    L3_DEFIPm_CLR(d);
+    L3_DEFIPm_VALID0f_SET(d, 1);
+    L3_DEFIPm_MODE0f_SET(d, 0);
+    L3_DEFIPm_MODE_MASK0f_SET(d, 1);
+    L3_DEFIPm_IP_ADDR0f_SET(d, dst_host & mask);
+    L3_DEFIPm_IP_ADDR_MASK0f_SET(d, mask);
+    L3_DEFIPm_VRF_ID_0f_SET(d, 0);
+    L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0x3ff);
+
+    if (n == 1) {
+        L3_DEFIPm_ECMP0f_SET(d, 0);
+        L3_DEFIPm_NEXT_HOP_INDEX0f_SET(d, nh_idx[0]);
+        rv = WRITE_L3_DEFIPm(edged.unit, slot, d);
+        syslog(LOG_INFO,
+               "route L3_DEFIP[%d] %u.%u.%u.%u/%d -> nh_idx=%d wr=%d",
+               slot,(dst_host>>24)&0xff,(dst_host>>16)&0xff,(dst_host>>8)&0xff,
+               dst_host&0xff,prefix_len,nh_idx[0],rv);
+    } else {
+        int grp = l3_ecmp_group_create(nh_idx, n);
+        if (grp < 0) return -1;
+        L3_DEFIPm_ECMP0f_SET(d, 1);
+        L3_DEFIPm_ECMP_PTR0f_SET(d, grp);
+        rv = WRITE_L3_DEFIPm(edged.unit, slot, d);
+        syslog(LOG_INFO,
+               "route L3_DEFIP[%d] %u.%u.%u.%u/%d -> ECMP grp=%d (%d paths) wr=%d",
+               slot,(dst_host>>24)&0xff,(dst_host>>16)&0xff,(dst_host>>8)&0xff,
+               dst_host&0xff,prefix_len,grp,n,rv);
+    }
+    return rv < 0 ? -1 : 0;
 }

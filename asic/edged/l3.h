@@ -43,4 +43,13 @@ int l3_local_host_add(uint32_t ipv4_addr, int logical_port);
  */
 int l3_ecmp_group_create(const int *intf_ids, int count);
 
+/*
+ * Program a transit IPv4 prefix into L3_DEFIP with one or more next-hops.
+ * dst_host and gw_host[] are host byte order (MSB = first octet). ngw>1 builds
+ * an ECMP group so the chip load-balances flows across the gateways' swp ports.
+ * Each gateway must already be ARP-resolved (l3_host_add ran on it).
+ */
+int l3_route_add_paths(uint32_t dst_host, int prefix_len,
+                       const uint32_t *gw_host, int ngw);
+
 #endif /* __L3_H__ */
