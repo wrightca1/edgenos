@@ -820,10 +820,15 @@ static int pcs_block_lock_get(int unit, int port)
  * across 4 lanes (MLD) and the receiver must AM-lock each lane and deskew them
  * before the link is usable, so QSFP ports need this CL82 aggregate check.
  *
- *   CL82_RX_STATUS_3.AM_LOCK_STATE (bits 10:13) = per-lane AM lock; 0xF = all 4.
- *   CL82_RX_STATUS_2.DESKEW_STATE  (bit 14)     = 1 when the 4 lanes are deskewed.
- * AM-lock implies per-lane 64b/66b block_lock, so these two together are the
- * full link indicator (== IEEE 802.3 Clause 82 align_status).
+ *   CL82_RX_STATUS_3.AM_LOCK_STATE (bits 13:10) = the AM-lock STATE MACHINE value
+ *       (NOT a per-lane bitmap!). CORRECTION (2026-06-07): the aligned/locked
+ *       value is 0x6, NOT 0xf. Verified against the WORKING Cumulus 2.5.0 4/4
+ *       loopback, whose CL82_RX_STATUS_3 reads 0x99c0 -> AM_LOCK_STATE=0x6 (and
+ *       RX_STATUS_2=0x4384 deskew=1, RX_STATUS_4=0x020f). EdgeNOS reaches the
+ *       identical RX_STATUS_2/3/4 once deskew engages, so the old `==0xf` check
+ *       falsely reported a fully-locked port as DOWN.
+ *   CL82_RX_STATUS_2.DESKEW_STATE  (bit 14)     = 1 when the 4 lanes are deskewed
+ *       = IEEE 802.3 Clause 82 align_status = link up.
  *
  * The SDK register accessors (READ_CL82_RX_STATUS_*r) handle the Warpcore AER
  * lane-select + indirect-block addressing internally via the port's phy_ctrl.
@@ -838,14 +843,16 @@ static int cl82_link_get(int unit, int port, int *am_lock_out, int *deskew_out)
     if (pc &&
         READ_CL82_RX_STATUS_3r(pc, &rx3) >= 0 &&
         READ_CL82_RX_STATUS_2r(pc, &rx2) >= 0) {
-        am_lock = CL82_RX_STATUS_3r_AM_LOCK_STATEf_GET(rx3);  /* 4 bits, one per lane */
+        am_lock = CL82_RX_STATUS_3r_AM_LOCK_STATEf_GET(rx3);  /* state m/c; 0x6=locked */
         deskew  = CL82_RX_STATUS_2r_DESKEW_STATEf_GET(rx2);   /* 1 = deskew done */
     }
 
     if (am_lock_out) *am_lock_out = am_lock;
     if (deskew_out)  *deskew_out = deskew;
 
-    return (am_lock == 0xf) && deskew;
+    /* Link up = deskew complete (align_status) AND AM-lock state machine at the
+     * locked value (0x6, per Cumulus 4/4; accept 0xf too for safety). */
+    return deskew && (am_lock == 0x6 || am_lock == 0xf);
 }
 
 /*
@@ -1011,8 +1018,8 @@ int portmap_link_poll(void)
          * AM-locked, once its peer's TX has had time to come live. Engages
          * deskew (which never fires from the boot-order init) and re-adapts. */
         if (edged.ports[i].port_type == PORT_TYPE_QSFP) {
-            if (cl82_am == 0xf) {
-                qsfp_unlocked_since[i] = 0;   /* fully locked: clear timer */
+            if (pcs_link) {   /* aligned/locked (deskew + am_lock 0x6) */
+                qsfp_unlocked_since[i] = 0;   /* locked: clear timer */
                 qsfp_retry_count[i] = 0;
             } else {
                 time_t now = time(NULL);
