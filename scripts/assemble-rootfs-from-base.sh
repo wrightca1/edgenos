@@ -18,7 +18,9 @@ R=/tmp/rootfs-assembly
 
 rm -rf "$R"
 echo "==> unsquashing base..."
-unsquashfs -q -d "$R" "$BASE" >/dev/null   # unsquashfs creates $R itself
+# -no-xattrs: the build fs can't store selinux xattrs; without this unsquashfs
+# prints a warning AND returns exit 2, which `set -e` would treat as fatal.
+unsquashfs -q -no-xattrs -d "$R" "$BASE" >/dev/null   # unsquashfs creates $R itself
 
 echo "==> removing stale switchd..."
 rm -f "$R/usr/sbin/switchd"
