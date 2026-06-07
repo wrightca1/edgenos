@@ -41,11 +41,15 @@
 struct edged_state edged;
 static volatile int running = 1;
 
+static volatile int rx_diag_req = 0;
+
 static void signal_handler(int sig)
 {
     if (sig == SIGTERM || sig == SIGINT) {
         syslog(LOG_INFO, "Received signal %d, shutting down", sig);
         running = 0;
+    } else if (sig == SIGUSR1) {
+        rx_diag_req = 1;  /* serviced in main loop (chip reads not signal-safe) */
     }
 }
 
@@ -294,6 +298,7 @@ int main(int argc, char **argv)
     /* Signal handling */
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
+    signal(SIGUSR1, signal_handler);  /* RX-path drop-counter dump */
     signal(SIGPIPE, SIG_IGN);
 
     /* Initialize state */
@@ -367,6 +372,11 @@ int main(int argc, char **argv)
     while (running) {
         packet_io_rx_poll();
         netlink_poll();
+
+        if (rx_diag_req) {
+            rx_diag_req = 0;
+            datapath_rx_diag();
+        }
 
         /* Link poll every ~30ms (300 iterations at 100us) */
         if (++poll_count >= 300) {

@@ -209,7 +209,7 @@
 				reg = <0x75>;
 				#address-cells = <1>;
 				#size-cells = <0>;
-				deselect-on-exit;
+				i2c-mux-idle-disconnect;
 
 				/* ch0 → PCA9548 → ports 1-8 */
 				i2c@0 {
@@ -382,7 +382,7 @@
 				reg = <0x76>;
 				#address-cells = <1>;
 				#size-cells = <0>;
-				deselect-on-exit;
+				i2c-mux-idle-disconnect;
 
 				/* ch0 → PCA9548 → ports 33-40 */
 				i2c@0 {
@@ -526,7 +526,7 @@
 				reg = <0x77>;
 				#address-cells = <1>;
 				#size-cells = <0>;
-				deselect-on-exit;
+				i2c-mux-idle-disconnect;
 
 				/* ch0: QSFP port 49 */
 				i2c@0 {
@@ -534,7 +534,7 @@
 					#size-cells = <0>;
 					reg = <0>;
 					eeprom@50 {
-						compatible = "sff,sff8436";
+						compatible = "atmel,24c02";
 						reg = <0x50>;
 					};
 					retimer@27 {
@@ -550,7 +550,7 @@
 					#size-cells = <0>;
 					reg = <1>;
 					eeprom@50 {
-						compatible = "sff,sff8436";
+						compatible = "atmel,24c02";
 						reg = <0x50>;
 					};
 					retimer@27 {
@@ -566,7 +566,7 @@
 					#size-cells = <0>;
 					reg = <2>;
 					eeprom@50 {
-						compatible = "sff,sff8436";
+						compatible = "atmel,24c02";
 						reg = <0x50>;
 					};
 					retimer@27 {
@@ -582,7 +582,7 @@
 					#size-cells = <0>;
 					reg = <3>;
 					eeprom@50 {
-						compatible = "sff,sff8436";
+						compatible = "atmel,24c02";
 						reg = <0x50>;
 					};
 					retimer@27 {

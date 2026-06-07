@@ -10,9 +10,8 @@
 #   2. linux-user-bde             - userspace BDE interface
 #   3. tun                        - TUN/TAP for packet I/O (52 ports)
 #   4. accton_as5610_52x_cpld     - CPLD (LEDs, PSU, fan, watchdog)
-#   5. at24                       - EEPROM (board + 48 SFP + 4 QSFP)
-#   6. sff_8436_eeprom            - QSFP EEPROM pages
-#   7. gpio-pca953x               - GPIO expanders (SFP/QSFP control)
+#   5. at24                       - EEPROM (board + 48 SFP + 4 QSFP, all via at24)
+#   6. gpio-pca953x               - GPIO expanders (SFP/QSFP control)
 #   8. max6697                    - Temperature sensor (7-channel)
 #   9. adm1021                    - Temperature sensor (2-channel)
 #  10. ds100df410                 - Retimer/equalizer (32 devices)
@@ -59,8 +58,9 @@ load_mod tun
 load_mod accton_as5610_52x_cpld
 
 # I2C devices
+# QSFP EEPROMs are declared "atmel,24c02" in the DTS so the at24 driver binds
+# them (the old "sff,sff8436" had no driver in this 5.10 kernel and never bound).
 load_mod at24
-load_mod sff_8436_eeprom
 
 # GPIO expanders (PCA9506 40-bit + PCA9538 8-bit)
 load_mod gpio-pca953x
@@ -87,31 +87,57 @@ export_gpio() {
     [ -n "$val" ] && echo "$val" > "${GPIO_SYS}/gpio${gpio}/value" 2>/dev/null || true
 }
 
-# QSFP control via PCA9538 GPIO expanders
-# Find the actual gpiochip base numbers (vary by kernel version)
+# ── QSFP RESET_L + MODSEL_L: bring modules 49-52 out of reset and select them ──
+# VERIFIED on hardware 2026-06-03: this is what makes the QSFP optic EEPROMs at
+# 0x50 ACK (all 4 read id=0x0D, CISCO-AVAGO AFBR-79EBPZ-CS2 40G-SR4, distinct SNs).
+#
+# Expander PCA9538 0x71 (mux 0x76 ch2 / bus 64) carries RESET_L[3:0] on pins 0-3
+# and MODSEL_L[3:0] on pins 4-7 (matches Cumulus S10gpio_init: rst_l + modsel_l on
+# the same chip). Set the whole port to output (config=0x00) with value 0x0F:
+#   pins 0-3 = 1  -> RESET_L deasserted (modules out of reset)
+#   pins 4-7 = 0  -> MODSEL_L asserted  (modules selected for the 2-wire mgmt bus)
+# Expander 0x70 pins 0-3 = LPMODE[3:0]; drive 0 for high power (needed for 40G).
+#
+# NOTE: this REQUIRES the muxes to have i2c-mux-idle-disconnect (see the .dts).
+# Without it, driving 0x71 pins 4-7 corrupted the SFP I2C path; with idle-disconnect
+# the mux channels are isolated and driving the full 0x71 port is safe (SFP reads
+# stay clean). GPIO_PCA953X is built-in and owns 0x70/0x71, so we drive them through
+# the gpio sysfs (raw i2cset would fight the kernel driver).
 for chip in /sys/class/gpio/gpiochip*; do
     label=$(cat "$chip/label" 2>/dev/null)
     base=$(cat "$chip/base" 2>/dev/null)
     case "$label" in
-        64-007[0-3])
-            # PCA9538 QSFP GPIO: pin0=RESET_N pin1=LPMODE pin2=MODSEL_N
-            export_gpio $base out 1           # RESET_N = 1 (deassert)
-            export_gpio $((base+1)) out 0     # LPMODE = 0 (high power)
-            export_gpio $((base+2)) out 0     # MODSEL_N = 0 (selected)
-            log "QSFP GPIO: chip=$label base=$base"
+        64-0071)
+            export_gpio $((base+0)) out 1    # RESET_L[0] high (swp49 out of reset)
+            export_gpio $((base+1)) out 1    # RESET_L[1] (swp50)
+            export_gpio $((base+2)) out 1    # RESET_L[2] (swp51)
+            export_gpio $((base+3)) out 1    # RESET_L[3] (swp52)
+            export_gpio $((base+4)) out 0    # MODSEL_L[0] low (swp49 selected)
+            export_gpio $((base+5)) out 0    # MODSEL_L[1] (swp50)
+            export_gpio $((base+6)) out 0    # MODSEL_L[2] (swp51)
+            export_gpio $((base+7)) out 0    # MODSEL_L[3] (swp52)
+            log "QSFP RESET_L deasserted + MODSEL_L selected (0x71=0x0F): base=$base"
+            ;;
+        64-0070)
+            export_gpio $((base+0)) out 0    # LPMODE[0] low = high power (swp49)
+            export_gpio $((base+1)) out 0    # LPMODE[1] (swp50)
+            export_gpio $((base+2)) out 0    # LPMODE[2] (swp51)
+            export_gpio $((base+3)) out 0    # LPMODE[3] (swp52)
+            log "QSFP LPMODE set to high power (0x70 pins0-3=0): base=$base"
             ;;
     esac
 done
 
-# SFP TX_DISABLE via PCA9506 GPIO expanders
-# EdgeNOS bus 64 = mux 0x76 ch2 (Cumulus was bus 16)
-# EdgeNOS bus 65 = mux 0x76 ch3 (Cumulus was bus 17)
-# PCA9506: direction reg 0x18+, output reg 0x08+
-# Set all outputs to 0 (TX_DISABLE = low = TX enabled)
+# SFP TX_DISABLE via PCA9506 GPIO expanders (0x20/0x21/0x22/0x24 ONLY).
+# EdgeNOS bus 64 = mux 0x76 ch2, bus 65 = mux 0x76 ch3. PCA9506: cfg reg 0x18+, out 0x08+.
+# Set all outputs to 0 (TX_DISABLE = low = TX enabled).
+# IMPORTANT: 0x23 is the QSFP control expander (NOT SFP TX) — do NOT zero it here.
+# OpenNetworkLinux's init_equalizer leaves 0x23 outputs at their default HIGH; zeroing
+# them holds the QSFP modules' control lines low (RESET/MODSEL asserted) so the optic
+# EEPROM at 0x50 never ACKs. Handle 0x23 separately below.
 for bus in 64 65; do
-    for addr in 0x20 0x21 0x22 0x23 0x24; do
+    for addr in 0x20 0x21 0x22 0x24; do
         if i2cget -y $bus $addr 0 b >/dev/null 2>&1; then
-            # Set all 5 ports to output, all bits low
             for port in 0x18 0x19 0x1a 0x1b 0x1c; do
                 i2cset -y $bus $addr $port 0x00 b 2>/dev/null
             done
@@ -121,7 +147,28 @@ for bus in 64 65; do
         fi
     done
 done
-log "SFP TX_DISABLE cleared (buses 64-65)"
+log "SFP TX_DISABLE cleared (0x20/0x21/0x22/0x24 on buses 64-65)"
+
+# QSFP control expander 0x23 (PCA9506 on bus 65 = mux 0x76 ch3).
+# Per ONL init_equalizer: config ports 0 & 4 = output; drive outputs HIGH to
+# deassert the QSFP control lines (RESET_L high / not held). Presence is input
+# port 2 (reg 0x02). Mirrors ONL leaving 0x23 outputs at default 0xFF.
+if i2cget -y 65 0x23 0 b >/dev/null 2>&1; then
+    i2cset -y 65 0x23 0x18 0x00 b 2>/dev/null   # cfg port0 = output
+    i2cset -y 65 0x23 0x1c 0x00 b 2>/dev/null   # cfg port4 = output
+    i2cset -y 65 0x23 0x08 0xff b 2>/dev/null   # out port0 = high (deassert)
+    i2cset -y 65 0x23 0x0c 0xff b 2>/dev/null   # out port4 = high (deassert)
+    log "QSFP control 0x23 outputs deasserted (high)"
+fi
+
+# Now that QSFP MODSEL (0x71) + control (0x23) are set, (re)bind at24 to the QSFP
+# EEPROMs. at24 was modprobed in Phase 1 BEFORE these GPIOs, so its initial probe of
+# the QSFP 0x50 clients failed (modules not yet selected/deasserted) and won't retry
+# on its own — bind them explicitly here.
+for b in 66 67 68 69; do
+    echo "$b-0050" > /sys/bus/i2c/drivers/at24/bind 2>/dev/null || true
+done
+log "QSFP EEPROM at24 (re)bind attempted (buses 66-69)"
 
 log "GPIO initialization complete"
 

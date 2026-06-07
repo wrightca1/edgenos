@@ -1,0 +1,262 @@
+_phy_wc40_c73_adv_local_get: u=0 p=1 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=1 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=1 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=1 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=2 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=2 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=2 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=2 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=3 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=3 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=3 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=3 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=4 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=4 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=4 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=4 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=5 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=5 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=5 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=5 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=6 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=6 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=6 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=6 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=7 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=7 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=7 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=7 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=8 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=8 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=8 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=8 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=9 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=9 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=9 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=9 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=10 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=10 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=10 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=10 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=11 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=11 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=11 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=11 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=12 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=12 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=12 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=12 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=13 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=13 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=13 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=13 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=14 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=14 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=14 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=14 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=15 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=15 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=15 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=15 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=16 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=16 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=16 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=16 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=17 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=17 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=17 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=17 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=18 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=18 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=18 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=18 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=19 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=19 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=19 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=19 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=20 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=20 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=20 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=20 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=21 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=21 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=21 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=21 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=22 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=22 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=22 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=22 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=23 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=23 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=23 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=23 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=24 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=24 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=24 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=24 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=25 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=25 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=25 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=25 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=26 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=26 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=26 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=26 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=27 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=27 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=27 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=27 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=28 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=28 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=28 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=28 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=29 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=29 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=29 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=29 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=30 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=30 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=30 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=30 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=31 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=31 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=31 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=31 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=32 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=32 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=32 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=32 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=33 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=33 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=33 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=33 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=34 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=34 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=34 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=34 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=35 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=35 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=35 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=35 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=36 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=36 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=36 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=36 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=37 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=37 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=37 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=37 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=38 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=38 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=38 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=38 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=39 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=39 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=39 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=39 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=40 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=40 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=40 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=40 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=41 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=41 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=41 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=41 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=42 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=42 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=42 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=42 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=43 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=43 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=43 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=43 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=44 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=44 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=44 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=44 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=45 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=45 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=45 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=45 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=46 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=46 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=46 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=46 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=47 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=47 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=47 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=47 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=48 pause=00000003 speeds=0840
+phy_wc40_ability_advert_get:unit=0 p=48 pause=00000003 sp=000008c0
+phy_wc40_ability_local_get:unit=0 p=48 sp=000018e0
+phy_wc40_ability_local_get:unit=0 p=48 sp=000018e0
+_phy_wc40_c73_adv_local_get: u=0 p=49 pause=00000003 speeds=1000840
+phy_wc40_ability_advert_get:unit=0 p=49 pause=00000003 sp=01cfa8c0
+phy_wc40_ability_local_get:unit=0 p=49 sp=03cfa8e0
+phy_wc40_ability_local_get:unit=0 p=49 sp=03cfa8e0
+_phy_wc40_c73_adv_local_get: u=0 p=50 pause=00000003 speeds=1000840
+phy_wc40_ability_advert_get:unit=0 p=50 pause=00000003 sp=01cfa8c0
+phy_wc40_ability_local_get:unit=0 p=50 sp=03cfa8e0
+phy_wc40_ability_local_get:unit=0 p=50 sp=03cfa8e0
+_phy_wc40_c73_adv_local_get: u=0 p=51 pause=00000003 speeds=1000840
+phy_wc40_ability_advert_get:unit=0 p=51 pause=00000003 sp=01cfa8c0
+phy_wc40_ability_local_get:unit=0 p=51 sp=03cfa8e0
+phy_wc40_ability_local_get:unit=0 p=51 sp=03cfa8e0
+_phy_wc40_c73_adv_local_get: u=0 p=52 pause=00000003 speeds=1000840
+phy_wc40_ability_advert_get:unit=0 p=52 pause=00000003 sp=01cfa8c0
+phy_wc40_ability_local_get:unit=0 p=52 sp=03cfa8e0
+phy_wc40_ability_local_get:unit=0 p=52 sp=03cfa8e0
+            ena/    speed/ link auto    STP                  lrn  inter   max  loop
+      port  link    duplex scan neg?   state   pause  discrd ops   face frame  back
+       xe0  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+       xe1  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+       xe2  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+       xe3  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+       xe4  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+       xe5  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+       xe6  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+       xe7  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+       xe8  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+       xe9  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe10  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe11  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe12  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe13  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe14  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe15  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe16  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe17  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe18  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe19  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe20  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe21  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe22  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe23  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe24  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe25  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe26  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe27  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe28  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe29  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe30  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe31  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe32  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe33  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe34  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe35  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe36  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe37  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe38  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe39  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe40  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe41  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe42  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe43  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe44  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe45  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe46  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe47  !ena   10G  FD   SW  No   Disable          None    F    XFI  1518 
+      xe48  up     40G  FD   SW  No   Forward          None    F    KR4  1518 
+      xe49  up     40G  FD   SW  No   Forward          None    F    KR4  1518 
+      xe50  !ena   40G  FD   SW  No   Disable          None    F    KR4  1518 
+      xe51  !ena   40G  FD   SW  No   Disable          None    F    KR4  1518 

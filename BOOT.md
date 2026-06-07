@@ -301,6 +301,11 @@ ssh-copy-id root@<switch-ip>
 
 ## Build
 
+> For the **current build process** (rootless Docker, per-target builds, the
+> Fast-path re-squash for DTS/overlay-only changes, and the rootless gotchas),
+> see [`docs/BUILD.md`](docs/BUILD.md). The one-liner below is the original
+> system-docker full build, kept for reference.
+
 ```bash
 # Full build (kernel + initramfs + Debian rootfs + FIT + installer)
 docker run --rm --privileged --network=host \

@@ -28,6 +28,10 @@
 /* PHY headers - for direct PHY_CONFIG_SET access */
 #include <phy/phy.h>
 
+/* Warpcore register defs - for CL82 (40G MLD) RX status registers used by
+ * the QSFP 4-lane link detection (cl82_link_get). */
+#include <phy/chip/bcmi_warpcore_xgxs_defs.h>
+
 /* Port-to-SerDes lane mapping for AS5610-52X
  * Index = front-panel port (0-based), value = SerDes lane
  */
@@ -209,6 +213,41 @@ int portmap_configure_ports(void)
          */
         bmd_port_mode_set(edged.unit, port, bmdPortModeDisabled, 0);
 
+        /*
+         * Apply the Warpcore RX lane remap BEFORE the enabling mode_set, so the
+         * subsequent reset + RX adaptation runs WITH the swap in place. This
+         * mirrors board_bcm56846_svk.c's _phy_reset_cb (which applies it during
+         * phy reset). Applying it AFTER adaptation (tried earlier) just disturbs
+         * the RX (the handler re-selects the div/16 clock) and leaves it
+         * non-adapting. File-driven via /tmp/qsfp_rxremap:
+         *   "ref"  -> reference per-port (port 45 = 0x3210, others = 0x1032)
+         *   <hex>  -> that value for all QSFP ports
+         *   absent -> no remap (baseline)
+         */
+        if (edged.ports[i].port_type == PORT_TYPE_QSFP) {
+            FILE *rf = fopen("/tmp/qsfp_rxremap", "r");
+            if (rf) {
+                char buf[32] = {0};
+                if (fgets(buf, sizeof(buf), rf)) {
+                    phy_ctrl_t *pcr = BMD_PORT_PHY_CTRL(edged.unit, port);
+                    unsigned int rmap = 0;
+                    int apply = 1;
+                    if (buf[0] == 'r')                 /* "ref" */
+                        rmap = (port == 45) ? 0x3210 : 0x1032;
+                    else if (sscanf(buf, "%x", &rmap) != 1)
+                        apply = 0;
+                    if (apply && pcr) {
+                        int rrv = PHY_CONFIG_SET(pcr, PhyConfig_XauiRxLaneRemap,
+                                                 rmap, NULL);
+                        syslog(LOG_INFO,
+                               "Port %s: XauiRxLaneRemap=0x%04x rv=%d (pre-enable)",
+                               edged.ports[i].ifname, rmap, rrv);
+                    }
+                }
+                fclose(rf);
+            }
+        }
+
         rv = bmd_port_mode_set(edged.unit, port, mode, flags);
         if (rv < 0) {
             syslog(LOG_ERR, "Port %s: bmd_port_mode_set(%d, %dG) failed: %d",
@@ -226,7 +265,17 @@ int portmap_configure_ports(void)
          * speed_set (line 1589-1594 of xgxs_drv.c) should release
          * the reset, but the write doesn't persist — possibly because
          * the Disable call's MISC6r state overrides the Enable's write.
+         *
+         * QSFP/40G NOTE: this fixup is 10G-XFI-specific -- it forces
+         * IND_40BITIF (40-bit single-lane interface), releases TX/RX reset on
+         * lane 0 ONLY, and restarts the PLL with the 10G value 0x242f.  For a
+         * 40G CL82 4-lane QSFP port that is WRONG: it clobbers the 4-lane SR4
+         * config that bcmi_warpcore_xgxs_speed_set() just applied and leaves
+         * the SerDes TX invalid (the optic then squelches its laser -> RX_LOS,
+         * no link).  So apply it only to single-lane SFP+ ports; for QSFP let
+         * the speed_set 40G/SR4 configuration stand.
          */
+        if (edged.ports[i].port_type != PORT_TYPE_QSFP)
         {
             phy_ctrl_t *pc_fix = BMD_PORT_PHY_CTRL(edged.unit, port);
             if (pc_fix) {
@@ -298,6 +347,110 @@ int portmap_configure_ports(void)
 
                 syslog(LOG_INFO, "Port %s: forced reset_rx=0 IND_40BITIF=1 seq_restart",
                        edged.ports[i].ifname);
+            }
+        }
+        else
+        {
+            /*
+             * 40G QSFP: the SR4 speed_set already configured the 4-lane port,
+             * but (like the SFP case) the per-lane TX/RX ASIC reset release in
+             * MISC6r doesn't reliably persist -- observed as only 2 of 4 lanes
+             * reaching CL82 AM-lock.  Release RESET_RX_ASIC/RESET_TX_ASIC on
+             * ALL FOUR lanes (AER 0-3) so every lane's RX can lock.  Do NOT set
+             * IND_40BITIF or rewrite the PLL value here -- those are 10G-XFI
+             * settings and would break the 4-lane SR4 config.
+             */
+            phy_ctrl_t *pc_q = BMD_PORT_PHY_CTRL(edged.unit, port);
+            if (pc_q) {
+                int qlane;
+                /* (RX lane remap now applied pre-enable, above — see the
+                 * /tmp/qsfp_rxremap block before bmd_port_mode_set.) */
+                /*
+                 * EXPERIMENT (file-driven): force per-lane RX/TX polarity flip
+                 * on QSFP lanes from /tmp/qsfp_polflip (hex mask: bits 0-3 =
+                 * RX polarity flip per lane, bits 4-7 = TX polarity flip per
+                 * lane).  Applied BEFORE the reset release below so RX comes
+                 * out of reset with the forced polarity.  Diagnoses the
+                 * deterministic lanes-2,3 AM-lock failure on the 40G loopback.
+                 * Sweep combos by editing the file + restarting edged.
+                 */
+                {
+                    FILE *pf = fopen("/tmp/qsfp_polflip", "r");
+                    unsigned int mask = 0;
+                    if (pf) { if (fscanf(pf, "%x", &mask) != 1) mask = 0; fclose(pf); }
+                    if (mask) {
+                        int idx;
+                        for (idx = 0; idx < 4; idx++) {
+                            ANARXCONTROLPCIr_t rxc;
+                            ANATXACONTROL0r_t txc;
+                            if ((mask & (1u << idx)) &&
+                                READ_ANARXCONTROLPCIr(pc_q, idx, &rxc) >= 0) {
+                                ANARXCONTROLPCIr_RX_POLARITY_Rf_SET(rxc, 1);
+                                ANARXCONTROLPCIr_RX_POLARITY_FORCE_SMf_SET(rxc, 1);
+                                WRITE_ANARXCONTROLPCIr(pc_q, idx, rxc);
+                            }
+                            if ((mask & (1u << (idx + 4))) &&
+                                READ_ANATXACONTROL0r(pc_q, idx, &txc) >= 0) {
+                                ANATXACONTROL0r_TXPOL_FLIPf_SET(txc, 1);
+                                WRITE_ANATXACONTROL0r(pc_q, idx, txc);
+                            }
+                        }
+                        syslog(LOG_INFO, "Port %s: QSFP polflip mask=0x%x applied",
+                               edged.ports[i].ifname, mask);
+                    }
+                }
+                for (qlane = 0; qlane < 4; qlane++) {
+                    uint32_t m6 = 0;
+                    PHY_BUS_WRITE(pc_q, 0x1f, 0xffd0);   /* AER */
+                    PHY_BUS_WRITE(pc_q, 0x1e, qlane);
+                    PHY_BUS_WRITE(pc_q, 0x1f, 0x8340);   /* MISC6r block */
+                    PHY_BUS_READ(pc_q, 0x15, &m6);
+                    m6 &= ~((1 << 15) | (1 << 14));      /* clear RESET_RX/TX_ASIC */
+                    PHY_BUS_WRITE(pc_q, 0x15, m6);
+                }
+                PHY_BUS_WRITE(pc_q, 0x1f, 0x0000);
+                syslog(LOG_INFO, "Port %s: 40G 4-lane TX/RX ASIC reset released",
+                       edged.ports[i].ifname);
+
+                /*
+                 * Per-lane RX-EQ diagnostic (read-only).  Dump each lane's
+                 * adapted VGA gain + TAP1 DFE alongside the CL82 per-lane
+                 * AM-lock bitmap, so we can see WHY only some lanes lock:
+                 * a lane whose VGA is railed (0 or max) or whose DFE never
+                 * settles indicates weak/absent signal or lane skew, vs a
+                 * locked lane whose VGA/DFE sit mid-range.  RX0-3 are the
+                 * four per-lane analog-status copies; no AER juggling needed.
+                 */
+                {
+                    RX0_ANARXASTATUSr_t e0; RX1_ANARXASTATUSr_t e1;
+                    RX2_ANARXASTATUSr_t e2; RX3_ANARXASTATUSr_t e3;
+                    CL82_RX_STATUS_3r_t s3;
+                    uint32_t aml = 0;
+                    int vga[4] = {-1,-1,-1,-1}, dfe[4] = {-1,-1,-1,-1};
+                    usleep(200000);  /* allow RX EQ to adapt before sampling */
+                    if (READ_CL82_RX_STATUS_3r(pc_q, &s3) >= 0)
+                        aml = CL82_RX_STATUS_3r_AM_LOCK_STATEf_GET(s3);
+                    if (READ_RX0_ANARXASTATUSr(pc_q, &e0) >= 0) {
+                        vga[0] = RX0_ANARXASTATUSr_VGAf_GET(e0);
+                        dfe[0] = RX0_ANARXASTATUSr_TAP1_DFE_GRAYf_GET(e0);
+                    }
+                    if (READ_RX1_ANARXASTATUSr(pc_q, &e1) >= 0) {
+                        vga[1] = RX1_ANARXASTATUSr_VGAf_GET(e1);
+                        dfe[1] = RX1_ANARXASTATUSr_TAP1_DFE_GRAYf_GET(e1);
+                    }
+                    if (READ_RX2_ANARXASTATUSr(pc_q, &e2) >= 0) {
+                        vga[2] = RX2_ANARXASTATUSr_VGAf_GET(e2);
+                        dfe[2] = RX2_ANARXASTATUSr_TAP1_DFE_GRAYf_GET(e2);
+                    }
+                    if (READ_RX3_ANARXASTATUSr(pc_q, &e3) >= 0) {
+                        vga[3] = RX3_ANARXASTATUSr_VGAf_GET(e3);
+                        dfe[3] = RX3_ANARXASTATUSr_TAP1_DFE_GRAYf_GET(e3);
+                    }
+                    syslog(LOG_INFO,
+                        "Port %s: 40G EQ am_lock=0x%x L0[vga=%d dfe=%d] L1[vga=%d dfe=%d] L2[vga=%d dfe=%d] L3[vga=%d dfe=%d]",
+                        edged.ports[i].ifname, (unsigned)aml,
+                        vga[0],dfe[0], vga[1],dfe[1], vga[2],dfe[2], vga[3],dfe[3]);
+                }
             }
         }
 
@@ -641,6 +794,157 @@ static int pcs_block_lock_get(int unit, int port)
     return (val >> 15) & 1;
 }
 
+/*
+ * Read 40G CL82 (MLD/BAM) link status for a QSFP port.  Returns 1 only when
+ * the full 4-lane PCS is up: alignment-marker lock on ALL 4 lanes AND the
+ * lanes are deskewed/aligned.
+ *
+ * The CL49 single-lane block_lock check (pcs_block_lock_get) is for 10G SFP+
+ * and only reflects lane 0 — it gives a false "up" for a 40G port whose other
+ * 3 lanes or alignment haven't come up.  40GBASE-R4 distributes the stream
+ * across 4 lanes (MLD) and the receiver must AM-lock each lane and deskew them
+ * before the link is usable, so QSFP ports need this CL82 aggregate check.
+ *
+ *   CL82_RX_STATUS_3.AM_LOCK_STATE (bits 10:13) = per-lane AM lock; 0xF = all 4.
+ *   CL82_RX_STATUS_2.DESKEW_STATE  (bit 14)     = 1 when the 4 lanes are deskewed.
+ * AM-lock implies per-lane 64b/66b block_lock, so these two together are the
+ * full link indicator (== IEEE 802.3 Clause 82 align_status).
+ *
+ * The SDK register accessors (READ_CL82_RX_STATUS_*r) handle the Warpcore AER
+ * lane-select + indirect-block addressing internally via the port's phy_ctrl.
+ */
+static int cl82_link_get(int unit, int port, int *am_lock_out, int *deskew_out)
+{
+    phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(unit, port);
+    CL82_RX_STATUS_2r_t rx2;
+    CL82_RX_STATUS_3r_t rx3;
+    int am_lock = 0, deskew = 0;
+
+    if (pc &&
+        READ_CL82_RX_STATUS_3r(pc, &rx3) >= 0 &&
+        READ_CL82_RX_STATUS_2r(pc, &rx2) >= 0) {
+        am_lock = CL82_RX_STATUS_3r_AM_LOCK_STATEf_GET(rx3);  /* 4 bits, one per lane */
+        deskew  = CL82_RX_STATUS_2r_DESKEW_STATEf_GET(rx2);   /* 1 = deskew done */
+    }
+
+    if (am_lock_out) *am_lock_out = am_lock;
+    if (deskew_out)  *deskew_out = deskew;
+
+    return (am_lock == 0xf) && deskew;
+}
+
+/*
+ * Per-lane RX-EQ dump for a 40G QSFP port (read-only).  Logs the CL82
+ * per-lane AM-lock bitmap + deskew alongside each lane's adapted VGA gain
+ * and TAP1 DFE.  Shared by the one-shot config-time diagnostic and the
+ * throttled steady-state dump in portmap_link_poll() — the steady-state
+ * read is the trustworthy one (the config-time snapshot samples a port
+ * 200ms after IT is configured, before a later-configured loopback partner's
+ * TX is up, so the earlier port falsely reads dark).
+ */
+static void qsfp_eq_dump(int unit, int port, const char *ifname)
+{
+    phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(unit, port);
+    RX0_ANARXASTATUSr_t e0; RX1_ANARXASTATUSr_t e1;
+    RX2_ANARXASTATUSr_t e2; RX3_ANARXASTATUSr_t e3;
+    CL82_RX_STATUS_2r_t s2; CL82_RX_STATUS_3r_t s3;
+    uint32_t aml = 0, dsk = 0;
+    int vga[4] = {-1,-1,-1,-1}, dfe[4] = {-1,-1,-1,-1};
+    if (!pc) return;
+    if (READ_CL82_RX_STATUS_3r(pc, &s3) >= 0)
+        aml = CL82_RX_STATUS_3r_AM_LOCK_STATEf_GET(s3);
+    if (READ_CL82_RX_STATUS_2r(pc, &s2) >= 0)
+        dsk = CL82_RX_STATUS_2r_DESKEW_STATEf_GET(s2);
+    if (READ_RX0_ANARXASTATUSr(pc, &e0) >= 0) {
+        vga[0] = RX0_ANARXASTATUSr_VGAf_GET(e0);
+        dfe[0] = RX0_ANARXASTATUSr_TAP1_DFE_GRAYf_GET(e0);
+    }
+    if (READ_RX1_ANARXASTATUSr(pc, &e1) >= 0) {
+        vga[1] = RX1_ANARXASTATUSr_VGAf_GET(e1);
+        dfe[1] = RX1_ANARXASTATUSr_TAP1_DFE_GRAYf_GET(e1);
+    }
+    if (READ_RX2_ANARXASTATUSr(pc, &e2) >= 0) {
+        vga[2] = RX2_ANARXASTATUSr_VGAf_GET(e2);
+        dfe[2] = RX2_ANARXASTATUSr_TAP1_DFE_GRAYf_GET(e2);
+    }
+    if (READ_RX3_ANARXASTATUSr(pc, &e3) >= 0) {
+        vga[3] = RX3_ANARXASTATUSr_VGAf_GET(e3);
+        dfe[3] = RX3_ANARXASTATUSr_TAP1_DFE_GRAYf_GET(e3);
+    }
+    syslog(LOG_INFO,
+        "Port %s: 40G EQ am_lock=0x%x deskew=%d L0[vga=%d dfe=%d] L1[vga=%d dfe=%d] L2[vga=%d dfe=%d] L3[vga=%d dfe=%d]",
+        ifname, (unsigned)aml, (unsigned)dsk,
+        vga[0],dfe[0], vga[1],dfe[1], vga[2],dfe[2], vga[3],dfe[3]);
+
+    /* Extended CL82 PCS diagnostic (2026-06-07): why do 2/4 lanes fail AM-lock?
+     * Dumps the alignment-marker error flags, AM-remove-FIFO state, pseudo-lock,
+     * the RX lane-swap mux (virtual->physical), and raw status words. Compare
+     * against the Cumulus 4/4 capture to find the AM-lock root cause. */
+    {
+        CL82_RX_STATUS_4r_t s4;
+        RXLNSWAP1r_t lns;
+        unsigned amspace = 0, amnonuniq = 0, pseudo = 0;
+        unsigned am_status = 0, amfifo = 0, amovf = 0, amunf = 0;
+        int sw[4] = {-1,-1,-1,-1};
+        unsigned raw2 = (unsigned)(s2.v[0] & 0xffff);
+        unsigned raw3 = (unsigned)(s3.v[0] & 0xffff);
+        unsigned raw4 = 0;
+        amspace   = CL82_RX_STATUS_3r_AMRKR_SPACING_ERR_LATCH_MUXf_GET(s3);
+        amnonuniq = CL82_RX_STATUS_3r_NON_UNIQUE_AMRKR_ERR_MUXf_GET(s3);
+        pseudo    = CL82_RX_STATUS_2r_PSEUDO_LOCKf_GET(s2);
+        if (READ_CL82_RX_STATUS_4r(pc, &s4) >= 0) {
+            raw4   = (unsigned)(s4.v[0] & 0xffff);
+            am_status = CL82_RX_STATUS_4r_AM_STATUSf_GET(s4);
+            amfifo = CL82_RX_STATUS_4r_AM_RMFIFO_STATEf_GET(s4);
+            amovf  = CL82_RX_STATUS_4r_AM_RMFIFO_OVERFLOWf_GET(s4);
+            amunf  = CL82_RX_STATUS_4r_AM_RMFIFO_UNDERFLOWf_GET(s4);
+        }
+        if (READ_RXLNSWAP1r(pc, &lns) >= 0) {
+            sw[0] = RXLNSWAP1r_RX0_LNSWAP_SELf_GET(lns);
+            sw[1] = RXLNSWAP1r_RX1_LNSWAP_SELf_GET(lns);
+            sw[2] = RXLNSWAP1r_RX2_LNSWAP_SELf_GET(lns);
+            sw[3] = RXLNSWAP1r_RX3_LNSWAP_SELf_GET(lns);
+        }
+        syslog(LOG_INFO,
+            "Port %s: CL82DIAG amspace_err=0x%x nonuniq_am=0x%x pseudo=%u am_status=0x%x amfifo=0x%x ovf=%u unf=%u lnswap=[%d %d %d %d] raw2=0x%04x raw3=0x%04x raw4=0x%04x",
+            ifname, amspace, amnonuniq, pseudo, am_status, amfifo, amovf, amunf,
+            sw[0],sw[1],sw[2],sw[3], raw2, raw3, raw4);
+    }
+
+    /* Full CL82/PCS block dump (2026-06-07), gated on /tmp/cl82dump (one read
+     * per poll while present). Reads 0x8100-0x816f + 0x8420-0x844f on BOTH
+     * dual-block AER contexts (lane 0 and lane 2) via raw MIIM, so we can diff
+     * EdgeNOS's live CL82 state register-by-register vs the Cumulus 4/4 capture
+     * (docs/cumulus_wc_full_dump_2026_06_07.txt) and find the exact remaining
+     * delta behind nonuniq_am. AER is restored to 0 after. */
+    {
+        FILE *df = fopen("/tmp/cl82dump", "r");
+        if (df) {
+            extern int cdk_xgs_miim_read(int, uint32_t, uint32_t, uint32_t *);
+            extern int cdk_xgs_miim_write(int, uint32_t, uint32_t, uint32_t);
+            int u = PHY_CTRL_UNIT(pc);
+            uint32_t pa = PHY_CTRL_ADDR(pc);
+            int blk, reg;
+            uint32_t v;
+            fclose(df);
+            for (blk = 0; blk <= 2; blk += 2) {
+                cdk_xgs_miim_write(u, pa, (1 << 16) | 0xFFDE, blk);
+                for (reg = 0x8100; reg <= 0x844f; reg++) {
+                    /* skip the 0x8170-0x841f gap (not CL82/PCS-relevant here) */
+                    if (reg == 0x8170) reg = 0x8420;
+                    v = 0;
+                    if (cdk_xgs_miim_read(u, pa, (1 << 16) | reg, &v) < 0) continue;
+                    v &= 0xffff;
+                    if (v == 0 || v == (uint32_t)reg) continue; /* skip 0 + addr-echo */
+                    syslog(LOG_INFO, "Port %s: CL82BLK blk%d 0x%x=0x%04x",
+                           ifname, blk, reg, v);
+                }
+            }
+            cdk_xgs_miim_write(u, pa, (1 << 16) | 0xFFDE, 0);
+        }
+    }
+}
+
 int portmap_link_poll(void)
 {
     int i;
@@ -670,7 +974,14 @@ int portmap_link_poll(void)
          * — it transitions MAC RX_EN + EPC_LINK_BMAP through the
          * normal SDK code path, just without trusting MII_STATUS.
          */
-        int pcs_link = pcs_block_lock_get(edged.unit, port);
+        /* 40G QSFP ports use CL82 (4-lane AM-lock + deskew); 10G SFP+ use
+         * CL49 single-lane block_lock. */
+        int cl82_am = 0, cl82_deskew = 0;
+        int pcs_link;
+        if (edged.ports[i].port_type == PORT_TYPE_QSFP)
+            pcs_link = cl82_link_get(edged.unit, port, &cl82_am, &cl82_deskew);
+        else
+            pcs_link = pcs_block_lock_get(edged.unit, port);
         if (pcs_link) {
             BMD_PORT_STATUS_SET(edged.unit, port,
                                 BMD_PST_FORCE_LINK | BMD_PST_LINK_UP);
@@ -682,8 +993,20 @@ int portmap_link_poll(void)
         bmd_port_mode_update(edged.unit, port);
 
         if (first_poll && (i < 3 || edged.ports[i].port_type == PORT_TYPE_QSFP)) {
-            syslog(LOG_INFO, "link_poll[%s]: port=%d pcs_link=%d",
-                   edged.ports[i].ifname, port, pcs_link);
+            if (edged.ports[i].port_type == PORT_TYPE_QSFP)
+                syslog(LOG_INFO, "link_poll[%s]: port=%d CL82 am_lock=0x%x deskew=%d link=%d",
+                       edged.ports[i].ifname, port, cl82_am, cl82_deskew, pcs_link);
+            else
+                syslog(LOG_INFO, "link_poll[%s]: port=%d pcs_link=%d",
+                       edged.ports[i].ifname, port, pcs_link);
+        }
+
+        /* Steady-state per-lane EQ dump for QSFP: every 8th poll (all ports
+         * are up by then, so this reflects real convergence — unlike the
+         * config-time one-shot). */
+        if (edged.ports[i].port_type == PORT_TYPE_QSFP &&
+            (link_poll_count % 8) == 1) {
+            qsfp_eq_dump(edged.unit, port, edged.ports[i].ifname);
         }
 
         edged.ports[i].link_up = pcs_link;

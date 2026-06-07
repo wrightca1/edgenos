@@ -15,6 +15,7 @@
 #include <syslog.h>
 
 #include "edged.h"
+#include "vlan.h"
 
 #include <cdk/chip/bcm56840_a0_defs.h>
 #include <cdk/arch/xgs_chip.h>
@@ -142,6 +143,41 @@ static int datapath_hash_init(int unit)
     ioerr += WRITE_HASH_CONTROLr(unit, hash_control);
 
     syslog(LOG_INFO, "RTAG7 hash: CRC16-CCITT, ECMP+trunk enabled");
+
+    /* L3_DEFIP TCAM enable — REQUIRED for the L3 LPM (and our local-host
+     * /32 -> CPU DEFIP entries) to be consulted at all.  bmd_init leaves these
+     * at 0 (DEFIP CAM disabled), so every L3-terminated IPv4 frame finds NO
+     * route and is discarded as RIPD4 — this is the root cause of the cold-boot
+     * ICMP-to-self drop (2026-06-04).  Broadcom 'init all' sets
+     * L3_DEFIP_CAM_ENABLE=0x3ff and L3_DEFIP_128_CAM_ENABLE=0x3 (verified in the
+     * Cumulus SOC reg dump).  We replicate that here. */
+    {
+        L3_DEFIP_CAM_ENABLEr_t ce;
+        L3_DEFIP_128_CAM_ENABLEr_t ce128;
+        ioerr += READ_L3_DEFIP_CAM_ENABLEr(unit, &ce);
+        ioerr += READ_L3_DEFIP_128_CAM_ENABLEr(unit, &ce128);
+        syslog(LOG_INFO,
+               "L3_DEFIP_CAM_ENABLE before: 0x%x (128-CAM: 0x%x)",
+               L3_DEFIP_CAM_ENABLEr_GET(ce),
+               L3_DEFIP_128_CAM_ENABLEr_GET(ce128));
+        L3_DEFIP_CAM_ENABLEr_CAM_0_ENABLEf_SET(ce, 1);
+        L3_DEFIP_CAM_ENABLEr_CAM_1_ENABLEf_SET(ce, 1);
+        L3_DEFIP_CAM_ENABLEr_CAM_2_ENABLEf_SET(ce, 1);
+        L3_DEFIP_CAM_ENABLEr_CAM_3_ENABLEf_SET(ce, 1);
+        L3_DEFIP_CAM_ENABLEr_CAM_4_ENABLEf_SET(ce, 1);
+        L3_DEFIP_CAM_ENABLEr_CAM_5_ENABLEf_SET(ce, 1);
+        L3_DEFIP_CAM_ENABLEr_CAM_6_ENABLEf_SET(ce, 1);
+        L3_DEFIP_CAM_ENABLEr_CAM_7_ENABLEf_SET(ce, 1);
+        L3_DEFIP_CAM_ENABLEr_DIP_CAMSf_SET(ce, 3);
+        ioerr += WRITE_L3_DEFIP_CAM_ENABLEr(unit, ce);
+        L3_DEFIP_128_CAM_ENABLEr_CAM_0_ENABLEf_SET(ce128, 1);
+        L3_DEFIP_128_CAM_ENABLEr_CAM_1_ENABLEf_SET(ce128, 1);
+        ioerr += WRITE_L3_DEFIP_128_CAM_ENABLEr(unit, ce128);
+        ioerr += READ_L3_DEFIP_CAM_ENABLEr(unit, &ce);
+        syslog(LOG_INFO, "L3_DEFIP_CAM_ENABLE after: 0x%x (target 0x3ff)",
+               L3_DEFIP_CAM_ENABLEr_GET(ce));
+    }
+
     return ioerr;
 }
 
@@ -788,7 +824,7 @@ static int datapath_rc_full(int unit)
         EGR_MTUr_t v;
         EGR_MTUr_CLR(v);
         EGR_MTUr_MTU_ENABLEf_SET(v, 1);
-        EGR_MTUr_MTU_SIZEf_SET(v, 1522);
+        EGR_MTUr_MTU_SIZEf_SET(v, 1622);
         ioerr += WRITE_EGR_MTUr(unit, 0, v);
         CDK_PBMP_ITER(xlpbmp, port) {
             ioerr += WRITE_EGR_MTUr(unit, port, v);
@@ -891,7 +927,7 @@ static int datapath_rc_full(int unit)
     {
         XMAC_RX_MAX_SIZEr_t v;
         XMAC_RX_MAX_SIZEr_CLR(v);
-        XMAC_RX_MAX_SIZEr_SET(v, 0, 1522);
+        XMAC_RX_MAX_SIZEr_SET(v, 0, 1622);
         CDK_PBMP_ITER(xlpbmp, port) {
             ioerr += WRITE_XMAC_RX_MAX_SIZEr(unit, port, v);
         }
@@ -1143,4 +1179,167 @@ int datapath_init(void)
 
     syslog(LOG_INFO, "Datapath configuration complete");
     return 0;
+}
+
+/*
+ * datapath_rx_diag() - on-demand chip RX-path dump for a physical port.
+ *
+ * Wired to SIGUSR1 (see edged.c).  Localises where ingress frames are
+ * dropped on the RX→CPU path by reading the per-stage RX debug drop
+ * counters (RDBGCn, selects programmed in datapath_mac_init) plus the
+ * port's classification config (PVID) and the service VLAN membership.
+ *
+ * Drop-counter SELECTs (from datapath_mac_init):
+ *   rdbgc0 = aggregate (RIPD4+RIPD6+RDISC+RPORTD+PDISC+VLANDR)
+ *   rdbgc3 = RIPD4+RIPD6  (IPv4/IPv6 header / L3 lookup drops)
+ *   rdbgc4 = RDISC        (general discard)
+ *   rdbgc5 = RFILDR       (ingress filter / VLAN-membership drop)
+ *   rdbgc6 = RDROP        (generic RX drop)
+ */
+void datapath_rx_diag(void)
+{
+    int unit = edged.unit;
+    int i;
+
+    extern unsigned g_tx_calls, g_tx_ok, g_tx_fail, g_tx_lastrv;
+
+    syslog(LOG_INFO, "=== RX-DIAG (SIGUSR1) ===");
+
+    /* L3_DEFIP[2560/2561] readback: confirm our local-host /32 -> CPU TCAM
+     * entries actually landed (raw mem_write may only write the RAM half of a
+     * TCAM and not load the key/mask CAM). */
+    {
+        int slots[] = {2560, 2561, 8000};
+        unsigned k;
+        for (k = 0; k < sizeof(slots)/sizeof(slots[0]); k++) {
+            L3_DEFIPm_t d;
+            if (READ_L3_DEFIPm(unit, slots[k], &d) == 0) {
+                syslog(LOG_INFO,
+                       "RX-DIAG L3_DEFIP[%d]: VALID0=%d IP_ADDR0=0x%x "
+                       "IP_ADDR_MASK0=0x%x VRF_MASK0=0x%x NHI0=%d MODE_MASK0=%d "
+                       "HIT0=%d  <-- HIT=1 means the route lookup matched",
+                       slots[k],
+                       L3_DEFIPm_VALID0f_GET(d),
+                       L3_DEFIPm_IP_ADDR0f_GET(d),
+                       L3_DEFIPm_IP_ADDR_MASK0f_GET(d),
+                       L3_DEFIPm_VRF_ID_MASK0f_GET(d),
+                       L3_DEFIPm_NEXT_HOP_INDEX0f_GET(d),
+                       L3_DEFIPm_MODE_MASK0f_GET(d),
+                       L3_DEFIPm_HIT0f_GET(d));
+            }
+        }
+    }
+
+    /* L3_IIF / ingress-VRF readout: the datapath derives the ingress VRF for
+     * an L3-terminated frame from L3_IIFm[iif].VRF.  Our L3_ENTRY host is
+     * written with VRF=0; if the ingress VRF != 0 the HW lookup misses (RIPD4)
+     * even though the SW schan lookup (which we force to VRF=0) finds it.
+     * Dump a few L3_IIF indices to see what VRF / ALLOW_GLOBAL_ROUTE they carry. */
+    {
+        int iifs[] = {0, 1, 2, 3, 100, 101};
+        unsigned k;
+        for (k = 0; k < sizeof(iifs)/sizeof(iifs[0]); k++) {
+            L3_IIFm_t iif;
+            if (READ_L3_IIFm(unit, iifs[k], &iif) == 0) {
+                syslog(LOG_INFO,
+                       "RX-DIAG L3_IIF[%d]: VRF=%d ALLOW_GLOBAL_ROUTE=%d "
+                       "URPF_MODE=%d",
+                       iifs[k],
+                       L3_IIFm_VRFf_GET(iif),
+                       L3_IIFm_ALLOW_GLOBAL_ROUTEf_GET(iif),
+                       L3_IIFm_URPF_MODEf_GET(iif));
+            }
+        }
+    }
+    syslog(LOG_INFO, "RX-DIAG TX: calls=%u ok=%u fail=%u lastrv=%u",
+           g_tx_calls, g_tx_ok, g_tx_fail, g_tx_lastrv);
+
+    /* Port-index sweep: RUC (RX unicast) + rdbgc0 (aggregate drop) across
+     * every possible device port.  phys/SerDes-lane numbering != the MMU
+     * port index these counters use, so print whichever indices are
+     * non-zero — a before/after-ping diff shows exactly where the reply
+     * lands (or proves it never arrives at any MAC). */
+    {
+        int pidx;
+        for (pidx = 0; pidx <= 72; pidx++) {
+            RUCr_t ru; RDBGC0r_t d0; RDBGC3r_t d3; RDBGC4r_t d4;
+            RDBGC5r_t d5; RDBGC6r_t d6;
+            uint32_t ruv, d0v;
+            READ_RUCr(unit, pidx, &ru);
+            READ_RDBGC0r(unit, pidx, &d0);
+            ruv = RUCr_GET(ru); d0v = RDBGC0r_GET(d0);
+            if (ruv || d0v) {
+                READ_RDBGC3r(unit, pidx, &d3);
+                READ_RDBGC4r(unit, pidx, &d4);
+                READ_RDBGC5r(unit, pidx, &d5);
+                READ_RDBGC6r(unit, pidx, &d6);
+                syslog(LOG_INFO,
+                       "RX-DIAG sweep port[%d]: RUC=%u rdbgc0(agg)=%u "
+                       "rdbgc3(L3hdr)=%u rdbgc4(disc)=%u rdbgc5(filt)=%u "
+                       "rdbgc6(drop)=%u",
+                       pidx, ruv, d0v,
+                       RDBGC3r_GET(d3), RDBGC4r_GET(d4),
+                       RDBGC5r_GET(d5), RDBGC6r_GET(d6));
+            }
+        }
+    }
+
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {
+        struct port_state *p = &edged.ports[i];
+        if (!p->valid)
+            continue;
+        /* Only the two Nexus uplinks to keep the dump readable. */
+        if (p->logical_port != 1 && p->logical_port != 2)
+            continue;
+        int phys = p->physical_lane;
+        int vid  = edged_resv_vid_for_port(p->logical_port);
+
+        RUCr_t ruc;
+        RDBGC0r_t d0; RDBGC3r_t d3; RDBGC4r_t d4; RDBGC5r_t d5; RDBGC6r_t d6;
+        PORT_TABm_t pt; VLAN_TABm_t vt;
+
+        READ_RUCr(unit, phys, &ruc);
+        READ_RDBGC0r(unit, phys, &d0);
+        READ_RDBGC3r(unit, phys, &d3);
+        READ_RDBGC4r(unit, phys, &d4);
+        READ_RDBGC5r(unit, phys, &d5);
+        READ_RDBGC6r(unit, phys, &d6);
+
+        syslog(LOG_INFO,
+               "RX-DIAG %s phys=%d: RUC(rx-ucast)=%u | rdbgc0(agg)=%u "
+               "rdbgc3(L3hdr)=%u rdbgc4(disc)=%u rdbgc5(filt)=%u rdbgc6(drop)=%u",
+               p->ifname, phys,
+               RUCr_GET(ruc),
+               RDBGC0r_GET(d0), RDBGC3r_GET(d3), RDBGC4r_GET(d4),
+               RDBGC5r_GET(d5), RDBGC6r_GET(d6));
+
+        /* PORT_TABm is LOGICAL-port indexed (bmd_port_vlan_set writes
+         * PORT_TABm[P2L(port)]).  Read both logical and physical index
+         * so a port-map mismatch is visible. */
+        if (READ_PORT_TABm(unit, p->logical_port, &pt) == 0) {
+            syslog(LOG_INFO,
+                   "RX-DIAG %s PORT_TAB[lport=%d]: PORT_VID=%d (expect %d) "
+                   "TRUST_INCOMING_VID=%d FILTER_ENABLE=%d",
+                   p->ifname, p->logical_port,
+                   PORT_TABm_PORT_VIDf_GET(pt), vid,
+                   PORT_TABm_TRUST_INCOMING_VIDf_GET(pt),
+                   PORT_TABm_FILTER_ENABLEf_GET(pt));
+        }
+        if (READ_PORT_TABm(unit, phys, &pt) == 0) {
+            syslog(LOG_INFO,
+                   "RX-DIAG %s PORT_TAB[phys=%d]: PORT_VID=%d",
+                   p->ifname, phys, PORT_TABm_PORT_VIDf_GET(pt));
+        }
+        if (READ_VLAN_TABm(unit, vid, &vt) == 0) {
+            syslog(LOG_INFO,
+                   "RX-DIAG %s VLAN_TAB[%d]: VALID=%d STG=%d",
+                   p->ifname, vid,
+                   VLAN_TABm_VALIDf_GET(vt), VLAN_TABm_STGf_GET(vt));
+        }
+        syslog(LOG_INFO, "RX-DIAG %s sw-counters: tx_pkts=%llu rx_pkts=%llu",
+               p->ifname,
+               (unsigned long long)p->tx_packets,
+               (unsigned long long)p->rx_packets);
+    }
+    syslog(LOG_INFO, "=== RX-DIAG end ===");
 }

@@ -22,6 +22,8 @@
 
 /* BMD headers */
 #include <bmd/bmd.h>
+#include <cdk/chip/bcm56840_a0_defs.h>
+#include <cdk/arch/xgs_chip.h>
 
 /*
  * Reserved internal VLAN range for hardware L3.
@@ -199,6 +201,45 @@ int vlan_init_resv_per_port(void)
         syslog(LOG_INFO,
                "STG1: FORWARDING set on %d ports (CPU + %d swpN)",
                fwd_count, fwd_count - 1);
+    }
+
+    /*
+     * Enable IPv4/IPv6 L3 routing in the VLAN_PROFILE the service VLANs use.
+     *
+     * On Trident each VLAN points (VLAN_TAB.VLAN_PROFILE_PTR) at a
+     * VLAN_PROFILE_TAB entry whose IPV4L3_ENABLE/IPV6L3_ENABLE bits gate
+     * whether a MY_STATION-terminated IP frame in that VLAN is submitted to
+     * the L3 route lookup.  We never set this -> our VLANs used a profile with
+     * L3 DISABLED, so terminated IPv4 to our own IP was never looked up and
+     * fell through to RIPD4 (root cause of the cold-boot ICMP-to-self drop,
+     * 2026-06-04: confirmed the L3 DEFIP HIT bit stayed 0 even for a match-all
+     * route).  Enable L3 on all 128 profiles (we don't do per-VLAN L3 policy). */
+    {
+        int vid0 = edged_resv_vid_for_port(1);
+        VLAN_TABm_t vt;
+        int ptr = -1;
+        if (READ_VLAN_TABm(edged.unit, vid0, &vt) == 0)
+            ptr = VLAN_TABm_VLAN_PROFILE_PTRf_GET(vt);
+
+        int prof, done = 0;
+        for (prof = 0; prof <= VLAN_PROFILE_TABm_MAX; prof++) {
+            VLAN_PROFILE_TABm_t vp;
+            if (READ_VLAN_PROFILE_TABm(edged.unit, prof, &vp) != 0)
+                continue;
+            if (prof == 0 || prof == ptr)
+                syslog(LOG_INFO,
+                       "VLAN_PROFILE[%d] before: IPV4L3=%d IPV6L3=%d",
+                       prof,
+                       VLAN_PROFILE_TABm_IPV4L3_ENABLEf_GET(vp),
+                       VLAN_PROFILE_TABm_IPV6L3_ENABLEf_GET(vp));
+            VLAN_PROFILE_TABm_IPV4L3_ENABLEf_SET(vp, 1);
+            VLAN_PROFILE_TABm_IPV6L3_ENABLEf_SET(vp, 1);
+            if (WRITE_VLAN_PROFILE_TABm(edged.unit, prof, vp) == 0)
+                done++;
+        }
+        syslog(LOG_INFO,
+               "VLAN_PROFILE: IPv4/IPv6 L3 enabled on %d profiles "
+               "(service VLAN %d uses profile ptr=%d)", done, vid0, ptr);
     }
 
     return 0;

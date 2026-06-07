@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <syslog.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 
@@ -136,6 +137,20 @@ int l3_my_station_add(const uint8_t *mac, int vlan)
     uint32_t mac_mask[2] = { 0xffffffff, 0x0000ffff };
     int idx, rv;
 
+    /* FIX #2 (L2-punt) test toggle: if /tmp/no_mystation exists, skip the
+     * MY_STATION entry so inbound IPv4 to our MAC is NOT L3-terminated — it
+     * stays L2 and punts to the CPU via the {swpN MAC, service VID}->CPU L2
+     * entry (the same path ARP already uses).  This sidesteps the L3-host
+     * lookup miss (RIPD4 drop) entirely.  Remove the file + restart edged to
+     * return to the L3-termination path. */
+    if (access("/tmp/no_mystation", F_OK) == 0) {
+        syslog(LOG_INFO,
+               "MY_STATION: SKIPPED for %02x:%02x:%02x:%02x:%02x:%02x VID=%d "
+               "(/tmp/no_mystation present -> L2-punt mode)",
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], vlan);
+        return 0;
+    }
+
     if (l3_my_station_idx > MY_STATION_TCAMm_MAX) {
         syslog(LOG_ERR, "MY_STATION_TCAM full at idx %d", l3_my_station_idx);
         return -1;
@@ -255,41 +270,49 @@ int l3_init(void)
                rb);
     }
 
-    /* Enable per-port L3 IPv4/IPv6 forwarding via LPORT_TAB.
+    /* Enable per-port L3 IPv4/IPv6 forwarding in PORT_TABm.
      *
-     * Without LPORT_TAB.V4L3_ENABLE=1 on the ingress port, the chip
-     * never enters the L3 pipeline for IPv4 frames received on that
-     * port — MY_STATION_TCAM is irrelevant because it's queried only
-     * inside the L3 pipeline.  Iterating over all 52 front-panel ports
-     * and the CPU port to make sure the V4/V6 L3 ENABLE bits are set. */
+     * THE GATE for the L3 route lookup (root cause of the cold-boot
+     * ICMP-to-self drop, found 2026-06-04 via BCM SDK study + Cumulus dump):
+     * the per-port "do IPv4/IPv6 L3" enable lives in PORT_TABm[logical_port]
+     * (V4L3_ENABLE/V6L3_ENABLE), the same per-port table that holds PORT_VID.
+     * We previously set these in LPORT_TABm — but LPORT_TAB is a 128-entry
+     * PROFILE table indexed by SOURCE_TRUNK_MAP_TABLE.LPORT_PROFILE_IDX (=0 for
+     * all our ports), NOT the per-port table, so the enable never reached the
+     * ingress port -> the chip never entered the L3 pipeline -> the DEFIP/
+     * L3_ENTRY search never ran (a match-ALL DEFIP entry's HIT bit stayed 0)
+     * -> inbound IPv4 to our own IP was RIPD4-discarded.  Cumulus's live dump
+     * confirms: PORT_TAB[1..52].V4L3_ENABLE=1, LPORT_TAB none.
+     * Read-modify-write to preserve PORT_VID/FILTER_ENABLE already set there. */
     {
         int p, enabled = 0;
         for (p = 0; p < EDGED_MAX_PORTS; p++) {
-            int phys = edged.ports[p].physical_lane;
-            if (!edged.ports[p].valid || phys <= 0)
+            int lport = edged.ports[p].logical_port;
+            if (!edged.ports[p].valid || lport <= 0)
                 continue;
-            if (phys > LPORT_TABm_MAX) continue;
+            if (lport > PORT_TABm_MAX) continue;
 
-            LPORT_TABm_t lp;
-            int rb = READ_LPORT_TABm(edged.unit, phys, &lp);
-            uint32_t was = lp.lport_tab[0];
-            LPORT_TABm_V4L3_ENABLEf_SET(lp, 1);
-            LPORT_TABm_V6L3_ENABLEf_SET(lp, 1);
-            int wr = WRITE_LPORT_TABm(edged.unit, phys, lp);
+            PORT_TABm_t pt;
+            int rb = READ_PORT_TABm(edged.unit, lport, &pt);
+            int was4 = PORT_TABm_V4L3_ENABLEf_GET(pt);
+            PORT_TABm_V4L3_ENABLEf_SET(pt, 1);
+            PORT_TABm_V6L3_ENABLEf_SET(pt, 1);
+            int wr = WRITE_PORT_TABm(edged.unit, lport, pt);
             if (rb || wr) {
                 syslog(LOG_WARNING,
-                       "LPORT_TAB[%d] rb=%d wr=%d", phys, rb, wr);
+                       "PORT_TAB[lport=%d] L3-enable rb=%d wr=%d", lport, rb, wr);
             } else {
-                if (p < 3 || phys == 66) {
+                if (p < 3) {
                     syslog(LOG_INFO,
-                           "LPORT_TAB[%d] (%s): was=0x%08x now=0x%08x "
-                           "V4=1 V6=1", phys, edged.ports[p].ifname,
-                           was, lp.lport_tab[0]);
+                           "PORT_TAB[lport=%d] (%s): V4L3 was=%d now=1 V6L3=1 "
+                           "(PORT_VID=%d)", lport, edged.ports[p].ifname,
+                           was4, PORT_TABm_PORT_VIDf_GET(pt));
                 }
                 enabled++;
             }
         }
-        syslog(LOG_INFO, "L3: enabled V4/V6 L3 on %d ports", enabled);
+        syslog(LOG_INFO, "L3: enabled V4/V6 L3 on %d ports (logical-indexed)",
+               enabled);
     }
 
     return 0;
@@ -469,6 +492,67 @@ int l3_local_host_add(uint32_t ipv4_addr, int logical_port)
             syslog(LOG_WARNING, "local-host EGR_L3_NEXT_HOP[%d] wr=%d",
                    nh_idx, rv); return -1;
         }
+    }
+
+    /* FIX #1: L3_DEFIP /32 -> CPU (the Cumulus recipe).
+     *
+     * The L3_ENTRY *hash* entry below round-trips via schan ("lookup OK") but
+     * the hardware datapath lookup misses it -> inbound IPv4 to our own IP is
+     * discarded as RIPD4 (verified 2026-06-04: rdbgc3 +N per N pings, ingress
+     * VRF confirmed 0 so it is NOT a VRF mismatch).  Cumulus avoids the hash
+     * path entirely and installs our own /32 in the L3_DEFIP TCAM (deterministic,
+     * no hashing).  We mirror that here: one /32 entry per local host -> the same
+     * COPY_TO_CPU next-hop (nh_idx).
+     *
+     * Field encoding replicated from a live Cumulus L3_DEFIP dump (entry 2564,
+     * 10.101.101.1/32 -> TO_CPU): half 0 used, half 1 unused; VRF 0 exact-match
+     * (VRF_ID_MASK0=0x3ff); IP_ADDR0/IP_ADDR_MASK0 give a /32; MODE0=0/MODE_MASK0=1.
+     * KEY0/MASK0 are composite views over MODE+IP+VRF, so setting the structured
+     * fields sets them automatically. */
+    {
+        static int defip_slot = 2560;  /* Cumulus /32 band base */
+        L3_DEFIPm_t d;
+        int slot = defip_slot++;
+        L3_DEFIPm_CLR(d);
+        L3_DEFIPm_VALID0f_SET(d, 1);
+        L3_DEFIPm_MODE0f_SET(d, 0);
+        L3_DEFIPm_MODE_MASK0f_SET(d, 1);
+        L3_DEFIPm_IP_ADDR0f_SET(d, ipv4_addr);
+        L3_DEFIPm_IP_ADDR_MASK0f_SET(d, 0xffffffff);
+        L3_DEFIPm_VRF_ID_0f_SET(d, 0);
+        L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0x3ff);
+        L3_DEFIPm_NEXT_HOP_INDEX0f_SET(d, nh_idx);
+        /* half 1 left unused (VALID1=0, MODE_MASK1=0) by CLR. */
+        rv = WRITE_L3_DEFIPm(edged.unit, slot, d);
+        syslog(LOG_INFO,
+               "local-host L3_DEFIP[%d] /32 %u.%u.%u.%u -> nh_idx=%d (CPU) wr=%d",
+               slot,
+               (ipv4_addr >> 24) & 0xff, (ipv4_addr >> 16) & 0xff,
+               (ipv4_addr >> 8) & 0xff, ipv4_addr & 0xff, nh_idx, rv);
+    }
+
+    /* DIAGNOSTIC (one-shot, logical_port 1 only): a CATCH-ALL L3_DEFIP entry
+     * that matches ANY routed IPv4 in ANY VRF (IP mask=0, VRF mask=0) -> the
+     * same COPY_TO_CPU next-hop.  Decides whether the DEFIP TCAM is consulted at
+     * all: if inbound IPv4 then punts (RIPD4 stops), the lookup works and the
+     * earlier /32 miss was a key/VRF detail; if it STILL RIPD4s, the L3 dst
+     * lookup is not being performed -> deeper soc_init gap. Slot 8000 (lowest
+     * priority). Remove after diagnosis. */
+    if (logical_port == 1) {
+        L3_DEFIPm_t d;
+        L3_DEFIPm_CLR(d);
+        L3_DEFIPm_VALID0f_SET(d, 1);
+        L3_DEFIPm_MODE0f_SET(d, 0);
+        L3_DEFIPm_MODE_MASK0f_SET(d, 0);         /* match ANY mode too */
+        L3_DEFIPm_IP_ADDR0f_SET(d, 0);
+        L3_DEFIPm_IP_ADDR_MASK0f_SET(d, 0);      /* match any IP */
+        L3_DEFIPm_VRF_ID_0f_SET(d, 0);
+        L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0);       /* match any VRF */
+        L3_DEFIPm_NEXT_HOP_INDEX0f_SET(d, nh_idx);
+        rv = WRITE_L3_DEFIPm(edged.unit, 8000, d);
+        syslog(LOG_INFO,
+               "DIAG L3_DEFIP[8000] CATCH-ALL (any mode/IP/VRF) -> nh_idx=%d (CPU) wr=%d",
+               nh_idx, rv);
     }
 
     /* L3 host entry: our IP -> nh_idx (-> CPU port).

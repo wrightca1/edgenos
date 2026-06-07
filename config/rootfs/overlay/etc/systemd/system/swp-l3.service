@@ -1,0 +1,14 @@
+[Unit]
+Description=EdgeNOS swp L3 address config (Nexus uplinks)
+# edged creates the swpN TUN interfaces; we must run after it so they exist.
+After=edged.service
+Wants=edged.service
+ConditionPathExists=/etc/edged/swp-addrs.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/swp-l3-config.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

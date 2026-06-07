@@ -1,0 +1,58 @@
+# Cumulus 2.5.0 QSFP 40G cal capture — swp49(xe48)/swp50(xe49) loopback, 4/4 locked
+# captured Sat Jun  6 09:43:16 PM EDT 2026 from 10.1.1.215
+Warning: Permanently added '10.1.1.215' (ECDSA) to the list of known hosts.
+===== xe48 (swp49) DSC =====
+
+
+DSC parameters for port 49
+
+PLL Range: 235
+
+LN  PPM PPM_XFR clk90_ofs PF SL_TRGT VGA BIAS DFE1 DFE2 DFE3 DFE4 DFE5 PREC MAIN POSTC MTRC PE   ZE   ME  PO  ZO  MO
+00 0000 0000000 000000042 0000 0150 0023  88% 0019 -010 -005 0003 -005 0000 0039 0024  0000 -006 0002  1  -8   0 -5
+01 0000 0000000 000000039 0000 0150 0023  88% 0009 -009 -003 -002 0001 0000 0039 0024  0000 -001 0000 -2  -6   5  8
+02 0000 0000000 000000038 0000 0150 0025  88% 0009 -010 -004 0003 -005 0000 0039 0024  0000 0001 0002 -5  -1  -2 11
+03 0000 0000000 000000039 0000 0150 0026  88% 0014 -007 -006 0003 -002 0000 0039 0024  0000 0000 -001 -9   1   1  7
+===== xe49 (swp50) DSC =====
+
+
+DSC parameters for port 50
+
+PLL Range: 235
+
+LN  PPM PPM_XFR clk90_ofs PF SL_TRGT VGA BIAS DFE1 DFE2 DFE3 DFE4 DFE5 PREC MAIN POSTC MTRC PE   ZE   ME  PO  ZO  MO
+00 0000 0000000 000000040 0000 0150 0021  88% 0005 -009 -005 0003 -004 0000 0039 0024  0000 -004 0005 11  -1  -3  2
+01 0000 0000000 000000042 0000 0150 0022  88% 0012 -012 -005 0002 -003 0000 0039 0024  0000 -010 0005 15   0   1 -1
+02 0000 0000000 000000035 0000 0150 0019  88% 0000 -006 -005 0003 -004 0000 0039 0024  0000 -003 0005 -7  -6   2  4
+03 0000 0000000 000000037 0000 0125 0021  88% 0002 -007 -004 0002 -004 0000 0039 0024  0000 -005 -001 -6  -1   3 13
+===== raw cal regs xe48 (devad1) =====
+xe48 0x8300 = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x8301 = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x8302 = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x8308 = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x833c = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x833d = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x833e = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x8150 = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x832b = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x8067 = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x8077 = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x8087 = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x8097 = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x81f2 = /usr/bin/tail.coreutils: option used in invalid context -- 1
+xe48 0x820e = /usr/bin/tail.coreutils: option used in invalid context -- 1
+
+# NOTE: raw single-reg bcmcmd reads (phy raw c45 / phy <port> <reg>) return
+# 0xffff/0x0000 — they lack per-lane AER selection. The DSC dump above IS the
+# authoritative per-lane converged cal (bcmcmd 'phy diag dsc' does the internal
+# per-lane access). Both swp49(xe48) and swp50(xe49) = 4/4 locked at 40G KR4.
+#
+# Per-lane converged cal to replay in EdgeNOS (from DSC, all 4 lanes locked):
+#   VGA ~0x13-0x1a (19-26), DFE1 0x05-0x20, DFE2 ~-0x07..-0x0c, DFE3 ~-3..-6,
+#   PF=0 (no peaking-filter override), SL_TRGT=0x96(150)/0x7d(125),
+#   MAIN=0x27(57? shown 39 dec=0x27), POSTC=0x18(24), PREC=0.
+# Key point vs EdgeNOS: Cumulus lets the firmware ADAPT these (VGA/DFE differ
+# per lane and per port) — they are NOT a fixed seed. EdgeNOS's fixed 0x8308=0x05
+# seed can't match. Replay options: (B) GDB-capture the cold-init MIIM write
+# sequence to get the exact init writes + fw_mode that ENABLE adaptation, OR map
+# these DSC params to WC registers (VGA=0x8300 field, DFE=0x83xx) and write per-lane.

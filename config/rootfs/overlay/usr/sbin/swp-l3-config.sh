@@ -1,0 +1,51 @@
+#!/bin/sh
+# swp-l3-config.sh - apply persistent swp L3 addresses from /etc/edged/swp-addrs.conf
+#
+# Runs once at boot (swp-l3.service, After=edged.service). edged creates the swpN
+# TUN interfaces during its startup; this waits for them, assigns the configured
+# addresses, and brings the links up.
+#
+# We do NOT restart edged here.  Two reasons (both verified 2026-06-03 on a real
+# reboot):
+#   1. edged's swpN interfaces are TUN devices owned by the edged process. When
+#      edged stops they are DESTROYED, taking their IP addresses with them. A
+#      restart-after-assign therefore *wipes* the very addresses we just set, and
+#      the oneshot service has already exited so nothing re-adds them.
+#   2. It isn't needed: edged's live RTM_NEWADDR handler programs the L3
+#      local-host CPU-punt on each `ip addr add` (confirmed: "L3_HOST lookup OK"
+#      in the edged log right after the add). It runs the same l3_local_host_add()
+#      the startup RTM_GETADDR dump uses.
+#
+# Idempotent: re-running skips addresses already present.
+CONF=/etc/edged/swp-addrs.conf
+added=0
+log() { logger -t swp-l3 "$*"; echo "swp-l3: $*"; }
+
+[ -r "$CONF" ] || { log "no $CONF, nothing to do"; exit 0; }
+
+apply_one() {
+    iface="$1"; cidr="$2"; mtu="$3"
+    # wait up to ~15s for the interface to exist (edged creates swpN at startup)
+    i=0
+    while [ ! -e "/sys/class/net/$iface" ]; do
+        i=$((i + 1)); [ "$i" -gt 30 ] && { log "$iface never appeared, skipping"; return 1; }
+        sleep 0.5
+    done
+    [ -n "$mtu" ] && ip link set "$iface" mtu "$mtu" 2>/dev/null
+    if ip -o addr show "$iface" 2>/dev/null | grep -qw "${cidr%/*}"; then
+        log "$iface already has ${cidr}, skip"
+    else
+        ip addr add "$cidr" dev "$iface" 2>/dev/null && { log "$iface += $cidr (mtu ${mtu:-default})"; added=1; }
+    fi
+    ip link set "$iface" up 2>/dev/null
+}
+
+while read -r iface cidr mtu _rest; do
+    case "$iface" in ''|\#*) continue ;; esac
+    [ -n "$cidr" ] || continue
+    apply_one "$iface" "$cidr" "$mtu"
+done < "$CONF"
+
+[ "$added" = 1 ] && log "addresses added (edged live RTM_NEWADDR programs the L3 punt)"
+
+log "done"

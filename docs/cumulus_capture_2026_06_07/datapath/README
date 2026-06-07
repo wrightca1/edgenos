@@ -1,0 +1,25 @@
+
+Hardware datapath configuration manages packet buffering, queueing, and scheduling
+in hardware.  There are two configuration input files:
+
+* /etc/cumulus/datapath/traffic.conf: describes priority groups and assigns
+  the scheduling algorithm and weights
+
+* /etc/bcm.d/datapath/datapath.conf: assigns buffer space and egress queues
+
+Each packet is assigned to an ASIC Class of Service (CoS) value based on the packet's
+priority value stored in the 802.1p (Class of Service) or DSCP (Differentiated
+Services Code Point) header field.  The packet is assigned to a Priority Group
+based on the CoS value.
+
+Priority groups include:
+
+* Control: Highest priority traffic
+* Service: Second-highest priority traffic
+* Lossless: Traffic protected by priority flow control
+* Bulk: All remaining traffic
+
+A lossless priority group requires a port group configuration which specifies
+the ports configured for priority flow control and the additional buffer space
+assigned to each port for packets in the lossless priority group.
+

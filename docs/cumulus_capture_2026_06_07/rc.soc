@@ -1,0 +1,84 @@
+
+debug -PCi
+debug -SChan 
+debug -SOCMEM
+debug -SYMTAB
+debug -VERInet
+debug -L3
+debug -INTr
+debug -ARL
+debug -ARLMon
+debug -L2table
+debug -DMA
+debug -POrt
+debug -PAcket
+debug -TX
+debug -RCLOAD
+debug -TEsts
+debug -VERbose
+debug -MIIm
+debug -PHY
+debug -END
+debug -LInk
+debug -CounTeR
+debug -IP
+debug -STP
+debug -VLAN
+debug -RX
+debug -I2C
+debug -REG
+debug -MEM
+debug -STK
+
+attach *
+
+0:
+
+init all
+
+# basic port configuration
+#
+rcload /etc/bcm.d/rc.ports_0
+
+setreg xmac_tx_ctrl 0xc802
+s MAC_RSV_MASK MASK=0x18
+
+m cmic_misc_control LINK40G_ENABLE=1
+
+# datapath
+#
+0: rcload /var/lib/cumulus/rc.datapath_0
+
+# avoid Trident FP_METER_TABLE false parity error errata
+#
+setreg IFP_METER_PARITY_CONTROL 0
+
+#-------------------------------------------------------------------------------
+#
+# receive and transmit drop statistic dissaggregation
+#
+# this counters are coupled with and presented by code in the SDK and switchd
+# to allow ethtool and snmp access.
+#
+
+# aggregated rx drop statistics
+# - ingress buffer discards are counted separately
+#
+setreg rdbgc0_select 0x04000d11	# RIPD4, RIPD6, RDISC, RPORTD, PDISC, VLANDR
+
+# disaggreagated receive drop statistics
+#
+setreg rdbgc3_select 0x00000011	# RIPD4, RIPD6
+setreg rdbgc4_select 0x00000100	# RDISC  
+setreg rdbgc5_select 0x00002000	# RFILDR 
+setreg rdbgc6_select 0x00008000	# RDROP  
+
+# disaggregated tx drop statistic
+#
+setreg tdbgc6_select 0x00040000	# TPKTD
+
+#-------------------------------------------------------------------------------
+#
+# LEDs
+#
+rcload /etc/bcm.d/rc.led

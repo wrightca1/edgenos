@@ -1,0 +1,2 @@
+/etc/bcm.d/rc.soc
+/etc/bcm.d/config.bcm

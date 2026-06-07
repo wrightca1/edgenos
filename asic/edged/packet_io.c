@@ -340,6 +340,19 @@ static void handle_tun_tx(int port_idx)
         len = 64;
     }
 
+    /* FCS slack (2026-06-04): the chip's egress MAC is in CRC-REPLACE mode — it
+     * overwrites the LAST 4 BYTES of the frame with the computed FCS rather than
+     * appending.  Without slack, every frame loses its last 4 real data bytes:
+     * harmless for padded frames (lost bytes are pad) but for an exact-length
+     * frame (IP total-length == L2 payload) it truncates 4 bytes of IP data, so
+     * the peer receives a clean-FCS frame whose IP packet is 4 bytes short and
+     * silently drops it (observed: e1/33 full byte count, 0 CRC, no ICMP reply;
+     * pings worked only for payloads that left >=4 pad bytes).  Append 4 dummy
+     * bytes so the MAC overwrites those instead of real data.  (Safe under
+     * CRC-append mode too: the 4 extra bytes become harmless trailing L2 pad.) */
+    memset(tx_buf + len, 0, 4);
+    len += 4;
+
     /* Allocate DMA-coherent buffer for the (padded) packet data */
     dma_buf = bmd_dma_alloc_coherent(edged.unit, len, &baddr);
     if (!dma_buf) {

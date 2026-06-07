@@ -60,6 +60,7 @@ int bmd_switching_init_all(void);
 
 /* Datapath configuration (CPU punt, hash, buffers) */
 int datapath_init(void);
+void datapath_rx_diag(void);  /* SIGUSR1 RX-path drop-counter dump */
 
 /* Replicate Cumulus chip-memory state (EPC_LINK_BMAP, L2_USER_ENTRY,
  * EGR_VLAN, FP_TCAM, FP_POLICY_TABLE) from captured dumps. */
