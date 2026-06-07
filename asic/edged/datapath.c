@@ -316,10 +316,15 @@ static int datapath_mac_init(int unit)
         VLAN_PROFILE_TABm_L3_IPV6_PFMf_SET(vp, 0);
         VLAN_PROFILE_TABm_IPV4L3_ENABLEf_SET(vp, 1);
         VLAN_PROFILE_TABm_IPV6L3_ENABLEf_SET(vp, 1);
-        VLAN_PROFILE_TABm_IPMCV4_ENABLEf_SET(vp, 1);
-        VLAN_PROFILE_TABm_IPMCV6_ENABLEf_SET(vp, 1);
-        VLAN_PROFILE_TABm_IPMCV4_L2_ENABLEf_SET(vp, 1);
-        VLAN_PROFILE_TABm_IPMCV6_L2_ENABLEf_SET(vp, 1);
+        /* IPMC routing DISABLED: we don't route IP multicast, and with it enabled
+         * the chip diverts IPv4 multicast (incl. OSPF 224.0.0.5) to the IPMC path
+         * where, with no group, it's consumed without a CPU copy. Disabling it
+         * makes IP multicast pure-L2 -> L2_PFM=0 floods to VLAN members (incl. the
+         * CPU) = the L2 behaviour behind Cumulus's MCAST_FLOOD_ALL. */
+        VLAN_PROFILE_TABm_IPMCV4_ENABLEf_SET(vp, 0);
+        VLAN_PROFILE_TABm_IPMCV6_ENABLEf_SET(vp, 0);
+        VLAN_PROFILE_TABm_IPMCV4_L2_ENABLEf_SET(vp, 0);
+        VLAN_PROFILE_TABm_IPMCV6_L2_ENABLEf_SET(vp, 0);
         /* Unknown (no IPMC group) IP multicast -> CPU. With IPMCV4_ENABLE=1 the
          * chip takes IPv4 multicast down the IPMC path; 224.0.0.5/6 (OSPF) have
          * no IPMC group, so without this they hit an IPMC miss and are silently
@@ -332,6 +337,22 @@ static int datapath_mac_init(int unit)
         ioerr += WRITE_VLAN_PROFILE_TABm(unit, VLAN_PROFILE_TABm_MAX, vp);
         syslog(LOG_INFO,
                "MAC: VLAN_PROFILE[127] L2_PFM=0 + UNKNOWN_IPV4/6_MC_TOCPU=1 (OSPF hellos to CPU)");
+    }
+
+    /* ING_MISC_CONFIG2.IPMC_MISS_AS_L2MC — the actual lever that delivers OSPF.
+     * With IPMCV4_ENABLE=1 the chip sends IPv4 multicast down the IPMC path; an
+     * unknown group (224.0.0.5/6 — no IPMC entry) is otherwise dropped, NOT
+     * L2-flooded, so VLAN membership (incl. CPU) never sees it. This bit makes an
+     * IPMC miss fall back to L2MC logic = flood to the VLAN (members incl. CPU),
+     * i.e. the L2 path behind Cumulus's MCAST_FLOOD_ALL. Cumulus captured
+     * ING_MISC_CONFIG2 = 0x80 (this bit). Read-modify-write to keep other bits. */
+    {
+        ING_MISC_CONFIG2r_t mc2;
+        READ_ING_MISC_CONFIG2r(unit, &mc2);
+        ING_MISC_CONFIG2r_IPMC_MISS_AS_L2MCf_SET(mc2, 1);
+        ioerr += WRITE_ING_MISC_CONFIG2r(unit, mc2);
+        syslog(LOG_INFO,
+               "MAC: ING_MISC_CONFIG2.IPMC_MISS_AS_L2MC=1 (unknown IPMC -> L2 flood -> CPU; OSPF)");
     }
 
     /*
@@ -1356,10 +1377,20 @@ void datapath_rx_diag(void)
                    p->ifname, phys, PORT_TABm_PORT_VIDf_GET(pt));
         }
         if (READ_VLAN_TABm(unit, vid, &vt) == 0) {
+            int pp = VLAN_TABm_VLAN_PROFILE_PTRf_GET(vt);
+            VLAN_PROFILE_TABm_t vpd;
+            int l2pfm = -1, unkmc = -1, ipmc4 = -1;
+            if (READ_VLAN_PROFILE_TABm(unit, pp, &vpd) == 0) {
+                l2pfm = VLAN_PROFILE_TABm_L2_PFMf_GET(vpd);
+                unkmc = VLAN_PROFILE_TABm_UNKNOWN_IPV4_MC_TOCPUf_GET(vpd);
+                ipmc4 = VLAN_PROFILE_TABm_IPMCV4_ENABLEf_GET(vpd);
+            }
             syslog(LOG_INFO,
-                   "RX-DIAG %s VLAN_TAB[%d]: VALID=%d STG=%d",
+                   "RX-DIAG %s VLAN_TAB[%d]: VALID=%d STG=%d PROFILE_PTR=%d "
+                   "-> [L2_PFM=%d IPMCV4_EN=%d UNKNOWN_IPV4_MC_TOCPU=%d]",
                    p->ifname, vid,
-                   VLAN_TABm_VALIDf_GET(vt), VLAN_TABm_STGf_GET(vt));
+                   VLAN_TABm_VALIDf_GET(vt), VLAN_TABm_STGf_GET(vt),
+                   pp, l2pfm, ipmc4, unkmc);
         }
         syslog(LOG_INFO, "RX-DIAG %s sw-counters: tx_pkts=%llu rx_pkts=%llu",
                p->ifname,
