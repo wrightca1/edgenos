@@ -48,4 +48,31 @@ done < "$CONF"
 
 [ "$added" = 1 ] && log "addresses added (edged live RTM_NEWADDR programs the L3 punt)"
 
+# ── ECMP / multipath transit routes ──────────────────────────────────────────
+# /etc/edged/swp-routes.conf, one route per line:
+#     <dst/prefixlen>   <gw1>:<dev1>  [<gw2>:<dev2> ...]
+# Multiple gw:dev pairs => ECMP. We ping each gateway first so the kernel ARP
+# resolves it and edged programs that next-hop in the chip — only then does the
+# `ip route add` (which edged turns into the chip ECMP/DEFIP entry) find every
+# next-hop. Without the pre-resolve the route would install with missing paths.
+RCONF=/etc/edged/swp-routes.conf
+if [ -r "$RCONF" ]; then
+    while read -r dst paths; do
+        case "$dst" in ''|\#*) continue ;; esac
+        [ -n "$paths" ] || continue
+        nhargs=""
+        for p in $paths; do
+            gw="${p%%:*}"; dev="${p##*:}"
+            [ -n "$gw" ] && [ -n "$dev" ] || continue
+            # resolve the gateway so edged programs its chip next-hop
+            ping -c1 -W2 "$gw" >/dev/null 2>&1
+            nhargs="$nhargs nexthop via $gw dev $dev"
+        done
+        [ -n "$nhargs" ] || continue
+        ip route replace "$dst" $nhargs 2>/dev/null \
+            && log "route $dst ->$nhargs" \
+            || log "route $dst FAILED (gateways reachable?)"
+    done < "$RCONF"
+fi
+
 log "done"
