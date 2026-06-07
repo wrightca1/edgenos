@@ -1387,10 +1387,13 @@ void datapath_rx_diag(void)
             }
             syslog(LOG_INFO,
                    "RX-DIAG %s VLAN_TAB[%d]: VALID=%d STG=%d PROFILE_PTR=%d "
-                   "-> [L2_PFM=%d IPMCV4_EN=%d UNKNOWN_IPV4_MC_TOCPU=%d]",
+                   "-> [L2_PFM=%d IPMCV4_EN=%d UNKNOWN_IPV4_MC_TOCPU=%d] "
+                   "BC_IDX=%d UMC_IDX=%d UUC_IDX=%d",
                    p->ifname, vid,
                    VLAN_TABm_VALIDf_GET(vt), VLAN_TABm_STGf_GET(vt),
-                   pp, l2pfm, ipmc4, unkmc);
+                   pp, l2pfm, ipmc4, unkmc,
+                   VLAN_TABm_BC_IDXf_GET(vt), VLAN_TABm_UMC_IDXf_GET(vt),
+                   VLAN_TABm_UUC_IDXf_GET(vt));
         }
         syslog(LOG_INFO, "RX-DIAG %s sw-counters: tx_pkts=%llu rx_pkts=%llu",
                p->ifname,
