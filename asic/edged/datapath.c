@@ -290,14 +290,16 @@ static int datapath_mac_init(int unit)
          */
         ING_CONFIG_64r_L3SRC_HIT_ENABLEf_SET(ingc, 1);
         ING_CONFIG_64r_L2DST_HIT_ENABLEf_SET(ingc, 1);
-        /* APPLY_EGR_MASK_ON_L2/L3 explicitly OFF. Enabling it (to drive the
-         * VLAN_PROFILE_2 unknown-mcast->CPU flood for OSPF) masked the flood to
-         * empty and broke the whole datapath (ping 100% loss) — and the bit
-         * persists across an edged restart, so we must force it 0 here to recover.
-         * The egress-mask flood chain needs the correct EGR_MASK polarity/values
-         * worked out before it can be turned on safely. */
-        ING_CONFIG_64r_APPLY_EGR_MASK_ON_L2f_SET(ingc, 0);
-        ING_CONFIG_64r_APPLY_EGR_MASK_ON_L3f_SET(ingc, 0);
+        /* APPLY_EGR_MASK_ON_L2/L3=1 — the SDK's standard config (OpenBCM
+         * trident2.c soc init sets exactly this). The block masks are POSITIVE-
+         * LOGIC "ports to BLOCK" memories; the SDK relies on the soc-reset clear
+         * leaving them 0 (block nothing) so flood reaches all members incl. CPU.
+         * Our minimal bmd_init never clears them, so we zero them explicitly just
+         * below. (An earlier attempt set EGR_MASK=all-1s = block-everything and
+         * killed the datapath — the polarity is block, not allow.) This is what
+         * lets unknown multicast (OSPF 224.0.0.5) flood to the CPU member. */
+        ING_CONFIG_64r_APPLY_EGR_MASK_ON_L2f_SET(ingc, 1);
+        ING_CONFIG_64r_APPLY_EGR_MASK_ON_L3f_SET(ingc, 1);
         ioerr += WRITE_ING_CONFIG_64r(unit, ingc);
         syslog(LOG_INFO,
                "MAC: ING_CONFIG_64 L2DST/L3SRC hit-enable only "
@@ -361,6 +363,32 @@ static int datapath_mac_init(int unit)
         ioerr += WRITE_ING_MISC_CONFIG2r(unit, mc2);
         syslog(LOG_INFO,
                "MAC: ING_MISC_CONFIG2.IPMC_MISS_AS_L2MC=1 (unknown IPMC -> L2 flood -> CPU; OSPF)");
+    }
+
+    /* Zero the egress / non-unicast block masks (= block nothing) so that, with
+     * APPLY_EGR_MASK_ON_L2/L3=1 above, L2/L3 flood reaches ALL VLAN members incl.
+     * the CPU — delivering unknown multicast (OSPF 224.0.0.5) to the daemon. These
+     * are positive "ports to BLOCK" memories; the SDK leaves them 0 via the soc
+     * reset clear, but our bmd_init never touches them so they may hold stale/
+     * all-ones values (which is what masked flood to empty before). CLR = all 0. */
+    {
+        int bi, rv;
+        EGR_MASKm_t em; EGR_MASKm_CLR(em);
+        for (bi = 0; bi <= EGR_MASKm_MAX && bi < 80; bi++)
+            ioerr += WRITE_EGR_MASKm(unit, bi, em);
+        UNKNOWN_MCAST_BLOCK_MASKm_t um; UNKNOWN_MCAST_BLOCK_MASKm_CLR(um);
+        for (bi = 0; bi <= UNKNOWN_MCAST_BLOCK_MASKm_MAX && bi < 80; bi++)
+            ioerr += WRITE_UNKNOWN_MCAST_BLOCK_MASKm(unit, bi, um);
+        UNKNOWN_UCAST_BLOCK_MASKm_t uu; UNKNOWN_UCAST_BLOCK_MASKm_CLR(uu);
+        for (bi = 0; bi <= UNKNOWN_UCAST_BLOCK_MASKm_MAX && bi < 80; bi++)
+            ioerr += WRITE_UNKNOWN_UCAST_BLOCK_MASKm(unit, bi, uu);
+        NONUCAST_TRUNK_BLOCK_MASKm_t nt; NONUCAST_TRUNK_BLOCK_MASKm_CLR(nt);
+        for (bi = 0; bi <= NONUCAST_TRUNK_BLOCK_MASKm_MAX && bi < 80; bi++)
+            ioerr += WRITE_NONUCAST_TRUNK_BLOCK_MASKm(unit, bi, nt);
+        (void)rv;
+        syslog(LOG_INFO,
+               "MAC: zeroed EGR_MASK + UNKNOWN_{M,U}CAST/NONUCAST_TRUNK block masks "
+               "(block-nothing; flood incl CPU for OSPF)");
     }
 
     /*
