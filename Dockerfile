@@ -262,9 +262,20 @@ build_rootfs() {
     find /build/platform -name "*.ko" -exec cp {} "${STAGING}/lib/modules/extra/" \; 2>/dev/null || true
     find /build/asic/bde -name "*.ko" -exec cp {} "${STAGING}/lib/modules/extra/" \; 2>/dev/null || true
 
-    # Install switchd
-    if [ -f /build/asic/switchd/switchd ]; then
-        install -D -m 755 /build/asic/switchd/switchd "${STAGING}/usr/sbin/switchd"
+    # Install edged (the switch daemon). Prefer the freshly-built binary from the
+    # mounted output/ dir (built by scripts/rebuild-edged-with-sdk.sh, which does the
+    # OpenMDK SDK + warpcore PKG->pkgsrc sync). A valid edged is ~18-19 MB; a ~2 MB
+    # binary means the SDK libs were inconsistent and it WILL crash, so we reject it.
+    EDGED_BIN=""
+    for c in /build/output/edged-rebuilt /build/asic/edged/edged; do
+        [ -f "$c" ] && [ "$(stat -c%s "$c")" -gt 15000000 ] && { EDGED_BIN="$c"; break; }
+    done
+    if [ -n "$EDGED_BIN" ]; then
+        install -D -m 755 "$EDGED_BIN" "${STAGING}/usr/sbin/edged"
+        echo "  edged installed from $EDGED_BIN ($(stat -c%s "$EDGED_BIN") bytes)"
+    else
+        echo "  ERROR: no valid edged (>15MB) found in output/ — run scripts/rebuild-edged-with-sdk.sh first"
+        return 1
     fi
 
     # Install mdk-init (optional test tool, may not be built)
@@ -281,6 +292,20 @@ build_rootfs() {
     if [ -d /build/config/rootfs/overlay ]; then
         cp -a /build/config/rootfs/overlay/* "${STAGING}/"
     fi
+
+    # Enable services. There is no systemctl in the cross-build, so create the
+    # multi-user.target.wants symlinks by hand (this is what `systemctl enable`
+    # does). Without this the overlay ships the unit files but nothing starts
+    # them — which is why a freshly-installed box came up with 0 swp ports.
+    WANTS="${STAGING}/etc/systemd/system/multi-user.target.wants"
+    mkdir -p "${WANTS}"
+    for svc in platform-init.service edged.service swp-l3.service \
+               fan-controller.service sshd-keygen.service; do
+        if [ -f "${STAGING}/etc/systemd/system/${svc}" ]; then
+            ln -sf "../${svc}" "${WANTS}/${svc}"
+            echo "  enabled ${svc}"
+        fi
+    done
 
     # Set root password to 'as5610'
     HASH='$6$52x8izoNf.9aB3Vd$azJoPieNNwYutepMslp9J.32/wB0pGCdd5lxeiz9J8jhoBdqwllvIvNIvyGYnCWfYuVZ4LBP9970NCzaymfsI/'
@@ -496,7 +521,10 @@ case "$CMD" in
         build_kernel
         build_platform_modules
         build_sdk
-        build_switchd
+        # NOTE: the datapath daemon is `edged` (built by
+        # scripts/rebuild-edged-with-sdk.sh into output/edged-rebuilt, which
+        # build_rootfs installs). The legacy `switchd` is no longer part of the
+        # image; build it explicitly with `./build.sh switchd` if ever needed.
         build_rootfs
         build_image
         ;;
