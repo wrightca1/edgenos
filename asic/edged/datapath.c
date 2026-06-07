@@ -290,6 +290,14 @@ static int datapath_mac_init(int unit)
          */
         ING_CONFIG_64r_L3SRC_HIT_ENABLEf_SET(ingc, 1);
         ING_CONFIG_64r_L2DST_HIT_ENABLEf_SET(ingc, 1);
+        /* APPLY_EGR_MASK_ON_L2/L3 explicitly OFF. Enabling it (to drive the
+         * VLAN_PROFILE_2 unknown-mcast->CPU flood for OSPF) masked the flood to
+         * empty and broke the whole datapath (ping 100% loss) — and the bit
+         * persists across an edged restart, so we must force it 0 here to recover.
+         * The egress-mask flood chain needs the correct EGR_MASK polarity/values
+         * worked out before it can be turned on safely. */
+        ING_CONFIG_64r_APPLY_EGR_MASK_ON_L2f_SET(ingc, 0);
+        ING_CONFIG_64r_APPLY_EGR_MASK_ON_L3f_SET(ingc, 0);
         ioerr += WRITE_ING_CONFIG_64r(unit, ingc);
         syslog(LOG_INFO,
                "MAC: ING_CONFIG_64 L2DST/L3SRC hit-enable only "
