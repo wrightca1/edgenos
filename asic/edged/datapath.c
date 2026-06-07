@@ -47,6 +47,13 @@ static int datapath_cpu_punt_init(int unit)
     CPU_CONTROL_1r_V4L3DSTMISS_TOCPUf_SET(cpu_ctrl1, 1);
     CPU_CONTROL_1r_V6L3DSTMISS_TOCPUf_SET(cpu_ctrl1, 1);
 
+    /* Send unregistered (link-local) multicast to CPU. This is what delivers
+     * routing-protocol hellos — OSPF AllSPFRouters 224.0.0.5 / AllDRouters
+     * 224.0.0.6 (and similar) are unregistered L2 multicast with no IGMP group,
+     * so without this the daemon never hears its neighbors. Mirrors Cumulus's
+     * CPU_CONTROL_1 UMC trap. */
+    CPU_CONTROL_1r_UMC_TOCPUf_SET(cpu_ctrl1, 1);
+
     ioerr += WRITE_CPU_CONTROL_1r(unit, cpu_ctrl1);
 
     /* Enable ARP and DHCP punt to CPU on all valid ports.
