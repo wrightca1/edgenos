@@ -1,5 +1,18 @@
 # 40G QSFP (swp49–52) Bring-up — Status & Reproducible Investigation
 
+> ## ✅ SOLVED (2026-06-07) — 40G is up and forwarding, both directions.
+> The "2 of 4 lanes" was never a real partial lock. Two stacked bugs:
+> 1. **Frozen adaptation** — Warpcore `fw_mode=0x1111` (SR4) *froze* SerDes RX
+>    adaptation. Fix: `fw_mode=0` (let it adapt) → all 4 lanes converge.
+> 2. **Link-decode bug** — `cl82_link_get` required `am_lock==0xf`, but the
+>    `AM_LOCK_STATE` field is a *state-machine value* and **`0x6` is the locked
+>    state** (matches Cumulus's working 4/4 exactly; `0xf` never occurs).
+>
+> Verified by raw-frame inject on swp49 + tcpdump on swp50 (and reverse):
+> frames traverse the wire byte-for-byte. See `docs/JOURNEY_WRITEUP.md` and the
+> patch in `patches/openmdk/bcmi_warpcore_xgxs_drv.c`. The "What works" /
+> "open blocker" sections below are kept as the historical investigation record.
+
 Living record of the effort to bring up the four 40G QSFP+ ports on the
 AS5610-52X (BCM56840 Trident+, internal Warpcore SerDes). Read alongside
 `BUILD.md` (build process) and `DATAPATH_BRINGUP.md`.
@@ -32,13 +45,16 @@ swp50=67/61, swp51=68/62, swp52=69/63 (rx/tx).
   boot. Persists across reflash.
 - **Optics + retimers**: modules lase; DS100DF410 init via `retimer-init.sh`
   (`/sys/class/retimer_dev/`, `set_eq2`).
-- **40G port config**: bmd `bmdPortMode40000fd`, warpcore SR4 fw_mode `0x1111`,
-  4-lane CL82 link detect (`cl82_link_get` in `portmap.c`).
-- **On a swp49↔swp50 duplex-LC loopback: 2 of 4 lanes AM-lock** (`am_lock=0x3`,
-  lanes 0,1), all 4 lanes receive + adapt. Cumulus brought this same loopback up
-  at full 40G (4/4), so 4/4 IS achievable — see the open blocker.
+- **40G port config**: bmd `bmdPortMode40000fd`, warpcore fw_mode `0` (see SOLVED
+  banner; was `0x1111` which froze adaptation), 4-lane CL82 link detect
+  (`cl82_link_get` in `portmap.c`, locked when `am_lock==0x6 && deskew`).
+- **swp49↔swp50 loopback: all 4 lanes AM-lock and the port forwards** both
+  directions. (Historical note: with the old `fw_mode=0x1111` + `am_lock==0xf`
+  check this presented as "2 of 4, `am_lock=0x3`" — see SOLVED banner.)
 
-## THE OPEN BLOCKER: lanes 2,3 never reach CL82 AM-lock
+## [HISTORICAL] The investigation that read as "lanes 2,3 never AM-lock"
+> Resolved — see the SOLVED banner at the top. The text below is the record of the
+> dead-end theory (missing per-lane RX cal), kept intentionally.
 
 Steady state (both ends of the loopback): `am_lock=0x3 deskew=0` — lanes 0,1 lock,
 lanes 2,3 do not, so CL82 deskew never completes and the 40G link stays down.

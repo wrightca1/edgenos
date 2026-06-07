@@ -1,0 +1,13 @@
+diff --git a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_tx.c b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_tx.c
+index 3579f8b..e8462e8 100644
+--- a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_tx.c
++++ b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_tx.c
+@@ -116,7 +116,7 @@ bcm56840_a0_bmd_tx(int unit, const bmd_pkt_t *pkt)
+         rv = CDK_E_TIMEOUT;
+     }
+     BMD_DMA_CACHE_INVAL(dcb, 2 * sizeof(*dcb));
+-    bmd_xgs_dump_tx_dcbs(unit, (uint32_t *)dcb, 2,
++    bmd_xgsd_dump_tx_dcbs(unit, (uint32_t *)dcb, 2,
+                          CDK_BYTES2WORDS(TX_DCB_SIZE), CDK_HIGIG2_WSIZE);
+ 
+     /* Free DMA descriptor */

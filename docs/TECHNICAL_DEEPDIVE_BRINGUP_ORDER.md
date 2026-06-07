@@ -168,23 +168,26 @@ This is its own ordered subsystem and a frequent silent wall:
 
 ---
 
-## 6. The 40G SerDes wall — `independent_lane_init`
+## 6. The 40G SerDes bring-up — SOLVED (2026-06-07)
 
 For 10G, PCS `block_lock` was enough. For **40GBASE-R (CL82)** you need all **four PCS
-lanes** to alignment-marker-lock and deskew. We reliably get **2 of 4**.
+lanes** to alignment-marker-lock and deskew. For weeks we only saw **2 of 4** — and
+mis-diagnosed it as a missing-calibration wall. It was two stacked bugs:
 
-What we ruled out: lane swap/remap (`PhyConfig_XauiRxLaneRemap` → `RXLNSWAP1` +
-`_warpcore_rx_div_clk_set`), polarity, and the forced-mode choices — `FV_fdr_40G_X4`
-(forced, no training) actually made it *worse* by disabling RX DFE auto-adaptation vs
-`FV_fdr_40G_KR4`.
+1. **Frozen adaptation:** `fw_mode=0x1111` (SR4) *freezes* Warpcore RX auto-adaptation.
+   Setting **`fw_mode=0`** lets the firmware adapt → all 4 lanes converge.
+2. **Decode bug:** the link check required `am_lock==0xf`, but the alignment-lock field
+   is a *state-machine value* and **`0x6` is the locked state** (matches Cumulus 4/4;
+   `0xf` never occurs). The chip was locked while our code read it as unlocked.
 
-**Root cause (pinned):** OpenMDK's Warpcore driver is a *partial* reimplementation of
-the full SDK's `_phy_wc40_independent_lane_init`. It lacks the **per-lane RX
-calibration layer** (in the decompiled reference, the path through `FUN_015936ac`
-touching lane registers around `0x8308`/`0x833c`) that the full stack runs per lane;
-our code relies on firmware auto-adapt, which gets 2 lanes there and stalls on the
-other 2. Closure paths: port the missing per-lane cal sub-routines, or capture a
-cold-init MIIM sequence from the working reference and replay it. Open.
+What we ruled out (lane swap/remap via `PhyConfig_XauiRxLaneRemap`→`RXLNSWAP1`,
+polarity, X4-vs-KR4 forced modes) were all correctly ruled out — none was the cause.
+
+**The disproven theory:** we had pinned the root cause on OpenMDK lacking the full SDK's
+per-lane RX-calibration layer (`_phy_wc40_independent_lane_init` / `FUN_015936ac` /
+regs `0x8308`/`0x833c`). That was **false** — firmware auto-adapt handles all four lanes
+once it isn't frozen. No cal-routine port or cold-init replay was needed. Verified by
+raw-frame inject + tcpdump across the swp49↔swp50 loopback, both directions.
 
 ---
 

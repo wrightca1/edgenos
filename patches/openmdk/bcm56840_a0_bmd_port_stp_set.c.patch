@@ -1,0 +1,12 @@
+diff --git a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_port_stp_set.c b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_port_stp_set.c
+index ac50461..072786d 100644
+--- a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_port_stp_set.c
++++ b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_port_stp_set.c
+@@ -40,6 +40,7 @@ bcm56840_a0_bmd_port_stp_set(int unit, int port, bmd_stp_state_t state)
+     ioerr += READ_STG_TABm(unit, 1, &stg_tab);
+ 
+     switch (lport) {
++    case 0: STG_TABm_SP_TREE_PORT0f_SET(stg_tab, hw_state); break;
+     case 1: STG_TABm_SP_TREE_PORT1f_SET(stg_tab, hw_state); break;
+     case 2: STG_TABm_SP_TREE_PORT2f_SET(stg_tab, hw_state); break;
+     case 3: STG_TABm_SP_TREE_PORT3f_SET(stg_tab, hw_state); break;

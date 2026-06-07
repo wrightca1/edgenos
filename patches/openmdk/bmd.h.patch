@@ -1,0 +1,20 @@
+diff --git a/bmd/include/bmd/bmd.h b/bmd/include/bmd/bmd.h
+index 1c15145..84b1a1d 100644
+--- a/bmd/include/bmd/bmd.h
++++ b/bmd/include/bmd/bmd.h
+@@ -320,8 +320,13 @@ typedef enum bmd_stat_e {
+     bmdStatRxPackets, 
+     bmdStatRxBytes, 
+     bmdStatRxErrors, 
+-    bmdStatRxDrops, 
+-    bmdStatCount 
++    bmdStatRxDrops,
++    bmdStatRxIpDrop,      /* RDBGC3: RIPD4+RIPD6 (IP header drops) */
++    bmdStatRxDiscard,     /* RDBGC4: RDISC (discard: STP/VLAN/L3 miss) */
++    bmdStatRxFilterDrop,  /* RDBGC5: RFILDR (FP/filter drop) */
++    bmdStatRxGenDrop,     /* RDBGC6: RDROP (generic RX drop) */
++    bmdStatRxPuntToCpu,   /* RIPC4: IPv4 L3 unicast punted to CPU */
++    bmdStatCount
+ } bmd_stat_t;
+ 
+ /* Get statistics counter. */

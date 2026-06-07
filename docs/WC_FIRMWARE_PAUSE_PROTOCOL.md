@@ -1,5 +1,16 @@
 # Warpcore firmware-adapt disable + host RX cal — protocol decode
 
+> ## ⚠️ SUPERSEDED (2026-06-07) — this doc's root-cause theory was WRONG.
+> The premise here — "firmware RX auto-adapt is running and must be *paused* so a
+> host seed can take" — turned out to be **backwards**. The actual fix was the
+> **opposite**: the firmware adapt was *frozen* by `fw_mode=0x1111` (SR4), and
+> setting `fw_mode=0` (letting the firmware adapt freely) is what locked all 4
+> lanes. No uC pause / host RX-cal was needed. The "2/4" was also partly a
+> link-decode bug (`am_lock` locked value is `0x6`, not `0xf`).
+> See `docs/QSFP_40G_INVESTIGATION.md` (SOLVED banner) for the real resolution.
+> This document is retained as a record of the (disproven) firmware-pause
+> investigation and the mailbox/handshake decode, which remains technically accurate.
+
 **Goal:** get all 4 PCS lanes of a 40G QSFP port to AM-lock (currently 2/4 on
 swp49↔swp50). Root cause (confirmed 3 ways, see
 `project_qsfp_rxkick_attempt_2026_06_04`): OpenMDK leaves the Warpcore

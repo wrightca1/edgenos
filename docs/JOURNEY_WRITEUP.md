@@ -92,9 +92,11 @@ disciplined before/after counter deltas — is what turned guesswork into a bise
 
 ---
 
-## Part 3 — 40-gig QSFP: where we are honest about the wall
+## Part 3 — 40-gig QSFP: the bug that hid behind another bug
 
-The 40G QSFP ports are the unfinished frontier. Real progress, real wall:
+The 40G QSFP ports were the last frontier — and the most instructive, because the
+"wall" turned out to be two bugs stacked so they masked each other. **Solved
+2026-06-07: all four lanes lock and the port forwards 40G in both directions.**
 
 **What works:**
 - All four QSFP optics (40GBASE-SR-BiDi, an unusual duplex-LC/WDM module — not the
@@ -103,19 +105,28 @@ The 40G QSFP ports are the unfinished frontier. Real progress, real wall:
   (which turned out to be *reverse-ordered* from what the schematic implied) and the
   device-tree mux configuration.
 - 40G **persists across reflashes**, and we built per-lane equalization diagnostics.
+- **All four PCS lanes align and de-skew; the link forwards traffic** — verified by
+  injecting raw frames on swp49 and capturing them byte-for-byte on swp50 across the
+  loopback (and the reverse).
 
-**What doesn't (yet):**
-- A 40G link needs all **four PCS lanes** to align and de-skew. We reliably get
-  **2 of 4 lanes** to lock; the other two won't alignment-marker-lock.
-- We chased and *ruled out* the usual suspects: lane swap/remap, polarity, the
-  KR4-vs-X4 forced modes (X4 actually made it *worse* — it disabled the RX
-  auto-adaptation we needed).
-- **Root cause (pinned, not yet fixed):** the open toolkit (OpenMDK) is a *partial*
-  reimplementation of Broadcom's full Warpcore bring-up. It lacks the **per-lane RX
-  calibration layer** that the full SDK / Cumulus runs (`independent_lane_init`). The
-  two stubborn lanes need RX equalization that our code never performs. We have the
-  two closure paths identified: port the missing calibration sub-routines, or capture
-  and replay a cold-init sequence from the working reference. That's the next mountain.
+**The two bugs that masked each other:**
+- For weeks it looked like only **2 of 4 lanes** would lock, and we built an entire
+  theory around it: OpenMDK is a *partial* reimplementation of Broadcom's Warpcore
+  bring-up, so it must lack the per-lane RX calibration the full SDK runs
+  (`independent_lane_init`). We were ready to port cal sub-routines or replay a
+  Cumulus cold-init. **That theory was wrong.**
+- **Bug 1 — frozen adaptation.** We were setting the Warpcore to SR4 firmware mode
+  (`fw_mode=0x1111`), which *freezes* the SerDes RX auto-adaptation. The fix was the
+  opposite of what we'd been attempting: `fw_mode=0` — let the firmware adapt freely.
+  Suddenly all four lanes were converging.
+- **Bug 2 — we were misreading "locked."** Our link check required the alignment-lock
+  field to read `0xf`. But that field is a *state-machine value*, not a per-lane
+  bitmap — and **`0x6` is the locked state**. The chip had been reporting `0x6`
+  (exactly matching Cumulus's working 4/4) while our code called it "not locked." A
+  one-constant decode bug had us staring at a healthy link and seeing failure.
+- The lesson: when a result is stuck at a suspiciously clean fraction (2 of 4), suspect
+  your *measurement* before you build a theory around the silicon. The fix was a frozen
+  mode flag and a misread status field — no missing calibration layer at all.
 
 ---
 
@@ -144,8 +155,9 @@ The 40G QSFP ports are the unfinished frontier. Real progress, real wall:
 - ✅ 10G SFP+: links up, L2/L3 forwarding, **bidirectional ping to a Cisco Nexus,
   0% loss, full-MTU** — on a from-scratch NOS driving the chip directly.
 - ✅ L3 datapath cold-boot bug: **3 root causes found and fixed**, verified end-to-end.
-- 🟡 40G QSFP: optics detected/persisted, **2 of 4 lanes lock**; missing per-lane RX
-  calibration is the identified blocker.
+- ✅ 40G QSFP: optics detected/persisted, **all 4 lanes lock, forwards both directions**.
+  The long "2 of 4" was a frozen-adaptation flag (`fw_mode=0x1111`) + an `am_lock==0xf`
+  decode bug (`0x6` is locked) — *not* the missing-calibration wall we'd theorized.
 - 🧰 Built a reusable on-chip diagnostic and a reproducible cross-compile/build flow
   along the way.
 
@@ -174,10 +186,13 @@ refusing to believe "it works" until the evidence is overwhelming.
 > refusing to trust "it works" until packet captures and the neighbor's own counters
 > agreed.
 >
-> The 40-gig optical ports are the honest unfinished part — all four optics detect, but
-> only 2 of 4 lanes lock. We've pinned the root cause (the open toolkit is missing a
-> per-lane receiver-calibration step the full vendor stack runs) and have the path
-> forward.
+> And the 40-gig optical ports now forward too — all four lanes lock, traffic both
+> ways. That one was the best lesson of the whole project: for weeks it looked like
+> only 2 of 4 lanes would ever lock, and we built an elaborate theory that the open
+> toolkit was missing a vendor calibration step. Wrong. It was a mode flag freezing the
+> receiver's auto-tuning, plus our own code misreading the "locked" status register —
+> we'd been staring at a healthy link and calling it broken. When a number sticks at a
+> suspiciously clean fraction, doubt your measurement before you blame the silicon.
 >
 > Bringing up silicon from scratch is 10% heroics and 90% building the instruments
 > that let you see. More soon.

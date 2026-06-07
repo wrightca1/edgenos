@@ -362,6 +362,31 @@ _port_speed_max(int unit, int port)
         return CDK_PORT_CONFIG_SPEED_MAX(unit, port);
     }
 
+    /*
+     * AS5610-52X 40G QSFP+ (swp49-52).  Each QSFP cage is a 40G/4-lane port
+     * whose XLPORT block is { base, base+1, base+2, base+3 } with the base lane
+     * at XLPORT_SUBPORT()==0.  The base lanes are physical 45/49/57/61 (mapping
+     * to logical swp50/49/52/51 in the captured Cumulus p2l).  The other three
+     * lanes of each block (46-48, 50-52, 58-60, 62-64) are p2l-UNMAPPED on this
+     * board and are consumed by the 40G port.
+     *
+     * Report 40000 for the base lanes (so bmd_port_mode_set(40G) is accepted
+     * and num_lanes()==4) and 0 for the consumed lanes -- otherwise the default
+     * below would make those three lanes separate 1-lane ports and bmd_attach's
+     * block-overlap check fails with "Overlapping lanes" / CDK_E_CONFIG.
+     *
+     * We deliberately do NOT set the global DCFG_40G flag: that would also zero
+     * the 48 single-lane SFP+ ports (their non-subport-0 lanes -> 0).  Scoping
+     * this to the QSFP lanes leaves the SFP+ datapath untouched.
+     */
+    if (port == 45 || port == 49 || port == 57 || port == 61) {
+        return 40000;
+    }
+    if ((port >= 46 && port <= 48) || (port >= 50 && port <= 52) ||
+        (port >= 58 && port <= 60) || (port >= 62 && port <= 64)) {
+        return 0;
+    }
+
     /* Default port configurations */
     CDK_XGS_BLKTYPE_PBMP_GET(unit, BLKTYPE_XLPORT, &pbmp);
     if (CDK_XGS_FLAGS(unit) & CHIP_FLAG_HGONLY) {

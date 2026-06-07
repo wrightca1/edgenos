@@ -71,7 +71,7 @@ ping to a Cisco Nexus at 0% loss, full standard MTU.
 
 ---
 
-## 2. QSFP (40G) — the optics control plane + the SerDes wall
+## 2. QSFP (40G) — the optics control plane + the SerDes bring-up (SOLVED)
 
 ### 2.1 The optic is a BiDi module, not SR4
 The installed modules are **AFBR-79EBPZ — 40GBASE-SR-BiDi** (EEPROM id `0x0D`). This is
@@ -99,37 +99,39 @@ A 40GBASE-R link is **four PCS lanes** that must each **alignment-marker-lock (A
 and then **deskew** into one logical channel (CL82). Success requires **all 4**; partial
 lock = no link.
 
-### 2.4 The wall: 2 of 4 lanes lock
-We reliably get **2 of 4 lanes** to AM-lock; the other two won't. What we **ruled out**
-(each tested and reverted):
-- **Lane swap / RX remap** — `PhyConfig_XauiRxLaneRemap` (writes `RXLNSWAP1` +
-  `_warpcore_rx_div_clk_set`); the reference SVK board uses `0x3210`/`0x1032`, but the
-  Accton board's wiring differs and remap didn't fix it.
-- **Polarity** inversion — not it.
-- **Forced modes** — `FV_fdr_40G_X4` (0x26, forced, no training) actually made it
-  **worse**: X4 disables the RX DFE auto-adaptation, so the marginal lanes got worse,
-  not better. `FV_fdr_40G_KR4` (0x31, with CL72 training / CL73 AN) is the better base.
+### 2.4 ✅ SOLVED (2026-06-07): all 4 lanes lock — it was two stacked bugs
+For weeks this looked like a hard "2 of 4 lanes" SerDes wall. It wasn't. Two bugs
+masked each other:
+1. **Frozen adaptation** — we set `fw_mode=0x1111` (SR4), which *freezes* the Warpcore
+   RX auto-adaptation. Fix: **`fw_mode=0`** (let firmware adapt) → all 4 lanes converge.
+2. **Link-decode bug** — our check required the alignment-lock field `am_lock==0xf`, but
+   that field is a *state-machine value*, not a per-lane bitmap, and **`0x6` is the
+   locked state** (matches Cumulus's working 4/4 byte-for-byte; `0xf` never occurs).
+   The chip was reporting `0x6` while our code called it unlocked.
 
-### 2.5 Root cause (pinned, not yet fixed): missing per-lane RX calibration
-OpenMDK's Warpcore driver (`bcmi_warpcore_xgxs_drv.c`) is a **partial reimplementation**
-of the full SDK's `_phy_wc40_independent_lane_init`. Our `_warpcore_init_stage_2` brings
-up the lanes but **omits the per-lane RX-calibration layer** that the full stack runs on
-each lane independently. In the decompiled reference the missing path runs through
-`FUN_015936ac` and touches per-lane RX registers around **`0x8308` / `0x833c`**; our code
-relies on firmware auto-adapt instead, which converges 2 lanes and stalls on the 2 that
-need explicit cal. Two closure paths:
-1. **Port the missing cal sub-routines** into our Warpcore init (decode + replicate the
-   `independent_lane_init` per-lane RX steps), or
-2. **Capture + replay** a cold-init MIIM sequence from the working reference for these
-   lanes.
+Verified by raw-frame inject on swp49 + tcpdump on swp50 (and reverse): all 4 lanes,
+both directions, frames intact. Fix in `patches/openmdk/bcmi_warpcore_xgxs_drv.c` +
+`asic/edged/portmap.c` (`cl82_link_get`). What we'd previously **ruled out** (lane
+swap/remap, polarity, X4-vs-KR4 forced modes) were all correctly ruled out — none were
+the cause.
 
-Decompiled references kept for this: `ind_lane_init_decomp.c`, `wc40_speed_set_decomp.c`,
-`SERDES_WC_INIT.md`, plus captured MIIM traces (`*_miim_capture*`).
+### 2.5 The disproven theory (kept as a cautionary record)
+We had *pinned* a root cause that turned out to be wrong: that OpenMDK's Warpcore driver
+omits the full SDK's per-lane RX-calibration layer (`_phy_wc40_independent_lane_init`,
+`FUN_015936ac`, regs `0x8308`/`0x833c`) and the two stubborn lanes therefore needed
+explicit cal we never ran. **This was false** — OpenMDK's firmware auto-adapt handles all
+four lanes fine once it isn't frozen by `fw_mode=0x1111`. No cal-table port or cold-init
+replay was needed. Lesson: a suspiciously clean fraction (2/4) is a hint to doubt your
+*measurement* before theorizing about the silicon.
 
-### 2.6 Remaining 40G gaps (named)
-- **Per-lane RX cal** (§2.5) — the blocker for 4/4 lock.
-- **CL82** specifics for a clean BiDi link once lanes lock.
-- **Optic firmware/init** nuances for the BiDi part vs a generic SR4.
+Decompiled references kept (now historical): `ind_lane_init_decomp.c`,
+`wc40_speed_set_decomp.c`, `SERDES_WC_INIT.md`, captured MIIM traces (`*_miim_capture*`).
+
+### 2.6 40G status: link up + forwarding
+4/4 lane lock and bidirectional forwarding achieved (§2.4). No per-lane RX cal was
+needed. CL82 dual-block config (AM markers + deskew) is programmed in the warpcore
+driver. Remaining polish (not blockers): tuning over a live BiDi span vs the bench
+loopback, and any optic-firmware nuances specific to the BiDi part.
 
 ---
 
@@ -174,6 +176,7 @@ status path is stale), TX drop on "no link," lane-state degradation from restart
 
 - ✅ **10G SFP+:** retimer CDR + EQ unlock, PCS `block_lock`, MII-gate bypass → links up,
   forwards traffic.
-- 🟡 **40G QSFP:** optics detected + persisted (control-plane decoded), **2 of 4 PCS
-  lanes lock**; missing per-lane RX calibration (`independent_lane_init`) is the
-  identified blocker, with two concrete closure paths.
+- ✅ **40G QSFP:** optics detected + persisted (control-plane decoded), **all 4 PCS
+  lanes lock and the port forwards** in both directions. Root cause of the long
+  "2 of 4" was `fw_mode=0x1111` freezing RX adaptation + an `am_lock==0xf` decode bug
+  (`0x6` is the locked state); no per-lane RX cal layer was needed.

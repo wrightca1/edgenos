@@ -1,5 +1,14 @@
 # QSFP 40G cold-init capture plan (Cumulus → EdgeNOS replicate)
 
+> ## ✅ NOT NEEDED (2026-06-07) — 40G solved without this capture.
+> This plan assumed OpenMDK *can't* converge 40G without replaying Cumulus's
+> board-cal tables. That assumption was **false**: OpenMDK adapts all 4 lanes
+> fine once `fw_mode=0` (the SR4 `0x1111` value was freezing adaptation), and the
+> apparent "2/4" was compounded by a link-decode bug (`am_lock` locked value is
+> `0x6`, not `0xf`). No cold-init capture / cal-table replay was required.
+> See `docs/QSFP_40G_INVESTIGATION.md` (SOLVED). Kept only as a record of the
+> capture methodology, which is reusable for other RE tasks.
+
 **Why:** Pure-software RX-cal in OpenMDK converges at 2/4 because the cal seed +
 TX-FIR are computed from board calibration tables (SOC PVT / per-port) that
 OpenMDK never builds (see `project_wc_fw_pause_protocol_2026_06_04`,

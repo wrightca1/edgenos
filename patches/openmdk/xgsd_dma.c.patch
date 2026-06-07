@@ -1,0 +1,73 @@
+diff --git a/bmd/PKG/arch/xgsd/xgsd_dma.c b/bmd/PKG/arch/xgsd/xgsd_dma.c
+index 35dc9f6..93e7da0 100644
+--- a/bmd/PKG/arch/xgsd/xgsd_dma.c
++++ b/bmd/PKG/arch/xgsd/xgsd_dma.c
+@@ -68,15 +68,30 @@ bmd_xgsd_dma_chan_start(int unit, int chan, dma_addr_t dcb)
+ 
+     /* Write the DCB address to the DESC address for this channel */
+     CDK_DEV_WRITE32(unit, CMIC_CMC_DMA_DESCr + 4*chan, dcb);
+-    
+-    CDK_CONFIG_MEMORY_BARRIER; 
++
++    CDK_CONFIG_MEMORY_BARRIER;
+ 
+     /* Kick it off */
+-    ioerr += READ_CMIC_CMC_DMA_CTRLr(unit, chan, &cdc); 
++    ioerr += READ_CMIC_CMC_DMA_CTRLr(unit, chan, &cdc);
+     CMIC_CMC_DMA_CTRLr_DMA_ENf_SET(cdc, 1);
+-    ioerr += WRITE_CMIC_CMC_DMA_CTRLr(unit, chan, cdc); 
+-
+-    CDK_CONFIG_MEMORY_BARRIER; 
++    ioerr += WRITE_CMIC_CMC_DMA_CTRLr(unit, chan, cdc);
++
++    CDK_CONFIG_MEMORY_BARRIER;
++
++    /* Debug: read back CTRL and STAT after DMA kick */
++    {
++        CMIC_CMC_DMA_CTRLr_t dbg_ctrl;
++        CMIC_CMC_DMA_STATr_t dbg_stat;
++        uint32_t desc_rb = 0;
++        READ_CMIC_CMC_DMA_CTRLr(unit, chan, &dbg_ctrl);
++        READ_CMIC_CMC_DMA_STATr(unit, &dbg_stat);
++        CDK_DEV_READ32(unit, CMIC_CMC_DMA_DESCr + 4*chan, &desc_rb);
++        CDK_PRINTF("XGSD DMA start: chan=%d dcb=0x%08x desc_rb=0x%08x "
++                   "ctrl=0x%08x stat=0x%08x ioerr=%d\n",
++                   chan, (unsigned)dcb, desc_rb,
++                   CMIC_CMC_DMA_CTRLr_GET(dbg_ctrl),
++                   CMIC_CMC_DMA_STATr_GET(dbg_stat), ioerr);
++    } 
+ 
+     return ioerr ? CDK_E_IO : CDK_E_NONE; 
+ }
+@@ -98,12 +113,13 @@ bmd_xgsd_dma_chan_poll(int unit, int chan, int polls)
+         }
+         if (done & (1 << chan)) {
+             /* DMA complete. Clear the channel */
+-            _clear_chan(unit, chan); 
++            _clear_chan(unit, chan);
+ 
+-            return ioerr ? CDK_E_IO : px; 
++            return ioerr ? CDK_E_IO : px;
+         }
+     }
+-    return CDK_E_TIMEOUT; 
++    /* Timeout is normal for poll(1) when no packet ready — no spam */
++    return CDK_E_TIMEOUT;
+ }
+ 
+ int
+@@ -176,6 +192,14 @@ bmd_xgsd_dma_init(int unit)
+     CMIC_CMC_COS_CTRL_RX_1r_SET(cos_ctrl1, 0xffff);
+     WRITE_CMIC_CMC_COS_CTRL_RX_1r(unit, XGSD_DMA_RX_CHAN, cos_ctrl1);
+ 
++    /* Debug: verify register access works */
++    {
++        CMIC_CMC_DMA_CTRLr_t dbg;
++        READ_CMIC_CMC_DMA_CTRLr(unit, 0, &dbg);
++        CDK_PRINTF("XGSD DMA init: CTRL[0]=0x%08x flags=0x%x ioerr=%d\n",
++                   CMIC_CMC_DMA_CTRLr_GET(dbg), flags, ioerr);
++    }
++
+     /* Initialize TX and RX channels */
+     bmd_xgsd_dma_chan_init(unit, XGSD_DMA_TX_CHAN, XGSD_DMA_CHAN_DIR_TX); 
+     bmd_xgsd_dma_chan_init(unit, XGSD_DMA_RX_CHAN, XGSD_DMA_CHAN_DIR_RX); 

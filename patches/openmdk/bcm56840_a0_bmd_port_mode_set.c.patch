@@ -1,0 +1,19 @@
+diff --git a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_port_mode_set.c b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_port_mode_set.c
+index 53740e2..9b49fa1 100644
+--- a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_port_mode_set.c
++++ b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_port_mode_set.c
+@@ -78,6 +78,14 @@ bcm56840_a0_bmd_port_mode_set(int unit, int port,
+             break;
+         case bmdPortMode40000fd:
+             speed = 40000;
++            /* On the AS5610 the 40G ports are QSFP optical (40GBASE-SR4),
++             * so default the generic 40G mode to the SR line interface, which
++             * makes the Warpcore program the SFP_OPT_SR4 firmware mode for the
++             * optical link. HiGig 40G ports (if any) keep BMD_PHY_IF_HIGIG
++             * set above; copper DAC/KR use bmdPortMode40000CR/KR explicitly. */
++            if (!(flags & HG_FLAGS)) {
++                pref_intf = BMD_PHY_IF_SR;
++            }
+             break;
+         case bmdPortMode40000KR:
+             speed = 40000;

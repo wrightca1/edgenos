@@ -29,87 +29,45 @@ _clear_chan(int unit, int chan)
     int ioerr = 0;
     CMIC_CMC_DMA_CTRLr_t cdc;
     CMIC_CMC_DMA_STAT_CLRr_t cdsc;
-    CMIC_CMC_DMA_STATr_t stat_w1c;
 
-    /* Clear descriptor complete via STAT_CLR field */
-    CMIC_CMC_DMA_STAT_CLRr_CLR(cdsc);
-    CMIC_CMC_DMA_STAT_CLRr_DESCRD_CMPLT_CLRf_SET(cdsc, (1 << chan));
-    ioerr += WRITE_CMIC_CMC_DMA_STAT_CLRr(unit, cdsc);
+    /* Clear descriptor complete */
+    CMIC_CMC_DMA_STAT_CLRr_CLR(cdsc); 
+    CMIC_CMC_DMA_STAT_CLRr_DESCRD_CMPLT_CLRf_SET(cdsc, (1 << chan)); 
+    ioerr += WRITE_CMIC_CMC_DMA_STAT_CLRr(unit, cdsc); 
 
-    /* Clear CHAIN_DONE for this channel directly on the STAT register
-     * (write-1-to-clear semantics).  STAT_CLR has no chain-done field
-     * documented, but writing 1 to the chain_done bit in STAT clears
-     * it on CMICm (confirmed by checking Cumulus's recovery sequence —
-     * without this, the sticky bit makes every poll falsely succeed). */
-    CMIC_CMC_DMA_STATr_CLR(stat_w1c);
-    if (chan == 0) CMIC_CMC_DMA_STATr_CH0_CHAIN_DONEf_SET(stat_w1c, 1);
-    if (chan == 1) CMIC_CMC_DMA_STATr_CH1_CHAIN_DONEf_SET(stat_w1c, 1);
-    if (chan == 2) CMIC_CMC_DMA_STATr_CH2_CHAIN_DONEf_SET(stat_w1c, 1);
-    if (chan == 3) CMIC_CMC_DMA_STATr_CH3_CHAIN_DONEf_SET(stat_w1c, 1);
-    ioerr += WRITE_CMIC_CMC_DMA_STATr(unit, stat_w1c);
-
-    CDK_CONFIG_MEMORY_BARRIER;
+    CDK_CONFIG_MEMORY_BARRIER; 
 
     /* Disable DMA */
-    ioerr += READ_CMIC_CMC_DMA_CTRLr(unit, chan, &cdc);
+    ioerr += READ_CMIC_CMC_DMA_CTRLr(unit, chan, &cdc); 
     CMIC_CMC_DMA_CTRLr_DMA_ENf_SET(cdc, 0);
-    ioerr += WRITE_CMIC_CMC_DMA_CTRLr(unit, chan, cdc);
+    ioerr += WRITE_CMIC_CMC_DMA_CTRLr(unit, chan, cdc); 
 
-    CDK_CONFIG_MEMORY_BARRIER;
+    CDK_CONFIG_MEMORY_BARRIER; 
 
-    return CDK_E_NONE;
+    return CDK_E_NONE; 
 }
 
-int
+int 
 bmd_xgsd_dma_chan_init(int unit, int chan, int dir)
 {
     int ioerr = 0;
     CMIC_CMC_DMA_CTRLr_t cdc;
 
-    ioerr += READ_CMIC_CMC_DMA_CTRLr(unit, chan, &cdc);
+    ioerr += READ_CMIC_CMC_DMA_CTRLr(unit, chan, &cdc); 
     CMIC_CMC_DMA_CTRLr_DIRECTIONf_SET(cdc, dir);
-    /* RX channels: block on chain end (don't drop) + enable CONTINUOUS_DMA.
-     * The bcm56840_a0_bmd_rx_start path NOW sets DESC_HALT_ADDR to bound the
-     * ring, so CONTINUOUS_DMA=1 makes the chip walk the ring autonomously
-     * and wrap at HALT_ADDR. Mirrors Cumulus's CMICm RX setup. */
-    if (dir == 0) {
-        CMIC_CMC_DMA_CTRLr_DROP_RX_PKT_ON_CHAIN_ENDf_SET(cdc, 0);
-        CMIC_CMC_DMA_CTRLr_ENABLE_CONTINUOUS_DMAf_SET(cdc, 1);
-    }
-    ioerr += WRITE_CMIC_CMC_DMA_CTRLr(unit, chan, cdc);
+    ioerr += WRITE_CMIC_CMC_DMA_CTRLr(unit, chan, cdc); 
 
-    return ioerr ? CDK_E_IO : CDK_E_NONE;
+    return ioerr ? CDK_E_IO : CDK_E_NONE; 
 }
 
-int
+int 
 bmd_xgsd_dma_chan_start(int unit, int chan, dma_addr_t dcb)
 {
     int ioerr = 0;
     CMIC_CMC_DMA_CTRLr_t cdc;
-    CMIC_CMC_DMA_STATr_t stat_w1c;
-    CMIC_CMC_DMA_STAT_CLRr_t cdsc;
 
-    /* Pre-clear any sticky CHAIN_DONE / DESCRD_CMPLT for this channel.
-     * Without this, a previous run's bits make the very next poll falsely
-     * succeed before the chip has actually written to the new DCB. */
-    CMIC_CMC_DMA_STATr_CLR(stat_w1c);
-    if (chan == 0) CMIC_CMC_DMA_STATr_CH0_CHAIN_DONEf_SET(stat_w1c, 1);
-    if (chan == 1) CMIC_CMC_DMA_STATr_CH1_CHAIN_DONEf_SET(stat_w1c, 1);
-    if (chan == 2) CMIC_CMC_DMA_STATr_CH2_CHAIN_DONEf_SET(stat_w1c, 1);
-    if (chan == 3) CMIC_CMC_DMA_STATr_CH3_CHAIN_DONEf_SET(stat_w1c, 1);
-    WRITE_CMIC_CMC_DMA_STATr(unit, stat_w1c);
-
-    CMIC_CMC_DMA_STAT_CLRr_CLR(cdsc);
-    CMIC_CMC_DMA_STAT_CLRr_DESCRD_CMPLT_CLRf_SET(cdsc, (1 << chan));
-    WRITE_CMIC_CMC_DMA_STAT_CLRr(unit, cdsc);
-
-    CDK_CONFIG_MEMORY_BARRIER;
-
-    /* Write the DCB address to the DESC register for this channel.
-     * MUST go through CDK_XGSD_CMC_WRITE so the per-CMC offset is added
-     * — raw CDK_DEV_WRITE32 hits the wrong bank and the chip ignores it,
-     * leaving the channel armed against an all-zero DESC pointer. */
-    CDK_XGSD_CMC_WRITE(unit, CMIC_CMC_DMA_DESCr + 4*chan, dcb);
+    /* Write the DCB address to the DESC address for this channel */
+    CDK_DEV_WRITE32(unit, CMIC_CMC_DMA_DESCr + 4*chan, dcb);
 
     CDK_CONFIG_MEMORY_BARRIER;
 
@@ -127,7 +85,7 @@ bmd_xgsd_dma_chan_start(int unit, int chan, dma_addr_t dcb)
         uint32_t desc_rb = 0;
         READ_CMIC_CMC_DMA_CTRLr(unit, chan, &dbg_ctrl);
         READ_CMIC_CMC_DMA_STATr(unit, &dbg_stat);
-        CDK_XGSD_CMC_READ(unit, CMIC_CMC_DMA_DESCr + 4*chan, &desc_rb);
+        CDK_DEV_READ32(unit, CMIC_CMC_DMA_DESCr + 4*chan, &desc_rb);
         CDK_PRINTF("XGSD DMA start: chan=%d dcb=0x%08x desc_rb=0x%08x "
                    "ctrl=0x%08x stat=0x%08x ioerr=%d\n",
                    chan, (unsigned)dcb, desc_rb,
@@ -148,14 +106,11 @@ bmd_xgsd_dma_chan_poll(int unit, int chan, int polls)
     
     for (px = 0; px < polls; px++) {
         ioerr += READ_CMIC_CMC_DMA_STATr(unit, &dma_stat);
-        /* CMICm fires CHAIN_DONE on completion of a DCB chain.  NOTE: the RX
-         * path no longer uses this poll — bcm56840_a0_bmd_rx.c runs a 64-DCB
-         * CONTINUOUS_DMA ring and polls the per-DCB DONE bit in descriptor
-         * memory instead (STAT.CHAIN_DONE is sticky-1 at idle on this chip).
-         * This CHAIN_DONE poll remains only for the single-DCB TX path and the
-         * legacy bmd_xgsd_dma_chan_poll callers.  DESC_DONE is unreliable here
-         * (channels 0 and 3 show sticky DESC_DONE even with no DMA armed). */
-        done = CMIC_CMC_DMA_STATr_CHAIN_DONEf_GET(dma_stat);
+        if (chan == XGSD_DMA_TX_CHAN) {
+            done = CMIC_CMC_DMA_STATr_CHAIN_DONEf_GET(dma_stat);
+        } else {
+            done = CMIC_CMC_DMA_STATr_DESC_DONEf_GET(dma_stat);
+        }
         if (done & (1 << chan)) {
             /* DMA complete. Clear the channel */
             _clear_chan(unit, chan);
@@ -163,18 +118,8 @@ bmd_xgsd_dma_chan_poll(int unit, int chan, int polls)
             return ioerr ? CDK_E_IO : px;
         }
     }
-    /* Debug: print final stat on timeout */
-    {
-        CMIC_CMC_DMA_STATr_t dbg_stat;
-        READ_CMIC_CMC_DMA_STATr(unit, &dbg_stat);
-        CDK_PRINTF("XGSD DMA poll TIMEOUT: chan=%d stat=0x%08x "
-                   "chain_done=0x%x desc_done=0x%x active=0x%x\n",
-                   chan, CMIC_CMC_DMA_STATr_GET(dbg_stat),
-                   CMIC_CMC_DMA_STATr_CHAIN_DONEf_GET(dbg_stat),
-                   CMIC_CMC_DMA_STATr_DESC_DONEf_GET(dbg_stat),
-                   CMIC_CMC_DMA_STATr_DMA_ACTIVEf_GET(dbg_stat));
-    }
-    return CDK_E_TIMEOUT; 
+    /* Timeout is normal for poll(1) when no packet ready — no spam */
+    return CDK_E_TIMEOUT;
 }
 
 int

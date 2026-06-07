@@ -1,0 +1,31 @@
+diff --git a/bmd/shared/bmd_phy_staged_init.c b/bmd/shared/bmd_phy_staged_init.c
+index 7c86951..18fedae 100644
+--- a/bmd/shared/bmd_phy_staged_init.c
++++ b/bmd/shared/bmd_phy_staged_init.c
+@@ -76,7 +76,9 @@ typedef struct _bcast_sig_s {
+     uint32_t addr;
+ } _bcast_sig_t;
+ 
+-#define MAX_BCAST_SIG   8
++#define MAX_BCAST_SIG   24  /* BCM56846 has 18 WARPcore blocks */
++
++#include <stdio.h>  /* for debug printf */
+ #define MAX_INIT_STAGE  8
+ 
+ #endif
+@@ -93,6 +95,7 @@ bmd_phy_staged_init(int unit, cdk_pbmp_t *pbmp)
+     int num_sig, stage, done;
+ 
+     num_sig = 0;
++    printf("bmd_phy_staged_init: starting\n");
+     CDK_PBMP_ITER(*pbmp, port) {
+         pc = BMD_PORT_PHY_CTRL(unit, port);
+         for (; pc != NULL; pc = pc->next) {
+@@ -103,6 +106,7 @@ bmd_phy_staged_init(int unit, cdk_pbmp_t *pbmp)
+             /* Get broadcast signature */
+             rv = PHY_CONFIG_GET(pc, PhyConfig_BcastAddr, &addr, NULL);
+             if (CDK_FAILURE(rv)) {
++                if (port <= 68) printf("  port %d: BcastAddr FAIL rv=%d\n", port, rv);
+                 continue;
+             }
+             if (pc->drv == NULL ||  pc->drv->drv_name == NULL) {

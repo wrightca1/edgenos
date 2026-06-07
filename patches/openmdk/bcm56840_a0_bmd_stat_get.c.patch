@@ -1,0 +1,43 @@
+diff --git a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_stat_get.c b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_stat_get.c
+index 2bd59d5..0fc92c8 100644
+--- a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_stat_get.c
++++ b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_stat_get.c
+@@ -26,6 +26,11 @@ bcm56840_a0_bmd_stat_get(int unit, int port, bmd_stat_t stat, bmd_counter_t *cou
+     int lport;
+     RRPKTr_t rrpkt;
+     RDBGC0r_t rdbgc0;
++    RDBGC3r_t rdbgc3;
++    RDBGC4r_t rdbgc4;
++    RDBGC5r_t rdbgc5;
++    RDBGC6r_t rdbgc6;
++    RIPC4r_t  ripc4;
+     TPKTr_t tpkt;
+     TBYTr_t tbyt;
+     TFCSr_t tfcs;
+@@ -101,6 +106,26 @@ bcm56840_a0_bmd_stat_get(int unit, int port, bmd_stat_t stat, bmd_counter_t *cou
+         ioerr += READ_RDBGC0r(unit, lport, &rdbgc0);
+         counter->v[0] += RDBGC0r_GET(rdbgc0);
+         break;
++    case bmdStatRxIpDrop:
++        ioerr += READ_RDBGC3r(unit, lport, &rdbgc3);
++        counter->v[0] += RDBGC3r_GET(rdbgc3);
++        break;
++    case bmdStatRxDiscard:
++        ioerr += READ_RDBGC4r(unit, lport, &rdbgc4);
++        counter->v[0] += RDBGC4r_GET(rdbgc4);
++        break;
++    case bmdStatRxFilterDrop:
++        ioerr += READ_RDBGC5r(unit, lport, &rdbgc5);
++        counter->v[0] += RDBGC5r_GET(rdbgc5);
++        break;
++    case bmdStatRxGenDrop:
++        ioerr += READ_RDBGC6r(unit, lport, &rdbgc6);
++        counter->v[0] += RDBGC6r_GET(rdbgc6);
++        break;
++    case bmdStatRxPuntToCpu:
++        ioerr += READ_RIPC4r(unit, lport, &ripc4);
++        counter->v[0] += RIPC4r_GET(ripc4);
++        break;
+     default:
+         break;
+     }

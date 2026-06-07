@@ -1,0 +1,660 @@
+diff --git a/phy/PKG/chip/bcmi_warpcore_xgxs/bcmi_warpcore_xgxs_drv.c b/phy/PKG/chip/bcmi_warpcore_xgxs/bcmi_warpcore_xgxs_drv.c
+index 5956c93..0530bd7 100644
+--- a/phy/PKG/chip/bcmi_warpcore_xgxs/bcmi_warpcore_xgxs_drv.c
++++ b/phy/PKG/chip/bcmi_warpcore_xgxs/bcmi_warpcore_xgxs_drv.c
+@@ -9,6 +9,8 @@
+  *
+  */
+ 
++#include <stdio.h>
++
+ #include <phy/phy.h>
+ #include <phy/phy_drvlist.h>
+ #include <phy/phy_brcm_serdes_id.h>
+@@ -302,6 +304,9 @@ _warpcore_pll_lock_wait(phy_ctrl_t *pc)
+         }
+         PHY_SYS_USLEEP(1000);
+     }
++    CDK_PRINTF("WC PLL: port=%d lock=%d after %dms xgxs=0x%04x ioerr=%d\n",
++               PHY_CTRL_PORT(pc), lock, cnt,
++               xgxs_stat.xgxsstatus[0] & 0xffff, ioerr);
+     if (lock == 0) {
+         PHY_WARN(pc, ("TXPLL did not lock\n"));
+         return CDK_E_TIMEOUT;
+@@ -479,11 +484,12 @@ _warpcore_fw_get(phy_ctrl_t *pc, uint32_t *size)
+     /* Get revision for errata workarounds */
+     rev = _warpcore_id_rev(pc);
+ 
+-    /* Firmware for rev B0 and newer */
++    /* Select firmware based on chip revision.
++     * B0 (BCM56846) needs the B0-specific firmware for proper XFI/10G support.
++     * A0/A1 use the original firmware. */
+     fw_data = wc40_ucode_b0_bin;
+     fw_size = wc40_ucode_b0_bin_len;
+-    if (rev == REV_A0 || rev == REV_A1) { 
+-        /* Special firmware for rev A0/A1 */
++    if (rev == REV_A0 || rev == REV_A1) {
+         fw_data = wc40_ucode_bin;
+         fw_size = wc40_ucode_bin_len;
+     }
+@@ -519,6 +525,8 @@ _warpcore_init_stage_0(phy_ctrl_t *pc)
+     uint32_t fw_size;
+ 
+     _PHY_DBG(pc, ("init_stage_0\n"));
++    CDK_PRINTF("WC init_stage_0: port=%d primary=%d\n",
++               PHY_CTRL_PORT(pc), _warpcore_primary_lane(pc));
+ 
+     /* Initialize resources shared by all 4 lanes */
+     if (!_warpcore_primary_lane(pc)) {
+@@ -666,6 +674,64 @@ _warpcore_init_stage_1(phy_ctrl_t *pc)
+     return rv;
+ }
+ 
++/*
++ * RX-cal firmware-pause helpers (2026-06-04).
++ *
++ * Replicate the Warpcore firmware control protocol decoded from Cumulus
++ * libopennsl (docs/WC_FIRMWARE_PAUSE_PROTOCOL.md). The missing piece in the
++ * earlier RX-kick attempts was that the firmware uC was never stopped, so it
++ * overwrote every host cal seed. These helpers stop/restart the uC via the
++ * UC_CTRL mailbox (0x820e) with the documented bit-0x80 command handshake.
++ *
++ * All access is via cdk_xgs_miim_{read,write}; (1<<16)|reg = clause-45 devad1
++ * (the 0x8xxx block); the caller selects the lane via AER (0xFFDE) first.
++ */
++
++/* Read-modify-write: new = (old & ~mask) | (val & mask). Matches FUN_0158fbdc. */
++static int
++_wc_rmw(int unit, uint32_t phy, uint32_t reg, uint32_t val, uint32_t mask)
++{
++    uint32_t v = 0;
++    int rv = cdk_xgs_miim_read(unit, phy, reg, &v);
++    if (rv < 0) {
++        return rv;
++    }
++    v = (v & ~mask) | (val & mask);
++    return cdk_xgs_miim_write(unit, phy, reg, v);
++}
++
++/* Poll reg until (mask & val) becomes set (want_set!=0) or clear (want_set==0).
++ * Returns 0 on success, -1 on timeout. Matches FUN_0158ee1c. */
++static int
++_wc_poll(int unit, uint32_t phy, uint32_t reg, uint32_t mask, int want_set,
++         int max_polls)
++{
++    int i;
++    uint32_t v = 0;
++    for (i = 0; i < max_polls; i++) {
++        if (cdk_xgs_miim_read(unit, phy, reg, &v) < 0) {
++            return -1;
++        }
++        if (want_set) {
++            if ((v & mask) != 0) {
++                return 0;
++            }
++        } else {
++            if ((v & mask) == 0) {
++                return 0;
++            }
++        }
++        PHY_SYS_USLEEP(1000);
++    }
++    return -1;
++}
++
++/* NOTE: the v4 UC_CTRL (0x820e) stop/restart helper (_wc_uc_cmd) was removed —
++ * the read-only probe confirmed the per-core uC stop was reachable but didn't
++ * lock lanes 2,3, so v5 uses the per-lane 0xffe0 DSC pause instead (what
++ * independent_lane_init actually uses for cal). The 0x820e protocol is preserved
++ * in docs/WC_FIRMWARE_PAUSE_PROTOCOL.md. */
++
+ /*
+  * Function:
+  *      _warpcore_init_stage_2
+@@ -686,6 +752,15 @@ _warpcore_init_stage_2(phy_ctrl_t *pc)
+     MISC3r_t misc3;
+     MISC4r_t misc4;
+     RX66_SCW0r_t scw0;
++
++    /* IEEE MII reset — the full SDK does this FIRST in independent_lane_init.
++     * This resets the entire PHY including restarting the firmware.
++     * After reset, the firmware re-initializes from scratch and should
++     * enter a state where READY_FOR_CMD=1 and TX driver is configurable.
++     *
++     * Without this reset, the firmware stays in the state left by stage_0
++     * (FW_MODE=0x0707, READY_FOR_CMD=0) and ignores all configuration. */
++    /* IEEE reset removed - COMBO_MIICNTLr_RESETf incompatible */
+     RX66_SCW1r_t scw1;
+     RX66_SCW2r_t scw2;
+     RX66_SCW3r_t scw3;
+@@ -861,6 +936,320 @@ _warpcore_init_stage_2(phy_ctrl_t *pc)
+     MISC3r_LANEDISABLEf_SET(misc3, 0);
+     ioerr += WRITE_MISC3r(pc, misc3);
+ 
++    /* Configure TX driver current (idriver=9, ipredrive=9).
++     *
++     * This replicates _phy_wc40_tx_control_set() from OpenBCM wc40.c.
++     * The Memory SDK writes to lane-specific TX_DRIVERr registers:
++     *   TX0=0x8067, TX1=0x8077, TX2=0x8087, TX3=0x8097
++     * All accessed from lane 0 context (the register address determines
++     * which lane, not the AER). Only the primary lane (lane 0) of each
++     * WARPcore does this, writing all 4 lane registers.
++     *
++     * Default values from wc40.c _phy_wc40_config_init():
++     *   TXDRV_DFT_INX: idrive=9, ipredrive=9, post2=0
++     *
++     * Without this, TX outputs no signal → PMA TX_FAULT (CL45 1.8 bit 13).
++     */
++    /* Configure TX driver via firmware STOP/WRITE/RESTART sequence.
++     *
++     * From OpenBCM wc40.c _phy_wc40_firmware_mode_set():
++     * The WC firmware controls TX driver registers. Software must:
++     *   1. Wait for READY_FOR_CMD
++     *   2. STOP firmware (SUPPLEMENT_INFO=0, GP_UC_REQ=1)
++     *   3. Write TX_DRIVERr registers
++     *   4. RESUME firmware (SUPPLEMENT_INFO=2, GP_UC_REQ=1)
++     *   5. RESTART firmware (SUPPLEMENT_INFO=3, GP_UC_REQ=1)
++     */
++    /* Send TX driver enable command via UC_CTRLr firmware mailbox.
++     *
++     * The Cumulus SDK (from Ghidra RE of libopennsl.so.1) sets TX driver via:
++     * 1. tx_control_set stores idriver/ipredrive to sw_init_drive field
++     * 2. WC40_REG_MODIFY remaps value with 0x07000000 prefix
++     * 3. Dispatch chain sends to firmware through SOC PHY register table
++     * 4. Firmware applies TX driver settings
++     *
++     * We try to replicate by sending the TX driver config through the
++     * UC_CTRLr mailbox (0x820E) with various command sequences.
++     * The firmware should recognize the command and set idriver=9.
++     *
++     * Also try direct CL45 write to TX_DRIVERr with multi-MMD re-enable,
++     * matching the exact MIIM access pattern from bmd_reset warpcore_phy_init.
++     */
++    /* PRBS_EN clear removed - ANATXACONTROL0r macro incompatible */
++
++    if (_warpcore_primary_lane(pc)) {
++        uint32_t phy_addr = PHY_CTRL_ADDR(pc);
++        int unit_id = PHY_CTRL_UNIT(pc);
++
++        /* Step 1: Re-enable multi-MMD mode (same as warpcore_phy_init) */
++        cdk_xgs_miim_write(unit_id, phy_addr, 0x1f, 0x8000);
++        {
++            uint32_t ctrl;
++            cdk_xgs_miim_read(unit_id, phy_addr, 0x1d, &ctrl);
++            ctrl |= 0x400f;
++            ctrl &= ~0x8000;
++            cdk_xgs_miim_write(unit_id, phy_addr, 0x1d, ctrl);
++        }
++
++        /* Step 2: Stop PLL sequencer */
++        {
++            uint32_t xgxs;
++            cdk_xgs_miim_read(unit_id, phy_addr,
++                (1 << 16) | 0x8000, &xgxs);
++            xgxs &= ~0x2000;
++            cdk_xgs_miim_write(unit_id, phy_addr,
++                (1 << 16) | 0x8000, xgxs);
++        }
++
++        /* Step 3: Enable broadcast AER */
++        cdk_xgs_miim_write(unit_id, phy_addr,
++            (1 << 16) | 0xFFDE, 0x01FF);
++
++        /* Step 4: Write TX_DRIVERr for all 4 lanes via CL45 with PLL stopped.
++         *
++         * Value 0x2440 (2026-06-07): captured from the WORKING Cumulus 2.5.0 4/4
++         * loopback — TX_DRIVERr (0x8067/77/87/97) reads 0x2440 on ALL 4 lanes of
++         * both QSFP ports (docs/cumulus_wc_full_dump_2026_06_07.txt). EdgeNOS had
++         * been writing 0x0990 (idriver=9/ipredrive=9), which under-drives the
++         * link: with the CL82 digital config now matching Cumulus exactly, the
++         * remaining 2/4 was an ANALOG drive issue (swp's TX driving ~3 lanes too
++         * weak -> RX vga pinned high ~24, non-unique/garbled AMs on lanes 2,3).
++         * Match Cumulus's TX drive strength. */
++        {
++            int lane;
++            for (lane = 0; lane < 4; lane++) {
++                uint32_t reg = 0x8067 + (0x10 * lane);
++                cdk_xgs_miim_write(unit_id, phy_addr,
++                    (1 << 16) | reg, 0x2440);
++            }
++        }
++
++        /* Step 5: Disable broadcast */
++        cdk_xgs_miim_write(unit_id, phy_addr,
++            (1 << 16) | 0xFFDE, 0x0000);
++
++        /* Step 6: Restart PLL sequencer */
++        {
++            uint32_t xgxs;
++            cdk_xgs_miim_read(unit_id, phy_addr,
++                (1 << 16) | 0x8000, &xgxs);
++            xgxs |= 0x2000;
++            cdk_xgs_miim_write(unit_id, phy_addr,
++                (1 << 16) | 0x8000, xgxs);
++        }
++
++        /* Wait for PLL lock */
++        PHY_SYS_USLEEP(10000);
++
++        /* NOTE (2026-06-04) — per-lane RX-cal "kick" TRIED TWICE, BOTH REGRESSED
++         * 2/4 -> 0/4. Ported from _phy_wc40_independent_lane_init
++         * (docs/ind_lane_init_decomp.c, docs/wc_rxcal_decomp_ghidra.c):
++         *   #1 zero-seed (0x8308=0, 0x833c=0): broke firmware-locked lanes 0,1.
++         *   #2 REAL ghidra seed: FUN_015936ac returns 0x25 for a fiber 40G lane ->
++         *      0x8308 = 0x25&0x1f = 0x05 (CTLE idx), 0x833c = 0x25&0x20 ? 0x80 : 0
++         *      = 0x80 (cal-valid). Full arm seq (0x8309 hold/release, 0x8300 DFE en,
++         *      0x8302 FSM, 0x833d/0x833e LMS, 0x8150/0x832b deskew). STILL 0/4.
++         * CONCLUSION: a host-side cal restart CANNOT be layered on top of the
++         * Warpcore FIRMWARE RX auto-adapt that OpenMDK leaves running — the restart
++         * tears down the firmware's converged lanes (0,1) regardless of seed. The
++         * full SDK DISABLES firmware adapt and runs the COMPLETE host cal. Proper
++         * closure (substantial): disable fw RX auto-adapt (UC mailbox/fw-mode), then
++         * port the entire ind_lane_init RX path (seed + the per-lane TX-FIR funcs
++         * FUN_0158b954/01594d90/01597f00 = regs 0x8061/67/77/87/ba, + DFE/LMS) and
++         * own the per-lane cal end-to-end; OR replicate exact regs from a cold-init
++         * Cumulus capture. Decompiles saved: docs/wc_rxcal_decomp_ghidra.c. */
++
++        /* ATTEMPT #3 (2026-06-04) — PER-LANE-TARGETED kick.
++         *
++         * Addressing finding: cdk_xgs_miim_write treats (1<<16)|reg as
++         * clause-45 DEVAD=1; lane selection is via the AER register 0xFFDE.
++         *   0x01FF = BROADCAST (all 4 lanes)  -> what #1 and #2 used.
++         *   lane#  = single lane (FORCE_LANE), per bcm54282 WRITELN/WRITEALL.
++         * #1/#2 broadcast hit the firmware-converged lanes 0,1 and tore them
++         * down. Here we drive the seed kick ONLY into the lanes that never
++         * AM-lock (default 2,3) via single-lane AER, leaving 0,1 untouched.
++         * This CANNOT regress below 2/4: lanes 0,1 are never written.
++         *
++         * Opt-in (keeps the shipping image at safe baseline behaviour):
++         *   touch /tmp/wc_rxkick                  -> kick default lanes 2,3
++         *   echo 0xC > /tmp/wc_rxkick (hex mask)  -> kick lanes in bitmask
++         * Seed from FUN_015936ac (fiber 40G) = 0x25:
++         *   0x8308 = 0x25 & 0x1f = 0x05 (CTLE idx), 0x833c = 0x80 (cal-valid).
++         *
++         * RESULT (2026-06-04, swp50 loopback): NO REGRESSION (am_lock held
++         * 0x3 = lanes 0,1 stay locked — the single-lane AER fix worked) but
++         * NO IMPROVEMENT (lanes 2,3 still vga=20 dfe=0, never lock). This
++         * RULES OUT addressing as the path to 4/4: even correctly isolated to
++         * lanes 2,3 with the real seed, a one-shot host kick at init can't make
++         * them lock — the Warpcore FIRMWARE RX auto-adapt OpenMDK leaves running
++         * owns the lane state and defeats the host seed. The firmware-adapt wall
++         * is the real blocker, not addressing. Code kept (toggle off by default)
++         * for reuse AFTER firmware RX auto-adapt is disabled (UC mailbox/fw-mode);
++         * then the FULL host cal can own the lanes. See memory
++         * project_qsfp_rxkick_attempt_2026_06_04. */
++        /* ATTEMPT #4 (2026-06-04) — STOP THE FIRMWARE uC, then seed cal.
++         *
++         * The decode of _phy_wc40_firmware_mode_set / independent_lane_init
++         * (docs/WC_FIRMWARE_PAUSE_PROTOCOL.md) showed every prior kick was
++         * missing the firmware-pause step. Now: per target lane, run the
++         * UC_CTRL (0x820e) handshake to STOP the uC, write the cal seed while
++         * it is stopped, then RESTART the uC. The 0x80 handshake is polled so
++         * we know the stop actually took (if it times out we ABORT that lane
++         * rather than leave the uC half-stopped).
++         *
++         * NOTE: the uC is per-Warpcore (one micro for all 4 lanes) — the brief
++         * stop/restart touches the whole core, so it CAN disturb the already-
++         * locked lanes 0,1. Toggle-gated (off by default); always recoverable
++         * by restoring edged.baseline + removing /tmp/wc_rxkick.
++         *
++         * Results written to /tmp/wc_rxkick_result (CDK_PRINTF is discarded —
++         * edged daemonizes stdout to /dev/null). */
++        {
++            FILE *kf = fopen("/tmp/wc_rxkick", "r");
++            if (kf) {
++                unsigned lane_mask = 0xC; /* default: lanes 2,3 */
++                unsigned parsed;
++                FILE *rf;
++                int lane;
++                if (fscanf(kf, "%i", &parsed) == 1 && parsed != 0 &&
++                    (parsed & 0xF) != 0) {
++                    lane_mask = parsed & 0xF;
++                }
++                fclose(kf);
++
++                rf = fopen("/tmp/wc_rxkick_result", "a");
++                if (rf) {
++                    fprintf(rf, "port=%d lane_mask=0x%x : ",
++                        PHY_CTRL_PORT(pc), lane_mask);
++                }
++
++                /* ATTEMPT #5 (2026-06-05) — FULL RX-cal body per lane.
++                 *
++                 * Replicates the RX-cal register sequence of
++                 * _phy_wc40_independent_lane_init (docs/ind_lane_init_decomp.c)
++                 * for the 40G-fiber (non-XLAUI) case, using the per-lane 0xffe0
++                 * DSC pause the SDK actually uses for cal (NOT the per-core uC
++                 * stop from v4). Board-cal-dependent TX-FIR helpers
++                 * (FUN_0158b954/01594d90 — read SOC PVT tables OpenMDK lacks)
++                 * are SKIPPED; lanes 0,1 lock with our fixed TX-FIR so RX cal is
++                 * the gap. Seed FUN_015936ac(40G fiber)=0x25 -> 0x8308=0x05,
++                 * 0x833c=0x80. */
++                for (lane = 0; lane < 4; lane++) {
++                    int dsc_rv;
++                    if (!((lane_mask >> lane) & 1)) {
++                        continue;
++                    }
++                    /* Select THIS lane only via AER (single-lane, not bcast) */
++                    cdk_xgs_miim_write(unit_id, phy_addr,
++                        (1 << 16) | 0xFFDE, lane);
++
++                    /* --- per-lane DSC pause: request + wait for ACK clear --- */
++                    cdk_xgs_miim_write(unit_id, phy_addr,
++                        (1 << 16) | 0xffe0, 0x8000);
++                    dsc_rv = _wc_poll(unit_id, phy_addr,
++                        (1 << 16) | 0xffe0, 0x8000, 0, 50);
++                    if (rf) {
++                        fprintf(rf, "L%d[dsc=%d", lane, dsc_rv);
++                    }
++
++                    /* --- RX-cal setup (independent_lane_init body) --- */
++                    cdk_xgs_miim_write(unit_id, phy_addr,
++                        (1 << 16) | 0x82e6, 0x03f0);
++                    cdk_xgs_miim_write(unit_id, phy_addr,
++                        (1 << 16) | 0x82e8, 0x03f0);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x82e3, 0x3f00, 0x3f00);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8104, 0xff00, 0xff00);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8357, 0x0400, 0x0600);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8345, 0xc000, 0xc000);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8300, 0x0000, 0x000c);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8309, 0x0000, 0x0020);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x83c0, 0x6000, 0x6000);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8301, 0x0007, 0x0007);
++                    /* main DFE + slicer enable */
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8300, 0x0050, 0x0051);
++                    /* RX cal FSM */
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8302, 0x2004, 0x2006);
++
++                    /* --- seed: arm, write CTLE+cal-valid, release --- */
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8309, 0x0020, 0x0020);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8308, 0x0005, 0x001f);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x833c, 0x0080, 0x0080);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8309, 0x0000, 0x0020);
++
++                    /* --- DSC resume + LMS + deskew --- */
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0xffe0, 0x0000, 0x1200);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8345, 0x0000, 0xc000);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x833d, 0x8000, 0x8000);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x833e, 0xc000, 0xc000);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x8150, 0x0007, 0x0007);
++                    _wc_rmw(unit_id, phy_addr, (1 << 16) | 0x832b, 0x0000, 0x0002);
++
++                    if (rf) {
++                        fprintf(rf, " caldone] ");
++                    }
++                }
++                /* Restore AER to lane 0 (clear single-lane select) */
++                cdk_xgs_miim_write(unit_id, phy_addr,
++                    (1 << 16) | 0xFFDE, 0x0000);
++
++                if (rf) {
++                    fprintf(rf, "\n");
++                    fclose(rf);
++                }
++            }
++        }
++
++        /* READ-ONLY uC mailbox probe (2026-06-05). Gated on /tmp/wc_probe.
++         * No firmware/cal writes — only reads (plus benign AER lane-select,
++         * restored after). Determines whether we actually reach the UC_CTRL
++         * mailbox 0x820e, and at which devad/addressing. Output appended to
++         * /tmp/wc_probe_result. See project_wc_fw_pause_protocol_2026_06_04. */
++        {
++            FILE *pf = fopen("/tmp/wc_probe", "r");
++            if (pf) {
++                FILE *rf = fopen("/tmp/wc_probe_result", "a");
++                fclose(pf);
++                if (rf) {
++                    int lane, devad;
++                    uint32_t v;
++                    fprintf(rf, "port=%d phy_addr=0x%x:\n",
++                        PHY_CTRL_PORT(pc), phy_addr);
++                    /* sanity: a known XGXS reg should NOT read 0xffff */
++                    v = 0xdead;
++                    cdk_xgs_miim_read(unit_id, phy_addr, (1 << 16) | 0x8000, &v);
++                    fprintf(rf, "  sanity 0x8000(devad1)=0x%04x\n", v & 0xffff);
++                    /* 0x820e across devads 0..4, no AER select */
++                    for (devad = 0; devad <= 4; devad++) {
++                        v = 0xdead;
++                        cdk_xgs_miim_read(unit_id, phy_addr,
++                            (devad << 16) | 0x820e, &v);
++                        fprintf(rf, "  0x820e devad%d(noAER)=0x%04x\n",
++                            devad, v & 0xffff);
++                    }
++                    /* 0x820e per-lane via AER select, devad1 */
++                    for (lane = 0; lane < 4; lane++) {
++                        cdk_xgs_miim_write(unit_id, phy_addr,
++                            (1 << 16) | 0xFFDE, lane);
++                        v = 0xdead;
++                        cdk_xgs_miim_read(unit_id, phy_addr,
++                            (1 << 16) | 0x820e, &v);
++                        fprintf(rf, "  0x820e AERlane%d devad1=0x%04x\n",
++                            lane, v & 0xffff);
++                    }
++                    /* read back AER itself + restore to 0 */
++                    v = 0xdead;
++                    cdk_xgs_miim_read(unit_id, phy_addr,
++                        (1 << 16) | 0xFFDE, &v);
++                    fprintf(rf, "  AER(0xffde) readback=0x%04x\n", v & 0xffff);
++                    cdk_xgs_miim_write(unit_id, phy_addr,
++                        (1 << 16) | 0xFFDE, 0x0000);
++                    fprintf(rf, "\n");
++                    fclose(rf);
++                }
++            }
++        }
++    }
++
+     /* Default mode is fiber */
+     PHY_NOTIFY(pc, PhyEvent_ChangeToFiber);
+ 
+@@ -1115,6 +1504,22 @@ bcmi_warpcore_xgxs_link_get(phy_ctrl_t *pc, int *link, int *autoneg_done)
+         }
+     }
+ 
++    /* DEBUG: log first link_get call per port */
++    {
++        static uint32_t _dbg_mask[3];
++        int port = PHY_CTRL_PORT(pc);
++        int widx = port / 32;
++        int bit = port % 32;
++        if (widx < 3 && !(_dbg_mask[widx] & (1 << bit))) {
++            _dbg_mask[widx] |= (1 << bit);
++            CDK_PRINTF("WC link_get: port=%d pcs=0x%04x mii=0x%04x link=%d "
++                       "flags=0x%x 4lane=%d ioerr=%d\n",
++                       port, pcs_stat.pcs_ieeestatus1[0] & 0xffff,
++                       mii_stat.combo_miistat[0] & 0xffff, *link,
++                       PHY_CTRL_FLAGS(pc), IS_4LANE_PORT(pc) ? 1 : 0, ioerr);
++        }
++    }
++
+     /* Check if a link down->up transition */
+     if (*link == TRUE) {
+         if (!(PHY_CTRL_FLAGS(pc) & PHY_F_LINK_UP)) {
+@@ -1330,6 +1735,29 @@ bcmi_warpcore_xgxs_speed_set(phy_ctrl_t *pc, uint32_t speed)
+                 fw_mode = 0x3333;
+             } else if (PHY_CTRL_LINE_INTF(pc) == PHY_IF_CR) {
+                 speed_val = FV_fdr_40G_CR4;
++            } else if (PHY_CTRL_LINE_INTF(pc) == PHY_IF_SR) {
++                /* 40GBASE-SR4 optical (e.g. Avago AFBR-79EBPZ QSFP on the
++                 * AS5610). Same 40G-R4 data rate as KR4, but the per-lane
++                 * firmware mode must be SFP_OPT_SR4 (nibble 1) instead of the
++                 * copper KR4/DAC equalization, so the SerDes RX adapts for an
++                 * optical link (the copper DFE that KR4 assumes is wrong for
++                 * fiber). Nibble values match _SHR_PORT_PHY_FIRMWARE_*:
++                 * 1=SFP_OPT_SR4, 2=SFP_DAC, 3=XLAUI. */
++                /* NOTE (2026-06-03): tried FV_fdr_40G_X4 (forced 4-lane, no
++                 * CL72 training) on the theory that KR4 training blocks the
++                 * optic — it made things WORSE (RX DFE stopped adapting,
++                 * dfe=0, 0/4 AM-lock). KR4 datarate is correct.
++                 *
++                 * FIX (2026-06-07): fw_mode was 0x1111 (SFP_OPT_SR4) — that
++                 * only locked 2/4 lanes. Captured the WORKING Cumulus 2.5.0 on
++                 * this exact swp49<->swp50 loopback (4/4 locked) via SDK MIIM
++                 * debug: FIRMWARE_MODEr (0x81f2) reads 0x0000 on ALL four QSFP
++                 * lanes, NOT 0x1111. fw_mode=0 (DEFAULT) lets the WC firmware
++                 * run its normal per-lane RX auto-adapt and all 4 lanes
++                 * converge. The SFP_OPT_SR4 nibble was the wrong hypothesis.
++                 * See docs/cumulus_qsfp_miim_capture_2026_06_07.txt. */
++                speed_val = FV_fdr_40G_KR4;
++                fw_mode = 0;
+             } else {
+                 /* Default is 40GKR */
+                 speed_val = FV_fdr_40G_KR4;
+@@ -1426,8 +1854,16 @@ bcmi_warpcore_xgxs_speed_set(phy_ctrl_t *pc, uint32_t speed)
+     if (CDK_FAILURE(rv)) {
+         return rv;
+     }
++    CDK_PRINTF("WC speed_set: port=%d speed=%d cur_speed=%d 4lane=%d "
++               "line_intf=%d active_intf=%d speed_val=0x%x\n",
++               PHY_CTRL_PORT(pc), (int)speed, (int)cur_speed,
++               IS_4LANE_PORT(pc) ? 1 : 0,
++               PHY_CTRL_LINE_INTF(pc), ACTIVE_INTERFACE_GET(pc),
++               speed_val);
+     if (speed == cur_speed &&
+         PHY_CTRL_LINE_INTF(pc) == ACTIVE_INTERFACE_GET(pc)) {
++        CDK_PRINTF("WC speed_set: SKIPPING (speed unchanged) port=%d\n",
++                   PHY_CTRL_PORT(pc));
+         return CDK_E_NONE;
+     }
+ 
+@@ -1468,12 +1904,81 @@ bcmi_warpcore_xgxs_speed_set(phy_ctrl_t *pc, uint32_t speed)
+         MISC6r_RESET_RX_ASICf_SET(misc6, 1);
+         MISC6r_RESET_TX_ASICf_SET(misc6, 1);
+         ioerr += WRITE_MISC6r(pc, misc6);
++
++        /*
++         * Configure 1-lane Rx clock compensation.
++         * init_stage_2 only sets this if IS_1LANE_PORT is true at init time,
++         * but PHY_F_SERDES_MODE may be set after init. Ensure the 1-lane
++         * RX66 settings are applied when switching from 4-lane to 1-lane mode.
++         */
++        {
++            RX66_CONTROLr_t rx66_ctrl;
++            ioerr += READ_RX66_CONTROLr(pc, &rx66_ctrl);
++            RX66_CONTROLr_CC_ENf_SET(rx66_ctrl, 1);
++            RX66_CONTROLr_CC_DATA_SELf_SET(rx66_ctrl, 1);
++            ioerr += WRITE_RX66_CONTROLr(pc, rx66_ctrl);
++        }
+     }
+ 
+     /* Update firmware mode for all lanes */
+     FIRMWARE_MODEr_SET(firmware_mode, fw_mode);
+     ioerr += WRITE_FIRMWARE_MODEr(pc, firmware_mode);
+ 
++    /* 40G/4-lane CL82 PCS per-dual-block config (2026-06-07).
++     *
++     * The Warpcore has TWO CL82/XGXSBLK2 sub-blocks: the lane-0 AER context
++     * serves PCS lanes 0,1 and the lane-2 context serves lanes 2,3. OpenMDK's
++     * register accessors write via the PRIMARY (lane-0) phy_ctrl only, so the
++     * lane-2 sub-block is left at power-on defaults -> lanes 2,3 get the wrong
++     * TX lane-swap / 64b66b alignment / deskew-window, emit & expect NON-UNIQUE
++     * alignment markers (confirmed via CL82DIAG: nonuniq_am=1, amspace_err=1),
++     * and never AM-lock -> am_lock stuck at 0x3 (2/4) even after fw_mode=0 made
++     * all 4 lanes adapt.
++     *
++     * Fix: write the per-dual-block PCS config to BOTH the lane-0 AND lane-2 AER
++     * contexts (raw MIIM with AER lane-select, since the SDK macros only reach
++     * lane 0), using the exact values captured from the WORKING Cumulus 2.5.0
++     * 4/4 loopback (docs/cumulus_wc_full_dump_2026_06_07.txt — lanes 0 and 2 are
++     * configured identically there):
++     *   0x8100=0x08e4  0x8101 TXLNSWAP=0x00e4  0x810d ASWAP66_1=0x0064
++     *   0x810e ASWAP66_2=0x0809  0x8150=0x00bc  0x8169 TXLNSWAP1=0x00e4 */
++    if (IS_4LANE_PORT(pc)) {
++        int unit_id = PHY_CTRL_UNIT(pc);
++        uint32_t phy_addr = PHY_CTRL_ADDR(pc);
++        int blk;
++        for (blk = 0; blk <= 2; blk += 2) {   /* dual-blocks: lane-0 and lane-2 */
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0xFFDE, blk);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8100, 0x08e4);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8101, 0x00e4);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x810d, 0x0064);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x810e, 0x0809);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8150, 0x00bc);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8169, 0x00e4);
++            /* CL82 AM-marker config (2026-06-07) — the per-dual-block alignment-
++             * marker pattern + RX match. EdgeNOS only enables CL82 (TX_CONTROL_1)
++             * and leaves these at defaults, so the 4 PCS lanes get NON-UNIQUE
++             * AMs (CL82DIAG nonuniq_am=1) -> only 2 lanes AM-lock. Values from
++             * the WORKING Cumulus 4/4 (cumulus_wc_full_dump_2026_06_07.txt); the
++             * 0x7690/0xc4f0/0xe647 triple is the AM marker (TX insert + RX match):
++             *   CL82_RX_CONTROL_3=0x8429  _4=0x842a  _6=0x842c  _8=0x8435
++             *   CL82_TX_CONTROL_4=0x8434  _5=0x8436  _6=0x8437  _7=0x8438
++             *   CL82_RX_CONTROL_9=0x8439  _10=0x843a  _11=0x843b */
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8429, 0x3fff);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x842a, 0x01df);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x842c, 0x0041);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8434, 0x0001);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8435, 0x0001);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8436, 0x7690);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8437, 0xc4f0);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8438, 0xe647);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x8439, 0x7690);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x843a, 0xc4f0);
++            ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0x843b, 0xe647);
++        }
++        /* restore AER to lane 0 so subsequent SDK accesses are unaffected */
++        ioerr += cdk_xgs_miim_write(unit_id, phy_addr, (1 << 16) | 0xFFDE, 0x0000);
++    }
++
+     /* Disable 100FX and 100FX auto-detect */
+     ioerr += READ_FX100_CONTROL1r(pc, &fx100_ctrl1);
+     FX100_CONTROL1r_ENABLEf_SET(fx100_ctrl1, 0);
+@@ -1594,11 +2099,42 @@ bcmi_warpcore_xgxs_speed_set(phy_ctrl_t *pc, uint32_t speed)
+         ioerr += WRITE_MISC6r(pc, misc6);
+     }
+ 
++    /* Verify actual speed after configuration */
++    {
++        uint32_t verify_speed = 0;
++        PHY_SPEED_GET(pc, &verify_speed);
++        CDK_PRINTF("WC speed_set DONE: port=%d requested=%d actual=%d "
++                   "4lane=%d ioerr=%d\n",
++                   PHY_CTRL_PORT(pc), (int)speed, (int)verify_speed,
++                   IS_4LANE_PORT(pc) ? 1 : 0, ioerr);
++    }
++
++    /* Set TX driver current after PLL sequencer restart. */
++    if (_warpcore_primary_lane(pc)) {
++        int i;
++
++        for (i = 0; i < 4; i++) {
++            uint32_t blk = 0x8060 + (0x10 * i);
++            uint32_t val;
++            PHY_BUS_WRITE(pc, 0x1f, 0xffd0);
++            PHY_BUS_WRITE(pc, 0x1e, 0x0000);
++            PHY_BUS_WRITE(pc, 0x1f, blk | 0x8000);
++            PHY_BUS_READ(pc, 0x17, &val);
++            val &= ~(0xf << 8);
++            val &= ~(0xf << 4);
++            val &= ~(1 << 15);
++            val |= (0x9 << 8);
++            val |= (0x9 << 4);
++            PHY_BUS_WRITE(pc, 0x17, val);
++        }
++        PHY_BUS_WRITE(pc, 0x1f, 0x0000);
++    }
++
+     return ioerr ? CDK_E_IO : rv;
+ }
+ 
+ /*
+- * Function:    
++ * Function:
+  *      bcmi_warpcore_xgxs_speed_get
+  * Purpose:     
+  *      Get the current operating speed.
+@@ -2353,6 +2889,13 @@ bcmi_warpcore_xgxs_config_get(phy_ctrl_t *pc, phy_config_t cfg, uint32_t *val, v
+     case PhyConfig_Enable:
+         *val = 1;
+         return CDK_E_NONE;
++    case PhyConfig_BcastAddr:
++        /* Return broadcast address for staged init firmware download.
++         * All 4 lanes of each WARPcore share the same broadcast address
++         * (the WC base PHY address). This groups lanes per-WC for firmware
++         * download and keeps unique signatures under MAX_BCAST_SIG (8). */
++        *val = PHY_CTRL_ADDR(pc);
++        return CDK_E_NONE;
+     case PhyConfig_Clause45Devs:
+         *val = 0;
+         if (PHY_CTRL_FLAGS(pc) & PHY_F_CLAUSE45) {
