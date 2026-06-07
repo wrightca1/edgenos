@@ -359,8 +359,12 @@ build_image() {
     # Build real initramfs with nos-init (handles squashfs + overlayfs mount)
     echo "  Building initramfs..."
     local IRDIR=$(mktemp -d)
+    # -lgcc: PPC needs libgcc's _restgpr_*/_savegpr_* register-save helpers, which
+    # -nodefaultlibs strips (link fails with "undefined reference to _restgpr_30_x").
+    # `|| true` so a compile failure falls through to the busybox initramfs instead
+    # of aborting the build under `set -e`.
     powerpc-linux-gnu-gcc -static -nostdlib -nostartfiles -nodefaultlibs \
-        -Os -Wall -o "${IRDIR}/init" /build/initramfs/nos-init.c 2>/dev/null
+        -Os -Wall -o "${IRDIR}/init" /build/initramfs/nos-init.c -lgcc 2>/dev/null || true
     if [ -f "${IRDIR}/init" ]; then
         echo "  nos-init compiled OK"
     else
