@@ -63,6 +63,17 @@ static int datapath_cpu_punt_init(int unit)
      * this too. */
     CPU_CONTROL_1r_IPMCPORTMISS_TOCPUf_SET(cpu_ctrl1, 1);
 
+    /* Send TTL=1 L3 unicast/multicast to CPU instead of dropping it.  OSPF
+     * adjacency packets (DBD/LSR/LSU, and the hellos) are sent with TTL=1;
+     * when a unicast OSPF packet (e.g. a DBD addressed to our swp IP) is
+     * L3-terminated, TTL=1 makes the chip drop it unless this trap is set.
+     * Without it the adjacency reaches 2-Way/DR-election (multicast hellos
+     * arrive via the FP 224/8 copy) but stalls at ExStart because the
+     * unicast DBD exchange never reaches the CPU.  Part of Cumulus's
+     * CPU_CONTROL_1 = 0x18500600 (found via the register diff). */
+    CPU_CONTROL_1r_L3UC_TTL1_ERR_TOCPUf_SET(cpu_ctrl1, 1);
+    CPU_CONTROL_1r_IPMC_TTL1_ERR_TOCPUf_SET(cpu_ctrl1, 1);
+
     ioerr += WRITE_CPU_CONTROL_1r(unit, cpu_ctrl1);
 
     /* Enable ARP and DHCP punt to CPU on all valid ports.
@@ -1542,6 +1553,30 @@ void datapath_rx_diag(void)
             syslog(LOG_INFO,
                    "FP-DIAG CMIC_CONFIG(0x10c)=0x%08x  COS_RX_EN(bit24)=%u",
                    cc_direct, (cc_direct >> 24) & 1);
+        }
+        /* THOROUGH DIFF: read every config-like non-zero Cumulus register on
+         * OUR chip (S-channel) and log only the gaps (Cumulus has bits, we
+         * have 0) plus value mismatches. cmp_regs[] auto-generated from the
+         * Cumulus dump_soc.txt. */
+        {
+            #include "generated/cmp_regs.h"
+            int i, gaps = 0, diffs = 0;
+            for (i = 0; i < CMP_REGS_N; i++) {
+                uint32_t ours = 0xdeadbeef;
+                cdk_xgs_reg32_read(unit, cmp_regs[i].addr, &ours);
+                if (ours == cmp_regs[i].cval) continue;
+                if (ours == 0) {
+                    syslog(LOG_INFO, "REGDIFF GAP  %-34s cumulus=0x%08x ours=0",
+                           cmp_regs[i].name, cmp_regs[i].cval);
+                    gaps++;
+                } else {
+                    syslog(LOG_INFO, "REGDIFF DIFF %-34s cumulus=0x%08x ours=0x%08x",
+                           cmp_regs[i].name, cmp_regs[i].cval, ours);
+                    diffs++;
+                }
+            }
+            syslog(LOG_INFO, "REGDIFF summary: %d gaps (ours=0), %d value-diffs, of %d regs",
+                   gaps, diffs, CMP_REGS_N);
         }
         /* iProc sub-window access validation (Path #2 scoping, read-only).
          * Gold standard: CMIC_DEV_REV_ID at AXI 0x18000178 must read

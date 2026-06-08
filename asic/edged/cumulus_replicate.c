@@ -514,6 +514,30 @@ static int cumulus_replicate_fp(int unit)
     }
 
     /*
+     * Multicast / copy replication + FP destination-action control — found via
+     * the thorough Cumulus-vs-ours register diff (all ours=0, Cumulus non-zero).
+     * A COPY_TO_CPU is a REPLICATION; without these the chip can't generate the
+     * copy.  SW2_FP_DST_ACTION_CONTROL specifically gates FP destination actions
+     * (copy/redirect).  Values verbatim from the Cumulus capture.
+     */
+    {
+        SW2_FP_DST_ACTION_CONTROLr_t fa; MCQ_CONFIGr_t mcq;
+        MC_CONTROL_1r_t m1; MC_CONTROL_2r_t m2; MC_CONTROL_3r_t m3; MC_CONTROL_5r_t m5;
+        EGR_MC_CONTROL_1r_t e1; EGR_MC_CONTROL_2r_t e2;
+        int rv = 0;
+        SW2_FP_DST_ACTION_CONTROLr_SET(fa, 0x0000000c); rv |= WRITE_SW2_FP_DST_ACTION_CONTROLr(unit, fa);
+        MC_CONTROL_1r_SET(m1, 0x10000000); rv |= WRITE_MC_CONTROL_1r(unit, m1);
+        MC_CONTROL_2r_SET(m2, 0x10001000); rv |= WRITE_MC_CONTROL_2r(unit, m2);
+        MC_CONTROL_3r_SET(m3, 0x10002000); rv |= WRITE_MC_CONTROL_3r(unit, m3);
+        MC_CONTROL_5r_SET(m5, 0x02001000); rv |= WRITE_MC_CONTROL_5r(unit, m5);
+        EGR_MC_CONTROL_1r_SET(e1, 0x10000000); rv |= WRITE_EGR_MC_CONTROL_1r(unit, e1);
+        EGR_MC_CONTROL_2r_SET(e2, 0x00002000); rv |= WRITE_EGR_MC_CONTROL_2r(unit, e2);
+        MCQ_CONFIGr_SET(mcq, 0x0f000000); rv |= WRITE_MCQ_CONFIGr(unit, mcq);
+        if (rv) { syslog(LOG_ERR, "MC/FP-action ctrl write errors=%d", rv); errs++; }
+        syslog(LOG_INFO, "MC_CONTROL + EGR_MC + MCQ_CONFIG + SW2_FP_DST_ACTION = Cumulus values");
+    }
+
+    /*
      * CPU_PBM / CPU_PBM_2 — the CPU port bitmap the MMU uses to REPLICATE
      * copies to the CPU.  bmd_init never programs it (Cumulus = BITMAP_W0=1,
      * i.e. port 0).  Without it, L3-destined-to-CPU traffic still works
