@@ -1543,6 +1543,25 @@ void datapath_rx_diag(void)
                    "FP-DIAG CMIC_CONFIG(0x10c)=0x%08x  COS_RX_EN(bit24)=%u",
                    cc_direct, (cc_direct >> 24) & 1);
         }
+        /* CPU-port (port 0) egress + MMU-drop counters — the decisive split:
+         * does the FP copy reach the CPU port (TPKT/TMCA climb) and then die at
+         * the DMA pull, or never egress to CPU (no climb -> MMU replication)?
+         * TPKT/TMCA are per-port MIB (S-channel, reliable). */
+        {
+            TPKTr_t tp; TMCAr_t tm; DROP_PKT_CNT_OVQr_t ovq; E2E_DROP_COUNTr_t e2e;
+            CMIC_PKT_COUNT_TOCPUDr_t cd; CMIC_PKT_COUNT_TOCPUNr_t cn;
+            uint32_t tpkt=0, tmca=0, dovq=0, de2e=0, ctd=0, ctn=0;
+            if (READ_TPKTr(unit, 0, &tp) == 0)            tpkt = TPKTr_GET(tp, 0);
+            if (READ_TMCAr(unit, 0, &tm) == 0)            tmca = TMCAr_GET(tm, 0);
+            if (READ_DROP_PKT_CNT_OVQr(unit, 0, &ovq)==0) dovq = DROP_PKT_CNT_OVQr_GET(ovq);
+            if (READ_E2E_DROP_COUNTr(unit, &e2e) == 0)    de2e = E2E_DROP_COUNTr_GET(e2e);
+            if (READ_CMIC_PKT_COUNT_TOCPUDr(unit, &cd)==0) ctd = CMIC_PKT_COUNT_TOCPUDr_GET(cd);
+            if (READ_CMIC_PKT_COUNT_TOCPUNr(unit, &cn)==0) ctn = CMIC_PKT_COUNT_TOCPUNr_GET(cn);
+            syslog(LOG_INFO,
+                   "FP-DIAG CPUPORT0: TPKT=%u TMCA=%u | OVQ_drop=%u E2E_drop=%u | "
+                   "CMIC_TOCPU_d=%u TOCPU_n=%u",
+                   tpkt, tmca, dovq, de2e, ctd, ctn);
+        }
         /* FP match counter for rule 1538 (test build wires COUNTER_INDEX=1538).
          * Non-zero => the rule MATCHED in hardware, regardless of whether the
          * COPY_TO_CPU was ever delivered to our RX poll. */
