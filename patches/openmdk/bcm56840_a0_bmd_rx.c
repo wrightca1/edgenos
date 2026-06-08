@@ -30,6 +30,7 @@
 #include <cdk/chip/bcm56840_a0_defs.h>
 #include <cdk/arch/xgsd_cmic.h>
 #include <cdk/arch/xgsd_chip.h>
+#include <cdk/arch/xgs_cmic.h>   /* CMIC_CONFIGr (COS_RX_EN) — XGS packed CMIC */
 
 #include "bcm56840_a0_bmd.h"
 #include "bcm56840_a0_internal.h"
@@ -142,6 +143,29 @@ bcm56840_a0_bmd_rx_start(int unit, bmd_pkt_t *pkt)
      * Idempotent and read-modify-write, so it preserves the working TX
      * channel (CH0); it (re)asserts RX channel direction (CH1=RX). */
     bmd_xgs_dma_init(unit);
+
+    /*
+     * FP COPY_TO_CPU delivery fix (2026-06-08): clear CMIC_CONFIG.COS_RX_EN.
+     * When COS_RX_EN=1 the packet DMA is CoS-based — each channel only pulls
+     * the CPU CoS queues named in its per-channel CMIC_CMC_COS_CTRL_RX bitmap.
+     * On this chip those CMICm regs (0x31xxx) don't accept writes, so the
+     * bitmap is effectively 0 and FP-copied control traffic (which lands in a
+     * non-default CoS) is never pulled — proven: match-any FP DROP dropped
+     * everything but match-any FP COPY delivered nothing.  With COS_RX_EN=0
+     * the single RX channel drains ALL CoS queues (working 0x10c path, RMW).
+     */
+    {
+        CMIC_CONFIGr_t cc;
+        int before, after;
+        READ_CMIC_CONFIGr(unit, &cc);
+        before = CMIC_CONFIGr_COS_RX_ENf_GET(cc);
+        CMIC_CONFIGr_COS_RX_ENf_SET(cc, 0);
+        WRITE_CMIC_CONFIGr(unit, cc);
+        READ_CMIC_CONFIGr(unit, &cc);
+        after = CMIC_CONFIGr_COS_RX_ENf_GET(cc);
+        CDK_PRINTF("rx_start: CMIC_CONFIG.COS_RX_EN %d->%d (drain all CoS)\n",
+                   before, after);
+    }
 
     ring->rd_idx = 0;   /* re-arm flag: 0 = freshly armed, 1 = needs re-arm */
 

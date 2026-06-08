@@ -1,8 +1,8 @@
-diff --git a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_rx.c b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_rx.c
-index c781b6d..1ab3b23 100644
---- a/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_rx.c
-+++ b/bmd/PKG/chip/bcm56840_a0/bcm56840_a0_bmd_rx.c
-@@ -2,147 +2,236 @@
+diff --git aa/bcm56840_a0_bmd_rx.c b/bcm56840_a0_bmd_rx.c
+index c781b6d..28d5ae0 100644
+--- aa/bcm56840_a0_bmd_rx.c
++++ b/bcm56840_a0_bmd_rx.c
+@@ -2,147 +2,260 @@
  #if CDK_CONFIG_INCLUDE_BCM56840_A0 == 1
  
  /*
@@ -39,6 +39,7 @@ index c781b6d..1ab3b23 100644
  #include <cdk/chip/bcm56840_a0_defs.h>
 +#include <cdk/arch/xgsd_cmic.h>
 +#include <cdk/arch/xgsd_chip.h>
++#include <cdk/arch/xgs_cmic.h>   /* CMIC_CONFIGr (COS_RX_EN) — XGS packed CMIC */
  
  #include "bcm56840_a0_bmd.h"
  #include "bcm56840_a0_internal.h"
@@ -167,36 +168,60 @@ index c781b6d..1ab3b23 100644
 +    ring->pkts[0].size  = BMD_RX_BUF_SIZE;
 +    ring->pkts[0].baddr = ring->pkt_baddrs[0];
 +    ring->pkts[0].port  = -1;
++
++    RX_DCB_CLR(ring->dcbs[0]);
++    RX_DCB_ADDRf_SET(ring->dcbs[0], ring->pkt_baddrs[0]);
++    RX_DCB_BYTE_COUNTf_SET(ring->dcbs[0], BMD_RX_BUF_SIZE);
++
++    /* Init the XGS DMA engine: CMIC_CONFIG SG+reload + chan directions.
++     * Idempotent and read-modify-write, so it preserves the working TX
++     * channel (CH0); it (re)asserts RX channel direction (CH1=RX). */
++    bmd_xgs_dma_init(unit);
++
++    /*
++     * FP COPY_TO_CPU delivery fix (2026-06-08): clear CMIC_CONFIG.COS_RX_EN.
++     * When COS_RX_EN=1 the packet DMA is CoS-based — each channel only pulls
++     * the CPU CoS queues named in its per-channel CMIC_CMC_COS_CTRL_RX bitmap.
++     * On this chip those CMICm regs (0x31xxx) don't accept writes, so the
++     * bitmap is effectively 0 and FP-copied control traffic (which lands in a
++     * non-default CoS) is never pulled — proven: match-any FP DROP dropped
++     * everything but match-any FP COPY delivered nothing.  With COS_RX_EN=0
++     * the single RX channel drains ALL CoS queues (working 0x10c path, RMW).
++     */
++    {
++        CMIC_CONFIGr_t cc;
++        int before, after;
++        READ_CMIC_CONFIGr(unit, &cc);
++        before = CMIC_CONFIGr_COS_RX_ENf_GET(cc);
++        CMIC_CONFIGr_COS_RX_ENf_SET(cc, 0);
++        WRITE_CMIC_CONFIGr(unit, cc);
++        READ_CMIC_CONFIGr(unit, &cc);
++        after = CMIC_CONFIGr_COS_RX_ENf_GET(cc);
++        CDK_PRINTF("rx_start: CMIC_CONFIG.COS_RX_EN %d->%d (drain all CoS)\n",
++                   before, after);
++    }
  
 -    _rx_dscr[unit].dcb = dcb;
 -    _rx_dscr[unit].bdcb = bdcb;
 -    _rx_dscr[unit].pkt = pkt;
-+    RX_DCB_CLR(ring->dcbs[0]);
-+    RX_DCB_ADDRf_SET(ring->dcbs[0], ring->pkt_baddrs[0]);
-+    RX_DCB_BYTE_COUNTf_SET(ring->dcbs[0], BMD_RX_BUF_SIZE);
++    ring->rd_idx = 0;   /* re-arm flag: 0 = freshly armed, 1 = needs re-arm */
  
 -    /* Set up DMA descriptor */
 -    RX_DCB_CLR(*dcb); 
 -    RX_DCB_ADDRf_SET(*dcb, pkt->baddr); 
 -    RX_DCB_BYTE_COUNTf_SET(*dcb, pkt->size); 
-+    /* Init the XGS DMA engine: CMIC_CONFIG SG+reload + chan directions.
-+     * Idempotent and read-modify-write, so it preserves the working TX
-+     * channel (CH0); it (re)asserts RX channel direction (CH1=RX). */
-+    bmd_xgs_dma_init(unit);
++    /* Enable CPU port forwarding BEFORE arming DMA. */
++    rv = _cpu_port_enable_set(unit, 1);
++    if (rv != CDK_E_NONE) {
++        CDK_PRINTF("rx_start: _cpu_port_enable_set failed: %d (continuing)\n", rv);
++    }
  
 -    /* Start DMA */
 -    BMD_DMA_CACHE_FLUSH(dcb, sizeof(*dcb));
 -    bmd_xgs_dma_rx_start(unit, bdcb); 
-+    ring->rd_idx = 0;   /* re-arm flag: 0 = freshly armed, 1 = needs re-arm */
- 
-+    /* Enable CPU port forwarding BEFORE arming DMA. */
-     rv = _cpu_port_enable_set(unit, 1);
-+    if (rv != CDK_E_NONE) {
-+        CDK_PRINTF("rx_start: _cpu_port_enable_set failed: %d (continuing)\n", rv);
-+    }
-+
 +    BMD_DMA_CACHE_FLUSH(ring->dcbs, sizeof(RX_DCB_t));
-+
+ 
+-    rv = _cpu_port_enable_set(unit, 1);
 +    /* Arm the RX channel via the XGS packed CMIC_DMA registers (0x100):
 +     * write the DCB bus address to CMIC_DMA_DESC0r+4*chan, set DMA_EN in
 +     * CMIC_DMA_STATr.  These low/mapped offsets accept writes (unlike the
@@ -300,7 +325,7 @@ index c781b6d..1ab3b23 100644
  #else
      return CDK_E_UNAVAIL;
  #endif
-@@ -152,13 +241,13 @@ int
+@@ -152,13 +265,13 @@ int
  bcm56840_a0_bmd_rx_stop(int unit)
  {
  #if BMD_CONFIG_INCLUDE_DMA == 1
@@ -317,7 +342,7 @@ index c781b6d..1ab3b23 100644
          return CDK_E_DISABLED;
      }
  
-@@ -167,17 +256,26 @@ bcm56840_a0_bmd_rx_stop(int unit)
+@@ -167,17 +280,26 @@ bcm56840_a0_bmd_rx_stop(int unit)
          return rv;
      }
  
