@@ -1436,5 +1436,54 @@ void datapath_rx_diag(void)
                (unsigned long long)p->tx_packets,
                (unsigned long long)p->rx_packets);
     }
+
+    /* ── FP (Field Processor) harness — Phase 0, READ-ONLY ──────────────────────
+     * Dump our live IFP slice config + a sample of the replicated rules so we can
+     * (a) confirm the slice infrastructure is empty (the OSPF-punt root cause) and
+     * (b) diff field-for-field against the Cumulus SOCMEM capture. Writes nothing. */
+    {
+        FP_PORT_FIELD_SELm_t pfs;
+        int rv = READ_FP_PORT_FIELD_SELm(unit, 1, &pfs);  /* ingress port 1 */
+        if (rv == 0) {
+            syslog(LOG_INFO,
+                   "FP-DIAG PORT_FIELD_SEL[1]: S0[F1=%u F2=%u F3=%u] S2[F1=%u F2=%u F3=%u] "
+                   "S3[F1=%u F2=%u F3=%u]",
+                   FP_PORT_FIELD_SELm_SLICE0_F1f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE0_F2f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE0_F3f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE2_F1f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE2_F2f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE2_F3f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE3_F1f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE3_F2f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE3_F3f_GET(pfs));
+        } else {
+            syslog(LOG_INFO, "FP-DIAG PORT_FIELD_SEL[1] read rv=%d", rv);
+        }
+        /* sample a replicated rule (index 256 = first captured Cumulus IFP rule) */
+        {
+            FP_TCAMm_t t; FP_POLICY_TABLEm_t pol; FP_GLOBAL_MASK_TCAMm_t gm;
+            int rt = READ_FP_TCAMm(unit, 256, &t);
+            int rp = READ_FP_POLICY_TABLEm(unit, 256, &pol);
+            int rg = READ_FP_GLOBAL_MASK_TCAMm(unit, 256, &gm);
+            if (rt == 0) {
+                uint32_t k[8]; FP_TCAMm_KEYf_GET(t, k);
+                syslog(LOG_INFO,
+                       "FP-DIAG TCAM[256] VALID=%u key[7..4]=%08x %08x %08x %08x",
+                       FP_TCAMm_VALIDf_GET(t), k[7], k[6], k[5], k[4]);
+            }
+            if (rp == 0) {
+                syslog(LOG_INFO,
+                       "FP-DIAG POLICY[256] G_COPY_TO_CPU=%u G_DROP=%u",
+                       FP_POLICY_TABLEm_G_COPY_TO_CPUf_GET(pol),
+                       FP_POLICY_TABLEm_G_DROPf_GET(pol));
+            }
+            if (rg == 0) {
+                syslog(LOG_INFO, "FP-DIAG GLOBAL_MASK_TCAM[256] VALID=%u",
+                       FP_GLOBAL_MASK_TCAMm_VALIDf_GET(gm));
+            }
+        }
+    }
+
     syslog(LOG_INFO, "=== RX-DIAG end ===");
 }
