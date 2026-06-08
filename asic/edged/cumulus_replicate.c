@@ -568,6 +568,12 @@ static int cumulus_replicate_fp(int unit)
         FP_POLICY_TABLEm_G_COPY_TO_CPUf_SET(p, 3);
         FP_POLICY_TABLEm_Y_COPY_TO_CPUf_SET(p, 3);
         FP_POLICY_TABLEm_R_COPY_TO_CPUf_SET(p, 3);
+        /* Force the CPU copy into CoS queue 0 — the queue our single-DCB XGS
+         * RX DMA actually services (ping/ARP arrive there).  Without this the
+         * copy's CPU CoS comes from CPU_COS_MAP/int-pri and lands in a queue
+         * we never pull, so the copy is generated but never delivered. */
+        FP_POLICY_TABLEm_CHANGE_CPU_COSf_SET(p, 1);
+        FP_POLICY_TABLEm_CPU_COSf_SET(p, 0);
 #endif
         FP_POLICY_TABLEm_COUNTER_MODEf_SET(p, 7);
         FP_POLICY_TABLEm_COUNTER_INDEXf_SET(p, idx);
