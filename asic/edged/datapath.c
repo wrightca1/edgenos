@@ -1513,6 +1513,17 @@ void datapath_rx_diag(void)
                    "FP-DIAG RX-path: rx_total=%u unmapped=%u delivered=%u",
                    g_rx_total, g_rx_unmapped, g_rx_delivered);
         }
+        /* FP match counter for rule 1538 (test build wires COUNTER_INDEX=1538).
+         * Non-zero => the rule MATCHED in hardware, regardless of whether the
+         * COPY_TO_CPU was ever delivered to our RX poll. */
+        {
+            FP_COUNTER_TABLEm_t fc;
+            if (READ_FP_COUNTER_TABLEm(unit, 1538, &fc) == 0) {
+                syslog(LOG_INFO,
+                       "FP-DIAG COUNTER[1538]: packets=%u",
+                       FP_COUNTER_TABLEm_PACKET_COUNTERf_GET(fc));
+            }
+        }
         /* FP-gating registers vs Cumulus known-good:
          *   ING_BYPASS_CTRL=0x0  AUX_ARB_CONTROL=0x12  AUX_ARB_CONTROL_2=0x0327f863
          * A bypass bit set or AUX_ARB/refresh unset would keep the IFP from

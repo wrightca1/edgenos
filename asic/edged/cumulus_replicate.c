@@ -392,6 +392,29 @@ static int cumulus_replicate_fp(int unit)
         }
     }
 
+    /*
+     * FP_TCAM_BLK_SEL / FP_GM_TCAM_BLK_SEL — enable the IFP TCAM blocks for
+     * lookup (12 blocks, one bit each).  Cumulus = 0x00000fff (all blocks).
+     * Another bit OpenMDK's bmd_init never sets: with the block-select = 0
+     * the chip won't search the (key) TCAM or the global-mask TCAM, so even
+     * a slice-enabled, valid rule is never compared.  This is the companion
+     * to FP_SLICE_ENABLE for activating the engine.
+     */
+    {
+        FP_TCAM_BLK_SELr_t tb;
+        FP_GM_TCAM_BLK_SELr_t gb;
+        int rv;
+        FP_TCAM_BLK_SELr_CLR(tb);
+        FP_TCAM_BLK_SELr_SET(tb, 0x00000fff);
+        rv = WRITE_FP_TCAM_BLK_SELr(unit, tb);
+        if (rv < 0) { syslog(LOG_ERR, "FP_TCAM_BLK_SEL write failed: %d", rv); errs++; }
+        FP_GM_TCAM_BLK_SELr_CLR(gb);
+        FP_GM_TCAM_BLK_SELr_SET(gb, 0x00000fff);
+        rv = WRITE_FP_GM_TCAM_BLK_SELr(unit, gb);
+        if (rv < 0) { syslog(LOG_ERR, "FP_GM_TCAM_BLK_SEL write failed: %d", rv); errs++; }
+        syslog(LOG_INFO, "FP_TCAM_BLK_SEL = FP_GM_TCAM_BLK_SEL = 0x00000fff (TCAM blocks ON)");
+    }
+
     for (i = 0; i < CUMULUS_FP_TCAM_COUNT; i++) {
         const struct cumulus_fp_tcam_row *r = &cumulus_fp_tcam_rows[i];
         FP_TCAMm_t t;
