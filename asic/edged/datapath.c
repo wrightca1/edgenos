@@ -1513,6 +1513,36 @@ void datapath_rx_diag(void)
                    "FP-DIAG RX-path: rx_total=%u unmapped=%u delivered=%u",
                    g_rx_total, g_rx_unmapped, g_rx_delivered);
         }
+        /* CPU_COS_MAP: does our chip map CPU-bound traffic to a CoS queue at all?
+         * Cumulus populates 22 entries (int_pri 0-7 -> CoS 0-7 + reason traps).
+         * If ours is empty/sparse, FP copies may have no valid CoS -> dropped at
+         * the MMU CPU enqueue. (read-only) */
+        {
+            CPU_COS_MAPm_t cm;
+            int ci, nv = 0;
+            for (ci = 0; ci <= 127; ci++) {
+                if (READ_CPU_COS_MAPm(unit, ci, &cm) != 0) continue;
+                if (CPU_COS_MAPm_VALIDf_GET(cm)) {
+                    if (nv < 10)
+                        syslog(LOG_INFO,
+                               "FP-DIAG CPU_COS_MAP[%d]: INT_PRI_KEY=%u MASK=0x%x COS=%u",
+                               ci, CPU_COS_MAPm_INT_PRI_KEYf_GET(cm),
+                               CPU_COS_MAPm_INT_PRI_MASKf_GET(cm),
+                               CPU_COS_MAPm_COSf_GET(cm));
+                    nv++;
+                }
+            }
+            syslog(LOG_INFO, "FP-DIAG CPU_COS_MAP: %d valid entries", nv);
+        }
+        /* CMIC_CONFIG (0x10c) — did our COS_RX_EN=0 write take? bit24=COS_RX_EN.
+         * Read via both paths; 0x10c is the packed CMIC window (not 0x31xxx). */
+        {
+            uint32_t cc_direct = 0;
+            cdk_xgs_reg32_read(unit, 0x10c, &cc_direct);
+            syslog(LOG_INFO,
+                   "FP-DIAG CMIC_CONFIG(0x10c)=0x%08x  COS_RX_EN(bit24)=%u",
+                   cc_direct, (cc_direct >> 24) & 1);
+        }
         /* FP match counter for rule 1538 (test build wires COUNTER_INDEX=1538).
          * Non-zero => the rule MATCHED in hardware, regardless of whether the
          * COPY_TO_CPU was ever delivered to our RX poll. */

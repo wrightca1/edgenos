@@ -514,6 +514,32 @@ static int cumulus_replicate_fp(int unit)
     }
 
     /*
+     * CPU_COS_MAP — our chip has 0 valid entries (bmd_init never programs it);
+     * Cumulus has 22.  This TCAM maps a CPU-bound packet's (reason, int_pri) to
+     * a CPU CoS queue.  With it empty, an FP-copied packet may have no valid CoS
+     * mapping and be dropped at the MMU CPU enqueue (while L3-dest-to-CPU like
+     * ping survives via a default).  Program the int_pri 0..7 -> CoS 0..7
+     * fallback rows Cumulus uses (indices 120..127), so every CPU-bound packet
+     * lands in a defined CoS queue (0..7) that our COS_RX_EN=0 RX channel drains.
+     */
+    {
+        int n;
+        for (n = 0; n < 8; n++) {
+            CPU_COS_MAPm_t cm;
+            int idx = 127 - n;           /* 127->pri0 ... 120->pri7 (Cumulus order) */
+            int rv;
+            CPU_COS_MAPm_CLR(cm);
+            CPU_COS_MAPm_VALIDf_SET(cm, 1);
+            CPU_COS_MAPm_INT_PRI_KEYf_SET(cm, n);
+            CPU_COS_MAPm_INT_PRI_MASKf_SET(cm, 0xf);
+            CPU_COS_MAPm_COSf_SET(cm, n);
+            rv = WRITE_CPU_COS_MAPm(unit, idx, cm);
+            if (rv < 0) { syslog(LOG_ERR, "CPU_COS_MAP[%d] write failed: %d", idx, rv); errs++; }
+        }
+        syslog(LOG_INFO, "CPU_COS_MAP: programmed int_pri 0..7 -> CoS 0..7 (idx 120..127)");
+    }
+
+    /*
      * Path B — single-wide OSPF/control-multicast trap, built from scratch
      * in virtual slice 6 (→ physical slice 4, idx 1024).  Matches IPv4
      * destination 224.0.0.0/8 (all link-local multicast incl. OSPF 224.0.0.5
