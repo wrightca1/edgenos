@@ -141,7 +141,38 @@ explicitly clear them (or reboot).
   ICMP proto-1 rule) and confirming our computed key/mask matches the captured bytes.
 - **Exit criteria:** we can produce a byte-exact `FP_TCAM` key for "IpProtocol == N".
 
-### Phase 3 — The OSPF rule (the actual goal)
+### Phase 3 — The OSPF rule — IN PROGRESS, blocked on double-wide group install
+
+Findings (commits 68155a7, 365627e):
+- **OSPF is trapped by DESTINATION, not protocol.** Cumulus's IFP rule 1538
+  (physical slice 6, selcode F2=1) matches `DstIP first-octet = 0xe0`
+  (224.0.0.0/8 multicast) → `COPY_TO_CPU`. OSPF 224.0.0.5/6 falls in that
+  range. The rule is **already in our replicated 100** — no new rule needed.
+- **Two real activation gaps were found and fixed:**
+  1. **IPBM (ingress-port-bitmap):** the captured global mask only covered
+     Cumulus's uplink ports (0..52) and forced bit 65 to 0, EXCLUDING our
+     uplinks (physical ports 65/66). Fixed → write match-any IPBM (KEY=0,
+     MASK=0, VALID=1).
+  2. **`FP_SLICE_ENABLE` was never set** by OpenMDK's `bmd_init` — the master
+     IFP lookup enable. Set to `0x000e33ff` (Cumulus value; virtual-slice
+     indexed; LOOKUP_ENABLE for VS2,3,7,8,9). The engine now activates.
+- **Remaining blocker:** the OSPF rule's virtual slice (VS8) is an
+  **inter-slice double-wide pair** (VS8=DstIP half in phys6, VS9=DstMAC half
+  in phys7; `SLICE9_8_PAIRING=1`). A match-any test on the paired entry still
+  copies ZERO frames over 55s with the engine on, while the chip is receiving
+  the OSPF multicast (RMCA increments, no drops). So a double-wide group needs
+  the SDK's group/key-assembly/mode-install sequence (Phase 2) beyond the raw
+  visible table values. **This is the next step: port the double-wide group
+  install, OR construct a single-wide OSPF trap in a slice we fully configure.**
+
+Diagnostics added (read-only, safe): `packet_io` RX counters
+(`g_rx_total/unmapped/delivered`); RX-DIAG dumps live `FP_PORT_FIELD_SEL` for
+the real uplink ports 65/66, `FP_SLICE_MAP`, `FP_TCAM/POLICY/GLOBAL_MASK` for
+rules 1538/1553, and FP-gating regs (`ING_BYPASS_CTRL`/`AUX_ARB_CONTROL[_2]`/
+`MISCCONFIG`/`EFP_METER_CONTROL`). rsyslog is down on the box — read via
+`journalctl -u edged`, not `/var/log/daemon.log`.
+
+#### Original Phase 3 plan (still the target)
 - Program one IFP entry: `FP_TCAM` key = IpProtocol 0x59 (+ the slice/IPBM bits),
   `FP_GLOBAL_MASK_TCAM` = permissive (all ingress ports), `FP_POLICY` =
   `COPY_TO_CPU` (CoS class 7, **no DROP**), `FP_METER` optional rate-limit.
