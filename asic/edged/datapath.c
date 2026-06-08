@@ -1518,11 +1518,21 @@ void datapath_rx_diag(void)
          * COPY_TO_CPU was ever delivered to our RX poll. */
         {
             FP_COUNTER_TABLEm_t fc;
-            if (READ_FP_COUNTER_TABLEm(unit, 1538, &fc) == 0) {
-                syslog(LOG_INFO,
-                       "FP-DIAG COUNTER[1538]: packets=%u",
-                       FP_COUNTER_TABLEm_PACKET_COUNTERf_GET(fc));
+            int ci, nz = 0;
+            /* Scan the whole counter table for ANY non-zero entry — proves
+             * whether the FP matched at all, independent of which index the
+             * HW actually writes (slice-relative base vs absolute). */
+            for (ci = 0; ci <= 2047; ci++) {
+                if (READ_FP_COUNTER_TABLEm(unit, ci, &fc) != 0)
+                    continue;
+                uint32_t pk = FP_COUNTER_TABLEm_PACKET_COUNTERf_GET(fc);
+                if (pk) {
+                    syslog(LOG_INFO, "FP-DIAG COUNTER[%d]: packets=%u", ci, pk);
+                    if (++nz >= 12) break;
+                }
             }
+            if (!nz)
+                syslog(LOG_INFO, "FP-DIAG COUNTER scan: ALL ZERO (no FP match)");
         }
         /* FP-gating registers vs Cumulus known-good:
          *   ING_BYPASS_CTRL=0x0  AUX_ARB_CONTROL=0x12  AUX_ARB_CONTROL_2=0x0327f863

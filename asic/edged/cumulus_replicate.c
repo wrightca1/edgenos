@@ -310,6 +310,19 @@ static int cumulus_replicate_fp(int unit)
         FP_PORT_FIELD_SELm_SLICE9_F3f_SET(fs, 0xa);
         FP_PORT_FIELD_SELm_SLICE9_8_PAIRINGf_SET(fs, 1);
 
+        /*
+         * Path B — our own SINGLE-WIDE OSPF trap slice.  Virtual slice 6 is
+         * unpaired (SLICE7_6_PAIRING=0) and empty in the capture (→ physical
+         * slice 4).  Give it the same FPF2 selcode as VS8 (F2=1) so it
+         * extracts DstIP at the top of the F2 field (empirically confirmed:
+         * the captured VS8 rules matched DstIP first-octet there).  Left
+         * single-wide (no pairing, no wide-mode bit) so one slice carries the
+         * whole rule — sidesteps the double-wide group install.
+         */
+        FP_PORT_FIELD_SELm_SLICE6_F1f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE6_F2f_SET(fs, 1);
+        FP_PORT_FIELD_SELm_SLICE6_F3f_SET(fs, 7);
+
         for (p = 0; p <= FP_PORT_FIELD_SELm_MAX; p++) {
             int rv = WRITE_FP_PORT_FIELD_SELm(unit, p, fs);
             if (rv < 0) {
@@ -382,13 +395,15 @@ static int cumulus_replicate_fp(int unit)
         FP_SLICE_ENABLEr_t se;
         int rv;
         FP_SLICE_ENABLEr_CLR(se);
-        FP_SLICE_ENABLEr_SET(se, 0x000e33ff);
+        /* 0x000e33ff (Cumulus) + bit16 = LOOKUP_ENABLE_SLICE_6 for our
+         * single-wide OSPF trap slice (VS6) → 0x000f33ff. */
+        FP_SLICE_ENABLEr_SET(se, 0x000f33ff);
         rv = WRITE_FP_SLICE_ENABLEr(unit, se);
         if (rv < 0) {
             syslog(LOG_ERR, "FP_SLICE_ENABLE write failed: %d", rv);
             errs++;
         } else {
-            syslog(LOG_INFO, "FP_SLICE_ENABLE = 0x000e33ff (IFP lookup ON)");
+            syslog(LOG_INFO, "FP_SLICE_ENABLE = 0x000f33ff (IFP lookup ON + VS6)");
         }
     }
 
@@ -496,6 +511,61 @@ static int cumulus_replicate_fp(int unit)
                    r->index, rv);
             errs++;
         }
+    }
+
+    /*
+     * Path B — single-wide OSPF/control-multicast trap, built from scratch
+     * in virtual slice 6 (→ physical slice 4, idx 1024).  Matches IPv4
+     * destination 224.0.0.0/8 (all link-local multicast incl. OSPF 224.0.0.5
+     * / 224.0.0.6) and copies to CPU.  Single-wide, so no double-wide group
+     * install is needed — the whole rule lives in one slice.
+     *
+     * Key construction uses the chip FP_TCAM subfield accessors (F2f handles
+     * physical placement): VS6 uses FPF2 selcode 1 (same as VS8), which puts
+     * the 32-bit DstIP at F2 bits 96..127 — first octet at the top.  So
+     * F2[bits 120..127] = 0xe0 (224).  FIXED left don't-care (FIXED_MASK=0)
+     * so the single-wide key-type need not be hand-derived.
+     *
+     * A packet counter (COUNTER_INDEX=1024, mode 7 = count all colors) gives
+     * a delivery-independent match signal in RX-DIAG (FP_COUNTER_TABLE[1024]).
+     */
+    {
+        const int idx = 1024;            /* phys slice 4, entry 0 (VS6) */
+        FP_TCAMm_t t;
+        FP_GLOBAL_MASK_TCAMm_t g;
+        FP_POLICY_TABLEm_t p;
+        uint32_t f2[4]  = {0};
+        uint32_t f2m[4] = {0};
+        int rv;
+
+        f2[3]  = 0xe0000000;             /* DstIP first octet = 224 */
+        f2m[3] = 0xff000000;             /* /8 */
+
+        FP_TCAMm_CLR(t);
+        FP_TCAMm_VALIDf_SET(t, 3);
+        FP_TCAMm_F2f_SET(t, f2);
+        FP_TCAMm_F2_MASKf_SET(t, f2m);
+        /* FIXED / FIXED_MASK left 0 (don't-care) */
+        rv = WRITE_FP_TCAMm(unit, idx, t);
+        if (rv < 0) { syslog(LOG_ERR, "FP OSPF-trap TCAM write failed: %d", rv); errs++; }
+
+        FP_GLOBAL_MASK_TCAMm_CLR(g);
+        FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);   /* match-any ingress port */
+        rv = WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
+        if (rv < 0) { syslog(LOG_ERR, "FP OSPF-trap GMASK write failed: %d", rv); errs++; }
+
+        FP_POLICY_TABLEm_CLR(p);
+        FP_POLICY_TABLEm_G_COPY_TO_CPUf_SET(p, 3);
+        FP_POLICY_TABLEm_Y_COPY_TO_CPUf_SET(p, 3);
+        FP_POLICY_TABLEm_R_COPY_TO_CPUf_SET(p, 3);
+        FP_POLICY_TABLEm_COUNTER_MODEf_SET(p, 7);
+        FP_POLICY_TABLEm_COUNTER_INDEXf_SET(p, idx);
+        rv = WRITE_FP_POLICY_TABLEm(unit, idx, p);
+        if (rv < 0) { syslog(LOG_ERR, "FP OSPF-trap POLICY write failed: %d", rv); errs++; }
+
+        syslog(LOG_INFO,
+               "FP OSPF-trap: single-wide rule @idx %d (VS6) -> action set, "
+               "counter @%d", idx, idx);
     }
 
     syslog(LOG_INFO,
