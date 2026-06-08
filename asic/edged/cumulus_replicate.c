@@ -514,6 +514,27 @@ static int cumulus_replicate_fp(int unit)
     }
 
     /*
+     * CPU_PBM / CPU_PBM_2 — the CPU port bitmap the MMU uses to REPLICATE
+     * copies to the CPU.  bmd_init never programs it (Cumulus = BITMAP_W0=1,
+     * i.e. port 0).  Without it, L3-destined-to-CPU traffic still works
+     * (unicast forward to port 0) but FP COPY_TO_CPU copies are never
+     * replicated to the CPU port — which is exactly why OSPF copies vanish
+     * (OVQ_drop=0: the copy never reaches the CPU MMU queue).  Set port 0.
+     */
+    {
+        CPU_PBMm_t cp; CPU_PBM_2m_t cp2; int rv;
+        CPU_PBMm_CLR(cp);
+        CPU_PBMm_BITMAP_W0f_SET(cp, 0x1);
+        rv = WRITE_CPU_PBMm(unit, 0, cp);
+        if (rv < 0) { syslog(LOG_ERR, "CPU_PBM write failed: %d", rv); errs++; }
+        CPU_PBM_2m_CLR(cp2);
+        CPU_PBM_2m_BITMAP_W0f_SET(cp2, 0x1);
+        rv = WRITE_CPU_PBM_2m(unit, 0, cp2);
+        if (rv < 0) { syslog(LOG_ERR, "CPU_PBM_2 write failed: %d", rv); errs++; }
+        syslog(LOG_INFO, "CPU_PBM = CPU_PBM_2 = port0 (CPU-copy replication ON)");
+    }
+
+    /*
      * CPU_COS_MAP — our chip has 0 valid entries (bmd_init never programs it);
      * Cumulus has 22.  This TCAM maps a CPU-bound packet's (reason, int_pri) to
      * a CPU CoS queue.  With it empty, an FP-copied packet may have no valid CoS
