@@ -212,3 +212,112 @@ rules 1538/1553, and FP-gating regs (`ING_BYPASS_CTRL`/`AUX_ARB_CONTROL[_2]`/
   (read-modify-write init preserves them). Recovery = explicit-write-0 or reboot.
 - Keep `edged.goodbak` on the box; ping-verify each deploy; CopyToCpu-only until
   Phase 4. One physical switch — do not risk it on un-verified DROP rules.
+
+---
+
+## Part 5 — Session log: everything tried (2026-06-07 → 2026-06-08)
+
+Chronological record of the OSPF-punt / Field-Processor bring-up effort so the
+next session (or reader) does not repeat eliminated paths. **Headline result:
+the FP engine works; the one unsolved piece is FP `COPY_TO_CPU` delivery to the
+CPU RX DMA.**
+
+### Phase 1 — slice infrastructure (DONE, commit 2a5d860)
+Root cause of "FP never matched": `edged` wrote `FP_TCAM`/`FP_POLICY` but never
+configured the slices. Replicated byte-for-byte from the Cumulus SOCMEM capture
+(`cumulus_replicate_fp()`):
+- `FP_PORT_FIELD_SEL` (all ports): SLICE2 F1=0xc/F2=2/F3=7, SLICE3 F1=0xa/F2=3/F3=6
+  (3_2_PAIRING=1), SLICE8 F1=5/F2=1/F3=7, SLICE9 F1=0xc/F2=5/F3=0xa (9_8_PAIRING=1).
+- `FP_SLICE_MAP[0]` (virtual→physical + group ids), `FP_SLICE_KEY_CONTROL[0]`
+  (SLICE_2/9 DST_CLASS_ID_SEL=1).
+- **De-risk: every `FP_POLICY.*_DROP` forced to 0** (captured rows carry DROP=1;
+  COPY-only until trusted — protects the one working switch).
+Verified live via the SIGUSR1 FP-DIAG read-back; ping 0% both uplinks.
+
+### Key decode facts (authoritative)
+- **OSPF is trapped by DESTINATION, not protocol.** Cumulus IFP rule 1538
+  (physical slice 6, selcode F2=1) matches DstIP first-octet `0xe0` = 224.0.0.0/8
+  multicast → `COPY_TO_CPU`. OSPF 224.0.0.5/6 is in range. **Already in our
+  replicated 100** — no new rule needed for parity.
+- Indexing: `FP_TCAM` index = physical slice × 256. `FP_PORT_FIELD_SEL` and
+  `FP_SLICE_ENABLE` are **virtual-slice indexed**; `FP_SLICE_MAP` routes
+  virtual→physical. Valid rules live at non-contiguous idx 256-279/384-407/
+  1536-1561/1792-1817 = physical slices 1,6,7.
+- Selcode meaning (empirical): F2=1 → DstIP at top of F2 (bits 96-127, first
+  octet at 120-127); F2=5 → DstMAC+EtherType (LLDP/LACP/CDP MACs, ARP 0x0806).
+- FPF2 IP/L4 layout (SDK trident/field.c): f2_offset=46; IpProtocol at slice-key
+  bit 102 (= F2 bit 56), DstIp at +64, L4DstPort +24, etc.
+- `FP_TCAM` subfield accessors place fields physically: `F2f_SET` = bits 48..175,
+  `FIXEDf_SET` = bits 219..235 — so you can set DstIP/proto without hand-deriving
+  the physical key.
+
+### Activation registers `bmd_init` never sets (all now set, all verified-needed)
+1. `FP_SLICE_ENABLE` = `0x000e33ff` (commit 365627e) — master IFP lookup enable
+   (SLICE_ENABLE bits0-9 + LOOKUP_ENABLE for VS2,3,7,8,9). Later `0x000f33ff`
+   (+bit16) to add our VS6 trap slice.
+2. `FP_TCAM_BLK_SEL` = `FP_GM_TCAM_BLK_SEL` = `0x00000fff` (commit 2e237db) —
+   enable all 12 key-TCAM + global-mask-TCAM blocks for search.
+Gating confirmed ON live: ING_BYPASS=0, AUX_ARB_2=0x327f863 (FP refresh on),
+PORT_TAB FILTER_ENABLE=1.
+
+### The IPBM fix (commit 68155a7)
+Captured per-rule global mask only covered Cumulus's uplink ports (0..52) and
+forced bit 65 to 0 — which EXCLUDED our uplinks (physical ports **65/66**). Now
+write a match-any IPBM (`KEY=0, MASK=0, VALID=1`) so traps apply on any ingress
+port — correct semantics for a control-plane copy rule.
+
+### THE breakthrough — FP matches; counters lie (commit 64bb9b0)
+User-authorized decisive tests on a self-built single-wide rule (VS6 → phys
+slice 4, idx 1024):
+- **match-any DROP → BOTH uplinks 100% loss** (clean revert after). **The FP
+  ENGINE MATCHES.** All activation above succeeded.
+- **`FP_COUNTER_TABLE` is unreliable** without pool/base setup — read ALL-ZERO
+  while the rule was definitively matching. So every earlier "counter=0 ⇒ no
+  match" was a FALSE NEGATIVE (it had misdirected Path A/B).
+- **match-any COPY → delivers nothing to the CPU RX.** Same rule DROPs
+  everything but COPYs nothing. **⇒ the blocker is `COPY_TO_CPU` delivery, not
+  matching.**
+- Deploy gotcha: overwrite a running `/usr/sbin/edged` with `mv` (rename), not
+  `cp` (Text file busy). Mgmt (end0, 10.1.1.217) is independent of the uplinks,
+  so DROP tests are recoverable.
+
+### DMA / delivery facts
+- RX uses the XGS **packed** CMIC_DMA registers at **0x100** (single-DCB model,
+  `bcm56840_a0_bmd_rx.c`). The **CMICm registers at 0x31xxx do NOT accept writes
+  on this chip** — every 0x31xxx read returns 0 yet DMA works — so any
+  `COS_CTRL_RX` (0x31168) / `cumulus_enable_cmicm_irq` diag is DEAD (bogus reads).
+
+### Delivery leads ELIMINATED
+- ❌ CPU-port egress membership — `EPC_LINK_BMAP[0]` already includes CPU port
+  (bit 0); ping proves egress-to-CPU works.
+- ❌ RX-channel CoS bitmap — set `CMIC_CONFIG.COS_RX_EN=0` (working 0x10c path,
+  in `bcm56840_a0_bmd_rx_start`) so the single channel drains ALL CoS. No change.
+- ❌ CoS-queue selection — `FP_POLICY CHANGE_CPU_COS=1 + CPU_COS=0` to steer the
+  copy to CoS0. match-any COPY + tcpdump for Nexus OSPF (src .2) = 0 captured.
+- ❌ Key layout — match-any is layout-independent and still doesn't deliver.
+
+### Delivery leads STILL OPEN (next-session candidates)
+1. **MMU CPU-port queue buffer/credit** — copy may be dropped at MMU enqueue if
+   its queue has no buffers. Read CPU-port (port 0) THDI/THDO/queue-drop counters
+   under a match-any COPY. (read-only, safe)
+2. **Global copy/redirect-to-CPU enable** the IFP needs that `bmd_init` skips.
+3. **`COPY_TO_CPU` encoding** — used value 3 (Cumulus's); confirm semantics.
+4. **Structural**: the XGS single-DCB RX may only catch L3-dest-CPU traffic, not
+   IFP copies → may require the proper CMICm RX (blocked by 0x31xxx-write issue)
+   or a fresh Cumulus capture of the exact CPU-copy DMA/queue path.
+
+### Current box state (10.1.1.217, EdgeNOS)
+Clean + datapath-safe: FP fully activated (slice cfg, SLICE_ENABLE, BLK_SEL),
+match-any IPBM, VS6 single-wide COPY trap (DstIP 224.0.0.0/8, CPU_COS=0,
+COPY-only/no-DROP, harmless — non-delivering), `COS_RX_EN=0`. Ping 0% both
+uplinks. `edged.goodbak` intact. (`COS_RX_EN` change lives in the gitignored
+`asic/openmdk` tree — on-disk + in binary; capture as an openmdk patch if kept.)
+
+### Caveats / gotchas for the reader
+- `FP_COUNTER_TABLE` reads are NOT a reliable match signal here (need extra
+  setup). Use a DROP test (forwarding-observable) or tcpdump for ground truth.
+- rsyslog is DOWN on the box — read edged logs via `journalctl -u edged`, not
+  `/var/log/daemon.log`.
+- A match-any **COPY** "flood" test is misleading: most traffic is already
+  CPU-bound (ping/ARP), so COPY adds little. Use tcpdump for the specific
+  non-CPU flow (Nexus OSPF src .2) instead.
