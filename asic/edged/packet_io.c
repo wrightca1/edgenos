@@ -59,6 +59,9 @@ static int max_tun_fd = -1;
 
 /* TX-path counters (2026-05-31 datapath debug), summarized in edged.c stat poll. */
 unsigned g_tx_calls = 0, g_tx_ok = 0, g_tx_fail = 0, g_tx_lastrv = 0;
+/* RX-path counters (FP-punt debug): total frames from bmd_rx_poll, and how many
+ * had an unmappable ingress port (FP/flood CPU-copies show up here). */
+unsigned g_rx_total = 0, g_rx_unmapped = 0, g_rx_delivered = 0;
 static fd_set tun_fds;
 
 /* RX DMA buffers submitted to the ASIC */
@@ -424,6 +427,8 @@ static void handle_asic_rx(void)
     if (rv < 0 || !pkt)
         return;
 
+    g_rx_total++;
+
     uint8_t *frame = pkt->data;
     int frame_len = pkt->size;
 
@@ -446,8 +451,11 @@ static void handle_asic_rx(void)
                    "RX: src port %d unmapped, delivered via service VID %d -> swp%d",
                    pkt->port, vid, swp);
         } else {
-            syslog(LOG_DEBUG, "RX: unknown ingress port %d (vid=%d)",
-                   pkt->port, vid);
+            g_rx_unmapped++;
+            syslog(LOG_INFO, "RX: unknown ingress port %d (vid=%d) len=%d "
+                   "dmac=%02x:%02x:%02x:%02x:%02x:%02x",
+                   pkt->port, vid, frame_len,
+                   frame[0], frame[1], frame[2], frame[3], frame[4], frame[5]);
             goto resubmit;
         }
     }
@@ -473,6 +481,7 @@ static void handle_asic_rx(void)
     if (written > 0) {
         port->rx_packets++;
         port->rx_bytes += written;
+        g_rx_delivered++;
     }
 
 resubmit:

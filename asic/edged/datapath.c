@@ -1442,46 +1442,95 @@ void datapath_rx_diag(void)
      * (a) confirm the slice infrastructure is empty (the OSPF-punt root cause) and
      * (b) diff field-for-field against the Cumulus SOCMEM capture. Writes nothing. */
     {
-        FP_PORT_FIELD_SELm_t pfs;
-        int rv = READ_FP_PORT_FIELD_SELm(unit, 1, &pfs);  /* ingress port 1 */
-        if (rv == 0) {
+        /* Dump the live slice selectors for OUR actual uplink ingress port (65)
+         * across all 10 slices — confirms the Phase-1 config reached the port
+         * the Nexus traffic actually enters on. */
+        int dports[] = {65, 66};
+        unsigned di;
+        for (di = 0; di < sizeof(dports)/sizeof(dports[0]); di++) {
+            FP_PORT_FIELD_SELm_t pfs;
+            int prt = dports[di];
+            if (READ_FP_PORT_FIELD_SELm(unit, prt, &pfs) != 0) {
+                syslog(LOG_INFO, "FP-DIAG PORT_FIELD_SEL[%d] read failed", prt);
+                continue;
+            }
             syslog(LOG_INFO,
-                   "FP-DIAG PORT_FIELD_SEL[1]: S0[F1=%u F2=%u F3=%u] S2[F1=%u F2=%u F3=%u] "
-                   "S3[F1=%u F2=%u F3=%u]",
-                   FP_PORT_FIELD_SELm_SLICE0_F1f_GET(pfs),
-                   FP_PORT_FIELD_SELm_SLICE0_F2f_GET(pfs),
-                   FP_PORT_FIELD_SELm_SLICE0_F3f_GET(pfs),
-                   FP_PORT_FIELD_SELm_SLICE2_F1f_GET(pfs),
-                   FP_PORT_FIELD_SELm_SLICE2_F2f_GET(pfs),
-                   FP_PORT_FIELD_SELm_SLICE2_F3f_GET(pfs),
-                   FP_PORT_FIELD_SELm_SLICE3_F1f_GET(pfs),
-                   FP_PORT_FIELD_SELm_SLICE3_F2f_GET(pfs),
-                   FP_PORT_FIELD_SELm_SLICE3_F3f_GET(pfs));
-        } else {
-            syslog(LOG_INFO, "FP-DIAG PORT_FIELD_SEL[1] read rv=%d", rv);
+                   "FP-DIAG PFS[%d] S5[%u/%u/%u] S6[%u/%u/%u] S8[%u/%u/%u] S9[%u/%u/%u]",
+                   prt,
+                   FP_PORT_FIELD_SELm_SLICE5_F1f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE5_F2f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE5_F3f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE6_F1f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE6_F2f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE6_F3f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE8_F1f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE8_F2f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE8_F3f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE9_F1f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE9_F2f_GET(pfs),
+                   FP_PORT_FIELD_SELm_SLICE9_F3f_GET(pfs));
         }
-        /* sample a replicated rule (index 256 = first captured Cumulus IFP rule) */
+        /* SLICE_MAP: virtual->physical */
+        {
+            FP_SLICE_MAPm_t sm;
+            if (READ_FP_SLICE_MAPm(unit, 0, &sm) == 0) {
+                syslog(LOG_INFO,
+                       "FP-DIAG SLICE_MAP VS5->p%u VS8->p%u VS9->p%u",
+                       FP_SLICE_MAPm_VIRTUAL_SLICE_5_PHYSICAL_SLICE_NUMBER_ENTRY_0f_GET(sm),
+                       FP_SLICE_MAPm_VIRTUAL_SLICE_8_PHYSICAL_SLICE_NUMBER_ENTRY_0f_GET(sm),
+                       FP_SLICE_MAPm_VIRTUAL_SLICE_9_PHYSICAL_SLICE_NUMBER_ENTRY_0f_GET(sm));
+            }
+        }
+        /* The OSPF-relevant rule: 1538 = DstIP 224.0.0.0/8 multicast (slice 6).
+         * Dump its key F2 top bytes + policy + global mask, live. */
         {
             FP_TCAMm_t t; FP_POLICY_TABLEm_t pol; FP_GLOBAL_MASK_TCAMm_t gm;
-            int rt = READ_FP_TCAMm(unit, 256, &t);
-            int rp = READ_FP_POLICY_TABLEm(unit, 256, &pol);
-            int rg = READ_FP_GLOBAL_MASK_TCAMm(unit, 256, &gm);
-            if (rt == 0) {
-                uint32_t k[8]; FP_TCAMm_KEYf_GET(t, k);
-                syslog(LOG_INFO,
-                       "FP-DIAG TCAM[256] VALID=%u key[7..4]=%08x %08x %08x %08x",
-                       FP_TCAMm_VALIDf_GET(t), k[7], k[6], k[5], k[4]);
+            int idxs[] = {1538, 1553};
+            unsigned ki;
+            for (ki = 0; ki < sizeof(idxs)/sizeof(idxs[0]); ki++) {
+                int ix = idxs[ki];
+                if (READ_FP_TCAMm(unit, ix, &t) == 0 &&
+                    READ_FP_POLICY_TABLEm(unit, ix, &pol) == 0 &&
+                    READ_FP_GLOBAL_MASK_TCAMm(unit, ix, &gm) == 0) {
+                    uint32_t k[8], m[8];
+                    FP_TCAMm_KEYf_GET(t, k);
+                    FP_TCAMm_MASKf_GET(t, m);
+                    syslog(LOG_INFO,
+                           "FP-DIAG TCAM[%d] VALID=%u key[7..5]=%08x %08x %08x "
+                           "mask[7..5]=%08x %08x %08x | G_COPY=%u G_DROP=%u GMASK_VALID=%u",
+                           ix, FP_TCAMm_VALIDf_GET(t), k[7], k[6], k[5],
+                           m[7], m[6], m[5],
+                           FP_POLICY_TABLEm_G_COPY_TO_CPUf_GET(pol),
+                           FP_POLICY_TABLEm_G_DROPf_GET(pol),
+                           FP_GLOBAL_MASK_TCAMm_VALIDf_GET(gm));
+                }
             }
-            if (rp == 0) {
-                syslog(LOG_INFO,
-                       "FP-DIAG POLICY[256] G_COPY_TO_CPU=%u G_DROP=%u",
-                       FP_POLICY_TABLEm_G_COPY_TO_CPUf_GET(pol),
-                       FP_POLICY_TABLEm_G_DROPf_GET(pol));
-            }
-            if (rg == 0) {
-                syslog(LOG_INFO, "FP-DIAG GLOBAL_MASK_TCAM[256] VALID=%u",
-                       FP_GLOBAL_MASK_TCAMm_VALIDf_GET(gm));
-            }
+        }
+        /* RX-path counters: did ANY frame reach the CPU RX poll? */
+        {
+            extern unsigned g_rx_total, g_rx_unmapped, g_rx_delivered;
+            syslog(LOG_INFO,
+                   "FP-DIAG RX-path: rx_total=%u unmapped=%u delivered=%u",
+                   g_rx_total, g_rx_unmapped, g_rx_delivered);
+        }
+        /* FP-gating registers vs Cumulus known-good:
+         *   ING_BYPASS_CTRL=0x0  AUX_ARB_CONTROL=0x12  AUX_ARB_CONTROL_2=0x0327f863
+         * A bypass bit set or AUX_ARB/refresh unset would keep the IFP from
+         * ever evaluating our (byte-identical) rules. */
+        {
+            ING_BYPASS_CTRLr_t byp; AUX_ARB_CONTROLr_t aux;
+            AUX_ARB_CONTROL_2r_t aux2; MISCCONFIGr_t misc;
+            EFP_METER_CONTROLr_t efp;
+            uint32_t vbyp=0,vaux=0,vaux2=0,vmisc=0,vefp=0;
+            if (READ_ING_BYPASS_CTRLr(unit,&byp)==0) vbyp=ING_BYPASS_CTRLr_GET(byp);
+            if (READ_AUX_ARB_CONTROLr(unit,&aux)==0) vaux=AUX_ARB_CONTROLr_GET(aux);
+            if (READ_AUX_ARB_CONTROL_2r(unit,&aux2)==0) vaux2=AUX_ARB_CONTROL_2r_GET(aux2);
+            if (READ_MISCCONFIGr(unit,&misc)==0) vmisc=MISCCONFIGr_GET(misc);
+            if (READ_EFP_METER_CONTROLr(unit,&efp)==0) vefp=EFP_METER_CONTROLr_GET(efp);
+            syslog(LOG_INFO,
+                   "FP-DIAG GATE: ING_BYPASS=0x%x AUX_ARB=0x%x AUX_ARB_2=0x%x "
+                   "MISCCONFIG=0x%x EFP_METER=0x%x (cumulus: 0x0/0x12/0x327f863)",
+                   vbyp, vaux, vaux2, vmisc, vefp);
         }
     }
 

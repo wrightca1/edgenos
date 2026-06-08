@@ -376,11 +376,20 @@ static int cumulus_replicate_fp(int unit)
         FP_GLOBAL_MASK_TCAMm_t g;
         uint32_t key_fval[8];
         uint32_t mask_fval[8];
-        /* Per-rule global mask = ingress-port-bitmap match, uniform across
-         * all valid rows in the capture (indices 256..555): KEY/IPBM and
-         * MASK/IPBM_MASK are aliased to the same 66-bit field. */
-        uint32_t gkey[3]  = { 0xffffffff, 0x001fffff, 0x0 };
-        uint32_t gmask[3] = { 0xffffffff, 0x001fffff, 0x2 };
+        /*
+         * Per-rule global mask = ingress-port-bitmap (IPBM) match. The
+         * capture's value (KEY=0x..1fffffffffffff, MASK=0x02..) is an IPBM
+         * that only covers Cumulus's uplink ports (0..52) and forces bit 65
+         * to 0 — which EXCLUDES our uplinks (physical ports 65/66), so the
+         * trap rules never matched our ingress traffic (the OSPF-punt
+         * blocker found in Phase 3).  Write a MATCH-ANY-PORT mask instead
+         * (KEY=0, MASK=0, VALID=1 — the same form Cumulus uses for its
+         * slice-7 L2 rules): the IPBM field becomes don't-care so the rule
+         * applies on every ingress port, which is the correct semantics for
+         * a control-plane copy-to-CPU trap.
+         */
+        uint32_t gkey[3]  = { 0x0, 0x0, 0x0 };
+        uint32_t gmask[3] = { 0x0, 0x0, 0x0 };
         int rv;
 
         memcpy(key_fval,  r->key,  sizeof(key_fval));
