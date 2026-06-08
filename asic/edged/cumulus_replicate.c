@@ -538,8 +538,13 @@ static int cumulus_replicate_fp(int unit)
         uint32_t f2m[4] = {0};
         int rv;
 
+#if defined(FP_MATCHANY_DROP_TEST) || defined(FP_MATCHANY_COPY_TEST)
+        /* match-any (f2 mask stays 0) */
+        (void)f2; (void)f2m;
+#else
         f2[3]  = 0xe0000000;             /* DstIP first octet = 224 */
         f2m[3] = 0xff000000;             /* /8 */
+#endif
 
         FP_TCAMm_CLR(t);
         FP_TCAMm_VALIDf_SET(t, 3);
@@ -555,9 +560,15 @@ static int cumulus_replicate_fp(int unit)
         if (rv < 0) { syslog(LOG_ERR, "FP OSPF-trap GMASK write failed: %d", rv); errs++; }
 
         FP_POLICY_TABLEm_CLR(p);
+#ifdef FP_MATCHANY_DROP_TEST
+        FP_POLICY_TABLEm_G_DROPf_SET(p, 1);
+        FP_POLICY_TABLEm_Y_DROPf_SET(p, 1);
+        FP_POLICY_TABLEm_R_DROPf_SET(p, 1);
+#else
         FP_POLICY_TABLEm_G_COPY_TO_CPUf_SET(p, 3);
         FP_POLICY_TABLEm_Y_COPY_TO_CPUf_SET(p, 3);
         FP_POLICY_TABLEm_R_COPY_TO_CPUf_SET(p, 3);
+#endif
         FP_POLICY_TABLEm_COUNTER_MODEf_SET(p, 7);
         FP_POLICY_TABLEm_COUNTER_INDEXf_SET(p, idx);
         rv = WRITE_FP_POLICY_TABLEm(unit, idx, p);
@@ -648,6 +659,7 @@ static void cumulus_enable_cmicm_irq(int unit)
                "desc0=0x%08x desc1=0x%08x",
                i_ctrl0, i_ctrl1, i_stat, i_desc0, i_desc1);
     }
+
 }
 
 /*
