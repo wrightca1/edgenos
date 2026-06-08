@@ -1543,6 +1543,25 @@ void datapath_rx_diag(void)
                    "FP-DIAG CMIC_CONFIG(0x10c)=0x%08x  COS_RX_EN(bit24)=%u",
                    cc_direct, (cc_direct >> 24) & 1);
         }
+        /* iProc sub-window access validation (Path #2 scoping, read-only).
+         * Gold standard: CMIC_DEV_REV_ID at AXI 0x18000178 must read
+         * 0x46b80200 (BCM56846 rev02).  If bde_iproc reads that, the sub-window
+         * path works for sub-window 0; then probe the CMICm region two ways to
+         * find the correct AXI mapping for the 0x31xxx DMA registers. */
+        {
+            extern int bde_cmicm_read32(uint32_t, uint32_t *);
+            uint32_t rev=0, schan=0, dma_a=0, dma_b=0;
+            /* DEV_REV_ID via subwin-7 remap to AXI page 0x18000000 (off 0x178).
+             * If this == 0x46b80200, the remap mechanism + endianness are GOOD. */
+            bde_cmicm_read32(0x18000178, &rev);
+            bde_cmicm_read32(0x18030050, &schan);   /* CMICm SCHAN_CTRL region */
+            bde_cmicm_read32(0x18031140, &dma_a);   /* CMICm DMA (SDK 0x31140 -> AXI) */
+            bde_cmicm_read32(0x18031150, &dma_b);   /* CMICm DMA_STAT region */
+            syslog(LOG_INFO,
+                   "FP-DIAG SUBWIN7: DEV_REV_ID=0x%08x (want 0x46b80200) | "
+                   "SCHAN@0x18030050=0x%08x DMA@0x18031140=0x%08x @0x18031150=0x%08x",
+                   rev, schan, dma_a, dma_b);
+        }
         /* CPU-port (port 0) egress + MMU-drop counters — the decisive split:
          * does the FP copy reach the CPU port (TPKT/TMCA climb) and then die at
          * the DMA pull, or never egress to CPU (no climb -> MMU replication)?

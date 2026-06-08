@@ -71,4 +71,8 @@ int cumulus_replicate_init(void);
 int bde_iproc_read32(uint32_t offset, uint32_t *data);
 int bde_iproc_write32(uint32_t offset, uint32_t data);
 
+/* CMICm register access via BAR0 sub-window-7 remap (full AXI address). */
+int bde_cmicm_read32(uint32_t axi, uint32_t *data);
+int bde_cmicm_write32(uint32_t axi, uint32_t data);
+
 #endif /* __EDGED_H__ */

@@ -189,6 +189,48 @@ int bde_iproc_write32(uint32_t offset, uint32_t data)
 }
 
 /*
+ * CMICm register access via BAR0 sub-window-7 remap (Path #2).
+ *
+ * The CMICm register block lives at AXI 0x18030000+; those addresses are
+ * beyond BAR0's directly-mapped first sub-window, so a plain bar0_map[axi/4]
+ * (what the bmd tried for 0x31xxx) never reaches them.  Instead remap
+ * sub-window 7 (IMAP0_7 at BAR0 0x2C1C) to the target 4K AXI page, then
+ * access it through the sub-window-7 aperture at BAR0 0x7000 + (axi & 0xFFF).
+ * This is the userspace form of the Broadcom shbde_iproc mechanism, done via
+ * the proven /dev/mem bar0_map (same path the bmd uses for sub-window-0 regs).
+ *
+ * `axi` is the full AXI address (e.g. 0x18031414).  Validate against
+ * DEV_REV_ID (AXI 0x18000178 == 0x46b80200) before trusting it.
+ */
+#define IMAP0_7_BAR0_OFF   0x2C1C
+#define SUBWIN7_BAR0_OFF   0x7000
+
+int bde_cmicm_read32(uint32_t axi, uint32_t *data)
+{
+    uint32_t page, off;
+    if (!bar0_map) { *data = 0; return -1; }
+    page = axi & ~0xFFFu;
+    off  = axi & 0x0FFFu;
+    bar0_map[IMAP0_7_BAR0_OFF / 4] = page | 1u;   /* remap subwin7 -> page */
+    (void)bar0_map[IMAP0_7_BAR0_OFF / 4];          /* read-back to flush */
+    *data = bar0_map[(SUBWIN7_BAR0_OFF + off) / 4];
+    return 0;
+}
+
+int bde_cmicm_write32(uint32_t axi, uint32_t data)
+{
+    uint32_t page, off;
+    if (!bar0_map) return -1;
+    page = axi & ~0xFFFu;
+    off  = axi & 0x0FFFu;
+    bar0_map[IMAP0_7_BAR0_OFF / 4] = page | 1u;
+    (void)bar0_map[IMAP0_7_BAR0_OFF / 4];
+    bar0_map[(SUBWIN7_BAR0_OFF + off) / 4] = data;
+    (void)bar0_map[(SUBWIN7_BAR0_OFF + off) / 4];  /* read-back to flush */
+    return 0;
+}
+
+/*
  * Register write via BDE kernel module ioctl.
  * Uses iowrite32() in kernel with proper PPC MMIO barriers.
  */
