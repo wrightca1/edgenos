@@ -266,11 +266,121 @@ static int cumulus_replicate_fp(int unit)
     int errs = 0;
     unsigned int i;
 
+    /*
+     * Phase 1 (FP port scope, docs/FP_FIELD_PROCESSOR_PORT_SCOPE.md):
+     * program the FP slice / field-group INFRASTRUCTURE before the rules.
+     *
+     * Historically edged wrote FP_TCAM + FP_POLICY but never configured the
+     * slices, so the chip built keys in a different layout than our entries
+     * expected and nothing ever matched.  These values are replicated
+     * byte-for-byte from the Cumulus SOCMEM capture (dump_socmem.txt.gz,
+     * FP_PORT_FIELD_SEL/FP_SLICE_MAP/FP_SLICE_KEY_CONTROL/FP_GLOBAL_MASK_TCAM)
+     * so the FPF2 IP/L4 group goes live with the same geometry Cumulus used.
+     *
+     * SAFE BY CONSTRUCTION: the FP_POLICY loop below forces every *_DROP=0,
+     * so activating the slices can only COPY matching control traffic to the
+     * CPU — a wrong key just fails to match.  No DROP until the engine is
+     * trusted (Phase 4).
+     */
+
+    /*
+     * FP_PORT_FIELD_SEL — identical on every ingress port in the capture:
+     *   SLICE2: F1=0xc F2=2 F3=7      SLICE3: F1=0xa F2=3 F3=6  (3_2_PAIRING=1)
+     *   SLICE8: F1=5   F2=1 F3=7      SLICE9: F1=0xc F2=5 F3=0xa (9_8_PAIRING=1)
+     * FPF2 in slices 2/3 carries IpProtocol at slice-key bit 102 (the OSPF
+     * proto-89 trap target for Phase 3).
+     */
+    {
+        FP_PORT_FIELD_SELm_t fs;
+        int p;
+
+        FP_PORT_FIELD_SELm_CLR(fs);
+        FP_PORT_FIELD_SELm_SLICE2_F1f_SET(fs, 0xc);
+        FP_PORT_FIELD_SELm_SLICE2_F2f_SET(fs, 2);
+        FP_PORT_FIELD_SELm_SLICE2_F3f_SET(fs, 7);
+        FP_PORT_FIELD_SELm_SLICE3_F1f_SET(fs, 0xa);
+        FP_PORT_FIELD_SELm_SLICE3_F2f_SET(fs, 3);
+        FP_PORT_FIELD_SELm_SLICE3_F3f_SET(fs, 6);
+        FP_PORT_FIELD_SELm_SLICE3_2_PAIRINGf_SET(fs, 1);
+        FP_PORT_FIELD_SELm_SLICE8_F1f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE8_F2f_SET(fs, 1);
+        FP_PORT_FIELD_SELm_SLICE8_F3f_SET(fs, 7);
+        FP_PORT_FIELD_SELm_SLICE9_F1f_SET(fs, 0xc);
+        FP_PORT_FIELD_SELm_SLICE9_F2f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE9_F3f_SET(fs, 0xa);
+        FP_PORT_FIELD_SELm_SLICE9_8_PAIRINGf_SET(fs, 1);
+
+        for (p = 0; p <= FP_PORT_FIELD_SELm_MAX; p++) {
+            int rv = WRITE_FP_PORT_FIELD_SELm(unit, p, fs);
+            if (rv < 0) {
+                syslog(LOG_ERR, "FP_PORT_FIELD_SEL[%d] write failed: %d",
+                       p, rv);
+                errs++;
+            }
+        }
+    }
+
+    /* FP_SLICE_MAP[0] — virtual->physical slice map + group ids (captured). */
+    {
+        FP_SLICE_MAPm_t sm;
+        int rv;
+
+        FP_SLICE_MAPm_CLR(sm);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_0_PHYSICAL_SLICE_NUMBER_ENTRY_0f_SET(sm, 2);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_0_VIRTUAL_SLICE_GROUP_ENTRY_0f_SET(sm, 0);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_1_PHYSICAL_SLICE_NUMBER_ENTRY_0f_SET(sm, 3);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_1_VIRTUAL_SLICE_GROUP_ENTRY_0f_SET(sm, 1);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_2_PHYSICAL_SLICE_NUMBER_ENTRY_0f_SET(sm, 8);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_2_VIRTUAL_SLICE_GROUP_ENTRY_0f_SET(sm, 2);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_3_PHYSICAL_SLICE_NUMBER_ENTRY_0f_SET(sm, 9);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_3_VIRTUAL_SLICE_GROUP_ENTRY_0f_SET(sm, 3);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_4_PHYSICAL_SLICE_NUMBER_ENTRY_0f_SET(sm, 0);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_4_VIRTUAL_SLICE_GROUP_ENTRY_0f_SET(sm, 4);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_5_PHYSICAL_SLICE_NUMBER_ENTRY_0f_SET(sm, 1);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_5_VIRTUAL_SLICE_GROUP_ENTRY_0f_SET(sm, 5);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_6_PHYSICAL_SLICE_NUMBER_ENTRY_0f_SET(sm, 4);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_6_VIRTUAL_SLICE_GROUP_ENTRY_0f_SET(sm, 6);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_7_PHYSICAL_SLICE_NUMBER_ENTRY_0f_SET(sm, 5);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_7_VIRTUAL_SLICE_GROUP_ENTRY_0f_SET(sm, 7);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_8_PHYSICAL_SLICE_NUMBER_ENTRY_0f_SET(sm, 6);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_8_VIRTUAL_SLICE_GROUP_ENTRY_0f_SET(sm, 8);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_9_PHYSICAL_SLICE_NUMBER_ENTRY_0f_SET(sm, 7);
+        FP_SLICE_MAPm_VIRTUAL_SLICE_9_VIRTUAL_SLICE_GROUP_ENTRY_0f_SET(sm, 9);
+
+        rv = WRITE_FP_SLICE_MAPm(unit, 0, sm);
+        if (rv < 0) {
+            syslog(LOG_ERR, "FP_SLICE_MAP write failed: %d", rv);
+            errs++;
+        }
+    }
+
+    /* FP_SLICE_KEY_CONTROL[0] — DST_CLASS_ID_SEL=1 on slices 2 and 9 (captured). */
+    {
+        FP_SLICE_KEY_CONTROLm_t kc;
+        int rv;
+
+        FP_SLICE_KEY_CONTROLm_CLR(kc);
+        FP_SLICE_KEY_CONTROLm_SLICE_2_DST_CLASS_ID_SELf_SET(kc, 1);
+        FP_SLICE_KEY_CONTROLm_SLICE_9_DST_CLASS_ID_SELf_SET(kc, 1);
+
+        rv = WRITE_FP_SLICE_KEY_CONTROLm(unit, 0, kc);
+        if (rv < 0) {
+            syslog(LOG_ERR, "FP_SLICE_KEY_CONTROL write failed: %d", rv);
+            errs++;
+        }
+    }
+
     for (i = 0; i < CUMULUS_FP_TCAM_COUNT; i++) {
         const struct cumulus_fp_tcam_row *r = &cumulus_fp_tcam_rows[i];
         FP_TCAMm_t t;
+        FP_GLOBAL_MASK_TCAMm_t g;
         uint32_t key_fval[8];
         uint32_t mask_fval[8];
+        /* Per-rule global mask = ingress-port-bitmap match, uniform across
+         * all valid rows in the capture (indices 256..555): KEY/IPBM and
+         * MASK/IPBM_MASK are aliased to the same 66-bit field. */
+        uint32_t gkey[3]  = { 0xffffffff, 0x001fffff, 0x0 };
+        uint32_t gmask[3] = { 0xffffffff, 0x001fffff, 0x2 };
         int rv;
 
         memcpy(key_fval,  r->key,  sizeof(key_fval));
@@ -286,6 +396,18 @@ static int cumulus_replicate_fp(int unit)
             syslog(LOG_ERR, "FP_TCAM[%u] write failed: %d", r->index, rv);
             errs++;
         }
+
+        FP_GLOBAL_MASK_TCAMm_CLR(g);
+        FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
+        FP_GLOBAL_MASK_TCAMm_KEYf_SET(g,  gkey);
+        FP_GLOBAL_MASK_TCAMm_MASKf_SET(g, gmask);
+
+        rv = WRITE_FP_GLOBAL_MASK_TCAMm(unit, r->index, g);
+        if (rv < 0) {
+            syslog(LOG_ERR, "FP_GLOBAL_MASK_TCAM[%u] write failed: %d",
+                   r->index, rv);
+            errs++;
+        }
     }
 
     for (i = 0; i < CUMULUS_FP_POLICY_TABLE_COUNT; i++) {
@@ -295,12 +417,21 @@ static int cumulus_replicate_fp(int unit)
         int rv;
 
         FP_POLICY_TABLEm_CLR(p);
-        FP_POLICY_TABLEm_Y_DROPf_SET(p, r->y_drop);
+        /*
+         * Phase 1 de-risk: force every *_DROP=0.  The captured rows carry
+         * DROP=1 (Cumulus drops the forwarded copy, keeps only the CPU
+         * copy), but on the one working switch a mis-matched key with DROP
+         * set could blackhole production traffic.  Until the FP engine is
+         * trusted we keep COPY_TO_CPU only — a wrong match merely copies.
+         * The captured *_drop values are intentionally ignored here.
+         */
+        FP_POLICY_TABLEm_Y_DROPf_SET(p, 0);
         FP_POLICY_TABLEm_Y_COPY_TO_CPUf_SET(p, r->y_copy_to_cpu);
-        FP_POLICY_TABLEm_R_DROPf_SET(p, r->r_drop);
+        FP_POLICY_TABLEm_R_DROPf_SET(p, 0);
         FP_POLICY_TABLEm_R_COPY_TO_CPUf_SET(p, r->r_copy_to_cpu);
-        FP_POLICY_TABLEm_G_DROPf_SET(p, r->g_drop);
+        FP_POLICY_TABLEm_G_DROPf_SET(p, 0);
         FP_POLICY_TABLEm_G_COPY_TO_CPUf_SET(p, r->g_copy_to_cpu);
+        (void)r->y_drop; (void)r->r_drop; (void)r->g_drop;
         /* METER_PAIR_MODE_MODIFIER + COUNTER_MODE captured but not yet ported;
          * Cumulus uses them for paired-meter accounting which we don't have
          * meter tables programmed for. */
