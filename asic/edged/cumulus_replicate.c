@@ -370,6 +370,28 @@ static int cumulus_replicate_fp(int unit)
         }
     }
 
+    /*
+     * FP_SLICE_ENABLE — the master per-slice lookup enable. THIS is the bit
+     * OpenMDK's bmd_init never sets: without it the IFP holds valid TCAM
+     * entries but never looks any slice up, so no rule ever matches (proven
+     * by a match-any test that copied zero frames).  Cumulus value =
+     * 0x000e33ff (FP_SLICE_ENABLE_SLICE_0..9 + FP_LOOKUP_ENABLE bits).
+     * Writing the captured word verbatim turns the engine on.
+     */
+    {
+        FP_SLICE_ENABLEr_t se;
+        int rv;
+        FP_SLICE_ENABLEr_CLR(se);
+        FP_SLICE_ENABLEr_SET(se, 0x000e33ff);
+        rv = WRITE_FP_SLICE_ENABLEr(unit, se);
+        if (rv < 0) {
+            syslog(LOG_ERR, "FP_SLICE_ENABLE write failed: %d", rv);
+            errs++;
+        } else {
+            syslog(LOG_INFO, "FP_SLICE_ENABLE = 0x000e33ff (IFP lookup ON)");
+        }
+    }
+
     for (i = 0; i < CUMULUS_FP_TCAM_COUNT; i++) {
         const struct cumulus_fp_tcam_row *r = &cumulus_fp_tcam_rows[i];
         FP_TCAMm_t t;
