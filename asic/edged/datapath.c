@@ -1588,6 +1588,12 @@ void datapath_rx_diag(void)
             if (READ_E2E_DROP_COUNTr(unit, &e2e) == 0)    de2e = E2E_DROP_COUNTr_GET(e2e);
             if (READ_CMIC_PKT_COUNT_TOCPUDr(unit, &cd)==0) ctd = CMIC_PKT_COUNT_TOCPUDr_GET(cd);
             if (READ_CMIC_PKT_COUNT_TOCPUNr(unit, &cn)==0) ctn = CMIC_PKT_COUNT_TOCPUNr_GET(cn);
+            {
+                DROP_PKT_CNT_INGr_t i65, i66; uint32_t d65=0, d66=0;
+                if (READ_DROP_PKT_CNT_INGr(unit, 65, &i65)==0) d65 = DROP_PKT_CNT_INGr_GET(i65);
+                if (READ_DROP_PKT_CNT_INGr(unit, 66, &i66)==0) d66 = DROP_PKT_CNT_INGr_GET(i66);
+                syslog(LOG_INFO, "FP-DIAG ING_DROP: swp1(65)=%u swp2(66)=%u", d65, d66);
+            }
             syslog(LOG_INFO,
                    "FP-DIAG CPUPORT0: TPKT=%u TMCA=%u | OVQ_drop=%u E2E_drop=%u | "
                    "CMIC_TOCPU_d=%u TOCPU_n=%u",
