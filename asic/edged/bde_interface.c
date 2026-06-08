@@ -205,6 +205,15 @@ int bde_iproc_write32(uint32_t offset, uint32_t data)
 #define IMAP0_7_BAR0_OFF   0x2C1C
 #define SUBWIN7_BAR0_OFF   0x7000
 
+/* Direct BAR0 read (no remap) — for sub-window-0 regs (offset < 0x1000) and
+ * to establish whether bar0_map reads work at all. */
+int bde_bar0_read32(uint32_t off, uint32_t *data)
+{
+    if (!bar0_map) { *data = 0; return -1; }
+    *data = bar0_map[off / 4];
+    return 0;
+}
+
 int bde_cmicm_read32(uint32_t axi, uint32_t *data)
 {
     uint32_t page, off;

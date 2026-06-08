@@ -1550,17 +1550,29 @@ void datapath_rx_diag(void)
          * find the correct AXI mapping for the 0x31xxx DMA registers. */
         {
             extern int bde_cmicm_read32(uint32_t, uint32_t *);
-            uint32_t rev=0, schan=0, dma_a=0, dma_b=0;
-            /* DEV_REV_ID via subwin-7 remap to AXI page 0x18000000 (off 0x178).
-             * If this == 0x46b80200, the remap mechanism + endianness are GOOD. */
-            bde_cmicm_read32(0x18000178, &rev);
-            bde_cmicm_read32(0x18030050, &schan);   /* CMICm SCHAN_CTRL region */
-            bde_cmicm_read32(0x18031140, &dma_a);   /* CMICm DMA (SDK 0x31140 -> AXI) */
-            bde_cmicm_read32(0x18031150, &dma_b);   /* CMICm DMA_STAT region */
+            extern int bde_bar0_read32(uint32_t, uint32_t *);
+            uint32_t rev_d=0, dmac=0, rev_w=0, schan=0;
+            /* DIRECT bar0_map reads (no remap) — DEV_REV_ID@0x178 + DMA_CTRL@0x100.
+             * Establishes whether bar0_map reads work at all (sub-window 0). */
+            extern int bde_iproc_read32(uint32_t, uint32_t *);
+            uint32_t hyb_rev=0, hyb_140=0, hyb_150=0, junk=0;
+            (void)bde_cmicm_read32; (void)rev_w; (void)schan; (void)dmac;
+            bde_bar0_read32(0x178, &rev_d);   /* baseline direct, expect 0x46b80200 */
+            /* HYBRID: kernel iproc ioctl does the PCI-config IMAP0_7 remap (its own
+             * read is broken/0, ignore), then read the subwin-7 aperture
+             * (BAR0 0x7000 + off) via the working userspace bar0_map.
+             * Validate against DEV_REV_ID: remap to AXI page 0x18000000. */
+            bde_iproc_read32(0x178, &junk);            /* AXI 0x18000178 -> remap pg 0x18000000 */
+            bde_bar0_read32(0x7000 + 0x178, &hyb_rev); /* aperture read */
+            /* CMICm DMA_CTRL (SDK 0x31140 -> AXI 0x18031140, page 0x18031000) */
+            bde_iproc_read32(0x31140, &junk);
+            bde_bar0_read32(0x7000 + 0x140, &hyb_140);
+            bde_iproc_read32(0x31150, &junk);
+            bde_bar0_read32(0x7000 + 0x150, &hyb_150);
             syslog(LOG_INFO,
-                   "FP-DIAG SUBWIN7: DEV_REV_ID=0x%08x (want 0x46b80200) | "
-                   "SCHAN@0x18030050=0x%08x DMA@0x18031140=0x%08x @0x18031150=0x%08x",
-                   rev, schan, dma_a, dma_b);
+                   "FP-DIAG HYBRID: direct DEV_REV_ID=0x%08x | aperture DEV_REV_ID=0x%08x "
+                   "(want 0x46b80200) | CMICm DMA_CTRL=0x%08x DMA_STAT=0x%08x",
+                   rev_d, hyb_rev, hyb_140, hyb_150);
         }
         /* CPU-port (port 0) egress + MMU-drop counters — the decisive split:
          * does the FP copy reach the CPU port (TPKT/TMCA climb) and then die at
