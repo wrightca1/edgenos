@@ -115,7 +115,7 @@ explicitly clear them (or reboot).
   live-vs-Cumulus-SOCMEM field-by-field.
 - **Exit criteria:** we can read every FP table we intend to write.
 
-### Phase 1 — Port the device stage init (slice setup)
+### Phase 1 — Port the device stage init (slice setup) ✅ DONE (commit 2a5d860)
 - From `src/bcm/esw/trident/field.c`: port `_field_trident_ingress_qualifiers_init`
   (the qualifier→offset table) and the IFP **stage/slice setup** that programs
   `FP_SLICE_MAP`, `FP_PORT_FIELD_SEL`, `FP_SLICE_KEY_CONTROL`, and the
@@ -124,6 +124,13 @@ explicitly clear them (or reboot).
   (`dump_socmem.txt.gz`) — they should match field-for-field.
 - **Exit criteria:** one IFP slice is configured for the **FPF2 (IP/L4)** group and
   reads back identical to Cumulus; ping still 0%.
+- **Result:** implemented directly in `cumulus_replicate_fp()` (slice config
+  replicated byte-for-byte from the capture rather than re-deriving via the SDK
+  selcode engine — that's Phase 2). FP-DIAG read-back on 10.1.1.217 confirms
+  `PORT_FIELD_SEL[1] S2[F1=0xc F2=2 F3=7] S3[F1=0xa F2=3 F3=6]` (was all-0),
+  `GLOBAL_MASK_TCAM[256] VALID=1` (was 0), `POLICY[256] COPY_TO_CPU=3 DROP=0`,
+  100 TCAM + 100 POLICY rows, errors=0. **All `FP_POLICY.*_DROP` forced to 0**
+  (de-risk). Ping Nexus .2 and .9 both 0%.
 
 ### Phase 2 — Port the minimal selcode + key-assembly
 - From `src/bcm/esw/field.c` + `field_common.c`: port the subset that, given a qset
