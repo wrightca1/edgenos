@@ -8,10 +8,33 @@ Open-source NOS for the Edgecore AS5610-52X bare metal switch.
 - **Kernel**: Linux 5.10.224 LTS
 - **Root**: SquashFS + OverlayFS (read-only base + writable overlay)
 
-> **Status (2026-06-02): working datapath.** Links up, L2 forwarding, TX egress,
-> RX→CPU punt, and L3 local-host — the switch **pings a live Cisco Nexus
-> neighbor** end-to-end. See [`docs/DATAPATH_BRINGUP.md`](docs/DATAPATH_BRINGUP.md)
-> for the architecture, the fixes, and how to bring a port up.
+> **Status (2026-06-09): L2/L3 switch with dynamic routing.** Beyond the working
+> datapath, the box now does hardware **IPv4 L3 routing + ECMP**, runs **OSPF**
+> (Quagga) with a live-Nexus adjacency, brings up a **40 G QSFP uplink**
+> (preferred over the 10 G links), reports **real link speed/carrier** via
+> `ip link`/`ethtool`, runs **active fan/thermal control**, applies its config
+> **race-free at boot**, and can drop into the **ONIE installer from the running
+> OS** (`fw_setenv onie_boot_reason install`). See
+> [`docs/EDGED_ARCHITECTURE_AND_OPERATIONS.md`](docs/EDGED_ARCHITECTURE_AND_OPERATIONS.md)
+> and [`docs/DATAPATH_BRINGUP.md`](docs/DATAPATH_BRINGUP.md).
+
+## Capabilities
+
+- **L2** — MAC learning + VLAN forwarding in hardware.
+- **L3 (IPv4)** — host + prefix routes programmed to the chip (MY_STATION /
+  L3_DEFIP / next-hop / intf), **ECMP** multipath, CPU punt for control traffic.
+- **OSPF** — Quagga `zebra`+`ospfd`; per-interface cost (40 G primary, 10 G ECMP
+  backup), loopback router-id; FIB→chip mirroring means any routing daemon gets
+  hardware acceleration for free.
+- **Ports** — 48× 10 G SFP+ and 4× 40 G QSFP+; real carrier + speed surfaced on
+  the `swpN` interfaces; SFP/QSFP DOM (optical power) readable over i2c.
+- **Config-driven, race-free boot** — addresses/MTU/routes loaded from
+  `/etc/edged/*.conf` only after edged signals readiness (`/run/edged.ready`).
+- **Platform** — active fan control with thermal emergency-shutdown, PSU/sensor
+  monitoring via the CPLD driver.
+- **Recovery** — reach ONIE from the OS with `fw_setenv onie_boot_reason install`
+  (bootloader + ONIE image kept read-only); see
+  [`docs/FLASH_MTD_AND_ONIE_RECOVERY.md`](docs/FLASH_MTD_AND_ONIE_RECOVERY.md).
 
 ---
 
@@ -120,7 +143,14 @@ Hit any key to stop autoboot
 => run onie_bootcmd
 ```
 
-Or from an existing OS: `onie-nos-install`
+**Or, from a running EdgeNOS (no serial needed):**
+
+```bash
+fw_setenv onie_boot_reason install && reboot   # U-Boot then boots ONIE install
+```
+
+This writes only the U-Boot env partition; the bootloader and ONIE image stay
+read-only. See [`docs/FLASH_MTD_AND_ONIE_RECOVERY.md`](docs/FLASH_MTD_AND_ONIE_RECOVERY.md).
 
 ### Step 2: Serve the Image
 
