@@ -125,10 +125,18 @@ journalctl -u edged --since "5 sec ago"
 | Service | Role |
 |---------|------|
 | `edged.service` | The datapath daemon |
-| `swp-l3.service` | Applies `/etc/edged/swp-addrs.conf` + `swp-routes.conf` at boot (after edged creates the TAPs) |
+| `swp-l3.service` | Applies `/etc/edged/swp-addrs.conf` + `swp-routes.conf` at boot — **waits for the edged readiness sentinel first** (see below) |
 | `zebra.service` / `ospfd.service` | Quagga routing stack (OSPF) |
 | `fan-controller.service` | Thermal/fan control (environmentals) |
 | `platform-init.service` | Platform/CPLD bring-up |
+
+**Readiness handshake (race-free boot).** edged creates the `swpN` TAPs ~25 s
+into init, so a fixed-timeout config loader used to race it and drop whichever
+port edged made last. Instead, edged writes **`/run/edged.ready`** only after it
+is fully up (all TAPs created, netlink handler about to run); `swp-l3-config.sh`
+waits on that sentinel before applying addresses/routes (best-effort after
+120 s). So the config file is the source of truth and is applied
+deterministically once edged is genuinely ready — no race.
 
 ### 2.4 Config files (`/etc/edged/`)
 
@@ -256,5 +264,5 @@ routing protocols (BGP) — each is "kernel installs it → edged mirrors it".
 
 ---
 
-*See also: `DATAPATH_BRINGUP.md`, `CHIP_REGISTER_REFERENCE.md`,
+*See also: `FLASH_MTD_AND_ONIE_RECOVERY.md` (NOR/MTD layout + reaching ONIE from the OS via `fw_setenv`), `DATAPATH_BRINGUP.md`, `CHIP_REGISTER_REFERENCE.md`,
 `TECHNICAL_DEEPDIVE_BRINGUP_ORDER.md`, `JOURNEY_WRITEUP.md`.*
