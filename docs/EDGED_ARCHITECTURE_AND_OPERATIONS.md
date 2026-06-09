@@ -264,5 +264,5 @@ routing protocols (BGP) — each is "kernel installs it → edged mirrors it".
 
 ---
 
-*See also: `FLASH_MTD_AND_ONIE_RECOVERY.md` (NOR/MTD layout + reaching ONIE from the OS via `fw_setenv`), `DATAPATH_BRINGUP.md`, `CHIP_REGISTER_REFERENCE.md`,
+*See also: `ECMP_AND_OSPF_BRINGUP.md` (how hardware ECMP + OSPF were brought up), `FLASH_MTD_AND_ONIE_RECOVERY.md` (NOR/MTD layout + reaching ONIE from the OS via `fw_setenv`), `DATAPATH_BRINGUP.md`, `CHIP_REGISTER_REFERENCE.md`,
 `TECHNICAL_DEEPDIVE_BRINGUP_ORDER.md`, `JOURNEY_WRITEUP.md`.*
