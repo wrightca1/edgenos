@@ -346,6 +346,15 @@ int l3_route_add(int family, const void *dst, int prefix_len,
     return 0;
 }
 
+/*
+ * Transit-route DEFIP band. Routes added by l3_route_add_paths() land at
+ * incrementing slots starting at defip_transit_base; l3_route_del() scans
+ * [defip_transit_base, defip_transit_slot) to find and invalidate one.
+ * File-scope so both add and del see the same allocator.
+ */
+static const int defip_transit_base = 1536;  /* first transit DEFIP slot */
+static int defip_transit_slot = 1536;        /* next free transit DEFIP slot */
+
 int l3_route_del(int family, const void *dst, int prefix_len)
 {
     char dst_str[INET6_ADDRSTRLEN] = "?";
@@ -353,9 +362,42 @@ int l3_route_del(int family, const void *dst, int prefix_len)
 
     syslog(LOG_INFO, "L3 route del: %s/%d", dst_str, prefix_len);
 
+    /* Only IPv4 transit prefixes are programmed into L3_DEFIP here. */
+    if (family != AF_INET)
+        return 0;
+
+    uint32_t dst_host = ntohl(*(const uint32_t *)dst);
+    uint32_t mask = (prefix_len == 0)  ? 0 :
+                    (prefix_len >= 32) ? 0xffffffffu :
+                    (0xffffffffu << (32 - prefix_len));
+    uint32_t target = dst_host & mask;
+
     /*
-     * TODO: bcm_l3_route_delete(unit, &route)
+     * No prefix->slot map is kept, so scan the transit band and invalidate the
+     * entry whose key (IP_ADDR0 + IP_ADDR_MASK0) matches this prefix. The band
+     * is small (a handful of routes), so a linear scan is fine. Clearing VALID0
+     * removes it from the lookup; any ECMP group it referenced is left in place
+     * (harmless orphan, reclaimed on the next edged restart).
      */
+    int removed = 0;
+    for (int slot = defip_transit_base; slot < defip_transit_slot; slot++) {
+        L3_DEFIPm_t d;
+        if (READ_L3_DEFIPm(edged.unit, slot, &d) != 0)
+            continue;
+        if (!L3_DEFIPm_VALID0f_GET(d))
+            continue;
+        if (L3_DEFIPm_IP_ADDR0f_GET(d) != target ||
+            L3_DEFIPm_IP_ADDR_MASK0f_GET(d) != mask)
+            continue;
+
+        L3_DEFIPm_CLR(d);
+        int rv = WRITE_L3_DEFIPm(edged.unit, slot, d);
+        syslog(LOG_INFO, "route L3_DEFIP[%d] %s/%d removed (wr=%d)",
+               slot, dst_str, prefix_len, rv);
+        removed++;
+    }
+    if (!removed)
+        syslog(LOG_INFO, "L3 route del: %s/%d not in transit DEFIP", dst_str, prefix_len);
 
     return 0;
 }
@@ -911,8 +953,6 @@ int l3_ecmp_group_create(const int *intf_ids, int count)
 int l3_route_add_paths(uint32_t dst_host, int prefix_len,
                        const uint32_t *gw_host, int ngw)
 {
-    static int defip_transit_slot = 1536;   /* transit band: above /32 (2560),
-                                               below the /0 catch-all (8000) */
     int nh_idx[64];
     int n = 0, rv;
 
