@@ -14,12 +14,18 @@
 
 set -u
 
-# CPLD fan_pwm sysfs node. With the current driver (.dev_groups) it lives at the
-# DEVICE path; with the older loaded .ko it's at the DRIVER path. Probe both so
-# this works on a running box and after a reflash. PWM_SYS is resolved at startup
-# (see the writable-node check below).
-PWM_CANDIDATES="/sys/devices/platform/as5610_52x_cpld/fan_pwm /sys/bus/platform/drivers/as5610_52x_cpld/fan_pwm"
-PWM_SYS=""
+# CPLD fan_pwm sysfs node — DEVICE path ONLY.
+#
+# The correct CPLD driver (.dev_groups + platform_set_drvdata) exposes fan_pwm
+# here, with a valid private context, so reads/writes are safe.
+#
+# We deliberately do NOT fall back to the driver-path node
+# (/sys/bus/platform/drivers/as5610_52x_cpld/fan_pwm). An older buggy CPLD build
+# attaches the attribute to the *driver* kobject, where the store handler gets a
+# NULL drvdata and dereferences it — writing that node OOPSES THE KERNEL. Only
+# the device-path node is ever safe to touch; if it's absent we leave the fans
+# at their (safe) hardware default rather than risk the driver-path node.
+PWM_SYS=/sys/devices/platform/as5610_52x_cpld/fan_pwm
 
 POLL_INTERVAL=5         # seconds between samples
 RAMP_STEP=2             # max PWM units changed per poll (smooth ramp)
@@ -91,16 +97,20 @@ write_pwm() {
     echo "$v"
 }
 
-# Resolve the fan_pwm node to whichever candidate path is writable. Note we only
-# ever WRITE this node (get_max_temp reads hwmon, not fan_pwm), so the older
-# driver's read-side segfault on fan_pwm never bites us.
-for cand in $PWM_CANDIDATES; do
-    if [ -w "$cand" ]; then PWM_SYS="$cand"; break; fi
+# Wait briefly for the CPLD driver to create the device-path fan_pwm node at
+# boot. If it never shows up (e.g. an old driver that only exposes the unsafe
+# driver-path node), exit 0 cleanly and leave the fans at their safe hardware
+# default — do NOT restart-loop and do NOT touch the driver-path node.
+i=0
+while [ ! -w "$PWM_SYS" ]; do
+    i=$((i + 1))
+    if [ "$i" -gt 30 ]; then
+        log "$PWM_SYS absent/unwritable after 30s — leaving fans at hardware \
+default (no active control; correct CPLD driver required). Exiting cleanly."
+        exit 0
+    fi
+    sleep 1
 done
-if [ -z "$PWM_SYS" ]; then
-    log "FATAL: no writable CPLD fan_pwm node (is as5610_52x_cpld loaded?). Exiting."
-    exit 1
-fi
 
 cur=$PWM_MED
 write_pwm "$cur" >/dev/null
