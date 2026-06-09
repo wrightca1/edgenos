@@ -33,6 +33,13 @@ T_MED=50
 T_HIGH=60
 T_CRIT=72
 
+# Emergency shutdown (degC). If the hottest sensor stays at/above T_EMERG for
+# EMERG_GRACE consecutive polls (so a single transient spike can't trip it),
+# halt the box to protect the hardware. This is the safety net that used to
+# live in the now-retired thermal-mgmt.sh; fans are already at full from T_CRIT.
+T_EMERG=75
+EMERG_GRACE=6           # consecutive over-T_EMERG polls before halt (~30s at 5s poll)
+
 log() { logger -t fan-controller "$*"; }
 
 get_max_temp() {
@@ -86,6 +93,7 @@ fi
 
 cur=$PWM_MED
 write_pwm "$cur" >/dev/null
+emerg_count=0
 log "started (sysfs=$PWM_SYS, poll=${POLL_INTERVAL}s)"
 
 while :; do
@@ -106,6 +114,18 @@ while :; do
     fi
     if [ "$temp" -ge "$T_CRIT" ]; then
         log "CRITICAL temp=${temp}C (>=${T_CRIT}C) - fan at full"
+    fi
+    # Emergency: sustained over-temp -> halt to protect hardware.
+    if [ "$temp" -ge "$T_EMERG" ]; then
+        emerg_count=$((emerg_count + 1))
+        log "EMERGENCY temp=${temp}C (>=${T_EMERG}C) - strike ${emerg_count}/${EMERG_GRACE}, fans at full"
+        if [ "$emerg_count" -ge "$EMERG_GRACE" ]; then
+            log "EMERGENCY: temp>=${T_EMERG}C sustained ${EMERG_GRACE} polls - halting now"
+            shutdown -h now "Thermal emergency: ${temp}C" 2>/dev/null \
+                || poweroff -f 2>/dev/null
+        fi
+    else
+        emerg_count=0
     fi
     sleep "$POLL_INTERVAL"
 done

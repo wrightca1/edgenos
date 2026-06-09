@@ -27,17 +27,37 @@ rm -f "$R/usr/sbin/switchd"
 rm -f "$R/etc/systemd/system/switchd.service"
 rm -f "$R/etc/systemd/system/multi-user.target.wants/switchd.service"
 
+echo "==> retiring legacy thermal-mgmt (superseded by fan-controller)..."
+# thermal-mgmt.sh targets a pre-platform_driver CPLD path (ff705000.localbus/
+# ea000000.cpld/pwm1) that no longer exists, and its 0-248 PWM scale would
+# corrupt the 5-bit CPLD register if it ran alongside fan-controller. Fan
+# control + emergency shutdown now live solely in fan-controller.sh.
+rm -f "$R/etc/systemd/system/thermal-mgmt.service"
+rm -f "$R/etc/systemd/system/multi-user.target.wants/thermal-mgmt.service"
+rm -f "$R/usr/sbin/thermal-mgmt.sh"
+
 echo "==> applying current overlay (services, scripts, config)..."
 cp -a "$OVERLAY/." "$R/"
 
 echo "==> installing validated edged ($(stat -c%s "$EDGED") bytes)..."
 install -D -m 755 "$EDGED" "$R/usr/sbin/edged"
 
+echo "==> installing Quagga (zebra + ospfd) for OSPF control plane..."
+for qb in zebra ospfd; do
+    if [ -f "$SRC/output/${qb}-ppc" ]; then
+        install -D -m 755 "$SRC/output/${qb}-ppc" "$R/usr/sbin/$qb"
+        echo "   installed $qb ($(stat -c%s "$SRC/output/${qb}-ppc") bytes)"
+    else
+        echo "   WARN: output/${qb}-ppc missing — OSPF will not be available"
+    fi
+done
+
 echo "==> enabling services..."
 W="$R/etc/systemd/system/multi-user.target.wants"
 mkdir -p "$W"
 for svc in platform-init.service edged.service swp-l3.service \
-           fan-controller.service sshd-keygen.service; do
+           fan-controller.service sshd-keygen.service \
+           zebra.service ospfd.service; do
     if [ -f "$R/etc/systemd/system/$svc" ]; then
         ln -sf "../$svc" "$W/$svc"; echo "   enabled $svc"
     else

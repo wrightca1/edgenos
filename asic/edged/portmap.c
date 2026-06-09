@@ -20,6 +20,7 @@
 
 #include "edged.h"
 #include "portmap.h"
+#include "packet_io.h"
 
 /* BMD headers */
 #include <bmd/bmd.h>
@@ -1059,6 +1060,15 @@ int portmap_link_poll(void)
         }
 
         edged.ports[i].link_up = pcs_link;
+
+        /* Reflect real link state on the swpN TAP device so `ip link` /
+         * ethtool / routing see the wire. Speed is fixed per optic, so set
+         * it once (first poll); carrier follows every up/down transition. */
+        if (first_poll)
+            tun_set_speed(edged.ports[i].ifname, edged.ports[i].speed);
+        if (pcs_link != old_link || first_poll)
+            tun_set_carrier(edged.ports[i].tun_fd, pcs_link);
+
         if (pcs_link != old_link) {
             syslog(LOG_INFO, "BMD link %s: port %d (%s) via PCS block_lock",
                    pcs_link ? "UP" : "DOWN", port,

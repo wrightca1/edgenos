@@ -33,6 +33,15 @@
 #include <net/if.h>
 #include <net/if_arp.h>
 #include <linux/if_tun.h>
+#include <linux/ethtool.h>
+#include <linux/sockios.h>
+
+/* TUNSETCARRIER (drive the TAP carrier/LOWER_UP flag) landed in Linux 5.0; the
+ * build container's userspace headers may predate it. Define the ioctl if the
+ * header didn't (the running kernel is 5.10, so it's honored at runtime). */
+#ifndef TUNSETCARRIER
+#define TUNSETCARRIER _IOW('T', 226, int)
+#endif
 
 #include "edged.h"
 #include "packet_io.h"
@@ -155,7 +164,76 @@ static int tun_create(const char *name, int port_num)
         close(sfd);
     }
 
+    /* Start carrier-down; portmap_link_poll() raises it once the PCS locks.
+     * Without this a port with no optic/peer would show UP until the first
+     * poll (TAP carrier defaults on after TUNSETIFF). */
+    tun_set_carrier(fd, 0);
+
     return fd;
+}
+
+/*
+ * Reflect real chip link state onto the swpN TAP device.
+ *
+ * swpN are TAP interfaces owned by edged; a TAP defaults to operstate UNKNOWN
+ * and (after TUNSETIFF) carrier-on, so `ip link` always showed UNKNOWN/UP
+ * regardless of the wire. TUNSETCARRIER drives the kernel carrier/LOWER_UP
+ * flag, so `ip link`/`ip -br link` now show UP (LOWER_UP) vs DOWN (NO-CARRIER)
+ * from the PCS link state portmap_link_poll() computes. As a bonus, routing
+ * and OSPF correctly avoid a port whose optic/peer is down.
+ */
+void tun_set_carrier(int tun_fd, int up)
+{
+    int on = up ? 1 : 0;
+    if (tun_fd < 0)
+        return;
+    if (ioctl(tun_fd, TUNSETCARRIER, &on) < 0) {
+        static int warned;
+        if (!warned) {   /* old kernel without TUNSETCARRIER — not fatal */
+            syslog(LOG_WARNING, "TUNSETCARRIER unsupported: %s", strerror(errno));
+            warned = 1;
+        }
+    }
+}
+
+/*
+ * Set the speed/duplex the TAP device reports to ethtool.
+ *
+ * The Linux tun driver stores whatever ethtool link settings userspace gives
+ * it and echoes them back on read, so this makes `ethtool swpN` report the
+ * real port speed (10000 for SFP+, 40000 for QSFP) instead of "Unknown!".
+ * Uses the legacy ETHTOOL_SSET cmd — the kernel converts it to
+ * set_link_ksettings(), which the tun driver implements. Speed is fixed per
+ * optic type, so this is called once per port.
+ */
+void tun_set_speed(const char *ifname, int speed_mbps)
+{
+    struct ifreq ifr;
+    struct ethtool_cmd ecmd;
+    int sfd;
+
+    if (speed_mbps <= 0)
+        return;
+    sfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sfd < 0)
+        return;
+
+    memset(&ecmd, 0, sizeof(ecmd));
+    ecmd.cmd = ETHTOOL_GSET;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    ifr.ifr_data = (void *)&ecmd;
+    ioctl(sfd, SIOCETHTOOL, &ifr);   /* seed from current settings */
+
+    ethtool_cmd_speed_set(&ecmd, (uint32_t)speed_mbps);
+    ecmd.duplex  = DUPLEX_FULL;
+    ecmd.port    = PORT_FIBRE;
+    ecmd.autoneg = AUTONEG_DISABLE;
+    ecmd.cmd     = ETHTOOL_SSET;
+    if (ioctl(sfd, SIOCETHTOOL, &ifr) < 0)
+        syslog(LOG_WARNING, "%s: ethtool set speed %dM failed: %s",
+               ifname, speed_mbps, strerror(errno));
+    close(sfd);
 }
 
 /*

@@ -1,0 +1,11 @@
+[Unit]
+Description=Quagga ospfd
+After=zebra.service
+Requires=zebra.service
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ospfd -f /etc/quagga/ospfd.conf
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

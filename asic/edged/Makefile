@@ -90,7 +90,7 @@ clean:
 
 # Dependencies
 edged.o: edged.h portmap.h packet_io.h netlink.h l2.h l3.h vlan.h
-portmap.o: edged.h portmap.h
+portmap.o: edged.h portmap.h packet_io.h
 packet_io.o: edged.h packet_io.h portmap.h
 netlink.o: edged.h netlink.h portmap.h l2.h l3.h
 l2.o: edged.h l2.h portmap.h
