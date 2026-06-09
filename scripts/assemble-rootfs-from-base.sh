@@ -42,6 +42,22 @@ cp -a "$OVERLAY/." "$R/"
 echo "==> installing validated edged ($(stat -c%s "$EDGED") bytes)..."
 install -D -m 755 "$EDGED" "$R/usr/sbin/edged"
 
+echo "==> installing corrected CPLD kernel module (if rebuilt)..."
+# The base rootfs carries the kernel modules built when it was made; the
+# assemble fast-path does NOT recompile them, so the fan_pwm NULL-deref fix in
+# platform/cpld never reached the image. Override just the CPLD module from
+# output/modules/ (built by scripts/build-kmodules.sh, vermagic-matched). We
+# deliberately leave bde/tmon/retimer as the base build — they work and bde is
+# datapath-critical, so we don't risk swapping them. Safe either way: if this
+# .ko fails to load, fan-controller (device-path only) just exits cleanly.
+CPLD_KO="$SRC/output/modules/accton_as5610_52x_cpld.ko"
+if [ -f "$CPLD_KO" ]; then
+    install -D -m 644 "$CPLD_KO" "$R/lib/modules/extra/accton_as5610_52x_cpld.ko"
+    echo "   installed accton_as5610_52x_cpld.ko ($(stat -c%s "$CPLD_KO") bytes)"
+else
+    echo "   note: output/modules/accton_as5610_52x_cpld.ko absent — keeping base module"
+fi
+
 echo "==> installing Quagga (zebra + ospfd) for OSPF control plane..."
 for qb in zebra ospfd; do
     if [ -f "$SRC/output/${qb}-ppc" ]; then
