@@ -14,7 +14,12 @@
 
 set -u
 
-PWM_SYS=/sys/devices/platform/as5610_52x_cpld/fan_pwm
+# CPLD fan_pwm sysfs node. With the current driver (.dev_groups) it lives at the
+# DEVICE path; with the older loaded .ko it's at the DRIVER path. Probe both so
+# this works on a running box and after a reflash. PWM_SYS is resolved at startup
+# (see the writable-node check below).
+PWM_CANDIDATES="/sys/devices/platform/as5610_52x_cpld/fan_pwm /sys/bus/platform/drivers/as5610_52x_cpld/fan_pwm"
+PWM_SYS=""
 
 POLL_INTERVAL=5         # seconds between samples
 RAMP_STEP=2             # max PWM units changed per poll (smooth ramp)
@@ -86,8 +91,14 @@ write_pwm() {
     echo "$v"
 }
 
-if [ ! -w "$PWM_SYS" ]; then
-    log "FATAL: $PWM_SYS not writable (is as5610_52x_cpld loaded?). Exiting."
+# Resolve the fan_pwm node to whichever candidate path is writable. Note we only
+# ever WRITE this node (get_max_temp reads hwmon, not fan_pwm), so the older
+# driver's read-side segfault on fan_pwm never bites us.
+for cand in $PWM_CANDIDATES; do
+    if [ -w "$cand" ]; then PWM_SYS="$cand"; break; fi
+done
+if [ -z "$PWM_SYS" ]; then
+    log "FATAL: no writable CPLD fan_pwm node (is as5610_52x_cpld loaded?). Exiting."
     exit 1
 fi
 
