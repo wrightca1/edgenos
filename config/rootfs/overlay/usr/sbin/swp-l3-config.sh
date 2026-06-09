@@ -23,6 +23,24 @@ log() { logger -t swp-l3 "$*"; echo "swp-l3: $*"; }
 
 [ -r "$CONF" ] || { log "no $CONF, nothing to do"; exit 0; }
 
+# ── Wait for edged readiness (race-free boot) ────────────────────────────────
+# edged drops /run/edged.ready ONLY after it has created every swpN TAP and
+# started its netlink handler (~25s into init). Gate on that instead of racing
+# a fixed per-port timeout — that race used to drop whichever swpN edged
+# created last (e.g. swp1). Best-effort: if the sentinel never appears we still
+# try, so a missing/old edged doesn't wedge the boot.
+READY=/run/edged.ready
+i=0
+while [ ! -e "$READY" ]; do
+    i=$((i + 1))
+    if [ "$i" -gt 120 ]; then
+        log "WARNING: $READY absent after 120s — applying best-effort"
+        break
+    fi
+    sleep 1
+done
+[ -e "$READY" ] && log "edged ready ($READY) — applying L3 config"
+
 apply_one() {
     iface="$1"; cidr="$2"; mtu="$3"
     # wait up to ~15s for the interface to exist (edged creates swpN at startup)

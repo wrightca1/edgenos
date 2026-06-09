@@ -43,6 +43,35 @@ static volatile int running = 1;
 
 static volatile int rx_diag_req = 0;
 
+/*
+ * Readiness sentinel. edged drops /run/edged.ready ONLY after it has fully
+ * initialized — chip up, all swpN TAP interfaces created, and the netlink
+ * handler about to run (so live `ip addr add` events program the chip L3
+ * punt). Boot-time config loaders (swp-l3.service) wait on this file instead
+ * of racing a fixed timeout against edged's ~25s init, which is what used to
+ * drop a swpN address at boot. Cleared at startup (stale from a prior run)
+ * and on clean shutdown.
+ */
+#define EDGED_READY_PATH "/run/edged.ready"
+
+static void edged_set_ready(void)
+{
+    FILE *f = fopen(EDGED_READY_PATH, "w");
+    if (f) {
+        fprintf(f, "%ld\n", (long)getpid());
+        fclose(f);
+        syslog(LOG_INFO, "readiness sentinel %s written", EDGED_READY_PATH);
+    } else {
+        syslog(LOG_WARNING, "could not write %s: %s",
+               EDGED_READY_PATH, strerror(errno));
+    }
+}
+
+static void edged_clear_ready(void)
+{
+    unlink(EDGED_READY_PATH);
+}
+
 static void signal_handler(int sig)
 {
     if (sig == SIGTERM || sig == SIGINT) {
@@ -299,6 +328,10 @@ int main(int argc, char **argv)
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
     signal(SIGUSR1, signal_handler);  /* RX-path drop-counter dump */
+
+    /* Remove any stale readiness sentinel from a prior instance — until init
+     * completes below, edged is NOT ready and loaders must keep waiting. */
+    edged_clear_ready();
     signal(SIGPIPE, SIG_IGN);
 
     /* Initialize state */
@@ -353,6 +386,11 @@ int main(int argc, char **argv)
 
     syslog(LOG_INFO, "edged ready, entering main loop");
 
+    /* Fully initialized: signal readiness so the boot-time config loader can
+     * safely apply swp addresses/routes (the swpN TAPs now exist and the
+     * netlink handler below will program the chip L3 punt as they're added). */
+    edged_set_ready();
+
     /*
      * Main loop: poll for RX packets, netlink events, and link state.
      *
@@ -389,6 +427,7 @@ int main(int argc, char **argv)
 
     /* Cleanup */
     syslog(LOG_INFO, "edged shutting down");
+    edged_clear_ready();   /* TAPs about to be torn down — no longer ready */
     netlink_cleanup();
     packet_io_cleanup();
     bde_close();

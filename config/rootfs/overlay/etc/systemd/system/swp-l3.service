@@ -9,6 +9,9 @@ ConditionPathExists=/etc/edged/swp-addrs.conf
 Type=oneshot
 ExecStart=/usr/sbin/swp-l3-config.sh
 RemainAfterExit=yes
+# The loader waits up to 120s for /run/edged.ready; give systemd headroom
+# beyond its default 90s oneshot start timeout.
+TimeoutStartSec=180
 
 [Install]
 WantedBy=multi-user.target
