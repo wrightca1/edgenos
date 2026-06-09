@@ -42,20 +42,22 @@ cp -a "$OVERLAY/." "$R/"
 echo "==> installing validated edged ($(stat -c%s "$EDGED") bytes)..."
 install -D -m 755 "$EDGED" "$R/usr/sbin/edged"
 
-echo "==> installing corrected CPLD kernel module (if rebuilt)..."
-# The base rootfs carries the kernel modules built when it was made; the
-# assemble fast-path does NOT recompile them, so the fan_pwm NULL-deref fix in
-# platform/cpld never reached the image. Override just the CPLD module from
-# output/modules/ (built by scripts/build-kmodules.sh, vermagic-matched). We
-# deliberately leave bde/tmon/retimer as the base build — they work and bde is
-# datapath-critical, so we don't risk swapping them. Safe either way: if this
-# .ko fails to load, fan-controller (device-path only) just exits cleanly.
-CPLD_KO="$SRC/output/modules/accton_as5610_52x_cpld.ko"
-if [ -f "$CPLD_KO" ]; then
-    install -D -m 644 "$CPLD_KO" "$R/lib/modules/extra/accton_as5610_52x_cpld.ko"
-    echo "   installed accton_as5610_52x_cpld.ko ($(stat -c%s "$CPLD_KO") bytes)"
+echo "==> installing freshly-built platform kernel modules (matched to uImage)..."
+# build-kmodules.sh rebuilds the kernel (uImage+dtb) AND the out-of-tree
+# platform modules together, so output/modules/*.ko are vermagic- and
+# CRC-matched to output/kernel/uImage. When the kernel is rebuilt (e.g. the MTD
+# change), install ALL of them over the stale base copies so the loadable
+# modules match the shipped kernel — bde is datapath-critical, so it must not
+# be a stale build against a different kernel. (Built from the same repo source
+# as the base, so no behaviour change — only kernel-match.) This also carries
+# the accton_as5610_52x_cpld fan_pwm NULL-deref fix.
+if [ -d "$SRC/output/modules" ] && ls "$SRC/output/modules/"*.ko >/dev/null 2>&1; then
+    for ko in "$SRC/output/modules/"*.ko; do
+        install -D -m 644 "$ko" "$R/lib/modules/extra/$(basename "$ko")"
+        echo "   installed $(basename "$ko") ($(stat -c%s "$ko") bytes)"
+    done
 else
-    echo "   note: output/modules/accton_as5610_52x_cpld.ko absent — keeping base module"
+    echo "   note: no output/modules/*.ko — keeping base modules"
 fi
 
 echo "==> installing Quagga (zebra + ospfd) for OSPF control plane..."

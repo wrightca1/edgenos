@@ -180,10 +180,18 @@ CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y
 
 # MTD (NOR flash)
+# NOTE: CONFIG_MTD_PHYSMAP_OF (the of_flash driver that binds the "cfi-flash"
+# node in the DTS) DEPENDS ON CONFIG_MTD_PHYSMAP. Without PHYSMAP, olddefconfig
+# silently drops PHYSMAP_OF, the flash is never probed, and /proc/mtd is empty.
+# That's why the eLBC NOR + its partitions (incl. u-boot-env = mtd1) weren't
+# appearing. Bank/interleave width 1 matches the DTS (bank-width/device-width=1).
 CONFIG_MTD=y
 CONFIG_MTD_CFI=y
 CONFIG_MTD_CFI_AMDSTD=y
+CONFIG_MTD_CFI_I1=y
+CONFIG_MTD_MAP_BANK_WIDTH_1=y
 CONFIG_MTD_OF_PARTS=y
+CONFIG_MTD_PHYSMAP=y
 CONFIG_MTD_PHYSMAP_OF=y
 
 # RTC (AS5610 has RTC8564 which is PCF8563 compatible)

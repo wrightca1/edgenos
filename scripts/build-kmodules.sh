@@ -44,8 +44,11 @@ if [ ! -d "$KSRC" ]; then
   rm /build/linux-${KVER}.tar.xz
 fi
 
-# DT (build-all.sh adds the board dts); harmless if already present.
-cp /src/kernel/dts/as5610-52x.dts "$KSRC/arch/powerpc/boot/dts/" 2>/dev/null || true
+# DT: install the board dts and register it in the dts Makefile (build-all.sh
+# does the same) so `make dtbs` emits as5610-52x.dtb.
+cp /src/kernel/dts/as5610-52x.dts "$KSRC/arch/powerpc/boot/dts/"
+grep -q "as5610-52x" "$KSRC/arch/powerpc/boot/dts/Makefile" || \
+  echo "dtb-\$(CONFIG_PPC_85xx) += as5610-52x.dtb" >> "$KSRC/arch/powerpc/boot/dts/Makefile"
 for p in /src/kernel/patches/*.patch; do
   [ -f "$p" ] || continue
   (cd "$KSRC" && patch -p1 -N < "$p") || true
@@ -54,8 +57,16 @@ done
 cp /src/config/kernel/as5610_defconfig "$KSRC/.config"
 make -C "$KSRC" ARCH=powerpc CROSS_COMPILE=powerpc-linux-gnu- olddefconfig
 
-echo "==> building kernel (vmlinux + modules -> Module.symvers)... [slow]"
-make -C "$KSRC" ARCH=powerpc CROSS_COMPILE=powerpc-linux-gnu- -j"$(nproc)" uImage modules
+echo "==> MTD config sanity (must all be =y for the NOR/env partitions):"
+grep -E "CONFIG_MTD=|CONFIG_MTD_PHYSMAP=|CONFIG_MTD_PHYSMAP_OF=|CONFIG_MTD_OF_PARTS=|CONFIG_MTD_CFI=|CONFIG_MTD_CFI_AMDSTD=" "$KSRC/.config" || true
+
+echo "==> building kernel (uImage + dtbs + modules)... [slow]"
+make -C "$KSRC" ARCH=powerpc CROSS_COMPILE=powerpc-linux-gnu- -j"$(nproc)" uImage dtbs modules
+
+echo "==> staging kernel + dtb..."
+mkdir -p /build/output/kernel
+cp -v "$KSRC/arch/powerpc/boot/uImage" /build/output/kernel/
+cp -v "$KSRC/arch/powerpc/boot/dts/as5610-52x.dtb" /build/output/kernel/
 
 echo "==> building out-of-tree platform modules..."
 MODSTAGE=/build/modules-src

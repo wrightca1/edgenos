@@ -65,6 +65,10 @@
 			partition@0 {
 				reg = <0x0 0x00360000>;
 				label = "onie";
+				/* read-only: the OS must never write the ONIE recovery
+				 * installer (onie-nos-install runs inside ONIE, not here).
+				 * Only u-boot-env (mtd1) is writable, for fw_setenv. */
+				read-only;
 			};
 			partition@360000 {
 				reg = <0x360000 0x00010000>;
