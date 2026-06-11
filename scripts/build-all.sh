@@ -13,7 +13,7 @@ set -e
 
 SRCDIR="${SRCDIR:-/src}"
 OUTDIR="${OUTDIR:-/build/output}"
-KVER="5.10.224"
+KVER="5.10.258"
 KSRC="/build/linux-${KVER}"
 JESSIE_MIRROR="http://archive.debian.org/debian"
 JOBS=$(nproc)

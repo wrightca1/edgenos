@@ -13,7 +13,7 @@
 # so module vermagic + symbol CRCs match the kernel shipped in the image.
 set -e
 
-KVER="5.10.224"
+KVER="5.10.258"
 TOP=$(cd "$(dirname "$0")/.." && pwd)
 export DOCKER_HOST=${DOCKER_HOST:-unix:///run/user/1000/docker.sock}
 
@@ -85,7 +85,8 @@ done
 
 echo "==> staging .ko + verifying CPLD vermagic..."
 find "$MODSTAGE" -name "*.ko" -exec cp -v {} /build/output/modules/ \;
-modinfo /build/output/modules/accton_as5610_52x_cpld.ko | grep -iE "vermagic|filename"
+# modinfo is not in the bookworm build image; read vermagic from the ELF note instead.
+echo -n "   cpld vermagic: "; strings /build/output/modules/accton_as5610_52x_cpld.ko | grep -m1 -E "^[0-9]+\.[0-9]+\..*SMP" || echo "(not found)"
 '
 echo "==> modules in output/modules:"
 ls -l "$TOP/output/modules/"
