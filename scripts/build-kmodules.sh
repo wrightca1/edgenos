@@ -33,7 +33,8 @@ apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
   build-essential gcc-powerpc-linux-gnu g++-powerpc-linux-gnu \
   binutils-powerpc-linux-gnu bc bison flex libssl-dev libelf-dev \
-  u-boot-tools device-tree-compiler wget ca-certificates make file xz-utils >/dev/null
+  u-boot-tools device-tree-compiler wget ca-certificates make file xz-utils \
+  kmod >/dev/null
 
 echo "==> fetching + configuring kernel ${KVER}..."
 mkdir -p /build
@@ -68,6 +69,20 @@ mkdir -p /build/output/kernel
 cp -v "$KSRC/arch/powerpc/boot/uImage" /build/output/kernel/
 cp -v "$KSRC/arch/powerpc/boot/dts/as5610-52x.dtb" /build/output/kernel/
 
+# Install the FULL versioned in-tree module tree (the =m stock modules: bridge,
+# 8021q, nf_tables, etc.) for THIS kernel release, with modules.dep, so that
+# modprobe works on the box after a kernel bump. Without this the rootfs keeps
+# the OLD kernel'\''s /lib/modules/<oldver> and every =m module fails vermagic.
+KVERREL=$(cat "$KSRC/include/config/kernel.release")   # e.g. 5.10.258-edgenos
+echo "==> modules_install for $KVERREL (in-tree =m modules + modules.dep)..."
+rm -rf /build/output/kernel/modules
+make -C "$KSRC" ARCH=powerpc CROSS_COMPILE=powerpc-linux-gnu- \
+     INSTALL_MOD_PATH=/build/output/kernel/modules INSTALL_MOD_STRIP=1 modules_install
+# drop the dangling build/source symlinks modules_install leaves (point into the
+# build tree, broken on the target; harmless but tidy)
+rm -f /build/output/kernel/modules/lib/modules/$KVERREL/build \
+      /build/output/kernel/modules/lib/modules/$KVERREL/source
+
 echo "==> building out-of-tree platform modules..."
 MODSTAGE=/build/modules-src
 rm -rf "$MODSTAGE"; mkdir -p "$MODSTAGE"
@@ -85,8 +100,14 @@ done
 
 echo "==> staging .ko + verifying CPLD vermagic..."
 find "$MODSTAGE" -name "*.ko" -exec cp -v {} /build/output/modules/ \;
+# Also place the out-of-tree .ko into the versioned tree'\''s extra/ and refresh
+# modules.dep so both in-tree (=m) and our modules are modprobe-resolvable.
+mkdir -p /build/output/kernel/modules/lib/modules/$KVERREL/extra
+cp /build/output/modules/*.ko /build/output/kernel/modules/lib/modules/$KVERREL/extra/
+depmod -b /build/output/kernel/modules "$KVERREL"
 # modinfo is not in the bookworm build image; read vermagic from the ELF note instead.
 echo -n "   cpld vermagic: "; strings /build/output/modules/accton_as5610_52x_cpld.ko | grep -m1 -E "^[0-9]+\.[0-9]+\..*SMP" || echo "(not found)"
+echo "==> versioned module tree built:"; ls /build/output/kernel/modules/lib/modules/
 '
 echo "==> modules in output/modules:"
 ls -l "$TOP/output/modules/"

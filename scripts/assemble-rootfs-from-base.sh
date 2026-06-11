@@ -42,15 +42,24 @@ cp -a "$OVERLAY/." "$R/"
 echo "==> installing validated edged ($(stat -c%s "$EDGED") bytes)..."
 install -D -m 755 "$EDGED" "$R/usr/sbin/edged"
 
-echo "==> installing freshly-built platform kernel modules (matched to uImage)..."
-# build-kmodules.sh rebuilds the kernel (uImage+dtb) AND the out-of-tree
-# platform modules together, so output/modules/*.ko are vermagic- and
-# CRC-matched to output/kernel/uImage. When the kernel is rebuilt (e.g. the MTD
-# change), install ALL of them over the stale base copies so the loadable
-# modules match the shipped kernel — bde is datapath-critical, so it must not
-# be a stale build against a different kernel. (Built from the same repo source
-# as the base, so no behaviour change — only kernel-match.) This also carries
-# the accton_as5610_52x_cpld fan_pwm NULL-deref fix.
+echo "==> installing kernel modules (matched to uImage)..."
+# build-kmodules.sh rebuilds the kernel (uImage+dtb), the out-of-tree platform
+# modules, AND a full versioned module tree (in-tree =m modules + modules.dep)
+# under output/kernel/modules/lib/modules/<KVER>. On a kernel BUMP the rootfs's
+# old /lib/modules/<oldver> must be replaced or every =m module (bridge, 8021q,
+# nf_tables, ...) fails vermagic and modprobe breaks (no modules.dep for the new
+# kernel). So: if a fresh versioned tree exists, drop the stale version dir(s)
+# and install the new one; otherwise just refresh our out-of-tree .ko.
+MODTREE="$SRC/output/kernel/modules/lib/modules"
+if [ -d "$MODTREE" ] && ls -d "$MODTREE"/*-edgenos >/dev/null 2>&1; then
+    NEWVER=$(basename "$(ls -d "$MODTREE"/*-edgenos | head -1)")
+    echo "   replacing versioned module tree -> $NEWVER (dropping stale $(ls "$R/lib/modules" 2>/dev/null | grep -E '\-edgenos$' | tr '\n' ' '))"
+    rm -rf "$R"/lib/modules/*-edgenos
+    cp -a "$MODTREE/$NEWVER" "$R/lib/modules/$NEWVER"
+    # depmod over the installed tree so modules.dep is correct for the target
+    depmod -b "$R" "$NEWVER" 2>/dev/null || true
+fi
+# Always refresh the flat /lib/modules/extra that platform-init insmods by path.
 if [ -d "$SRC/output/modules" ] && ls "$SRC/output/modules/"*.ko >/dev/null 2>&1; then
     for ko in "$SRC/output/modules/"*.ko; do
         install -D -m 644 "$ko" "$R/lib/modules/extra/$(basename "$ko")"
