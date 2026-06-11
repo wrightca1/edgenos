@@ -1,6 +1,17 @@
 #!/bin/bash
-# nos-upgrade - EdgeNOS upgrade utility
-# Upgrades the inactive slot and optionally switches to it
+# nos-upgrade - EdgeNOS dual-slot upgrade utility
+# Writes a new image into the INACTIVE slot, verifies it byte-for-byte, and
+# optionally activates + reboots into it. The active (running) slot is never
+# touched unless --force is given, so a failed/aborted upgrade always leaves a
+# bootable system, and ONIE remains the final backstop.
+#
+# Safety layers (each aborts BEFORE any partition is written):
+#   1. refuse to write the ACTIVE slot          (avoid corrupting the running rootfs)
+#   2. payload sanity   — __ARCHIVE__ marker present, both members extract
+#   3. content magic    — FIT (0xd00dfeed) for the kernel, squashfs ("hsqs") for rootfs
+#   4. capacity         — each member must fit its target partition
+#   5. read-back verify — sha256 of what landed on disk == sha256 of the source
+# Only after read-back passes will --activate flip cl.active.
 
 set -e
 
@@ -10,42 +21,59 @@ INSTALL_DEV="/dev/sda"
 usage() {
     echo "Usage: $PROG [options] <image.bin>"
     echo "  --slot A|B    Install to specific slot (default: inactive)"
-    echo "  --activate    Switch active slot after install"
+    echo "  --activate    Switch active slot after a verified install"
     echo "  --reboot      Reboot after install"
+    echo "  --force       Allow writing the ACTIVE slot (DANGEROUS)"
     echo "  -h, --help    Show this help"
 }
 
-log() { echo "$PROG: $*"; logger -t nos-upgrade "$*"; }
+log()  { echo "$PROG: $*"; logger -t nos-upgrade "$*" 2>/dev/null || true; }
+die()  { log "ERROR: $*"; [ -n "$TMPDIR" ] && rm -rf "$TMPDIR"; exit 1; }
 
 get_active_slot() {
-    fw_printenv cl.active 2>/dev/null | cut -d= -f2 || echo "1"
+    local s
+    s=$(fw_printenv cl.active 2>/dev/null | cut -d= -f2)
+    echo "${s:-1}"
+}
+
+# magic_u32 <file> -> first 4 bytes as 8 hex chars (big-endian), lowercase
+magic_u32() { od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n'; }
+
+# part_size <block-dev> -> capacity in bytes, or 0 if it can't be determined.
+# Prefer sysfs (always present); blockdev is not in the EdgeNOS busybox userland.
+part_size() {
+    local name; name=$(basename "$1")
+    if [ -r "/sys/class/block/$name/size" ]; then
+        echo $(( $(cat "/sys/class/block/$name/size") * 512 ))
+    elif command -v blockdev >/dev/null 2>&1; then
+        blockdev --getsize64 "$1" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
 }
 
 # Parse args
 SLOT=""
 ACTIVATE=0
 REBOOT=0
+FORCE=0
 IMAGE=""
+TMPDIR=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --slot)     SLOT="$2"; shift 2 ;;
         --activate) ACTIVATE=1; shift ;;
         --reboot)   REBOOT=1; shift ;;
+        --force)    FORCE=1; shift ;;
         -h|--help)  usage; exit 0 ;;
+        -*)         die "unknown option: $1" ;;
         *)          IMAGE="$1"; shift ;;
     esac
 done
 
-if [ -z "$IMAGE" ]; then
-    usage
-    exit 1
-fi
-
-if [ ! -f "$IMAGE" ]; then
-    log "ERROR: Image not found: $IMAGE"
-    exit 1
-fi
+[ -n "$IMAGE" ] || { usage; exit 1; }
+[ -f "$IMAGE" ] || die "image not found: $IMAGE"
 
 # Determine target slot
 ACTIVE=$(get_active_slot)
@@ -62,53 +90,87 @@ elif [ "$SLOT" = "2" ] || [ "$SLOT" = "B" ]; then
     ROOT_PART="${INSTALL_DEV}8"
     SLOT_NUM=2
 else
-    log "ERROR: Invalid slot: $SLOT"
-    exit 1
+    die "invalid slot: $SLOT"
 fi
 
-log "Active slot: $ACTIVE, installing to slot $SLOT_NUM"
+# Safety 1: never write the running slot unless forced.
+if [ "$SLOT_NUM" = "$ACTIVE" ]; then
+    if [ "$FORCE" = "1" ]; then
+        log "WARNING: --force given; writing the ACTIVE slot $SLOT_NUM (running system)"
+    else
+        die "refusing to write the ACTIVE slot ($SLOT_NUM). Upgrade targets the inactive slot; use --force to override."
+    fi
+fi
 
-# Extract payload from image
+# Target partitions must exist (dual-slot layout present).
+[ -b "$KERN_PART" ] || die "kernel partition $KERN_PART not found (is this a dual-slot install?)"
+[ -b "$ROOT_PART" ] || die "rootfs partition $ROOT_PART not found (is this a dual-slot install?)"
+
+log "Active slot: $ACTIVE, installing to slot $SLOT_NUM ($KERN_PART + $ROOT_PART)"
+
+# Safety 2: extract payload.
 ARCHIVE_LINE=$(grep -an "^__ARCHIVE__$" "$IMAGE" | tail -1 | cut -d: -f1)
-if [ -z "$ARCHIVE_LINE" ]; then
-    log "ERROR: Not a valid EdgeNOS image"
-    exit 1
-fi
+[ -n "$ARCHIVE_LINE" ] || die "not a valid EdgeNOS image (no __ARCHIVE__ marker)"
 
 TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
 tail -c "+$(( $(head -n "$ARCHIVE_LINE" "$IMAGE" | wc -c) + 1 ))" "$IMAGE" | \
-    tar -x -C "$TMPDIR"
+    tar -x -C "$TMPDIR" || die "failed to extract image payload"
 
-# Write FIT image
-if [ -f "$TMPDIR/uImage-powerpc.itb" ]; then
-    log "Writing FIT image to $KERN_PART..."
-    dd if="$TMPDIR/uImage-powerpc.itb" of="$KERN_PART" bs=64k 2>/dev/null
+KERN_SRC="$TMPDIR/uImage-powerpc.itb"
+ROOT_SRC="$TMPDIR/rootfs.sqsh"
+[ -f "$KERN_SRC" ] || die "FIT image (uImage-powerpc.itb) not found in archive"
+[ -f "$ROOT_SRC" ] || die "rootfs (rootfs.sqsh) not found in archive"
+
+# Safety 3: content magic.
+KMAGIC=$(magic_u32 "$KERN_SRC")
+[ "$KMAGIC" = "d00dfeed" ] || die "kernel payload is not a FIT image (magic=$KMAGIC, expected d00dfeed)"
+RMAGIC=$(head -c4 "$ROOT_SRC" 2>/dev/null)
+[ "$RMAGIC" = "hsqs" ] || die "rootfs payload is not a squashfs (magic='$RMAGIC', expected 'hsqs')"
+
+# Safety 4: capacity. Each member must fit its target partition. If a capacity
+# can't be read (cap=0), warn and skip that check rather than abort.
+KSZ=$(stat -c%s "$KERN_SRC")
+RSZ=$(stat -c%s "$ROOT_SRC")
+KCAP=$(part_size "$KERN_PART")
+RCAP=$(part_size "$ROOT_PART")
+if [ "$KCAP" -gt 0 ]; then
+    [ "$KSZ" -le "$KCAP" ] || die "FIT image ($KSZ B) exceeds $KERN_PART capacity ($KCAP B)"
 else
-    log "ERROR: FIT image not found in archive"
-    rm -rf "$TMPDIR"
-    exit 1
+    log "WARNING: could not read $KERN_PART capacity; skipping kernel fit check"
 fi
-
-# Write rootfs
-if [ -f "$TMPDIR/rootfs.sqsh" ]; then
-    log "Writing rootfs to $ROOT_PART..."
-    dd if="$TMPDIR/rootfs.sqsh" of="$ROOT_PART" bs=64k 2>/dev/null
+if [ "$RCAP" -gt 0 ]; then
+    [ "$RSZ" -le "$RCAP" ] || die "rootfs ($RSZ B) exceeds $ROOT_PART capacity ($RCAP B)"
 else
-    log "ERROR: rootfs not found in archive"
-    rm -rf "$TMPDIR"
-    exit 1
+    log "WARNING: could not read $ROOT_PART capacity; skipping rootfs fit check"
 fi
+log "Payload OK: kernel $KSZ B (cap $KCAP), rootfs $RSZ B (cap $RCAP)"
 
-rm -rf "$TMPDIR"
-log "Slot $SLOT_NUM upgrade complete."
+# Write kernel, then verify read-back.
+log "Writing FIT image to $KERN_PART..."
+dd if="$KERN_SRC" of="$KERN_PART" bs=64k conv=fsync 2>/dev/null || die "dd kernel -> $KERN_PART failed"
+KSRC_SHA=$(sha256sum "$KERN_SRC" | cut -d' ' -f1)
+KDST_SHA=$(head -c "$KSZ" "$KERN_PART" | sha256sum | cut -d' ' -f1)
+[ "$KSRC_SHA" = "$KDST_SHA" ] || die "kernel read-back mismatch ($KERN_PART corrupt); slot $SLOT_NUM NOT activated"
+log "Kernel verified ($KSRC_SHA)"
 
-# Activate if requested
+# Write rootfs, then verify read-back.
+log "Writing rootfs to $ROOT_PART..."
+dd if="$ROOT_SRC" of="$ROOT_PART" bs=64k conv=fsync 2>/dev/null || die "dd rootfs -> $ROOT_PART failed"
+RSRC_SHA=$(sha256sum "$ROOT_SRC" | cut -d' ' -f1)
+RDST_SHA=$(head -c "$RSZ" "$ROOT_PART" | sha256sum | cut -d' ' -f1)
+[ "$RSRC_SHA" = "$RDST_SHA" ] || die "rootfs read-back mismatch ($ROOT_PART corrupt); slot $SLOT_NUM NOT activated"
+log "Rootfs verified ($RSRC_SHA)"
+
+rm -rf "$TMPDIR"; trap - EXIT
+log "Slot $SLOT_NUM upgrade complete and verified."
+
+# Activate only after a fully verified write.
 if [ "$ACTIVATE" = "1" ]; then
     log "Activating slot $SLOT_NUM..."
-    fw_setenv cl.active "$SLOT_NUM"
+    fw_setenv cl.active "$SLOT_NUM" || die "fw_setenv cl.active $SLOT_NUM failed"
 fi
 
-# Reboot if requested
 if [ "$REBOOT" = "1" ]; then
     log "Rebooting..."
     reboot
