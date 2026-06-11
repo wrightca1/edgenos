@@ -439,10 +439,34 @@ void *_bde_dma_alloc(void *dvc, size_t size, dma_addr_t *baddr)
 void _bde_dma_free(void *dvc, size_t size, void *laddr, dma_addr_t baddr)
 {
     (void)dvc;
-    (void)size;
     (void)laddr;
-    (void)baddr;
-    /* Bump allocator - free is handled by bde_dma_pool_reset() */
+
+    /*
+     * LIFO reclaim.
+     *
+     * Steady-state packet I/O allocates DMA strictly nested and frees in
+     * reverse order: each TX allocates a frame buffer, then bmd_tx() allocates
+     * a DCB, frees the DCB, and finally the frame buffer is freed (edged is
+     * single-threaded and bmd_tx() is synchronous, so one TX completes before
+     * the next). So every free releases the TOP of the bump pool — roll the
+     * bump pointer back when the freed block is the most-recent allocation
+     * (its end == the current offset).
+     *
+     * Without this, _bde_dma_free was a no-op and EVERY transmitted frame
+     * permanently consumed pool space; once the 4MB pool filled, all TX failed
+     * ("pool exhausted") on every port. The long-lived RX-ring buffers sit
+     * below the transient TX allocations and are never freed, so they're
+     * untouched; a non-top free (shouldn't happen on the TX path) falls through
+     * as a safe no-op rather than corrupting the pool.
+     */
+    if (!dma_map || baddr < dma_phys)
+        return;
+
+    uint32_t off = (uint32_t)(baddr - dma_phys);
+    uint32_t aligned_size = (uint32_t)((size + 63) & ~63);
+
+    if (off + aligned_size == dma_offset)
+        dma_offset = off;          /* reclaim the top of the pool */
 }
 
 /*
