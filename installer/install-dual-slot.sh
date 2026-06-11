@@ -40,6 +40,24 @@ SLOT_TARGET="1"   # always slot 1 on fresh install
 log() { echo "$NOS_NAME: $*"; }
 fatal() { log "FATAL: $*"; exit 1; }
 
+# ── Image-validation helpers (mirror /usr/sbin/nos-upgrade) ──
+# part_size <block-dev> -> capacity in bytes via sysfs (universal), else blockdev, else 0.
+part_size() {
+    name=$(basename "$1")
+    if [ -r "/sys/class/block/$name/size" ]; then
+        echo $(( $(cat "/sys/class/block/$name/size") * 512 ))
+    elif command -v blockdev >/dev/null 2>&1; then
+        blockdev --getsize64 "$1" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+# first 4 bytes as 8 lowercase hex chars (big-endian)
+magic_u32() { od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n'; }
+# sha_of <file>  /  sha_head <nbytes> <file|dev>  -> hash, preferring sha256 then md5; empty if neither
+sha_of()   { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; elif command -v md5sum >/dev/null 2>&1; then md5sum "$1" | cut -d' ' -f1; else echo ""; fi; }
+sha_head() { if command -v sha256sum >/dev/null 2>&1; then head -c "$1" "$2" | sha256sum | cut -d' ' -f1; elif command -v md5sum >/dev/null 2>&1; then head -c "$1" "$2" | md5sum | cut -d' ' -f1; else echo ""; fi; }
+
 # ── Detect block device ──────────────────────────────────────
 BLK_DEV=""
 for d in sda sdb; do
@@ -116,7 +134,7 @@ partition_disk() {
 install_image() {
     log "Installing kernel and rootfs into slot $SLOT_TARGET..."
 
-    local tmpdir kpart spart
+    local tmpdir kpart spart ksrc rsrc kmagic rmagic ksz rsz kcap rcap a b
     tmpdir=$(mktemp -d)
     extract_payload | tar -xf - -C "$tmpdir"
 
@@ -126,17 +144,47 @@ install_image() {
         kpart="${BLK_DEV}7"; spart="${BLK_DEV}8"
     fi
 
-    [ -f "$tmpdir/uImage-powerpc.itb" ] || fatal "uImage-powerpc.itb not in payload"
-    [ -f "$tmpdir/rootfs.sqsh" ]       || fatal "rootfs.sqsh not in payload"
+    ksrc="$tmpdir/uImage-powerpc.itb"
+    rsrc="$tmpdir/rootfs.sqsh"
+    [ -f "$ksrc" ] || fatal "uImage-powerpc.itb not in payload"
+    [ -f "$rsrc" ] || fatal "rootfs.sqsh not in payload"
+
+    # Content magic: kernel = FIT (d00dfeed), rootfs = squashfs ("hsqs").
+    # Catches a truncated/corrupt installer download before we touch the disk.
+    kmagic=$(magic_u32 "$ksrc")
+    [ "$kmagic" = "d00dfeed" ] || fatal "kernel payload is not a FIT image (magic=$kmagic, expected d00dfeed)"
+    rmagic=$(head -c4 "$rsrc" 2>/dev/null)
+    [ "$rmagic" = "hsqs" ] || fatal "rootfs payload is not squashfs (magic='$rmagic', expected 'hsqs')"
+
+    # Capacity: each member must fit its slot partition (skip-with-warning if unknown).
+    ksz=$(wc -c < "$ksrc"); rsz=$(wc -c < "$rsrc")
+    kcap=$(part_size "/dev/$kpart"); rcap=$(part_size "/dev/$spart")
+    if [ "$kcap" -gt 0 ] && [ "$ksz" -gt "$kcap" ]; then fatal "FIT image ($ksz B) exceeds /dev/$kpart capacity ($kcap B)"; fi
+    if [ "$rcap" -gt 0 ] && [ "$rsz" -gt "$rcap" ]; then fatal "rootfs ($rsz B) exceeds /dev/$spart capacity ($rcap B)"; fi
+    log "  payload OK: kernel $ksz B (cap $kcap), rootfs $rsz B (cap $rcap)"
 
     log "  Writing FIT image to /dev/$kpart..."
-    dd if="$tmpdir/uImage-powerpc.itb" of="/dev/$kpart" bs=4k conv=fsync 2>/dev/null
-
+    dd if="$ksrc" of="/dev/$kpart" bs=4k conv=fsync 2>/dev/null
     log "  Writing rootfs to /dev/$spart..."
-    dd if="$tmpdir/rootfs.sqsh" of="/dev/$spart" bs=4k conv=fsync 2>/dev/null
+    dd if="$rsrc" of="/dev/$spart" bs=4k conv=fsync 2>/dev/null
+    sync
+
+    # Read-back verify (best-effort: sha256 -> md5 -> skip-with-warning).
+    a=$(sha_of "$ksrc"); b=$(sha_head "$ksz" "/dev/$kpart")
+    if [ -n "$a" ]; then
+        [ "$a" = "$b" ] || fatal "kernel read-back mismatch on /dev/$kpart (write corrupt)"
+        log "  kernel verified ($a)"
+    else
+        log "  WARN: no hash tool in ONIE; skipped kernel read-back verify"
+    fi
+    a=$(sha_of "$rsrc"); b=$(sha_head "$rsz" "/dev/$spart")
+    if [ -n "$a" ]; then
+        [ "$a" = "$b" ] || fatal "rootfs read-back mismatch on /dev/$spart (write corrupt)"
+        log "  rootfs verified ($a)"
+    fi
 
     rm -rf "$tmpdir"
-    log "Slot $SLOT_TARGET populated."
+    log "Slot $SLOT_TARGET populated and verified."
 }
 
 # ── Configure U-Boot (Cumulus-style slot chain) ──────────────
