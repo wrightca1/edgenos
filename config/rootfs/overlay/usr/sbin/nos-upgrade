@@ -36,6 +36,23 @@ get_active_slot() {
     echo "${s:-1}"
 }
 
+# u-boot-tools ships ONE binary dispatched by argv[0]; some assembled rootfs
+# images carry only fw_printenv and lack the fw_setenv alias (reads work, writes
+# don't). Resolve a working setenv: prefer a real fw_setenv, else invoke the
+# fw_printenv binary under the fw_setenv name via a temp alias.
+uboot_setenv() {
+    if command -v fw_setenv >/dev/null 2>&1; then
+        fw_setenv "$@"
+    elif command -v fw_printenv >/dev/null 2>&1; then
+        local d rc; d=$(mktemp -d)
+        ln -sf "$(command -v fw_printenv)" "$d/fw_setenv"
+        "$d/fw_setenv" "$@"; rc=$?
+        rm -rf "$d"; return $rc
+    else
+        return 127
+    fi
+}
+
 # magic_u32 <file> -> first 4 bytes as 8 hex chars (big-endian), lowercase
 magic_u32() { od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n'; }
 
@@ -168,7 +185,7 @@ log "Slot $SLOT_NUM upgrade complete and verified."
 # Activate only after a fully verified write.
 if [ "$ACTIVATE" = "1" ]; then
     log "Activating slot $SLOT_NUM..."
-    fw_setenv cl.active "$SLOT_NUM" || die "fw_setenv cl.active $SLOT_NUM failed"
+    uboot_setenv cl.active "$SLOT_NUM" || die "setting cl.active $SLOT_NUM failed (no working fw_setenv/fw_printenv)"
 fi
 
 if [ "$REBOOT" = "1" ]; then

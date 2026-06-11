@@ -13,7 +13,7 @@
 # so module vermagic + symbol CRCs match the kernel shipped in the image.
 set -e
 
-KVER="5.10.258"
+KVER="${KVER:-5.15.209}"   # canonical kernel; override e.g. KVER=5.10.258 build-kmodules.sh
 TOP=$(cd "$(dirname "$0")/.." && pwd)
 export DOCKER_HOST=${DOCKER_HOST:-unix:///run/user/1000/docker.sock}
 
