@@ -8,9 +8,11 @@
  *
  * Boot sequence:
  *   1. Mount proc/sys/devtmpfs
- *   2. Wait for /dev/sda6 (squashfs rootfs on USB flash)
- *   3. Mount squashfs on /lower (read-only)
- *   4. Mount ext2 from /dev/sda3 on /rw, set up overlayfs
+ *   2. Parse root=/dev/sdaN + active=S from /proc/cmdline (dual-slot:
+ *      slot 1 -> root=sda6, slot 2 -> root=sda8). Fallback: sda6 / slot 1.
+ *   3. Mount that squashfs rootfs on /lower (read-only)
+ *   4. Mount ext2 from /dev/sda3 on /rw, set up a PER-SLOT overlayfs
+ *      (upper/work under /rw/configS) so the two slots are independent
  *   5. switch_root to /newroot, exec /sbin/init
  *   6. Fallback: read-only squashfs root if overlay fails
  */
@@ -31,6 +33,7 @@
 #define __NR_reboot     88
 #define __NR_fork       2
 #define __NR_waitpid    7
+#define __NR_read       3
 
 /* stat64 structure for powerpc */
 struct kernel_stat {
@@ -177,6 +180,23 @@ static void do_exit(int code)
 #define __NR_open  5
 #define __NR_close 6
 #define O_RDONLY   0
+/* asm-generic flags (PowerPC follows these) for writing the boot-info marker */
+#define O_WRONLY   01
+#define O_CREAT    0100
+#define O_TRUNC    01000
+
+/* Best-effort: write a small NUL-terminated string to a new file. Errors are
+ * ignored — this is a diagnostic marker, never fatal to boot. */
+static void write_file(const char *path, const char *str)
+{
+    int fd = syscall3(__NR_open, (long)path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return;
+    {
+        int n = 0; while (str[n]) n++;
+        if (n > 0) syscall3(__NR_write, fd, (long)str, n);
+    }
+    syscall1(__NR_close, fd);
+}
 
 static int wait_blk(const char *dev, int major, int minor, int secs)
 {
@@ -197,6 +217,68 @@ static int wait_blk(const char *dev, int major, int minor, int secs)
         return 0;
     }
     return -1;
+}
+
+/* ── tiny string helpers (no libc) ─────────────────────────── */
+static int my_strlen(const char *s) { int n = 0; while (s[n]) n++; return n; }
+
+/* copy s into d, return pointer to the trailing NUL (for chaining) */
+static char *append(char *d, const char *s) { while ((*d = *s)) { d++; s++; } return d; }
+
+/* find first occurrence of needle in hay[0..haylen); return index or -1 */
+static int find_sub(const char *hay, int haylen, const char *needle)
+{
+    int nl = my_strlen(needle), i, j;
+    for (i = 0; i + nl <= haylen; i++) {
+        for (j = 0; j < nl && hay[i + j] == needle[j]; j++) ;
+        if (j == nl) return i;
+    }
+    return -1;
+}
+
+/* minor number from a /dev/sdaN path = trailing decimal digits (sda6->6) */
+static int dev_minor(const char *dev)
+{
+    int L = my_strlen(dev), i = L, v = 0;
+    while (i > 0 && dev[i-1] >= '0' && dev[i-1] <= '9') i--;
+    while (dev[i] >= '0' && dev[i] <= '9') { v = v*10 + (dev[i]-'0'); i++; }
+    return v;
+}
+
+/* Parse /proc/cmdline for root=/dev/sdaN and active=S.
+ * Defaults (preserved legacy behavior) if absent: root=/dev/sda6, slot=1.
+ * root_dev must be at least 32 bytes. */
+static void parse_cmdline(char *root_dev, int *slot)
+{
+    char buf[1024];
+    int fd, n, i;
+
+    append(root_dev, "/dev/sda6");
+    *slot = 1;
+
+    fd = syscall2(__NR_open, (long)"/proc/cmdline", O_RDONLY);
+    if (fd < 0) return;
+    n = syscall3(__NR_read, fd, (long)buf, sizeof(buf) - 1);
+    syscall1(__NR_close, fd);
+    if (n <= 0) return;
+    buf[n] = 0;
+
+    i = find_sub(buf, n, "root=");
+    if (i >= 0) {
+        int j = i + 5, k = 0;
+        while (buf[j] && buf[j] != ' ' && buf[j] != '\n' && buf[j] != '\t' && k < 31)
+            root_dev[k++] = buf[j++];
+        root_dev[k] = 0;
+    }
+
+    i = find_sub(buf, n, "active=");
+    if (i >= 0 && buf[i+7] >= '1' && buf[i+7] <= '9') {
+        *slot = buf[i+7] - '0';
+    } else {
+        /* derive from device: a trailing '8' is slot 2's rootfs (sda8) */
+        int L = my_strlen(root_dev);
+        if (L > 0 && root_dev[L-1] == '8') *slot = 2;
+    }
 }
 
 static void move_mount(const char *src, const char *newroot)
@@ -237,16 +319,23 @@ void _start(void)
     do_mkdir("/sys", 0755);    do_mount("sysfs", "/sys", "sysfs", 0, 0);
     do_mkdir("/dev", 0755);    do_mount("devtmpfs", "/dev", "devtmpfs", 0, 0);
 
-    /* Wait for USB storage to enumerate then mount squashfs.
+    /* Determine which slot's rootfs to mount from the kernel cmdline
+     * (dual-slot: slot 1 -> /dev/sda6, slot 2 -> /dev/sda8). */
+    char root_dev[32];
+    int slot = 1;
+    parse_cmdline(root_dev, &slot);
+    wrstr("nos-init: root="); wrstr(root_dev);
+    wrstr(" slot="); { char c[2] = { (char)('0' + slot), 0 }; wrstr(c); } wrstr("\n");
+
+    /* Wait for USB storage to enumerate then mount the slot's squashfs.
      * Create device node manually (devtmpfs may be slow) and
      * retry mount in a loop since the disk appears ~1s after boot. */
     do_mkdir("/lower", 0755);
-    do_mknod("/dev/sda6", S_IFBLK | 0600, makedev(8, 6));
-    msg("waiting for /dev/sda6...");
+    do_mknod(root_dev, S_IFBLK | 0600, makedev(8, dev_minor(root_dev)));
     {
         int i, mounted = 0;
         for (i = 0; i < 30; i++) {
-            if (do_mount("/dev/sda6", "/lower", "squashfs", MS_RDONLY, 0) == 0) {
+            if (do_mount(root_dev, "/lower", "squashfs", MS_RDONLY, 0) == 0) {
                 mounted = 1;
                 break;
             }
@@ -291,12 +380,37 @@ void _start(void)
         msg("sda3 formatted and mounted");
     }
 
-    do_mkdir("/rw/upper", 0755);
-    do_mkdir("/rw/work", 0700);
+    /* PER-SLOT overlay: upper/work live under /rw/configS so slot 1 and
+     * slot 2 keep independent rw state and never shadow each other. */
+    char ovl[24], upper[32], work[32], data[160];
+    char *p;
+    append(ovl, "/rw/config");
+    ovl[10] = (char)('0' + slot); ovl[11] = 0;     /* "/rw/config1" | "/rw/config2" */
+    append(append(upper, ovl), "/upper");
+    append(append(work,  ovl), "/work");
+    do_mkdir(ovl,   0755);
+    do_mkdir(upper, 0755);
+    do_mkdir(work,  0700);
+
+    /* Record which device/slot we actually booted, into the overlay upper, so
+     * the running system can read /.edgenos-boot (proves per-slot rootfs). */
+    {
+        char info[64], infop[40];
+        char *q = info;
+        q = append(q, "root="); q = append(q, root_dev);
+        q = append(q, " slot="); *q++ = (char)('0' + slot); *q++ = '\n'; *q = 0;
+        append(append(infop, upper), "/.edgenos-boot");
+        write_file(infop, info);
+    }
+
+    p = data;
+    p = append(p, "lowerdir=/lower,upperdir=");
+    p = append(p, upper);
+    p = append(p, ",workdir=");
+    p = append(p, work);
 
     msg("mounting overlay...");
-    if (do_mount("overlay", "/newroot", "overlay", 0,
-                 "lowerdir=/lower,upperdir=/rw/upper,workdir=/rw/work") == 0) {
+    if (do_mount("overlay", "/newroot", "overlay", 0, data) == 0) {
         msg("overlay OK");
         do_switch_root("/newroot");
     } else {
