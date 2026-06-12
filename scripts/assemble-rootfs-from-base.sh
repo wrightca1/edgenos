@@ -84,7 +84,7 @@ W="$R/etc/systemd/system/multi-user.target.wants"
 mkdir -p "$W"
 for svc in platform-init.service edged.service swp-l3.service \
            fan-controller.service sshd-keygen.service \
-           zebra.service ospfd.service; do
+           zebra.service ospfd.service nos-boot-success.service; do
     if [ -f "$R/etc/systemd/system/$svc" ]; then
         ln -sf "../$svc" "$W/$svc"; echo "   enabled $svc"
     else

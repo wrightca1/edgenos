@@ -189,9 +189,16 @@ install_image() {
 
 # ── Configure U-Boot (Cumulus-style slot chain) ──────────────
 #
-# nos_bootcmd runs initargs then boot_active. boot_active dispatches on
-# cl.active. hw_active1/2 do `usb start; usbiddev; usbboot $loadaddr
-# ${usbdev}:<part>` for the chosen slot and `bootm` the FIT.
+# boot_active dispatches on cl.active; hw_active1/2 do `usb start; usbiddev;
+# usbboot $loadaddr ${usbdev}:<part>` for the chosen slot and `bootm` the FIT.
+#
+# AUTO-ROLLBACK (this U-Boot has no CONFIG_BOOTCOUNT_LIMIT, so it's scripted):
+# nos_bootcmd increments boot_count (saveenv) before booting; if boot_count
+# exceeds boot_limit it flips cl.active to the other slot and resets the
+# counter, then boots. nos-boot-success.service resets boot_count=0 once edged
+# is confirmed up, so a slot that boots Linux but never starts the datapath is
+# NOT marked good and auto-rolls-back. If nos_bootcmd ever errors, bootcmd
+# falls through to onie_bootcmd (ONIE) — the ultimate backstop.
 configure_uboot() {
     log "Configuring U-Boot environment (dual-slot)..."
 
@@ -211,8 +218,9 @@ set_active1 setenv bootargs console=ttyS0,115200 cma=32M root=/dev/sda6 rootfsty
 set_active2 setenv bootargs console=ttyS0,115200 cma=32M root=/dev/sda8 rootfstype=squashfs ro rootwait earlycon active=2; run hw_active2
 boot_active if test ${cl.active} = 1; then run set_active1; else run set_active2; fi
 boot_alt if test ${cl.active} = 1; then run set_active2; else run set_active1; fi
-nos_bootcmd run boot_active
+nos_bootcmd setexpr boot_count ${boot_count} + 1 && saveenv; if itest ${boot_count} -gt ${boot_limit}; then echo "** slot ${cl.active} failed (boot_count=${boot_count}); switching slots **" && if test ${cl.active} = 1; then setenv cl.active 2; else setenv cl.active 1; fi && setenv boot_count 0 && saveenv; fi; run boot_active
 boot_count 0
+boot_limit 3
 UBOOT_ENV
     # Delete onie_boot_reason so check_boot_reason falls through to NOS.
     echo "onie_boot_reason" >> "$envfile"
@@ -220,7 +228,7 @@ UBOOT_ENV
     fw_setenv -f -s "$envfile" 2>/dev/null || log "WARN: fw_setenv failed"
     rm -f "$envfile"
 
-    log "U-Boot configured: cl.active=1, hw_active1/2 wired."
+    log "U-Boot configured: cl.active=1, hw_active1/2 wired, auto-rollback (boot_limit=3)."
 }
 
 # ── Persistent config ───────────────────────────────────────

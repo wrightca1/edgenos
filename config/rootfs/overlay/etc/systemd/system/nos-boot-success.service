@@ -1,0 +1,12 @@
+[Unit]
+Description=Mark current A/B slot good (reset U-Boot boot_count) once datapath is up
+After=multi-user.target edged.service
+Wants=edged.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nos-boot-success.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
