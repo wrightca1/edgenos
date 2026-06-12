@@ -52,8 +52,14 @@ part_size() {
         echo 0
     fi
 }
-# first 4 bytes as 8 lowercase hex chars (big-endian)
-magic_u32() { od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n'; }
+# FIT magic = first 4 bytes == 0xd00dfeed. ONIE's busybox `od` has no -A/-t/-N
+# (only single-letter flags), so byte-compare via dd + printf(octal) + cmp,
+# which works in both busybox-ash and glibc.
+fit_magic_ok() {
+    dd if="$1" bs=4 count=1 2>/dev/null > /tmp/.fitm || return 1
+    printf '\320\015\376\355' > /tmp/.fite
+    cmp -s /tmp/.fitm /tmp/.fite
+}
 # sha_of <file>  /  sha_head <nbytes> <file|dev>  -> hash, preferring sha256 then md5; empty if neither
 sha_of()   { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; elif command -v md5sum >/dev/null 2>&1; then md5sum "$1" | cut -d' ' -f1; else echo ""; fi; }
 sha_head() { if command -v sha256sum >/dev/null 2>&1; then head -c "$1" "$2" | sha256sum | cut -d' ' -f1; elif command -v md5sum >/dev/null 2>&1; then head -c "$1" "$2" | md5sum | cut -d' ' -f1; else echo ""; fi; }
@@ -151,8 +157,7 @@ install_image() {
 
     # Content magic: kernel = FIT (d00dfeed), rootfs = squashfs ("hsqs").
     # Catches a truncated/corrupt installer download before we touch the disk.
-    kmagic=$(magic_u32 "$ksrc")
-    [ "$kmagic" = "d00dfeed" ] || fatal "kernel payload is not a FIT image (magic=$kmagic, expected d00dfeed)"
+    fit_magic_ok "$ksrc" || fatal "kernel payload is not a FIT image (first 4 bytes != d00dfeed)"
     rmagic=$(head -c4 "$rsrc" 2>/dev/null)
     [ "$rmagic" = "hsqs" ] || fatal "rootfs payload is not squashfs (magic='$rmagic', expected 'hsqs')"
 
