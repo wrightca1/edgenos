@@ -1,0 +1,91 @@
+#!/bin/bash
+# nos-slot-clone - copy the ACTIVE slot's kernel + rootfs onto the INACTIVE slot
+# so both A/B slots run identical software (e.g. after validating an upgrade,
+# clone it to the standby instead of re-uploading the image).
+#
+# Reads the active slot's partitions directly. The active rootfs squashfs is
+# mounted read-only, so reading its block device is safe (nothing writes to it).
+# Only the inactive slot is written; the running slot is never touched.
+#
+# It copies exactly the payload (FIT total size / squashfs bytes_used), not the
+# whole partition, and verifies each copy with a sha256 read-back before
+# declaring success.
+
+set -e
+PROG=$(basename "$0")
+INSTALL_DEV="/dev/sda"
+
+usage() {
+    echo "Usage: $PROG [--reboot]"
+    echo "  Clones the active slot -> inactive slot (kernel + rootfs)."
+    echo "  --reboot   reboot after a verified clone (boots the SAME software"
+    echo "             you're already running; does NOT change cl.active)"
+    echo "  -h,--help  this help"
+}
+
+log()  { echo "$PROG: $*"; logger -t nos-slot-clone "$*" 2>/dev/null || true; }
+die()  { log "ERROR: $*"; exit 1; }
+
+get_active_slot() { local s; s=$(fw_printenv cl.active 2>/dev/null | cut -d= -f2); echo "${s:-1}"; }
+part_size() { local n; n=$(basename "$1"); if [ -r "/sys/class/block/$n/size" ]; then echo $(( $(cat "/sys/class/block/$n/size") * 512 )); else echo 0; fi; }
+
+# fit_size <part> -> FIT image total size (header magic d00dfeed, 32-bit BE @ off 4)
+fit_size() {
+    set -- $(od -An -tu1 -j4 -N4 "$1" 2>/dev/null)
+    [ $# -eq 4 ] || { echo 0; return; }
+    echo $(( ($1<<24) | ($2<<16) | ($3<<8) | $4 ))
+}
+# sqsh_size <part> -> squashfs bytes_used (8-byte LE @ off 40 in squashfs 4.0)
+sqsh_size() {
+    set -- $(od -An -tu1 -j40 -N8 "$1" 2>/dev/null)
+    [ $# -eq 8 ] || { echo 0; return; }
+    echo $(( $1 | ($2<<8) | ($3<<16) | ($4<<24) | ($5<<32) | ($6<<40) ))
+}
+
+REBOOT=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --reboot) REBOOT=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown option: $1" ;;
+    esac
+done
+
+ACTIVE=$(get_active_slot)
+if [ "$ACTIVE" = "1" ]; then
+    SRC_K="${INSTALL_DEV}5"; SRC_R="${INSTALL_DEV}6"
+    DST_K="${INSTALL_DEV}7"; DST_R="${INSTALL_DEV}8"; DST=2
+else
+    SRC_K="${INSTALL_DEV}7"; SRC_R="${INSTALL_DEV}8"
+    DST_K="${INSTALL_DEV}5"; DST_R="${INSTALL_DEV}6"; DST=1
+fi
+for p in "$SRC_K" "$SRC_R" "$DST_K" "$DST_R"; do
+    [ -b "$p" ] || die "partition $p not found (dual-slot install?)"
+done
+log "Active slot $ACTIVE -> cloning to inactive slot $DST"
+
+# clone_one <src> <dst> <bytes> <label>
+clone_one() {
+    local src="$1" dst="$2" sz="$3" label="$4" cap a b
+    [ "$sz" -gt 0 ] || die "$label: could not determine payload size on $src"
+    cap=$(part_size "$dst")
+    if [ "$cap" -gt 0 ] && [ "$sz" -gt "$cap" ]; then die "$label: payload ($sz B) exceeds $dst ($cap B)"; fi
+    log "$label: copying $sz B  $src -> $dst"
+    dd if="$src" of="$dst" bs=4096 count=$(( (sz + 4095) / 4096 )) conv=fsync 2>/dev/null \
+        || die "$label: dd $src -> $dst failed"
+    a=$(head -c "$sz" "$src" | sha256sum | cut -d' ' -f1)
+    b=$(head -c "$sz" "$dst" | sha256sum | cut -d' ' -f1)
+    [ "$a" = "$b" ] || die "$label: read-back mismatch on $dst (clone corrupt)"
+    log "$label: verified ($a)"
+}
+
+KSZ=$(fit_size "$SRC_K")
+RSZ=$(sqsh_size "$SRC_R")
+clone_one "$SRC_K" "$DST_K" "$KSZ" "kernel"
+clone_one "$SRC_R" "$DST_R" "$RSZ" "rootfs"
+log "Clone complete: slot $DST now matches the running slot $ACTIVE (cl.active unchanged = $ACTIVE)."
+
+if [ "$REBOOT" = "1" ]; then
+    log "Rebooting (same software)..."
+    reboot
+fi
