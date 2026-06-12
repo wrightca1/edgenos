@@ -14,6 +14,8 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <syslog.h>
 
 #include "edged.h"
@@ -373,4 +375,133 @@ int vlan_port_remove(int vid, int swp)
 
     syslog(LOG_DEBUG, "VLAN %d: removed swp%d", vid, swp);
     return 0;
+}
+
+/*
+ * vlan_l2_group_apply — make the listed swp ports one isolated L2 group.
+ *
+ * The default datapath puts every swpN on its own per-port service VLAN
+ * (edged_resv_vid_for_port, members CPU+port) so all inter-port traffic is
+ * CPU/L3-routed.  An L2 group instead pulls the chosen ports OFF their
+ * service VLANs and onto a single shared VLAN `vid` (untagged, PVID set,
+ * STG-1 forwarding).  Members then bridge directly to each other via the
+ * chip's L2 table, and are isolated from the L3-routed ports (which remain
+ * on their own service VLANs) and from other groups.
+ *
+ * Uses physical_lane for the bmd_* calls — mirroring the proven path in
+ * vlan_init_resv_per_port (NOT logical_port).
+ */
+int vlan_l2_group_apply(int vid, const int *swps, int n)
+{
+    int i, rv, added = 0;
+
+    if (vid < 2 || vid > 4094 || vid_is_reserved(vid)) {
+        syslog(LOG_ERR, "L2 group: invalid/reserved VID %d "
+               "(must be 2-4094, outside %d-%d)",
+               vid, EDGED_RESV_VLAN_LO, EDGED_RESV_VLAN_HI);
+        return -1;
+    }
+
+    rv = bmd_vlan_create(edged.unit, vid);
+    if (rv < 0)
+        /* tolerate "already exists" — the port-adds below still apply */
+        syslog(LOG_INFO, "L2 group %d: vlan_create rv=%d (continuing)", vid, rv);
+
+    for (i = 0; i < n; i++) {
+        int swp = swps[i];
+        struct port_state *p;
+        int rvid;
+
+        if (swp < 1 || swp > EDGED_MAX_PORTS || !edged.ports[swp - 1].valid) {
+            syslog(LOG_WARNING, "L2 group %d: swp%d invalid/absent", vid, swp);
+            continue;
+        }
+        p = &edged.ports[swp - 1];
+        rvid = edged_resv_vid_for_port(p->logical_port);
+
+        /* Pull the port off its per-port L3 service VLAN and VLAN 1 so it
+         * only forwards within the group (rv -8 = NOT_FOUND = already off). */
+        (void)bmd_vlan_port_remove(edged.unit, rvid, p->physical_lane);
+        (void)bmd_vlan_port_remove(edged.unit, 1, p->physical_lane);
+
+        rv = bmd_vlan_port_add(edged.unit, vid, p->physical_lane,
+                               BMD_VLAN_PORT_F_UNTAGGED);
+        if (rv < 0) {
+            syslog(LOG_WARNING, "L2 group %d: add %s (lane %d) failed: %d",
+                   vid, p->ifname, p->physical_lane, rv);
+            continue;
+        }
+
+        /* Untagged ingress on this port classifies into the group VLAN. */
+        rv = bmd_port_vlan_set(edged.unit, p->physical_lane, vid);
+        if (rv < 0)
+            syslog(LOG_WARNING, "L2 group %d: PVID on %s failed: %d",
+                   vid, p->ifname, rv);
+
+        /* New VLAN is in STG 1; ports default to BLOCKING there. */
+        rv = bmd_port_stp_set(edged.unit, p->physical_lane,
+                              bmdSpanningTreeForwarding);
+        if (rv < 0)
+            syslog(LOG_WARNING, "L2 group %d: STP FWD on %s failed: %d",
+                   vid, p->ifname, rv);
+
+        added++;
+        syslog(LOG_INFO, "L2 group %d: + %s (lane %d, moved off service VID %d)",
+               vid, p->ifname, p->physical_lane, rvid);
+    }
+
+    syslog(LOG_INFO, "L2 group VLAN %d: %d/%d member ports active", vid, added, n);
+    return added > 0 ? 0 : -1;
+}
+
+/*
+ * vlan_load_l2_groups — parse /etc/edged/l2-groups.conf and apply each group.
+ * Format (one group per line):  <vid> <swpA> <swpB> [swpC ...]
+ * Ports accept "swp10" or "10".  '#' comments and blank lines ignored.
+ */
+int vlan_load_l2_groups(const char *path)
+{
+    FILE *f;
+    char line[256];
+    int groups = 0;
+
+    f = fopen(path, "r");
+    if (!f) {
+        syslog(LOG_INFO, "L2 groups: no %s (none configured)", path);
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), f)) {
+        char *s = line, *tok;
+        int vid, swps[EDGED_MAX_PORTS], nswp = 0;
+
+        while (*s == ' ' || *s == '\t')
+            s++;
+        if (*s == '#' || *s == '\n' || *s == '\0')
+            continue;
+
+        tok = strtok(s, " \t\r\n");
+        if (!tok)
+            continue;
+        vid = atoi(tok);
+
+        while ((tok = strtok(NULL, " \t\r\n")) != NULL && nswp < EDGED_MAX_PORTS) {
+            if (strncmp(tok, "swp", 3) == 0)
+                tok += 3;
+            int swp = atoi(tok);
+            if (swp > 0)
+                swps[nswp++] = swp;
+        }
+
+        if (vid > 0 && nswp > 0) {
+            if (vlan_l2_group_apply(vid, swps, nswp) == 0)
+                groups++;
+        } else {
+            syslog(LOG_WARNING, "L2 groups: skipping malformed line: %s", line);
+        }
+    }
+
+    fclose(f);
+    syslog(LOG_INFO, "L2 groups: applied %d group(s) from %s", groups, path);
+    return groups;
 }

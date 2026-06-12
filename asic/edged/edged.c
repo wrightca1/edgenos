@@ -220,6 +220,11 @@ static int asic_init(void)
                "Per-port service VLAN init failed (continuing anyway)");
     }
 
+    /* Apply any L2 forwarding groups (config overrides the per-port service
+     * VLAN setup above for the listed ports — they become one isolated L2
+     * domain instead of CPU/L3-routed). No file = no groups. */
+    vlan_load_l2_groups("/etc/edged/l2-groups.conf");
+
     /* Configure datapath: CPU punt, hash, buffer thresholds */
     rv = datapath_init();
     if (rv < 0) {
