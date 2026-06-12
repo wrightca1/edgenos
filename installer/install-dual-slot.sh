@@ -218,7 +218,7 @@ set_active1 setenv bootargs console=ttyS0,115200 cma=32M root=/dev/sda6 rootfsty
 set_active2 setenv bootargs console=ttyS0,115200 cma=32M root=/dev/sda8 rootfstype=squashfs ro rootwait earlycon active=2; run hw_active2
 boot_active if test ${cl.active} = 1; then run set_active1; else run set_active2; fi
 boot_alt if test ${cl.active} = 1; then run set_active2; else run set_active1; fi
-nos_bootcmd setexpr boot_count ${boot_count} + 1 && saveenv; if itest ${boot_count} -gt ${boot_limit}; then echo "** slot ${cl.active} failed (boot_count=${boot_count}); switching slots **" && if test ${cl.active} = 1; then setenv cl.active 2; else setenv cl.active 1; fi && setenv boot_count 0 && saveenv; fi; run boot_active
+nos_bootcmd setexpr boot_count ${boot_count} + 1; saveenv; if itest ${boot_count} -gt ${boot_limit}; then echo NOS auto-rollback: slot ${cl.active} boot_count ${boot_count} exceeded, switching; if test ${cl.active} = 1; then setenv cl.active 2; else setenv cl.active 1; fi; setenv boot_count 0; saveenv; fi; run boot_active
 boot_count 0
 boot_limit 3
 UBOOT_ENV
