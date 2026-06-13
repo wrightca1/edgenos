@@ -410,7 +410,7 @@ build_fit() {
             type = "flat_dt";
             arch = "powerpc";
             compression = "none";
-            load = <0x00f00000>;
+            load = <0x03000000>;
             hash { algo = "crc32"; };
         };
         initramfs {
@@ -420,7 +420,7 @@ build_fit() {
             arch = "powerpc";
             os = "linux";
             compression = "none";
-            load = <0x01000000>;
+            load = <0x03100000>;
             hash { algo = "crc32"; };
         };
     };

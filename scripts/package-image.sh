@@ -34,6 +34,11 @@ fi
 rm -rf "$IRDIR"
 
 echo "==> generating FIT..."
+# FIT load map: kernel decompresses at 0x0. DTB/initramfs MUST sit above the
+# decompressed kernel or U-Boot aborts with "image is not a fdt" once the
+# kernel overwrites the blob. The 6.1 kernel grew past the old 0x00f00000 (15M)
+# DTB address (5.15 just fit under it), so DTB->0x03000000 (48M) and
+# initramfs->0x03100000 give generous headroom (well within the bootmap).
 cat > "$FITDIR/nos.its" << 'ITSEOF'
 /dts-v1/;
 / {
@@ -45,10 +50,10 @@ cat > "$FITDIR/nos.its" << 'ITSEOF'
             load = <0x00000000>; entry = <0x00000000>; hash { algo = "crc32"; }; };
         accton_as5610_52x_dtb { description = "AS5610-52X device tree";
             data = /incbin/("as5610_52x.dtb"); type = "flat_dt"; arch = "powerpc";
-            compression = "none"; load = <0x00f00000>; hash { algo = "crc32"; }; };
+            compression = "none"; load = <0x03000000>; hash { algo = "crc32"; }; };
         initramfs { description = "initramfs stub"; data = /incbin/("initramfs.cpio.gz");
             type = "ramdisk"; arch = "powerpc"; os = "linux"; compression = "none";
-            load = <0x01000000>; hash { algo = "crc32"; }; };
+            load = <0x03100000>; hash { algo = "crc32"; }; };
     };
     configurations {
         default = "accton_as5610_52x";
