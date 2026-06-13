@@ -324,6 +324,18 @@ static int bde_pci_probe(struct pci_dev *pdev,
 	 */
 	{
 		unsigned int try_mb = dma_size;
+		/*
+		 * Cap the first request at 4 MB — the largest single contiguous
+		 * buddy allocation on PPC32 (2^10 * 4 KB pages). On Linux 6.x,
+		 * asking dma_alloc_coherent for more than that trips a noisy
+		 * __alloc_pages WARNING (order >= MAX_ORDER) + backtrace before it
+		 * fails, and CMA doesn't reserve on these P2020 boards, so >4 MB can
+		 * never succeed here anyway. Capping gives the same working 4 MB
+		 * pool without the boot-time splat. (Raise if a CMA region is ever
+		 * carved.)
+		 */
+		if (try_mb > 4)
+			try_mb = 4;
 		while (try_mb >= 1) {
 			bdev->dma_size = try_mb * 1024 * 1024;
 			bdev->dma_virt = dma_alloc_coherent(&pdev->dev,

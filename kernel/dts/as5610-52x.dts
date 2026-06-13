@@ -188,6 +188,14 @@
 						compatible = "maxim,max6697";
 						reg = <0x4d>;
 					};
+					/* NE1617A (MAX1617 clone). Deliberately NOT bound to a
+					 * driver: the fan-controller reads it directly via I2C
+					 * (bus 9, 0x18, regs 0/1 = local/remote ASIC-die diode,
+					 * ~33/54C) which is correct and reliable. Binding adm1021
+					 * (by making "maxim,max1617" the first compatible) made it an
+					 * hwmon that reported a bogus high temp and tripped the
+					 * fan-controller board emergency -> halt. So leave it unbound;
+					 * the raw read already covers this sensor. */
 					ne1617a@18 {
 						compatible = "national,ne1617a", "maxim,max1617";
 						reg = <0x18>;

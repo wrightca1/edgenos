@@ -51,25 +51,64 @@ T_CRIT=72
 T_EMERG=75
 EMERG_GRACE=6           # consecutive over-T_EMERG polls before halt (~30s at 5s poll)
 
+# ASIC INTERNAL JUNCTION threshold (bde_tmon hwmon). The switch ASIC die runs
+# MUCH hotter than the board/case sensors (75-95C+ is normal), so it must NOT
+# share the board T_CRIT/T_EMERG or a healthy chip trips the board emergency and
+# halts the box. We force fans to full when the junction is hot, but we do NOT
+# halt on it: the die's safe-vs-danger point isn't characterized on this board
+# (an early guess caused a false shutdown), and the chip's own HARDWARE thermal
+# protection plus the board/case emergency are the real safety net. Log-only.
+T_JUNC_FULL=95          # junction at/above this -> fans to full (no halt)
+
 log() { logger -t fan-controller "$*"; }
 
+# Hottest BOARD/CASE sensor (MAX6697 hwmon channels + NE1617A external ASIC-die
+# diode). EXCLUDES the bde_tmon ASIC internal junction (handled separately) and
+# ignores implausible readings (>=120C) so a faulty/unconnected sensor can't
+# drive the fans or trip the board emergency.
 get_max_temp() {
     max=0
     for f in /sys/class/hwmon/hwmon*/temp*_input; do
         [ -r "$f" ] || continue
+        [ "$(cat "$(dirname "$f")/name" 2>/dev/null)" = "bde_tmon" ] && continue
         v=$(cat "$f" 2>/dev/null) || continue
         [ -z "$v" ] && continue
         c=$((v / 1000))
+        [ "$c" -ge 120 ] && continue
         [ "$c" -gt "$max" ] && max=$c
     done
+    # NE1617A external ASIC-die diode via direct I2C. If adm1021 has claimed it
+    # (the DT now binds it as an hwmon), this read returns EBUSY and is skipped —
+    # the hwmon loop above already counted it.
     for reg in 1 0; do
         v=$(i2cget -y 9 0x18 "$reg" b 2>/dev/null) || continue
         [ -z "$v" ] && continue
         c=$((v))
         [ "$c" -gt 127 ] && c=$((c - 256))
+        [ "$c" -ge 120 ] && continue
         [ "$c" -gt "$max" ] && max=$c
     done
     echo "$max"
+}
+
+# Hottest ASIC INTERNAL junction (bde_tmon hwmon), or 0 if not present. Runs hot
+# by design — kept on its own T_JUNC_* limits, never the board emergency.
+get_junction_temp() {
+    j=0
+    for f in /sys/class/hwmon/hwmon*/temp*_input; do
+        [ -r "$f" ] || continue
+        [ "$(cat "$(dirname "$f")/name" 2>/dev/null)" = "bde_tmon" ] || continue
+        v=$(cat "$f" 2>/dev/null) || continue
+        [ -z "$v" ] && continue
+        c=$((v / 1000))
+        # bde_tmon's read path isn't validated yet and returns a 150C sentinel
+        # (TMON_TEMP_MAX_MC) when the sensor isn't ready / reads out of range.
+        # Ignore any implausible value (a live die can't exceed ~125C — the chip
+        # HW-thermal-shuts-down first), so a bogus reading can't peg the fans.
+        [ "$c" -ge 125 ] && continue
+        [ "$c" -gt "$j" ] && j=$c
+    done
+    echo "$j"
 }
 
 target_pwm() {
@@ -119,7 +158,10 @@ log "started (sysfs=$PWM_SYS, poll=${POLL_INTERVAL}s)"
 
 while :; do
     temp=$(get_max_temp)
+    junc=$(get_junction_temp)
     tgt=$(target_pwm "$temp" "$cur")
+    # A hot ASIC junction forces full cooling regardless of the board tier.
+    if [ "$junc" -ge "$T_JUNC_FULL" ]; then tgt=$PWM_FULL; fi
     if   [ "$tgt" -gt "$cur" ]; then
         new=$((cur + RAMP_STEP))
         [ "$new" -gt "$tgt" ] && new=$tgt
@@ -147,6 +189,12 @@ while :; do
         fi
     else
         emerg_count=0
+    fi
+    # ASIC junction: log when hot (fans already forced full above T_JUNC_FULL),
+    # but NEVER halt on it — see the T_JUNC_FULL note. The board emergency above
+    # and the chip's hardware thermal protection are the real safety net.
+    if [ "$junc" -ge "$T_JUNC_FULL" ]; then
+        log "junction hot: ${junc}C (>=${T_JUNC_FULL}C; fans full, not halting)"
     fi
     sleep "$POLL_INTERVAL"
 done

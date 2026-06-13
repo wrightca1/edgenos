@@ -224,22 +224,21 @@ static ssize_t temp1_max_hyst_store(struct device *dev,
 	return count;
 }
 
-static ssize_t name_show(struct device *dev,
-			 struct device_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%s\n", DRIVER_NAME);
-}
-
+/*
+ * Do NOT define our own `name` attribute. hwmon_device_register_with_groups()
+ * auto-creates `name` from the name argument (DRIVER_NAME); on Linux 6.x the
+ * hwmon core does this unconditionally, so a driver-provided `name` collides
+ * -> "cannot create duplicate filename .../hwmon/hwmonN/name" / -EEXIST and the
+ * whole device fails to register. Let the core own `name`.
+ */
 static DEVICE_ATTR_RO(temp1_input);
 static DEVICE_ATTR_RW(temp1_max);
 static DEVICE_ATTR_RW(temp1_max_hyst);
-static DEVICE_ATTR_RO(name);
 
 static struct attribute *tmon_attrs[] = {
 	&dev_attr_temp1_input.attr,
 	&dev_attr_temp1_max.attr,
 	&dev_attr_temp1_max_hyst.attr,
-	&dev_attr_name.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(tmon);
