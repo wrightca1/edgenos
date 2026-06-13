@@ -45,7 +45,7 @@ build_kernel() {
     if [ ! -d "$KSRC" ]; then
         log "Downloading kernel..."
         wget -q -O /build/linux-${KVER}.tar.xz \
-            "https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${KVER}.tar.xz"
+            "https://cdn.kernel.org/pub/linux/kernel/v${KVER%%.*}.x/linux-${KVER}.tar.xz"
         tar -xf /build/linux-${KVER}.tar.xz -C /build/
         rm /build/linux-${KVER}.tar.xz
     fi

@@ -16,6 +16,7 @@
 #include <linux/i2c.h>
 #include <linux/slab.h>
 #include <linux/of.h>
+#include <linux/version.h>
 
 #include "retimer_class.h"
 
@@ -113,14 +114,25 @@ static int ds100df410_probe(struct i2c_client *client,
 	return devm_device_add_groups(&client->dev, ds100df410_groups);
 }
 
+/*
+ * i2c_driver.remove return type changed int -> void in Linux 6.1
+ * (commit "i2c: Make remove callback return void"). Guard so this builds
+ * on both the 5.15 LTS and the 6.x ladder.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+static void ds100df410_remove(struct i2c_client *client)
+#else
 static int ds100df410_remove(struct i2c_client *client)
+#endif
 {
 	struct ds100df410_data *data = i2c_get_clientdata(client);
 
 	if (data->rdev)
 		retimer_dev_unregister(data->rdev);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 	return 0;
+#endif
 }
 
 static const struct i2c_device_id ds100df410_id[] = {

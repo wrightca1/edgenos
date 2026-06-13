@@ -39,8 +39,11 @@ apt-get install -y -qq --no-install-recommends \
 echo "==> fetching + configuring kernel ${KVER}..."
 mkdir -p /build
 if [ ! -d "$KSRC" ]; then
+  # kernel.org groups tarballs by major version (v5.x, v6.x, ...); derive it
+  # from KVER so this works for 5.x AND 6.x bumps (was hardcoded v5.x).
+  KMAJ="v${KVER%%.*}.x"
   wget -q -O /build/linux-${KVER}.tar.xz \
-    "https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${KVER}.tar.xz"
+    "https://cdn.kernel.org/pub/linux/kernel/${KMAJ}/linux-${KVER}.tar.xz"
   tar -xf /build/linux-${KVER}.tar.xz -C /build/
   rm /build/linux-${KVER}.tar.xz
 fi
