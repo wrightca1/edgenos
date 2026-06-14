@@ -260,6 +260,22 @@ static int bde_write32(void *dvc, uint32_t addr, uint32_t data)
     return 0;
 }
 
+/*
+ * Public register access via the kernel BDE REG ioctl, using raw BAR0-relative
+ * offsets.  The kernel module auto-routes offsets >= 0x1000 through PAXB
+ * sub-window 7 (the same path the leddance tool used to drive the front-panel
+ * LED processors).  Use this for the CMIC LED registers (0x1000/0x2000 blocks).
+ */
+int bde_reg_read32(uint32_t addr, uint32_t *data)
+{
+    return bde_read32(NULL, addr, data);
+}
+
+int bde_reg_write32(uint32_t addr, uint32_t data)
+{
+    return bde_write32(NULL, addr, data);
+}
+
 int bde_open(void)
 {
     struct bde_dev_info info;

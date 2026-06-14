@@ -70,6 +70,7 @@ SRCS = edged.c \
        vlan.c \
        datapath.c \
        cumulus_replicate.c \
+       led.c \
        bde_interface.c
 
 OBJS = $(SRCS:.c=.o)
@@ -90,10 +91,11 @@ clean:
 
 # Dependencies
 edged.o: edged.h portmap.h packet_io.h netlink.h l2.h l3.h vlan.h
-portmap.o: edged.h portmap.h packet_io.h
+portmap.o: edged.h portmap.h packet_io.h led.h
 packet_io.o: edged.h packet_io.h portmap.h
 netlink.o: edged.h netlink.h portmap.h l2.h l3.h
 l2.o: edged.h l2.h portmap.h
 l3.o: edged.h l3.h portmap.h
 vlan.o: edged.h vlan.h
+led.o: edged.h led.h
 bde_interface.o: edged.h cdk_custom_config.h

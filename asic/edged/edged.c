@@ -29,6 +29,7 @@
 #include "l2.h"
 #include "l3.h"
 #include "vlan.h"
+#include "led.h"
 
 /* BMD/PHY headers for CLAUSE45 fix */
 #include <bmd/bmd.h>
@@ -42,6 +43,7 @@ struct edged_state edged;
 static volatile int running = 1;
 
 static volatile int rx_diag_req = 0;
+static volatile int led_diag_req = 0;
 
 /*
  * Readiness sentinel. edged drops /run/edged.ready ONLY after it has fully
@@ -79,6 +81,8 @@ static void signal_handler(int sig)
         running = 0;
     } else if (sig == SIGUSR1) {
         rx_diag_req = 1;  /* serviced in main loop (chip reads not signal-safe) */
+    } else if (sig == SIGUSR2) {
+        led_diag_req = 1; /* LED state dump, serviced in main loop */
     }
 }
 
@@ -333,6 +337,7 @@ int main(int argc, char **argv)
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
     signal(SIGUSR1, signal_handler);  /* RX-path drop-counter dump */
+    signal(SIGUSR2, signal_handler);  /* LED state dump */
 
     /* Remove any stale readiness sentinel from a prior instance — until init
      * completes below, edged is NOT ready and loaders must keep waiting. */
@@ -389,6 +394,11 @@ int main(int argc, char **argv)
     /* Initialize L3 routing */
     l3_init();
 
+    /* Start front-panel port LEDs: load the passthrough microcode into both LED
+     * microprocessors; edged then drives link/activity from its authoritative
+     * per-port state in the link poll (led_update). Non-fatal if it fails. */
+    led_init();
+
     syslog(LOG_INFO, "edged ready, entering main loop");
 
     /* Fully initialized: signal readiness so the boot-time config loader can
@@ -419,6 +429,11 @@ int main(int argc, char **argv)
         if (rx_diag_req) {
             rx_diag_req = 0;
             datapath_rx_diag();
+        }
+
+        if (led_diag_req) {
+            led_diag_req = 0;
+            led_diag();
         }
 
         /* Link poll every ~30ms (300 iterations at 100us) */

@@ -21,6 +21,7 @@
 #include "edged.h"
 #include "portmap.h"
 #include "packet_io.h"
+#include "led.h"
 
 /* BMD headers */
 #include <bmd/bmd.h>
@@ -1076,6 +1077,10 @@ int portmap_link_poll(void)
             changes++;
         }
     }
+
+    /* Render link/activity to the front-panel LEDs from edged's authoritative
+     * per-port link state. */
+    led_update();
 
     return changes;
 }

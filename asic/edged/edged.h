@@ -75,4 +75,9 @@ int bde_iproc_write32(uint32_t offset, uint32_t data);
 int bde_cmicm_read32(uint32_t axi, uint32_t *data);
 int bde_cmicm_write32(uint32_t axi, uint32_t data);
 
+/* Kernel BDE REG ioctl with raw BAR0-relative offset (auto sub-window 7 for
+ * offsets >= 0x1000). Used for the CMIC LED processors (leddance path). */
+int bde_reg_read32(uint32_t addr, uint32_t *data);
+int bde_reg_write32(uint32_t addr, uint32_t data);
+
 #endif /* __EDGED_H__ */
