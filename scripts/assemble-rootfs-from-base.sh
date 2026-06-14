@@ -7,7 +7,10 @@
 #
 # Runs entirely inside the edgenos-builder container (needs unsquashfs/mksquashfs).
 set -e
-SRC=/build/src
+# SRC defaults to the in-container bind mount, but can be overridden to run
+# natively on the host (e.g. when the container's squashfs-tools 4.3 can't
+# unsquash a v4.5-made image): SRC=$(pwd) bash scripts/assemble-rootfs-from-base.sh
+SRC="${SRC:-/build/src}"
 BASE="$SRC/output/images/rootfs.sqsh"
 EDGED="$SRC/output/edged-rebuilt"
 OVERLAY="$SRC/config/rootfs/overlay"
@@ -20,7 +23,9 @@ rm -rf "$R"
 echo "==> unsquashing base..."
 # -no-xattrs: the build fs can't store selinux xattrs; without this unsquashfs
 # prints a warning AND returns exit 2, which `set -e` would treat as fatal.
-unsquashfs -q -no-xattrs -d "$R" "$BASE" >/dev/null   # unsquashfs creates $R itself
+# no -q (not in v4.3); -da/-fr 64: v4.3 default 256MB queue trips "Data queue
+# size is too large" in the container.
+unsquashfs -no-xattrs -da 64 -fr 64 -d "$R" "$BASE" >/dev/null   # creates $R itself
 
 echo "==> removing stale switchd..."
 rm -f "$R/usr/sbin/switchd"

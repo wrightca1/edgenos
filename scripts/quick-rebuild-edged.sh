@@ -49,13 +49,13 @@ CPPFLAGS="-DBCM56846_A0 -DBCM56840_B0 -DBCM56840_A0 \
 for name in $SRCS; do
   srcf=asic/openmdk/bmd/pkgsrc/chip/bcm56840_a0/${name}.c
   objf=output/sdk/bmd/obj/pkgsrc/${name}.o
-  echo \"==> Recompiling $srcf\"
+  echo "==> Recompiling $srcf"
   $CC $CFLAGS $CPPFLAGS -c -o $objf $srcf
-  echo \"==> Updating $LIB with $(basename $objf)\"
+  echo "==> Updating $LIB with $(basename $objf)"
   $AR rcs $LIB $objf
 done
 
-echo \"==> Relinking edged\"
+echo "==> Relinking edged"
 # Re-run the edged Makefile (will detect lib changed and relink)
 touch $LIB
 rm -f asic/edged/edged
