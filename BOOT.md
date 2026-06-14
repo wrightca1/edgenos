@@ -16,6 +16,12 @@ every issue discovered during development and the solutions.
 
 ## Partition Layout
 
+> **Note:** EdgeNOS now ships in a **dual-slot A/B** layout (slot 1 = sda5/sda6,
+> slot 2 = sda7/sda8, with per-slot overlays under sda3). The single-slot layout
+> below is the original/`install.sh` variant and is kept here for the boot-flow
+> explanation; for the shipping layout, U-Boot `cl.active` slot selection, and
+> scripted auto-rollback see [`docs/DUAL_SLOT.md`](docs/DUAL_SLOT.md).
+
 Single-slot MBR layout (ONIE busybox kernel only exposes 3 logical partitions):
 
 ```
@@ -42,7 +48,7 @@ U-Boot 2013.01
   │     bootm 0x02000000#accton_as5610_52x
   └── onie_bootcmd (fallback → boots ONIE)
 
-Kernel 5.10.224
+Kernel 6.1.175-edgenos  (originally 5.10.224; upgraded via the 5.15 LTS step)
   ├── Decompresses gzip kernel
   ├── Loads DTB from FIT at 0x00f00000
   ├── Unpacks initramfs (nos-init)

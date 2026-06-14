@@ -1,5 +1,16 @@
 # Field Processor (FP) — what it is, and the scope to port it
 
+> **Status update (2026-06-14):** OSPF **now works** — adjacencies reach Full and
+> routes install to the chip. Control-plane punt (OSPF 224.0.0.5/6, TTL=1 control
+> unicast) is delivered via the **datapath CPU-control path** (`datapath.c`
+> CPU_CONTROL_1: UMC / IPMC / L3UC-TTL1 bits), *not* via the Field Processor. The
+> FP material below is still accurate: FP rule **matching** works (proven by a
+> match-any DROP), but explicit FP **COPY_TO_CPU delivery** was never finished —
+> and turned out to be unnecessary because the datapath path covers the control
+> traffic. Read this as "how the FP works + an unfinished alternative punt path,"
+> not as an open OSPF blocker. See
+> [`ECMP_AND_OSPF_BRINGUP.md`](ECMP_AND_OSPF_BRINGUP.md).
+
 Context: OSPF inbound multicast (224.0.0.5) never reaches the CPU on EdgeNOS. We
 proved (via the OpenBCM SDK) the chip does **not** flood multicast to the CPU by
 design; control traffic reaches the CPU only via explicit copy-to-CPU **traps**,

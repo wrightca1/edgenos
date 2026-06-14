@@ -5,16 +5,23 @@ Open-source NOS for the Edgecore AS5610-52X bare metal switch.
 - **CPU**: Freescale P2020 (PowerPC e500v2, dual-core 1.2 GHz)
 - **ASIC**: Broadcom BCM56846 (Trident+) -- 48x SFP+ 10GbE + 4x QSFP+ 40GbE
 - **SDK**: OpenMDK (open-source CDK/BMD/PHY, no proprietary Broadcom SDK)
-- **Kernel**: Linux 5.10.224 LTS
-- **Root**: SquashFS + OverlayFS (read-only base + writable overlay)
+- **Kernel**: Linux 6.1.175 LTS (upgraded from 5.10 via the 5.15 LTS step)
+- **Root**: SquashFS + OverlayFS (read-only base + writable overlay), **dual-slot A/B**
 
-> **Status (2026-06-09): L2/L3 switch with dynamic routing.** Beyond the working
-> datapath, the box now does hardware **IPv4 L3 routing + ECMP**, runs **OSPF**
-> (Quagga) with a live-Nexus adjacency, brings up a **40 G QSFP uplink**
-> (preferred over the 10 G links), reports **real link speed/carrier** via
-> `ip link`/`ethtool`, runs **active fan/thermal control**, applies its config
-> **race-free at boot**, and can drop into the **ONIE installer from the running
-> OS** (`fw_setenv onie_boot_reason install`). See
+> **Status (2026-06-14): L2/L3 switch with dynamic routing, on dual-slot 6.1.**
+> The box does hardware **IPv4 L3 routing + ECMP**, runs **OSPF** (Quagga) with a
+> live-Nexus adjacency, brings up a **40 G QSFP uplink** (preferred over the 10 G
+> links), drives the **front-panel port link/activity LEDs**, reports **real link
+> speed/carrier** via `ip link`/`ethtool`, runs **active fan/thermal control**,
+> applies its config **race-free at boot**, supports **in-place A/B upgrades with
+> automatic rollback** (`nos-upgrade`), and can drop into the **ONIE installer
+> from the running OS** (`fw_setenv onie_boot_reason install`).
+>
+> **New here?** Start with [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (what the
+> software is and where the knowledge came from),
+> [`docs/ONIE_IMAGE_BUILD.md`](docs/ONIE_IMAGE_BUILD.md) (how to build an image),
+> and [`docs/DUAL_SLOT.md`](docs/DUAL_SLOT.md) (how A/B upgrades work). Deeper
+> runtime detail is in
 > [`docs/EDGED_ARCHITECTURE_AND_OPERATIONS.md`](docs/EDGED_ARCHITECTURE_AND_OPERATIONS.md)
 > and [`docs/DATAPATH_BRINGUP.md`](docs/DATAPATH_BRINGUP.md).
 
@@ -28,10 +35,15 @@ Open-source NOS for the Edgecore AS5610-52X bare metal switch.
   hardware acceleration for free.
 - **Ports** — 48× 10 G SFP+ and 4× 40 G QSFP+; real carrier + speed surfaced on
   the `swpN` interfaces; SFP/QSFP DOM (optical power) readable over i2c.
+- **Port LEDs** — front-panel link/activity LEDs driven by `edged` (the two
+  on-chip LED microprocessors render solid-green-on-link / blink-on-traffic).
 - **Config-driven, race-free boot** — addresses/MTU/routes loaded from
   `/etc/edged/*.conf` only after edged signals readiness (`/run/edged.ready`).
 - **Platform** — active fan control with thermal emergency-shutdown, PSU/sensor
   monitoring via the CPLD driver.
+- **Dual-slot A/B upgrades** — in-place install to the inactive slot, byte-verify,
+  activate, and **automatic rollback** if the new image's datapath doesn't come
+  up healthy (`nos-upgrade`); see [`docs/DUAL_SLOT.md`](docs/DUAL_SLOT.md).
 - **Recovery** — reach ONIE from the OS with `fw_setenv onie_boot_reason install`
   (bootloader + ONIE image kept read-only); see
   [`docs/FLASH_MTD_AND_ONIE_RECOVERY.md`](docs/FLASH_MTD_AND_ONIE_RECOVERY.md).
@@ -50,89 +62,54 @@ Open-source NOS for the Edgecore AS5610-52X bare metal switch.
 
 ## Building
 
-### Docker Build (Recommended)
+The build runs in Docker (no host cross-compiler needed for most steps). The
+image is assembled from three independent pieces — kernel/DTB/initramfs (the FIT),
+the ASIC SDK + `edged`, and the Buildroot rootfs — then stitched into a
+self-extracting ONIE `.bin`.
 
-The entire build runs inside Docker -- no cross-compiler needed on the host.
+**The full, step-by-step build guide — including the fast "rebuild just edged and
+repackage" path and the build-environment gotchas — is
+[`docs/ONIE_IMAGE_BUILD.md`](docs/ONIE_IMAGE_BUILD.md).** The short version:
 
 ```bash
-# Clone the repo
-git clone https://github.com/wrightca1/edgenos.git
+export DOCKER_HOST=unix:///run/user/1000/docker.sock
 cd edgenos
 
-# Build the Docker container (downloads kernel + buildroot, ~5 min first time)
+scripts/apply-openmdk-patches.sh                  # restore OpenMDK divergence (clean checkout)
 docker build --network host -t edgenos-builder .
 
-# Run the full build (kernel + SDK + edged + rootfs + ONIE installer)
-mkdir -p output
-docker run --rm --network host \
-    -v $(pwd)/output:/build/output \
-    edgenos-builder all
-
-# Output: output/images/edgenos-as5610-52x.bin
+KVER=6.1.175 scripts/build-kmodules.sh            # kernel uImage + DTB + .ko modules
+scripts/rebuild-edged-with-sdk.sh                 # SDK libs + edged  (-> output/edged-rebuilt)
+scripts/build-quagga.sh                           # zebra + ospfd
+SRC=$(pwd) bash scripts/assemble-rootfs-from-base.sh   # -> output/images/rootfs.sqsh
+#   (build the FIT with package-image.sh only if the kernel/DTB/initramfs changed)
+bash installer/build-image.sh --dual-slot         # -> output/images/edgenos-as5610-52x-dualslot.bin
 ```
 
-### Build Targets
+Fast path for a userspace-only change (the common case): rebuild `edged`,
+re-run `assemble-rootfs-from-base.sh`, and `build-image.sh --dual-slot` reusing
+the existing FIT. See the build guide for details.
 
-Build individual components for faster iteration:
-
-```bash
-# Interactive shell inside build environment
-docker run --rm -it --network host \
-    -v $(pwd)/output:/build/output \
-    edgenos-builder bash
-
-# Inside the container:
-./docker-build.sh kernel      # Build Linux kernel + DTB (~5 min)
-./docker-build.sh modules     # Build platform kernel modules
-./docker-build.sh sdk          # Build OpenMDK libraries (CDK/BMD/PHY)
-./docker-build.sh edged     # Build switch daemon
-./docker-build.sh rootfs      # Build root filesystem via Buildroot (~20 min)
-./docker-build.sh image       # Create ONIE installer
-./docker-build.sh all          # Full build
-```
-
-### Iterative Development
-
-Mount source directories for live editing without rebuilding the container:
-
-```bash
-docker run --rm -it --network host \
-    -v $(pwd)/output:/build/output \
-    -v $(pwd)/asic/edged:/build/asic/edged \
-    -v $(pwd)/platform:/build/platform \
-    -v $(pwd)/config:/build/config \
-    edgenos-builder bash
-
-# Edit code on host, rebuild inside container:
-./docker-build.sh edged     # Rebuild just edged (~10 sec)
-./docker-build.sh image       # Repackage installer (~30 sec)
-```
-
-### Docker Compose
-
-```bash
-docker compose build                    # Build container
-docker compose run --rm build           # Full build
-docker compose run --rm build kernel    # Kernel only
-docker compose run --rm build bash      # Interactive shell
-```
-
-### What the Docker Container Includes
-
-| Component | Version | Purpose |
-|-----------|---------|---------|
-| Ubuntu 22.04 | base | Build environment |
-| gcc-powerpc-linux-gnu | 11.4.0 | PPC cross-compiler |
-| Linux kernel source | 5.10.224 | Kernel + modules |
-| Buildroot | 2023.02.9 | Root filesystem |
-| mkimage | - | FIT image creation |
-| dtc | - | Device tree compiler |
-| mksquashfs | - | SquashFS creation |
-| qemu-user-static | - | PPC binary testing |
+Build toolchain (in the `edgenos-builder` image / `debian:bullseye` for the
+initramfs): `gcc-powerpc-linux-gnu`, Linux 6.1.175 source, Buildroot 2023.02.9
+base, `mkimage` (FIT), `dtc`, `mksquashfs`, `qemu-user-static`.
 
 ---
 
 ## Installing on the Switch
+
+For an already-running EdgeNOS, the normal way to update is an **in-place A/B
+upgrade** (no ONIE, with automatic rollback) — see
+[`docs/DUAL_SLOT.md`](docs/DUAL_SLOT.md):
+
+```bash
+scp output/images/edgenos-as5610-52x-dualslot.bin root@<box>:/tmp/edgenos.bin
+ssh root@<box> 'nos-upgrade --activate /tmp/edgenos.bin'   # installs to the inactive slot
+ssh root@<box> 'fw_printenv cl.active'                     # confirm before rebooting
+ssh root@<box> 'reboot'
+```
+
+The first-time install (bare metal, via ONIE) follows.
 
 ### Step 1: Boot into ONIE Install Mode
 
@@ -211,26 +188,29 @@ reboot -f
 ## Architecture
 
 ```
-U-Boot 2013.01 (in NOR flash)
-  nos_bootcmd -> usb read FIT from sda5 -> bootm
+U-Boot (in NOR flash)
+  nos_bootcmd -> boot active slot (cl.active): FIT from sda5 (slot 1) or sda7 (slot 2)
+              -> scripted auto-rollback past boot_limit (see docs/DUAL_SLOT.md)
         |
-Linux 5.10.224 (PowerPC e500v2, SMP)
-  gianfar (eth0) | mpc-i2c (x2) | fsl-ehci (USB) | PCIe
+Linux 6.1.175-edgenos (PowerPC e500v2, SMP)
+  gianfar (end0) | mpc-i2c (x2) | fsl-ehci (USB) | PCIe
         |
-SquashFS rootfs (sda6) + ext2 overlay (sda3) + persist (sda1)
+per-slot initramfs (nos-init) -> squashfs root (sda6/sda8) + per-slot overlay (sda3) + persist (sda1)
         |
 systemd -> platform-init.sh -> edged -> networking
                 |                   |
                 |                   +-- OpenMDK CDK/BMD/PHY
-                |                   +-- bmd_reset -> bmd_init (WC firmware v0x0101)
+                |                   +-- bmd_reset -> bmd_init (WC firmware)
                 |                   +-- bmd_port_mode_set (10G/40G)
                 |                   +-- bmd_tx/rx (DMA packet I/O)
                 |                   +-- TUN interfaces (swp1-52)
+                |                   +-- netlink mirror: kernel FIB -> chip L3/ECMP
+                |                   +-- front-panel port LEDs (link/activity)
                 |
-                +-- Load 12 kernel modules
+                +-- Load kernel modules (bde, cpld, tmon, retimer)
                 +-- GPIO init (QSFP reset, SFP TX enable)
                 +-- 32x DS100DF410 retimer programming
-                +-- CPLD LED + fan PWM
+                +-- CPLD fan PWM + thermal control
 ```
 
 ### ASIC Packet Path
@@ -274,9 +254,12 @@ config/
 kernel/
   dts/as5610-52x.dts            Device tree (full I2C mux topology)
 installer/
-  install.sh                    ONIE self-extracting installer
+  install.sh                    ONIE self-extracting installer (single-slot)
+  install-dual-slot.sh          ONIE installer, dual-slot A/B layout
+  build-image.sh                Stitch FIT + rootfs behind an installer header
 asic/
-  openmdk/                      OpenMDK (CDK/BMD/PHY) -- git submodule
+  openmdk/                      OpenMDK (CDK/BMD/PHY) -- vendored tree, git-ignored
+                                (restore with scripts/apply-openmdk-patches.sh)
   bde/                          BDE kernel modules (PCI, DMA, IRQ, mmap)
     linux-kernel-bde.c          Kernel BDE (ioread32/iowrite32 with PPC barriers)
     linux-user-bde.c            Userspace BDE bridge
@@ -286,10 +269,14 @@ asic/
     portmap.c                   Port config + link polling (bmd_port_mode_set)
     packet_io.c                 Packet I/O (TUN + bmd_tx/rx with DMA coherent)
     l2.c                        L2 MAC table (bmd_port_mac_addr_add/remove)
-    l3.c                        L3 routing (software forwarding, HW needs OpenNSL)
+    l3.c                        L3 routing -> chip (MY_STATION/L3_DEFIP/next-hop, ECMP)
+    led.c                       Front-panel port link/activity LEDs (LEDUP0/1)
     vlan.c                      VLAN management (bmd_vlan_create/port_add)
     netlink.c                   Netlink listener (route/neigh/link events)
+    datapath.c                  CPU-punt + datapath tuning (rc.datapath_0 port)
+    cumulus_replicate.c         Replays 4 chip memories OpenMDK omits
   mdk-init/                     OpenMDK standalone init tool
+  tmon/                         BCM on-die thermal hwmon module
 platform/
   cpld/                         CPLD kernel module (LEDs, PSU, fan, watchdog)
   retimer/                      DS100DF410 retimer kernel module
@@ -310,21 +297,27 @@ ping: 5/5, 0% loss, RTT ~0.57ms
 | Component | Status | Source |
 |-----------|--------|--------|
 | Link UP (10G SFP+) | Working | OpenMDK SerDes + retimer CDR reset |
-| TX DMA (kernel → wire) | Working | OpenMDK xgs_dma + endianness fix |
-| RX DMA (wire → kernel) | Working | OpenMDK xgs_dma + VLAN strip |
-| ARP resolution | Working | PROTOCOL_PKT_CONTROLr punt |
-| ICMP ping | Working | Static L2 + CML learning fix |
-| TUN interfaces (swp1-52) | Working | Custom packet_io.c |
+| Link UP (40G QSFP) | Working | Warpcore CL82 (4-lane AM-lock + deskew) |
+| TX/RX DMA | Working | OpenMDK xgs_dma + endianness + VLAN strip |
+| ARP / ICMP | Working | protocol punt + static L2 + CML learning fix |
+| **L3 IPv4 (hardware)** | Working | `l3.c`: MY_STATION / L3_DEFIP / next-hop / SCHAN HASH_INSERT |
+| **ECMP (hardware)** | Working | L3 next-hop group hash; multipath FIB mirrored to chip |
+| **OSPF** | Working | Quagga zebra+ospfd → kernel FIB → netlink → chip |
+| **Port LEDs** | Working | `led.c`: LEDUP0/1 microcode, link/activity |
+| **Dual-slot A/B + rollback** | Working | `nos-upgrade`, U-Boot `cl.active`, boot-success reset |
+| TUN interfaces (swp1-52) | Working | Custom `packet_io.c` |
 
-### Not Yet Implemented
+End-to-end verified: ping to a Cisco Nexus at **0% loss** on all three uplinks
+(swp1/swp2 10G, swp49 40G), OSPF adjacencies **Full**, routes installed to the
+chip. See [`docs/DATAPATH_BRINGUP.md`](docs/DATAPATH_BRINGUP.md) and
+[`docs/ECMP_AND_OSPF_BRINGUP.md`](docs/ECMP_AND_OSPF_BRINGUP.md).
 
-| Component | Reason |
-|-----------|--------|
-| L3 hardware offload | Requires OpenNSL SDK (L3 is software-forwarded via kernel) |
-| ACL/FP table programming | Requires OpenNSL |
-| ECMP hardware hash | Works at L2; L3 ECMP needs OpenNSL |
-| LLDP/STP/BGP | Install from packages (lldpd, mstpd, frr) |
-| swp1 link | Retimer CDR on bus 11 doesn't lock (hardware issue on that channel) |
+### Not yet / out of scope
+
+| Component | Note |
+|-----------|------|
+| ACL/FP COPY_TO_CPU delivery | FP rule *matching* works; explicit FP copy-to-CPU delivery is unfinished (OSPF/control punt works via the datapath CPU-control path instead). See [`docs/FP_FIELD_PROCESSOR_PORT_SCOPE.md`](docs/FP_FIELD_PROCESSOR_PORT_SCOPE.md). |
+| BGP / LLDP / STP | Not deployed; BGP is straightforward to add (FIB→chip mirroring gives it HW forwarding for free). |
 
 ---
 
@@ -476,24 +469,55 @@ controls per-port learning behavior. Setting to 0 on CPU port fixed it.
 
 Local documents that go deeper than this README:
 
-| File | Topic |
-|------|-------|
-| [`BOOT.md`](BOOT.md) | Complete AS5610 boot flow: U-Boot env, FIT image format, kernel config (5.10.224), initramfs, ONIE recovery |
-| [`installer/ONIE_ISSUES.md`](installer/ONIE_ISSUES.md) | 13 ONIE BusyBox quirks and the workarounds baked into `install.sh` |
-| [`docs/IPROC_SUBWINDOW_ACCESS.md`](docs/IPROC_SUBWINDOW_ACCESS.md) | How the BDE remaps PAXB sub-window 7 via `pci_write_config_dword` to reach CMICm registers above `0x8000` |
-| [`docs/10G-LINK-BRINGUP-CHECKLIST.md`](docs/10G-LINK-BRINGUP-CHECKLIST.md) | Step-by-step SFP+ link bring-up checklist (10GBASE-R) |
-| [`docs/10gbase-r-linkup-checklist.md`](docs/10gbase-r-linkup-checklist.md) | Lower-level 10GBASE-R lane / signal checklist |
-| [`docs/802.3-10G-MDIO-reference.md`](docs/802.3-10G-MDIO-reference.md) | IEEE 802.3 Clause 45 MDIO register map for the 10G PHY layer |
-| [`docs/WC40-TX-DRIVER-ANALYSIS.md`](docs/WC40-TX-DRIVER-ANALYSIS.md) | Reverse-engineered Warpcore40 TX driver values used in `portmap.c` |
-
-Build-side documents:
+**Start here**
 
 | File | Topic |
 |------|-------|
-| `scripts/build-all.sh` | Single-Docker full build: kernel → out-of-tree modules → initramfs → Debian rootfs → FIT → ONIE installer |
-| `scripts/pre-build-checks.sh` | Pre-build sanity assertions (IND_40BITIF=bit15, PAXB sub-window 7, no CPLD writes > 0x1F, CDR-reset wired) |
-| `installer/install.sh` | Single-slot ONIE installer header (self-extracting `.bin` payload) |
-| `installer/install-dual-slot.sh` | Cumulus-style dual-slot variant (sda5/6 = slot A, sda7/8 = slot B, `cl.active` env var) |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The runtime software stack, how routes/packets reach the chip, and **where all the knowledge came from** (OpenMDK, Cumulus RE, datasheets, upstreams) + licensing posture |
+| [`docs/ONIE_IMAGE_BUILD.md`](docs/ONIE_IMAGE_BUILD.md) | How to build the installable image — full build, fast incremental path, and build-environment gotchas |
+| [`docs/DUAL_SLOT.md`](docs/DUAL_SLOT.md) | The A/B slot layout, U-Boot env + scripted auto-rollback, per-slot initramfs, and `nos-upgrade`/`nos-slot-clone` |
+
+**Boot / flash**
+
+| File | Topic |
+|------|-------|
+| [`BOOT.md`](BOOT.md) | AS5610 boot flow: U-Boot env, FIT image format, kernel config, initramfs, ONIE recovery |
+| [`docs/FLASH_MTD_AND_ONIE_RECOVERY.md`](docs/FLASH_MTD_AND_ONIE_RECOVERY.md) | NOR flash / MTD layout and reaching ONIE from the running OS |
+| [`installer/ONIE_ISSUES.md`](installer/ONIE_ISSUES.md) | ONIE BusyBox quirks and the workarounds baked into the installers |
+
+**Datapath / chip / control plane**
+
+| File | Topic |
+|------|-------|
+| [`docs/EDGED_ARCHITECTURE_AND_OPERATIONS.md`](docs/EDGED_ARCHITECTURE_AND_OPERATIONS.md) | edged daemon internals + operations |
+| [`docs/DATAPATH_BRINGUP.md`](docs/DATAPATH_BRINGUP.md) | The working L2/L3 datapath and the bugs solved to get there |
+| [`docs/ECMP_AND_OSPF_BRINGUP.md`](docs/ECMP_AND_OSPF_BRINGUP.md) | Hardware ECMP + OSPF control-plane punt |
+| [`docs/CHIP_REGISTER_REFERENCE.md`](docs/CHIP_REGISTER_REFERENCE.md) | Every chip register/memory edged reads or writes |
+| [`docs/TECHNICAL_DEEPDIVE_BRINGUP_ORDER.md`](docs/TECHNICAL_DEEPDIVE_BRINGUP_ORDER.md) | Dependency-ordered chip bring-up recovered from Cumulus captures |
+| [`docs/IPROC_SUBWINDOW_ACCESS.md`](docs/IPROC_SUBWINDOW_ACCESS.md) | PAXB sub-window 7 remap to reach CMICm registers |
+
+**SerDes / optics + narrative**
+
+| File | Topic |
+|------|-------|
+| [`docs/TECHNICAL_REFERENCE_OPTICS_SERDES.md`](docs/TECHNICAL_REFERENCE_OPTICS_SERDES.md) | SFP+/QSFP optics + SerDes signal chain |
+| [`docs/QSFP_40G_INVESTIGATION.md`](docs/QSFP_40G_INVESTIGATION.md) | 40G QSFP bring-up (solved) |
+| [`docs/10G-LINK-BRINGUP-CHECKLIST.md`](docs/10G-LINK-BRINGUP-CHECKLIST.md), [`docs/WC40-TX-DRIVER-ANALYSIS.md`](docs/WC40-TX-DRIVER-ANALYSIS.md) | 10G link checklist + Warpcore TX-driver analysis |
+| [`docs/JOURNEY_WRITEUP.md`](docs/JOURNEY_WRITEUP.md) | Narrative field notes of the whole bring-up |
+
+**Kernel**
+
+| File | Topic |
+|------|-------|
+| [`docs/KERNEL_UPGRADE_5.15.md`](docs/KERNEL_UPGRADE_5.15.md), [`docs/KERNEL_ROADMAP_6.x.md`](docs/KERNEL_ROADMAP_6.x.md) | The 5.10 → 5.15 → 6.1 LTS upgrade write-up and roadmap |
+
+Build-side references:
+
+| File | Topic |
+|------|-------|
+| `scripts/build-all.sh` | Single-Docker full build (debootstrap variant); the shipped image uses the Buildroot base + `assemble-rootfs-from-base.sh` (see [`docs/ONIE_IMAGE_BUILD.md`](docs/ONIE_IMAGE_BUILD.md)) |
+| `scripts/pre-build-checks.sh` | Pre-build sanity assertions (IND_40BITIF=bit15, PAXB sub-window 7, no CPLD writes > 0x1F, no stale `switchd`, CDR-reset wired) |
+| `installer/install.sh` / `install-dual-slot.sh` | Single-slot / dual-slot ONIE installer headers |
 
 ---
 
