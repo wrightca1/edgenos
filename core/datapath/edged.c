@@ -1,0 +1,457 @@
+/*
+ * edged.c - EdgeNOS Switch Daemon
+ *
+ * Main daemon that initializes the BCM56846 ASIC via OpenMDK,
+ * creates TUN interfaces for each port, handles packet I/O
+ * between the kernel and ASIC, and programs L2/L3 forwarding
+ * via netlink events.
+ *
+ * Copyright (C) 2024 EdgeNOS Contributors.
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <getopt.h>
+#include <errno.h>
+#include <syslog.h>
+#include <pthread.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+
+#include "edged.h"
+#include "portmap.h"
+#include "packet_io.h"
+#include "netlink.h"
+#include "l2.h"
+#include "l3.h"
+#include "vlan.h"
+#include "led.h"
+
+/* BMD/PHY headers for CLAUSE45 fix */
+#include <bmd/bmd.h>
+#include <bmd/bmd_phy_ctrl.h>
+#include <cdk/cdk_device.h>
+#include <cdk/arch/xgs_chip.h>
+#include <phy/phy.h>
+
+/* Global state */
+struct edged_state edged;
+static volatile int running = 1;
+
+static volatile int rx_diag_req = 0;
+static volatile int led_diag_req = 0;
+
+/*
+ * Readiness sentinel. edged drops /run/edged.ready ONLY after it has fully
+ * initialized — chip up, all swpN TAP interfaces created, and the netlink
+ * handler about to run (so live `ip addr add` events program the chip L3
+ * punt). Boot-time config loaders (swp-l3.service) wait on this file instead
+ * of racing a fixed timeout against edged's ~25s init, which is what used to
+ * drop a swpN address at boot. Cleared at startup (stale from a prior run)
+ * and on clean shutdown.
+ */
+#define EDGED_READY_PATH "/run/edged.ready"
+
+static void edged_set_ready(void)
+{
+    FILE *f = fopen(EDGED_READY_PATH, "w");
+    if (f) {
+        fprintf(f, "%ld\n", (long)getpid());
+        fclose(f);
+        syslog(LOG_INFO, "readiness sentinel %s written", EDGED_READY_PATH);
+    } else {
+        syslog(LOG_WARNING, "could not write %s: %s",
+               EDGED_READY_PATH, strerror(errno));
+    }
+}
+
+static void edged_clear_ready(void)
+{
+    unlink(EDGED_READY_PATH);
+}
+
+static void signal_handler(int sig)
+{
+    if (sig == SIGTERM || sig == SIGINT) {
+        syslog(LOG_INFO, "Received signal %d, shutting down", sig);
+        running = 0;
+    } else if (sig == SIGUSR1) {
+        rx_diag_req = 1;  /* serviced in main loop (chip reads not signal-safe) */
+    } else if (sig == SIGUSR2) {
+        led_diag_req = 1; /* LED state dump, serviced in main loop */
+    }
+}
+
+static void usage(const char *prog)
+{
+    fprintf(stderr,
+        "Usage: %s [options]\n"
+        "  -c, --config FILE   ASIC config file (default: /etc/edged/config.bcm)\n"
+        "  -d, --debug         Enable debug logging\n"
+        "  -f, --foreground    Run in foreground (don't daemonize)\n"
+        "  -h, --help          Show this help\n",
+        prog);
+}
+
+static int parse_config(const char *path)
+{
+    FILE *fp;
+    char line[256];
+    int count = 0;
+
+    fp = fopen(path, "r");
+    if (!fp) {
+        syslog(LOG_ERR, "Cannot open config %s: %s", path, strerror(errno));
+        return -1;
+    }
+
+    syslog(LOG_INFO, "Loading config from %s", path);
+
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = line;
+        char *key, *val;
+
+        /* Skip whitespace, comments, empty lines */
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || *p == '\0')
+            continue;
+
+        /* Remove trailing newline */
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+
+        /* Parse key=value */
+        key = p;
+        val = strchr(p, '=');
+        if (!val) continue;
+        *val++ = '\0';
+
+        /* Store in config (portmap entries handled by portmap module) */
+        if (strncmp(key, "portmap_", 8) == 0) {
+            portmap_parse_config(key, val);
+        }
+
+        count++;
+    }
+
+    fclose(fp);
+    syslog(LOG_INFO, "Loaded %d config entries", count);
+    return 0;
+}
+
+static int asic_init(void)
+{
+    int rv;
+
+    syslog(LOG_INFO, "Initializing ASIC...");
+
+    /* Open BDE device */
+    rv = bde_open();
+    if (rv < 0) {
+        syslog(LOG_ERR, "Failed to open BDE device");
+        return rv;
+    }
+
+    /* Probe and attach chip via CDK */
+    rv = cdk_init();
+    if (rv < 0) {
+        syslog(LOG_ERR, "CDK init failed");
+        return rv;
+    }
+
+    /* Run BMD initialization (reset, port init, enable) */
+    rv = bmd_init_all();
+    if (rv < 0) {
+        syslog(LOG_ERR, "BMD init failed");
+        return rv;
+    }
+
+    /*
+     * CRITICAL: Clear PHY_F_CLAUSE45 on all internal Warpcore PHYs
+     * BEFORE bmd_switching_init (which calls bmd_port_mode_set).
+     *
+     * bmd_init sets CLAUSE45 based on Warpcore MULTIMMDS_EN register.
+     * On BCM56846 with iProc, CL45 MIIM doesn't work for internal
+     * SerDes — register writes via CL45 path silently fail, causing
+     * speed encoding to never change from default CX4.
+     *
+     * Must be cleared after bmd_init (which sets the flag) but before
+     * any bmd_port_mode_set call (which writes speed registers).
+     */
+    {
+        int p;
+        for (p = 0; p < BMD_CONFIG_MAX_PORTS; p++) {
+            phy_ctrl_t *pc = BMD_PORT_PHY_CTRL(edged.unit, p);
+            if (pc && (PHY_CTRL_FLAGS(pc) & PHY_F_CLAUSE45)) {
+                PHY_CTRL_FLAGS(pc) &= ~PHY_F_CLAUSE45;
+            }
+        }
+        syslog(LOG_INFO, "Cleared PHY_F_CLAUSE45 on all internal Warpcores");
+    }
+
+    /* Initialize switching (L2 tables, VLANs) */
+    rv = bmd_switching_init_all();
+    if (rv < 0) {
+        syslog(LOG_ERR, "BMD switching init failed");
+        return rv;
+    }
+
+    /* Configure port modes */
+    rv = portmap_configure_ports();
+    if (rv < 0) {
+        syslog(LOG_ERR, "Port configuration failed");
+        return rv;
+    }
+
+    /* Set up default VLAN (all ports in VLAN 1) */
+    rv = vlan_init_default();
+    if (rv < 0) {
+        syslog(LOG_ERR, "VLAN init failed");
+        return rv;
+    }
+
+    /* Per-port service VLANs (Cumulus's 3301-3352 scheme).  Required so
+     * CPU TX can direct frames via 802.1Q tag instead of HiGig SOB —
+     * the SOB path works for ARP but Nexus drops our IPv4 SOB-directed
+     * frames, while Cumulus did it this way and ICMP worked. */
+    rv = vlan_init_resv_per_port();
+    if (rv < 0) {
+        syslog(LOG_WARNING,
+               "Per-port service VLAN init failed (continuing anyway)");
+    }
+
+    /* Apply any L2 forwarding groups (config overrides the per-port service
+     * VLAN setup above for the listed ports — they become one isolated L2
+     * domain instead of CPU/L3-routed). No file = no groups. */
+    vlan_load_l2_groups("/etc/edged/l2-groups.conf");
+
+    /* Configure datapath: CPU punt, hash, buffer thresholds */
+    rv = datapath_init();
+    if (rv < 0) {
+        syslog(LOG_ERR, "Datapath init failed");
+        return rv;
+    }
+
+    syslog(LOG_INFO, "ASIC initialization complete");
+
+    /*
+     * If /tmp/regdump.in exists, read every (address, name) pair from
+     * it and write our chip's actual values to /tmp/regdump.out so we
+     * can diff vs Cumulus's dump_soc_diff.txt.
+     *
+     * Input  format (matches Cumulus dump):
+     *     0x0f180d34 NAME.scope = 0x00000001
+     * Output format:
+     *     0x0f180d34 NAME.scope cum=0x00000001 ours=0x????????
+     */
+    {
+        FILE *fi = fopen("/tmp/regdump.in", "r");
+        if (fi) {
+            FILE *fo = fopen("/tmp/regdump.out", "w");
+            if (fo) {
+                char line[512];
+                int matched = 0, read_err = 0;
+                while (fgets(line, sizeof(line), fi)) {
+                    unsigned long addr;
+                    char namebuf[200] = {0};
+                    unsigned long cumval;
+                    int n = sscanf(line, "%lx %199s = %lx",
+                                   &addr, namebuf, &cumval);
+                    if (n != 3) continue;
+                    uint32_t our_val = 0;
+                    int rv = cdk_xgs_reg32_read(edged.unit,
+                                                (uint32_t)addr,
+                                                &our_val);
+                    if (rv != 0) { read_err++; }
+                    fprintf(fo, "0x%08lx %s cum=0x%08lx ours=0x%08x%s\n",
+                            addr, namebuf, cumval, our_val,
+                            (rv == 0 && our_val == cumval) ? "" : " DIFF");
+                    matched++;
+                }
+                fclose(fo);
+                syslog(LOG_INFO,
+                       "regdump: %d registers read, %d read-errors, "
+                       "output in /tmp/regdump.out",
+                       matched, read_err);
+            }
+            fclose(fi);
+        }
+    }
+
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    const char *config_file = "/etc/edged/config.bcm";
+    int foreground = 0;
+    int debug = 0;
+    int opt;
+
+    static struct option long_opts[] = {
+        {"config",     required_argument, 0, 'c'},
+        {"debug",      no_argument,       0, 'd'},
+        {"foreground", no_argument,       0, 'f'},
+        {"help",       no_argument,       0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    while ((opt = getopt_long(argc, argv, "c:dfh", long_opts, NULL)) != -1) {
+        switch (opt) {
+        case 'c': config_file = optarg; break;
+        case 'd': debug = 1; break;
+        case 'f': foreground = 1; break;
+        case 'h': usage(argv[0]); return 0;
+        default:  usage(argv[0]); return 1;
+        }
+    }
+
+    /* Open syslog */
+    openlog("edged", LOG_PID | (foreground ? LOG_PERROR : 0), LOG_DAEMON);
+    syslog(LOG_INFO, "EdgeNOS edged starting");
+
+    /* OpenMDK/CDK debug prints go through CDK_PRINTF → printf → stdout.
+     * Under systemd stdout is a pipe (not a TTY) so glibc block-buffers
+     * it: 4 KB of printf output sits in the FILE* buffer and never reaches
+     * journald until process exit.  Force line buffering so each \n
+     * flushes and we can actually see CMICm DMA diagnostics. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
+    if (debug)
+        setlogmask(LOG_UPTO(LOG_DEBUG));
+
+    /* Daemonize unless foreground mode */
+    if (!foreground) {
+        if (daemon(0, 0) < 0) {
+            syslog(LOG_ERR, "daemon() failed: %s", strerror(errno));
+            return 1;
+        }
+    }
+
+    /* Signal handling */
+    signal(SIGTERM, signal_handler);
+    signal(SIGINT, signal_handler);
+    signal(SIGUSR1, signal_handler);  /* RX-path drop-counter dump */
+    signal(SIGUSR2, signal_handler);  /* LED state dump */
+
+    /* Remove any stale readiness sentinel from a prior instance — until init
+     * completes below, edged is NOT ready and loaders must keep waiting. */
+    edged_clear_ready();
+    signal(SIGPIPE, SIG_IGN);
+
+    /* Initialize state */
+    memset(&edged, 0, sizeof(edged));
+
+    /* Parse config */
+    if (parse_config(config_file) < 0) {
+        syslog(LOG_ERR, "Config parse failed");
+        return 1;
+    }
+
+    /* Initialize ASIC */
+    if (asic_init() < 0) {
+        syslog(LOG_ERR, "ASIC init failed, exiting");
+        return 1;
+    }
+
+    /*
+     * Reset DMA pool after ASIC init.
+     * BMD init uses DMA for S-Channel table writes (temporary).
+     * These are freed by BMD but our bump allocator ignores frees.
+     * Reset the pool so packet I/O can use the full 4MB.
+     */
+    bde_dma_pool_reset();
+
+    /*
+     * Set DMA endianness right before packet I/O starts.
+     * CPS reset during bmd_reset clears CMIC_ENDIANESS_SEL, and
+     * the CDK's re-init doesn't stick reliably. Force it here.
+     * 0x06000006 = DMA_PACKET + DMA_OTHER (no PIO endian swap
+     * since iowrite32 already provides LE on PPC).
+     */
+    bde_set_dma_endianness();
+
+    /* Create TUN interfaces for each port */
+    if (packet_io_init() < 0) {
+        syslog(LOG_ERR, "Packet I/O init failed");
+        return 1;
+    }
+
+    /* Start netlink listener */
+    if (netlink_init() < 0) {
+        syslog(LOG_ERR, "Netlink init failed");
+        return 1;
+    }
+
+    /* Initialize L2 forwarding */
+    l2_init();
+
+    /* Initialize L3 routing */
+    l3_init();
+
+    /* Start front-panel port LEDs: load the passthrough microcode into both LED
+     * microprocessors; edged then drives link/activity from its authoritative
+     * per-port state in the link poll (led_update). Non-fatal if it fails. */
+    led_init();
+
+    syslog(LOG_INFO, "edged ready, entering main loop");
+
+    /* Fully initialized: signal readiness so the boot-time config loader can
+     * safely apply swp addresses/routes (the swpN TAPs now exist and the
+     * netlink handler below will program the chip L3 punt as they're added). */
+    edged_set_ready();
+
+    /*
+     * Main loop: poll for RX packets, netlink events, and link state.
+     *
+     * Cumulus architecture (from RE captures):
+     *   Thread 10792: RX path (ASIC -> TUN write), runs on BDE interrupt
+     *   Thread 10793: TX path (TUN read -> ASIC), runs on select()
+     *   Thread 5294:  Link polling (MIIM reads at 30ms intervals)
+     *
+     * Our simplified single-threaded approach:
+     *   - packet_io_rx_poll(): check for RX packets from ASIC
+     *   - netlink_poll(): process kernel route/neigh/link events
+     *   - portmap_link_poll(): poll PHY link status every ~30ms
+     *     (uses bmd_port_mode_update which reads WC MII_STATUS
+     *      on page 0x1800 and enables/disables MAC on change)
+     */
+    int poll_count = 0;
+    while (running) {
+        packet_io_rx_poll();
+        netlink_poll();
+
+        if (rx_diag_req) {
+            rx_diag_req = 0;
+            datapath_rx_diag();
+        }
+
+        if (led_diag_req) {
+            led_diag_req = 0;
+            led_diag();
+        }
+
+        /* Link poll every ~30ms (300 iterations at 100us) */
+        if (++poll_count >= 300) {
+            portmap_link_poll();
+            poll_count = 0;
+        }
+
+        usleep(100);  /* 100us poll interval */
+    }
+
+    /* Cleanup */
+    syslog(LOG_INFO, "edged shutting down");
+    edged_clear_ready();   /* TAPs about to be torn down — no longer ready */
+    netlink_cleanup();
+    packet_io_cleanup();
+    bde_close();
+    closelog();
+
+    return 0;
+}

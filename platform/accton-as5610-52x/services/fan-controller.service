@@ -1,0 +1,13 @@
+[Unit]
+Description=EdgeNOS Fan Speed Controller
+After=platform-init.service
+Wants=platform-init.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/fan-controller.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

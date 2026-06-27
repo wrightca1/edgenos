@@ -1,0 +1,32 @@
+# Board manifest: Accton/Edgecore AS5610-52X
+# Ties the board's source (split across the unified seams) back together and
+# declares how its datapath, config, drivers, and services compose. Read alongside
+# the switch DB entry switchdb/platforms/accton-as5610-52x.yml.
+platform: powerpc-accton_as5610_52x-r0
+arch: powerpc
+asic: bcm56846
+
+datapath:
+  target: edged
+  build: platform/accton-as5610-52x/Makefile
+  sources:
+    core:     core/datapath              # shared framework (edged, netlink, l2/l3/vlan, packet_io, datapath)
+    asic:     asic/bcm56846              # chip glue (bde_interface, cumulus_replicate)
+    platform: platform/accton-as5610-52x # board (portmap, led)
+
+config:    platform/accton-as5610-52x/config        # config.bcm, rc.soc, datapath.conf, hw_desc, rc.*
+firmware:  [config/led0.hex, config/led1.hex]       # LED microcontroller images
+dts:       platform/accton-as5610-52x/dts/as5610-52x.dts
+kernel_defconfig: platform/accton-as5610-52x/kernel/as5610_defconfig
+
+drivers:
+  - drivers/cpld/accton_as5610_52x_cpld     # board CPLD
+  - drivers/retimer/ds100df410              # DS100DF410 40G retimer
+  - onlp                                     # ONLP platform layer (sensors/SFP)
+
+services: platform/accton-as5610-52x/services  # platform-init, retimer-init, sfp-enable,
+                                               # fan-controller, swp-l3, edged.service
+
+# Not yet migrated (still in newnos/, pulled in as base bits until packaged):
+#   control plane (zebra/ospfd) -> core/control-plane
+#   kernel tree + BDE/KNET modules, initramfs, rootfs build -> later Phase 4 sub-steps

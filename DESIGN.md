@@ -116,9 +116,11 @@ plugins selected by data.
   re-squashes, and wraps per platform (`onie-sfx` `.bin` for the 5610, `onl-swi` `.swi`
   for the 4610). `catalog` lists downloadable switches from the DB. Both real installers
   produced + validated. (The 4610 final `mkshar` ONIE-wrap runs in the ONL builder.)
-- **Phase 4:** migrate 5610, then 4610, onto `core/` + `platform/`; package the remaining
-  components (bde/knet, quagga, bcmd, platform-svc) so images are fully package-composed;
-  retire the forks.
+- **Phase 4 (in progress):** migrate the boards onto `core/`+`platform/`. **AS5610 done**
+  (`MIGRATION.md`): `edged` split into `core/datapath` + `asic/bcm56846` + the board dir;
+  build wired (`arch/powerpc/toolchain.mk`, `asic/bcm56846/sdk.mk`, board `Makefile`,
+  `board.yml`); structure validated (compile pending the cross-build container). Next:
+  control plane → `core/`, package remaining components, then the 4610; retire the forks.
 
 ## Current support matrix
 
