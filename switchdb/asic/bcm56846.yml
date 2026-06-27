@@ -1,0 +1,20 @@
+# EdgeNOS switch ASIC: Broadcom BCM56846 (Trident+)
+# Used by: accton-as5610-52x
+id: bcm56846
+name: Broadcom BCM56846 (Trident+)
+vendor: broadcom
+family: trident-plus
+device_id: "0xb846"
+sdk: openmdk
+sdk_chip: bcm56840_b0      # 56846 is a 56840_B0 SKU; all register defs inherited from here
+cmic: cmicm
+datapath: edged
+kernel_modules:
+  - linux-kernel-bde
+  - linux-user-bde
+  - bde-tmon
+on_die_cpu: false          # external host CPU (P2020) over PCIe
+reference: edgecore-5610-reverse-engineering/docs/registers/   # full 2301-reg + 654-mem reference
+notes: >
+  52x10G + 4x40G. Datapath uses OpenMDK (CDK/BMD/PHY) statically linked into edged.
+  Packet I/O via BDE + TUN/TAP (no linux-bcm-knet on this target). Warpcore SerDes.

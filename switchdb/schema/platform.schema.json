@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "edgenos/switchdb/schema/platform.schema.json",
+  "title": "EdgeNOS platform (switch board) entry",
+  "description": "One physical switch model. The bill-of-materials + build parameters that drive the version and package systems. Keyed by ONIE platform string.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["onie_platform", "vendor", "model", "arch", "asic", "kernel", "components", "installer", "persistence"],
+  "properties": {
+    "onie_platform": {"type": "string", "description": "ONIE machine string = the primary key, e.g. 'arm-accton-as4610-54-r0'. Verify with `onie-sysinfo -p`."},
+    "vendor":  {"type": "string", "description": "e.g. 'accton', 'edgecore'."},
+    "model":   {"type": "string", "description": "e.g. 'as5610-52x'."},
+    "aliases": {"type": "array", "items": {"type": "string"}, "description": "Other names/SKUs for the same board."},
+
+    "arch":    {"type": "string", "description": "References switchdb/arch/<arch>.yml by its id."},
+    "asic":    {"type": "string", "description": "References switchdb/asic/<asic>.yml by its id."},
+    "kernel":  {"type": "string", "description": "Kernel version this platform ships, e.g. '5.10'."},
+
+    "datapath":   {"type": "string", "description": "Datapath daemon package (overrides the asic default if set)."},
+    "components": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                   "description": "Package names composing this platform's image. Resolved to versioned .epk files at build time."},
+    "firmware":   {"type": "array", "items": {"type": "string"}, "description": "Firmware blob package(s) / files this board needs (PHY ucode, LED hex, etc.)."},
+
+    "portmap":    {"type": "string", "description": "Port-map file under platform/<board>/, e.g. 'as5610-52x.portmap'."},
+    "platform_dir": {"type": "string", "description": "Relative path to the board support dir, default platform/<vendor>-<model>."},
+    "dts":        {"type": "string", "description": "Device-tree source name under the platform dir."},
+
+    "installer":   {"type": "string", "enum": ["onie-sfx", "onl-swi"], "description": "Installer envelope to emit."},
+    "persistence": {"type": "string", "enum": ["squashfs-overlay", "onl-swi"], "description": "On-disk rootfs/persistence model."},
+    "init":        {"type": "string", "enum": ["systemd", "sysvinit"], "default": "systemd"},
+
+    "status": {"type": "string", "enum": ["production", "bringup", "experimental", "planned"], "default": "bringup",
+               "description": "Maturity of EdgeNOS support for this board."},
+    "notes":  {"type": "string"}
+  }
+}

@@ -1,0 +1,21 @@
+# EdgeNOS switch ASIC: Broadcom BCM56340 (Helix4)
+# Used by: accton-as4610-54
+id: bcm56340
+name: Broadcom BCM56340 (Helix4)
+vendor: broadcom
+family: helix4
+device_id: "0xb340"
+sdk: openbcm+knet          # full OpenBCM SDK + linux-bcm-knet for RX/TX punt
+sdk_chip: bcm56340_a0
+cmic: cmicd-iproc
+datapath: bcmd
+kernel_modules:
+  - linux-kernel-bde
+  - linux-user-bde
+  - linux-bcm-knet
+on_die_cpu: true           # iProc ARM host CPU is on-die; no external PCIe
+reference: edgecore-4610-54t/docs/
+notes: >
+  48x1G copper + SFP+/QSFP uplinks. Datapath = bcmd (OpenBCM socdiag with
+  diag_shell diverted to bcmd_run). 84758 10G-SFP+ PHY needs an external ucode blob
+  (request_firmware). KNET netifs for CPU punt. ONL provides the as4610-54 platform layer.

@@ -1,0 +1,20 @@
+# EdgeNOS CPU architecture: ARM hard-float (Cortex-A9, ARMv7-A)
+# Used by: accton-as4610-54
+id: armhf
+name: ARM 32-bit hard-float (Cortex-A9, ARMv7-A)
+triple: arm-linux-gnueabihf
+endian: little
+bits: 32
+cpu: cortex-a9
+kernel_arch: arm
+kernel_defconfig: iproc_defconfig
+cflags:
+  - -mcpu=cortex-a9
+  - -mfpu=vfpv3
+  - -mfloat-abi=hard
+quirks:
+  - "Helix4 host CPU is the on-die iProc; CMIC is CMICd over the SoC bus, not external PCIe."
+  - "BDE/KNET modules must be rebuilt in lockstep with the kernel (vermagic + cgroup struct layout)."
+notes: >
+  Broadcom iProc ARM SoC on the AS4610. ONL ships a 4.14 armhf-iproc kernel;
+  EdgeNOS has forward-ported 4.19/5.10/5.15/6.1 trees. ABI: armv7-a EABIHF VFPv3.

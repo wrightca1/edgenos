@@ -1,0 +1,36 @@
+# EdgeNOS platform: Edgecore/Accton AS5610-52X
+# 52x10G + 4x40G, PowerPC P2020 host, BCM56846 (Trident+) switch ASIC.
+onie_platform: powerpc-accton_as5610_52x-r0   # TODO verify on box: `onie-sysinfo -p`
+vendor: accton
+model: as5610-52x
+aliases:
+  - edgecore-as5610-52x
+
+arch: powerpc
+asic: bcm56846
+kernel: "5.10"
+
+datapath: edged
+components:
+  - edged                # datapath daemon (statically links OpenMDK)
+  - linux-kernel-bde
+  - linux-user-bde
+  - bde-tmon
+  - quagga               # zebra + ospfd control plane
+  - platform-svc         # CPLD, retimer, SFP, fan, swp-l3 config services
+firmware:
+  - led0.hex             # LED microcontroller images
+  - led1.hex
+
+portmap: as5610-52x.portmap
+platform_dir: platform/accton-as5610-52x
+dts: as5610-52x.dts
+
+installer: onie-sfx
+persistence: squashfs-overlay
+init: systemd
+
+status: production       # pings Nexus 0% loss, OSPF + 40G working
+notes: >
+  Source today lives in newnos/. Trident+ retimer (DS100DF410) on the 40G path.
+  Dual-slot A/B upgrade supported via nos-upgrade. Migrates into core/ + platform/ in Phase 4.

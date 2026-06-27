@@ -1,0 +1,16 @@
+# build outputs
+/output/
+/build-out/
+*.epk
+*.swi
+*.itb
+*.sqsh
+*.bin
+
+# python
+__pycache__/
+*.pyc
+
+# editor
+*.swp
+.DS_Store

@@ -1,0 +1,19 @@
+# EdgeNOS CPU architecture: PowerPC (Freescale e500v2 / P2020)
+# Used by: accton-as5610-52x
+id: powerpc
+name: PowerPC 32-bit (Freescale e500v2)
+triple: powerpc-linux-gnu
+endian: big
+bits: 32
+cpu: e500v2
+kernel_arch: powerpc
+kernel_defconfig: as5610_defconfig
+cflags:
+  - -mcpu=8548
+quirks:
+  # Hard-won from 5610 bring-up — these are real, keep them visible.
+  - "Big-endian PIO: SDK must be built with SYS_BE_PIO=1."
+  - "BDE register writes via mmap are silently dropped on this SoC; use the BDE ioctl path instead of BAR0 MMIO."
+notes: >
+  Freescale P2020 dual-e500v2 SoC. No PCIe switch fabric quirks beyond the BDE
+  access path. Toolchain installed from Debian gcc-powerpc-linux-gnu.

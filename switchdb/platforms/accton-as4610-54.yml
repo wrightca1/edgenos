@@ -1,0 +1,38 @@
+# EdgeNOS platform: Edgecore/Accton AS4610-54T
+# 48x1G copper + 4x SFP+ + 2x QSFP, ARM iProc host (on-die), BCM56340 (Helix4).
+onie_platform: arm-accton-as4610-54-r0        # confirmed from ONL platform artifacts
+vendor: accton
+model: as4610-54
+aliases:
+  - edgecore-as4610-54t
+  - as4610-54t
+
+arch: armhf
+asic: bcm56340
+kernel: "4.14"           # ONL LTS baseline; forward-ported 4.19/5.10/5.15/6.1 trees exist
+
+datapath: bcmd
+components:
+  - bcmd                 # datapath daemon (OpenBCM)
+  - linux-kernel-bde
+  - linux-user-bde
+  - linux-bcm-knet
+  - quagga               # zebra + ospfd + bgpd
+  - onlp                 # ONL platform layer (sensors/SFP/PSU/fan/LED)
+  - platform-svc
+firmware:
+  - bcm84758_ucode       # 10G SFP+ PHY microcode (request_firmware blob)
+
+portmap: as4610-54.portmap
+platform_dir: platform/accton-as4610-54
+dts: arm-accton-as4610.dts
+
+installer: onl-swi
+persistence: onl-swi
+init: sysvinit           # ONL ARM Track A; Buildroot own-build track is systemd
+
+status: production       # 0% ping, 30+ OSPF routes to chip
+notes: >
+  Source today lives in edgecore-4610-54t/, built on the ONL as4610-54 platform.
+  RTC i2c-mux hang on 4.19+ is a known kernel issue (see project notes). The -510/-61
+  filename token is the KERNEL version, not the product version. Migrates in Phase 4.

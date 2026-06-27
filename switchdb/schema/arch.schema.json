@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "edgenos/switchdb/schema/arch.schema.json",
+  "title": "EdgeNOS CPU architecture entry",
+  "description": "One CPU architecture EdgeNOS can target. Referenced by platform entries via their 'arch' field.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "triple", "endian", "bits"],
+  "properties": {
+    "id":        {"type": "string", "pattern": "^[a-z0-9_]+$", "description": "Short key, e.g. 'powerpc', 'armhf', 'arm64', 'x86_64'."},
+    "name":      {"type": "string", "description": "Human-readable name."},
+    "triple":    {"type": "string", "description": "Cross toolchain triple, e.g. 'powerpc-linux-gnu'."},
+    "endian":    {"type": "string", "enum": ["big", "little"]},
+    "bits":      {"type": "integer", "enum": [32, 64]},
+    "cpu":       {"type": "string", "description": "Specific CPU/core, e.g. 'e500v2', 'cortex-a9'."},
+    "kernel_arch": {"type": "string", "description": "Linux ARCH= value (e.g. 'powerpc', 'arm', 'arm64')."},
+    "kernel_defconfig": {"type": "string", "description": "Default kernel defconfig fragment for this arch (platforms may override)."},
+    "cflags":    {"type": "array", "items": {"type": "string"}, "description": "Arch-wide compiler flags (e.g. -mcpu=8548)."},
+    "quirks":    {"type": "array", "items": {"type": "string"}, "description": "Known arch-level gotchas, free text (e.g. 'big-endian PIO; BDE mmap writes dropped, use ioctl')."},
+    "notes":     {"type": "string"}
+  }
+}

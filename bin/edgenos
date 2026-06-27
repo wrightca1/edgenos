@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""
+edgenos — top-level CLI for the unified EdgeNOS build/version/package system.
+
+Subcommands (Phase 1):
+  db list                       list known platforms
+  db validate                   schema + referential-integrity check of the switch DB
+  db show <onie_platform>       resolved platform+arch+asic view
+  version <onie_platform>       compute the build identity for a platform
+  version <onie_platform> --json <p> --os-release <p>   write stamps
+
+More subcommands (pkg, build) land in later phases.
+"""
+import os, sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "packaging", "version"))
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__.strip())
+        return 1
+    cmd, rest = argv[1], argv[2:]
+    if cmd == "db":
+        import switchdb
+        switchdb.main(["switchdb"] + rest)
+    elif cmd == "version":
+        import version
+        version.main(["version"] + rest)
+    else:
+        print(__doc__.strip())
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
