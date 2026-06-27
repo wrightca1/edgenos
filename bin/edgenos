@@ -9,13 +9,19 @@ Subcommands (Phase 1):
   version <onie_platform>       compute the build identity for a platform
   version <onie_platform> --json <p> --os-release <p>   write stamps
 
-More subcommands (pkg, build) land in later phases.
+  pkg build <spec.yml> --source-root <dir> --platform <p>   build an .epk package
+  pkg info|verify <file.epk>                                inspect a package
+  pkg install <file.epk> [--root /] [--force]               install (on-box)
+  pkg list|remove|show [--root /]                            manage installed pkgs
+
+The image-recipe subcommand (build) lands in Phase 3.
 """
 import os, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 sys.path.insert(0, os.path.join(ROOT, "packaging", "version"))
+sys.path.insert(0, os.path.join(ROOT, "packaging", "pkgtool"))
 
 
 def main(argv):
@@ -29,6 +35,13 @@ def main(argv):
     elif cmd == "version":
         import version
         version.main(["version"] + rest)
+    elif cmd == "pkg":
+        # `pkg build ...` -> host builder; everything else -> on-box epkg
+        if rest and rest[0] == "build":
+            import pkgbuild
+            return pkgbuild.main(["pkgbuild"] + rest[1:])
+        import epkg
+        return epkg.main(["epkg"] + rest)
     else:
         print(__doc__.strip())
         return 1

@@ -61,8 +61,11 @@ This replaces both.
 Every component builds into an **arch/ASIC-tagged package**:
 `edged_0.1.0_powerpc-bcm56846.epk`, `bcmd_0.1.0_armhf-bcm56340.epk`.
 
-An `.epk` is `manifest.json` (name, version, arch, asic, depends, `type: base|overlay`,
-`runtime_installable`, pre/post hooks, sha256) + `data.tar.zst` (payload).
+An `.epk` is an uncompressed outer tar holding `manifest.json` (name, version, arch,
+asic, depends, `type: base|overlay`, `runtime_installable`, pre/post hooks, per-file
+sha256) + `data.tar.xz` (payload). Payload is **xz**, not zstd, so the on-box `epkg`
+is pure Python stdlib (`tarfile`/`lzma`) with zero extra deps. Builds are reproducible
+(normalized mtime/uid/gid, sorted members, `SOURCE_DATE_EPOCH`).
 
 - **Build-time (immutable base):** the image recipe reads a platform's `components:`
   list, pulls the matching `.epk`s, lays them into the rootfs, builds the squashfs +
@@ -104,7 +107,9 @@ plugins selected by data.
 ## Roadmap
 
 - **Phase 1 (done):** switch DB + schema + the two known platforms; version stamper; CLI.
-- **Phase 2:** `pkgtool` — `.epk` format, builder, on-box `epkg`; package `edged` end-to-end.
+- **Phase 2 (done):** `pkgtool` — `.epk` format (`epk.py`), builder (`pkgbuild.py`),
+  on-box `epkg` (`epkg.py`); `edged` packaged end-to-end from real newnos artifacts.
+  Reproducible builds, checksum + tamper verification, arch/ASIC install guard.
 - **Phase 3:** image recipe — DB → BOM → squashfs → ONIE installer; reproduce the 5610 image from packages.
 - **Phase 4:** migrate 5610, then 4610, onto `core/` + `platform/`; retire the forks.
 
