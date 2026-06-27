@@ -1,0 +1,11 @@
+# Image recipe: AS5610-52X (onie-sfx)
+# Inputs are relative to --source-root (point it at /home/smiley/edgecore).
+platform: powerpc-accton_as5610_52x-r0
+installer: onie-sfx
+packages_dir: output/packages          # where base_*.epk and component .epk live
+
+onie_sfx:
+  installer_template: newnos/installer/install.sh        # proven self-extracting installer
+  fit: newnos/output/images/uImage-powerpc.itb           # prebuilt kernel FIT (reused; no mkimage needed)
+  fit_name_in_payload: uImage-powerpc.itb                # name the template's tar-extract expects
+  rootfs_name_in_payload: rootfs.sqsh

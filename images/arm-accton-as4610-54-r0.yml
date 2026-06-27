@@ -1,0 +1,11 @@
+# Image recipe: AS4610-54T (onl-swi)
+# Inputs relative to --source-root (point it at /home/smiley/edgecore).
+platform: arm-accton-as4610-54-r0
+installer: onl-swi
+packages_dir: output/packages
+
+onl_swi:
+  # The final ONIE self-installer is produced by ONL's mkshar wrapped around an
+  # installer scaffold; for full fidelity run inside the ONL builder. imgbuild
+  # builds the SWI (rootfs + manifest) unconditionally.
+  mkshar: OpenNetworkLinux/tools/mkshar

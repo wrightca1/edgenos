@@ -110,8 +110,15 @@ plugins selected by data.
 - **Phase 2 (done):** `pkgtool` — `.epk` format (`epk.py`), builder (`pkgbuild.py`),
   on-box `epkg` (`epkg.py`); `edged` packaged end-to-end from real newnos artifacts.
   Reproducible builds, checksum + tamper verification, arch/ASIC install guard.
-- **Phase 3:** image recipe — DB → BOM → squashfs → ONIE installer; reproduce the 5610 image from packages.
-- **Phase 4:** migrate 5610, then 4610, onto `core/` + `platform/`; retire the forks.
+- **Phase 3 (done):** image recipe — `pkgbase.py` captures a proven rootfs into a
+  first-class `base_<ver>_<arch>-<asic>.epk`; `imgbuild.py` composes base + component
+  `.epk`s, stamps os-release/version.json + a self-describing installed-pkg DB,
+  re-squashes, and wraps per platform (`onie-sfx` `.bin` for the 5610, `onl-swi` `.swi`
+  for the 4610). `catalog` lists downloadable switches from the DB. Both real installers
+  produced + validated. (The 4610 final `mkshar` ONIE-wrap runs in the ONL builder.)
+- **Phase 4:** migrate 5610, then 4610, onto `core/` + `platform/`; package the remaining
+  components (bde/knet, quagga, bcmd, platform-svc) so images are fully package-composed;
+  retire the forks.
 
 ## Current support matrix
 
