@@ -194,14 +194,24 @@ def wrap_onl_swi(recipe, sqsh, ident, args, outdir):
     wrap is attempted if the ONL tool + payload scaffold are available."""
     import zipfile
     cfg = recipe.get("onl_swi", {})
+    # The ONL loader reads `platforms` (to match the box) and
+    # version.SYSTEM_COMPATIBILITY_VERSION before booting a SWI — emit those, or the
+    # loader rejects the image. Mirror ONL's manifest shape; carry EdgeNOS identity too.
     manifest = {
-        "version": "1.0",
-        "platform": ident["onie_platform"],
+        "platforms": [ident["onie_platform"]],
         "arch": ident["arch"],
-        "asic": ident["asic"],
-        "edgenos_version": ident["version"],
-        "build_id": ident["build_id"],
-        "kernel": ident["kernel"],
+        "version": {
+            "VERSION_ID": ident["version"],
+            "BUILD_ID": ident["build_id"],
+            "VERSION_STRING": ident["version_string"],
+            "SYSTEM_COMPATIBILITY_VERSION": "2",
+        },
+        "edgenos": {
+            "version": ident["version"],
+            "asic": ident["asic"],
+            "kernel": ident["kernel"],
+            "datapath": ident["datapath"],
+        },
     }
     swi = os.path.join(outdir, f"EdgeNOS-{ident['version']}-{ident['onie_platform']}.swi")
     with zipfile.ZipFile(swi, "w", zipfile.ZIP_STORED) as z:

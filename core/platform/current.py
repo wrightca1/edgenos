@@ -46,8 +46,14 @@ def platform_name(root="/"):
 
 
 def _board_classes():
-    """Yield (class, source_path) for every platform/<board>/platform.py."""
-    for pf in sorted(glob.glob(os.path.join(ROOT, "platform", "*", "platform.py"))):
+    """Yield (class, source_path) for every platform.py we can find.
+
+    Two layouts: the dev tree (edgenos/platform/<board>/platform.py) and the
+    installed image, where platform-svc lands base.py + current.py + platform.py
+    side-by-side in /usr/lib/edgenos/platform/. Scan both."""
+    paths = glob.glob(os.path.join(ROOT, "platform", "*", "platform.py"))
+    paths += glob.glob(os.path.join(HERE, "platform.py"))      # installed (co-located)
+    for pf in sorted(set(paths)):
         spec = importlib.util.spec_from_file_location("edgenos_board", pf)
         mod = importlib.util.module_from_spec(spec)
         try:
