@@ -53,7 +53,7 @@ Expected: `EDGENOS_ARCH=armhf`, `EDGENOS_ASIC=bcm56340`, `EDGENOS_KERNEL=6.1`.
 
 ## What's installed
 
-Components on this image: `bcmd`, `linux-kernel-bde`, `linux-user-bde`, `linux-bcm-knet`, `quagga`, `onlp`, `platform-svc`.
+Components on this image: `bcmd`, `linux-kernel-bde`, `linux-user-bde`, `linux-bcm-knet`, `quagga`, `platform-svc`.
 
 ## Recover / reinstall
 

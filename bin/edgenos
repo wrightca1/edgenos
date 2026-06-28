@@ -17,7 +17,8 @@ Subcommands (Phase 1):
 
   build <onie_platform> --source-root <dir>                 build the ONIE installer
   catalog [--json]                                          list downloadable switches
-  platform name|show|init [--root /]                        resolve/bring up the board (ONL-style)
+  platform name|show|init|hal [--root /]                    resolve/bring up/query the board (ONL-style)
+  docs                                                      regenerate per-switch instruction pages
 """
 import os, sys
 
@@ -55,6 +56,11 @@ def main(argv):
     elif cmd == "catalog":
         import catalog
         return catalog.main(["catalog"] + rest)
+    elif cmd == "docs":
+        import importlib.util as _u
+        _s = _u.spec_from_file_location("gendocs", os.path.join(ROOT, "tools", "gen-docs.py"))
+        _m = _u.module_from_spec(_s); _s.loader.exec_module(_m)
+        return _m.main(["gen-docs"] + rest)
     elif cmd == "platform":
         sys.path.insert(0, os.path.join(ROOT, "core", "platform"))
         import current

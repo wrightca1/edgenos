@@ -18,8 +18,11 @@ components:
   - linux-user-bde
   - linux-bcm-knet
   - quagga               # zebra + ospfd + bgpd
-  - onlp                 # ONL platform layer (sensors/SFP/PSU/fan/LED)
-  - platform-svc
+  - platform-svc         # board services + native PlatformHAL (sensors/fan/PSU)
+  # NOTE: ONL's ONLP is intentionally NOT a component. Verified on the live 4610
+  # (and 5610): EdgeNOS runs on Buildroot (glibc 2.36) with NO onlp present and
+  # reads sensors via native sysfs/hwmon. ONL's ONLP is Debian-stretch userspace
+  # (glibc 2.24 + python2.7) — foreign here. The native PlatformHAL replaces it.
 firmware:
   - bcm84758_ucode       # 10G SFP+ PHY microcode (request_firmware blob)
 
