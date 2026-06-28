@@ -1,54 +1,108 @@
 # EdgeNOS
 
-Unified, multi-architecture / multi-ASIC network OS build system. A **switch
-database** drives everything: each board is a data entry that resolves to a CPU
-arch, a switch ASIC, and a bill-of-materials of packages.
+A unified, **multi-architecture / multi-ASIC** network operating system build system.
+One **switch database** describes every supported switch; from it, EdgeNOS builds a
+**per-switch ONIE installer** carrying a base system for that CPU + ASIC plus its
+software components as packages.
 
-See [`DESIGN.md`](DESIGN.md) for the full architecture.
+Pick your switch → download its installer → `onie-nos-install`. That's it.
 
-## Quick start
+```
+$ edgenos catalog
+EdgeNOS 0.1.0 — supported switches
 
-```sh
-# list known switches
-./bin/edgenos db list
-
-# validate the switch database (schema + referential integrity)
-./bin/edgenos db validate
-
-# resolved view of one platform (platform + arch + asic merged)
-./bin/edgenos db show arm-accton-as4610-54-r0
-
-# pick your switch — the downloadable catalog
-./bin/edgenos catalog
-
-# build a downloadable ONIE installer (base system for the arch+asic + packages)
-./bin/edgenos pkg base --from ../newnos/output/images/rootfs.sqsh \
-    --platform powerpc-accton_as5610_52x-r0
-./bin/edgenos build powerpc-accton_as5610_52x-r0 --source-root /home/smiley/edgecore
-#   -> output/images/EdgeNOS-0.1.0-powerpc-accton_as5610_52x-r0.bin
+MODEL                  ARCH     ASIC       KERNEL  STATUS      DOWNLOAD
+accton as4610-54       armhf    bcm56340   6.1     production  EdgeNOS-0.1.0-arm-accton-as4610-54-r0.swi
+accton as5610-52x      powerpc  bcm56846   6.1     production  EdgeNOS-0.1.0-powerpc-accton_as5610_52x-r0.bin
 ```
 
-## Status
+## How it fits together
 
-Phases 1–3 are in place: the switch DB + schema + version stamper (P1), the `.epk`
-package system — host builder + on-box `epkg` with an arch/ASIC install guard (P2),
-and the image recipe — `pkg base` + `build` producing per-platform ONIE installers
-(`.bin` for the 5610, `.swi` for the 4610), each carrying a base system for its
-arch+ASIC plus component packages, stamped and self-describing (P3). Next is Phase 4:
-packaging the remaining components and migrating the two forks onto `core/`+`platform/`.
-See `DESIGN.md`.
+Four layers, each feeding the next — all driven by the switch database:
+
+```
+switchdb/         one YAML per switch (arch, asic, kernel, component list)
+   │              + per-axis entries: arch/<arch>.yml, asic/<asic>.yml
+   ▼
+.epk packages     each software piece, tagged <name>_<ver>_<arch>-<asic>.epk
+   │                base   = the whole base rootfs (one per switch)
+   │                edged/bcmd/quagga/bde/platform-svc = the components
+   ▼
+imgbuild          base + components → stamp version → squashfs → installer
+   │
+   ▼
+ONIE installer    one downloadable file per switch (.bin or .swi)
+```
+
+The three axes — **arch** (CPU), **asic** (silicon), **platform** (board) — are kept
+orthogonal, so adding a switch is data + a folder, never a fork. The platform layer is
+ONL-inspired (a per-board class with `baseconfig()` + an ONLP-style HAL + a resolver),
+but images are **per switch**, not one-image-per-arch. See [`DESIGN.md`](DESIGN.md) and
+the [ONL comparison](DESIGN.md#prior-art-onl-and-where-edgenos-mirrors-vs-differs).
+
+## Install on a switch
+
+Each switch has its own page under [`docs/switches/`](docs/switches/). In short:
+
+```sh
+# on the switch, in ONIE install mode:
+onie-nos-install http://<server>/EdgeNOS-<ver>-<your-switch>.<bin|swi>
+```
+
+Download the file from [Releases](../../releases).
+
+## CLI
+
+```sh
+edgenos catalog                       # the "pick your switch" index
+edgenos db validate | show <plat>     # the switch database
+edgenos version <plat>                # the build identity for a switch
+edgenos pkg base  --from <rootfs> …   # capture a base system as a package
+edgenos pkg build <spec> …            # build a component .epk
+edgenos pkg install|verify|list …     # on-box package manager (epkg)
+edgenos build <plat>                  # assemble that switch's ONIE installer
+edgenos platform name|show|init       # resolve / bring up the board (ONL-style)
+edgenos docs                          # regenerate the per-switch instruction pages
+```
+
+## Build from source
+
+The datapath compiles in a cross-build container (no host toolchain needed):
+
+```sh
+build/build-sdk-and-edged.sh                 # AS5610: OpenMDK SDK libs + linked edged (PowerPC)
+edgenos pkg build packaging/specs/as5610-52x/edged.yml --source-root .. --arch powerpc --asic bcm56846
+edgenos build powerpc-accton_as5610_52x-r0 --source-root ..
+```
+
+The AS5610 `edged` is built from this tree (verified: 11/11 sources compile + link to an
+18.8 MB PowerPC binary). The AS4610 `bcmd` builds via its OpenBCM recipe (`build-bcmd.sh`).
 
 ## Layout
 
 | Dir | What |
 |-----|------|
-| `switchdb/` | the database — platforms, archs, asics, schema |
-| `core/` | shared arch/ASIC-agnostic code (datapath framework, control plane) |
-| `arch/`, `asic/`, `platform/` | per-axis support (plugins selected by the DB) |
-| `packaging/` | `version/` stamper, `pkgtool/` package system |
+| `switchdb/` | the database — platforms, archs, asics, JSON schema |
+| `core/` | shared, arch/ASIC-agnostic code (`datapath/`, `control-plane/`, `platform/`) |
+| `arch/<arch>/` | per-CPU toolchain + build fragments |
+| `asic/<asic>/` | per-ASIC SDK glue + chip code |
+| `platform/<board>/` | per-board: drivers, config, DTS, services, platform class |
+| `packaging/` | `version/` stamper, `pkgtool/` (.epk + on-box `epkg`), `specs/`, `imgbuild.py` |
 | `images/` | per-platform image recipes |
-| `tools/`, `bin/` | DB tooling + the `edgenos` CLI |
+| `build/` | cross-build scripts |
+| `tools/`, `bin/` | DB/catalog/docs tooling + the `edgenos` CLI |
+| `docs/switches/` | per-switch install pages (generated) |
 
-## Requirements
+## Status
 
-Python 3 with `pyyaml` and `jsonschema` (for DB validation).
+Production-capable on two switches (AS5610-52X, AS4610-54T), both fully package-composed
+and self-describing (each image records its component list under
+`/var/lib/edgenos/epkg/installed`). The unified AS5610 `edged` is built and linked from
+source. Adding a third switch is a `switchdb/` entry + a `platform/<board>/` folder.
+
+## Licensing
+
+All components are distributable. Kernel / BDE-KNET / Buildroot / Quagga are GPL; the
+Broadcom OpenBCM SDK, OpenMDK, and PHY firmware are source-available (distribution +
+derivative grant). Keep the Broadcom notices; the result is source-available, not pure
+OSI. See the per-component licenses.

@@ -14,3 +14,8 @@ __pycache__/
 # editor
 *.swp
 .DS_Store
+/output/
+
+# in-tree build artifacts (Makefile builds objects in CWD)
+*.o
+platform/*/edged

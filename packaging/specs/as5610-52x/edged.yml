@@ -1,29 +1,27 @@
-# EdgeNOS package spec: edged (BCM56846 datapath daemon)
+# EdgeNOS package: edged (BCM56846 datapath daemon) — built from the unified tree.
 #
-# Build with --source-root pointing at the newnos/ tree (where the artifacts live
-# today) and --platform to tag arch/asic from the switch DB:
-#
-#   bin/edgenos pkg build packaging/specs/edged.yml \
-#       --source-root ../newnos --platform powerpc-accton_as5610_52x-r0
+# Build the binary first:  build/build-sdk-and-edged.sh   -> edgenos/output/edged
+# Then package (from the repo top):
+#   bin/edgenos pkg build packaging/specs/as5610-52x/edged.yml \
+#       --source-root /home/smiley/edgecore --arch powerpc --asic bcm56846
 #
 name: edged
 summary: BCM56846 (Trident+) switch datapath daemon — mirrors kernel FIB to the ASIC
 type: overlay                 # composes into the base image, AND installable live
 runtime_installable: true
 asic: bcm56846                # pin: this binary only runs on Trident+ silicon
-# arch is taken from --platform (powerpc) at build time
 depends:
   - linux-kernel-bde
   - linux-user-bde
 
 files:
-  - src: output/edged-rebuilt
+  - src: edgenos/output/edged                                   # from-source build (build-sdk-and-edged.sh)
     dst: /usr/sbin/edged
     mode: "0755"
-  - src: config/bcm/config.bcm
+  - src: edgenos/platform/accton-as5610-52x/config/config.bcm
     dst: /etc/edged/config.bcm
     mode: "0644"
-  - src: config/rootfs/overlay/etc/systemd/system/edged.service
+  - src: edgenos/platform/accton-as5610-52x/services/edged.service
     dst: /etc/systemd/system/edged.service
     mode: "0644"
 
