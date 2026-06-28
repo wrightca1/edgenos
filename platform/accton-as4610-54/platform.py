@@ -35,6 +35,7 @@ class EdgeNOSPlatform_arm_accton_as4610_54_r0(EdgeNOSPlatformBase, PortConfig_48
     def psu_count(self):
         return 2
 
+    # SFP+/QSFP optics via bound eeprom sysfs (SFF decode in the base HAL).
+    SFP_EEPROMS = "sys/bus/i2c/devices/*-0050/eeprom"
     # thermals() comes from the generic hwmon base implementation.
-    # Fans/PSUs/SFPs are provided by ONL's ONLP layer on this board (the `onlp`
-    # component); query via onlpdump until a native HAL is wired here.
+    # Native fan/PSU reads TBD (no CPLD sysfs driver on the 6.1 Buildroot build yet).

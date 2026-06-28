@@ -50,6 +50,7 @@ class EdgeNOSPlatform_powerpc_accton_as5610_52x_r0(EdgeNOSPlatformBase, PortConf
 
     # --- HAL: real board reads via the CPLD driver's sysfs (never devmem) ---
     CPLD = "sys/devices/platform/as5610_52x_cpld"   # driver sysfs base (root-relative)
+    SFP_EEPROMS = "sys/bus/i2c/devices/*-0050/eeprom"   # 48 SFP + 4 QSFP via at24 on muxed buses
 
     def fan_count(self):
         return 4

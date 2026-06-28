@@ -1,0 +1,13 @@
+# EdgeNOS package: edgenos-cli — the on-box operator CLI.
+# Pure Python -> arch=any, asic=any (works on every switch). Build:
+#   pkg build packaging/specs/edgenos-cli.yml --source-root <repo-top> --arch any --asic any
+name: edgenos-cli
+summary: On-box EdgeNOS CLI (version, platform/HAL, epkg package manager)
+type: overlay
+runtime_installable: true
+depends:
+  - platform-svc            # provides /usr/lib/edgenos/platform/{base,current,platform}.py
+files:
+  - {src: edgenos/core/cli/edgenos, dst: /usr/sbin/edgenos, mode: "0755"}
+  - {src: edgenos/packaging/pkgtool/epkg.py, dst: /usr/lib/edgenos/epkg.py, mode: "0644"}
+  - {src: edgenos/packaging/pkgtool/epk.py, dst: /usr/lib/edgenos/epk.py, mode: "0644"}

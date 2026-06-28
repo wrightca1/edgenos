@@ -63,9 +63,15 @@ Every component builds into an **arch/ASIC-tagged package**:
 
 An `.epk` is an uncompressed outer tar holding `manifest.json` (name, version, arch,
 asic, depends, `type: base|overlay`, `runtime_installable`, pre/post hooks, per-file
-sha256) + `data.tar.xz` (payload). Payload is **xz**, not zstd, so the on-box `epkg`
-is pure Python stdlib (`tarfile`/`lzma`) with zero extra deps. Builds are reproducible
+sha256) + `data.tar` (payload). The payload is an **uncompressed** tar: the minimal
+Buildroot Python on the switches ships **no** compression modules (no zlib/gzip/bz2/
+lzma — verified on hardware), so `epkg` must not depend on any. The image itself is
+squashfs-compressed, so the `.epk` is only transport. Builds are reproducible
 (normalized mtime/uid/gid, sorted members, `SOURCE_DATE_EPOCH`).
+
+**On-box CLI:** the `edgenos-cli` package installs `/usr/sbin/edgenos` + `epkg`/`epk`
+so a switch has first-class `edgenos version` / `platform hal` / `pkg install` — the
+runtime half of the hybrid model (install/upgrade a component on a live box).
 
 - **Build-time (immutable base):** the image recipe reads a platform's `components:`
   list, pulls the matching `.epk`s, lays them into the rootfs, builds the squashfs +

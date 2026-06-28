@@ -18,6 +18,7 @@ components:
   - bde-tmon
   - quagga               # zebra + ospfd control plane
   - platform-svc         # CPLD, retimer, SFP, fan, swp-l3 config services
+  - edgenos-cli          # on-box CLI (version, platform/HAL, epkg)
 firmware:
   - led0.hex             # LED microcontroller images
   - led1.hex

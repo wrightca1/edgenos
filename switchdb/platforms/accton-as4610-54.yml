@@ -19,6 +19,7 @@ components:
   - linux-bcm-knet
   - quagga               # zebra + ospfd + bgpd
   - platform-svc         # board services + native PlatformHAL (sensors/fan/PSU)
+  - edgenos-cli          # on-box CLI (version, platform/HAL, epkg)
   # NOTE: ONL's ONLP is intentionally NOT a component. Verified on the live 4610
   # (and 5610): EdgeNOS runs on Buildroot (glibc 2.36) with NO onlp present and
   # reads sensors via native sysfs/hwmon. ONL's ONLP is Debian-stretch userspace

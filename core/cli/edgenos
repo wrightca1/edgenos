@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""edgenos — on-box CLI for EdgeNOS switches.
+
+The operator front-end installed on the switch (vs the full build-host CLI). Thin
+dispatcher over the on-box modules under /usr/lib/edgenos.
+
+  edgenos version                       show this image's build identity
+  edgenos platform name|show|init|hal   resolve / bring up / query the board (sensors, SFPs)
+  edgenos pkg list                      packages this image is composed of
+  edgenos pkg info|verify <file.epk>    inspect a package
+  edgenos pkg install <file.epk>        install/upgrade a component on the LIVE switch
+  edgenos pkg remove|show <name>        manage installed packages
+"""
+import os
+import sys
+import json
+
+LIB = os.environ.get("EDGENOS_LIB", "/usr/lib/edgenos")
+
+
+def cmd_version():
+    vj = "/etc/edgenos/version.json"
+    if not os.path.exists(vj):
+        print("EdgeNOS (version unknown — no /etc/edgenos/version.json)")
+        return 1
+    d = json.load(open(vj))
+    print(d.get("version_string", d.get("name", "EdgeNOS")))
+    print(f"  platform : {d.get('onie_platform')}")
+    print(f"  arch/asic: {d.get('arch')} / {d.get('asic')}   kernel {d.get('kernel')}")
+    print(f"  datapath : {d.get('datapath')}")
+    return 0
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__.strip())
+        return 1
+    cmd, rest = argv[1], argv[2:]
+    if cmd in ("version", "--version", "-v"):
+        return cmd_version()
+    if cmd == "platform":
+        sys.path.insert(0, os.path.join(LIB, "platform"))
+        import current
+        return current.main(["platform"] + rest)
+    if cmd == "pkg":
+        sys.path.insert(0, LIB)                  # epkg.py + epk.py live here on-box
+        import epkg
+        return epkg.main(["epkg"] + rest)
+    print(__doc__.strip())
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
