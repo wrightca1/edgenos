@@ -17,6 +17,7 @@ Subcommands (Phase 1):
 
   build <onie_platform> --source-root <dir>                 build the ONIE installer
   catalog [--json]                                          list downloadable switches
+  platform name|show|init [--root /]                        resolve/bring up the board (ONL-style)
 """
 import os, sys
 
@@ -54,6 +55,10 @@ def main(argv):
     elif cmd == "catalog":
         import catalog
         return catalog.main(["catalog"] + rest)
+    elif cmd == "platform":
+        sys.path.insert(0, os.path.join(ROOT, "core", "platform"))
+        import current
+        return current.main(["platform"] + rest)
     else:
         print(__doc__.strip())
         return 1

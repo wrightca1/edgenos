@@ -104,6 +104,26 @@ edgenos/
 No copied recipes, no second init system, no divergent overlays. arch and asic are
 plugins selected by data.
 
+## Prior art: ONL (and where EdgeNOS mirrors vs. differs)
+
+EdgeNOS deliberately borrows ONL's platform model, with one key difference:
+
+| Aspect | ONL | EdgeNOS |
+|--------|-----|---------|
+| Platform key | ONIE platform string | **same** (the switch-DB key) |
+| Per-board source | `packages/platforms/<v>/<arch>/<board>/` | **same shape** — `platform/<board>/` |
+| Platform class | `OnlPlatform_<string>` with `baseconfig()` | **same idea** — `EdgeNOSPlatform_<string>` in `platform/<board>/platform.py` |
+| HW abstraction | ONLP C HAL (sfp/fan/psu/led/thermal), board lib bound by boot symlink | **ONLP-style** `PlatformHAL` seam in `core/platform/base.py` |
+| Device registry | *derived* by scanning packages | **explicit** `switchdb/` + `edgenos catalog` (you wanted a database) |
+| **Image scope** | **one per arch, all boards, detect at boot** | **one per switch** ("pick your switch") |
+
+So the layout, the per-board platform class, the `baseconfig()` bring-up, and the HAL
+are ONL-like; the image is per-switch, and the supported-device list is a declarative
+database rather than something derived by enumeration. `core/platform/current.py`
+resolves the platform (version.json → os-release → `onie-sysinfo`) and loads the board
+class — the ONL `current.py` analog, but in a per-switch image it resolves the single
+board.
+
 ## Roadmap
 
 - **Phase 1 (done):** switch DB + schema + the two known platforms; version stamper; CLI.
