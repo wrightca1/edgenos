@@ -1,0 +1,8 @@
+# EdgeNOS package: linux-user-bde (userspace BDE interface)
+name: linux-user-bde
+summary: Userspace BDE interface kernel module (/dev/linux-user-bde)
+type: overlay
+runtime_installable: false
+depends: [linux-kernel-bde]
+files:
+  - {src: newnos/output/kernel/modules/lib/modules/6.1.175-edgenos/extra/linux-user-bde.ko, dst: /lib/modules/6.1.175-edgenos/extra/linux-user-bde.ko, mode: "0644"}

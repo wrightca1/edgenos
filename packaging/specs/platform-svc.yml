@@ -1,0 +1,25 @@
+# EdgeNOS package: platform-svc (board drivers + bring-up services + platform class).
+# The ONL platform-modules + platform-config analog for the AS5610-52X.
+name: platform-svc
+summary: AS5610-52X board drivers, bring-up services, and platform class
+type: overlay
+runtime_installable: false   # bundles board kernel modules
+files:
+  # board kernel modules
+  - {src: newnos/output/kernel/modules/lib/modules/6.1.175-edgenos/extra/accton_as5610_52x_cpld.ko, dst: /lib/modules/6.1.175-edgenos/extra/accton_as5610_52x_cpld.ko, mode: "0644"}
+  - {src: newnos/output/kernel/modules/lib/modules/6.1.175-edgenos/extra/ds100df410.ko, dst: /lib/modules/6.1.175-edgenos/extra/ds100df410.ko, mode: "0644"}
+  - {src: newnos/output/kernel/modules/lib/modules/6.1.175-edgenos/extra/retimer_class.ko, dst: /lib/modules/6.1.175-edgenos/extra/retimer_class.ko, mode: "0644"}
+  # bring-up scripts (where platform.py INIT_SCRIPTS expects them)
+  - {src: edgenos/platform/accton-as5610-52x/services/platform-init.sh, dst: /usr/lib/edgenos/platform/platform-init.sh, mode: "0755"}
+  - {src: edgenos/platform/accton-as5610-52x/services/retimer-init.sh, dst: /usr/lib/edgenos/platform/retimer-init.sh, mode: "0755"}
+  - {src: edgenos/platform/accton-as5610-52x/services/sfp-enable.sh, dst: /usr/lib/edgenos/platform/sfp-enable.sh, mode: "0755"}
+  - {src: edgenos/platform/accton-as5610-52x/services/fan-controller.sh, dst: /usr/lib/edgenos/platform/fan-controller.sh, mode: "0755"}
+  - {src: edgenos/platform/accton-as5610-52x/services/swp-l3-config.sh, dst: /usr/lib/edgenos/platform/swp-l3-config.sh, mode: "0755"}
+  # the ONL-style platform layer
+  - {src: edgenos/platform/accton-as5610-52x/platform.py, dst: /usr/lib/edgenos/platform/platform.py, mode: "0644"}
+  - {src: edgenos/core/platform/base.py, dst: /usr/lib/edgenos/platform/base.py, mode: "0644"}
+  - {src: edgenos/core/platform/current.py, dst: /usr/lib/edgenos/platform/current.py, mode: "0644"}
+  # systemd units
+  - {src: edgenos/platform/accton-as5610-52x/services/platform-init.service, dst: /etc/systemd/system/platform-init.service, mode: "0644"}
+  - {src: edgenos/platform/accton-as5610-52x/services/fan-controller.service, dst: /etc/systemd/system/fan-controller.service, mode: "0644"}
+  - {src: edgenos/platform/accton-as5610-52x/services/swp-l3.service, dst: /etc/systemd/system/swp-l3.service, mode: "0644"}

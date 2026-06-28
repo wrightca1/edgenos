@@ -1,0 +1,7 @@
+# EdgeNOS package: linux-kernel-bde (ASIC PCI driver + DMA pool)
+name: linux-kernel-bde
+summary: Broadcom Device Enumerator kernel module (BCM56846) + DMA pool
+type: overlay
+runtime_installable: false   # kernel module — composed into the image, not live-installed
+files:
+  - {src: newnos/output/kernel/modules/lib/modules/6.1.175-edgenos/extra/linux-kernel-bde.ko, dst: /lib/modules/6.1.175-edgenos/extra/linux-kernel-bde.ko, mode: "0644"}

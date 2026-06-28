@@ -7,9 +7,12 @@ services/platform-init.sh (itself a replica of the Cumulus boot order).
 import os
 import sys
 
-# import the shared framework from core/platform/
-_CORE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "core", "platform")
-sys.path.insert(0, os.path.abspath(_CORE))
+# import the shared framework — works both in-tree (core/platform/) and installed
+# (base.py lands alongside this file under /usr/lib/edgenos/platform/).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _p in (_HERE, os.path.abspath(os.path.join(_HERE, "..", "..", "core", "platform"))):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 from base import EdgeNOSPlatformBase, PortConfig_52x10_4x40   # noqa: E402
 
 # where the board services/scripts land in the installed rootfs

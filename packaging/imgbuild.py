@@ -119,12 +119,16 @@ def compose_rootfs(view, recipe, args, workdir):
     included = [base_meta_summary(base_meta)]
     missing = []
     for comp in view["platform"].get("components", []):
-        cand = sorted(glob.glob(os.path.join(pkgs_dir, f"{comp}_*_{arch}-{asic}.epk")))
+        # a component .epk matches if its arch/asic is the board's or "any"
+        cand = []
+        for p in sorted(glob.glob(os.path.join(pkgs_dir, f"{comp}_*.epk"))):
+            cm = epk.read_manifest(p)
+            if cm["arch"] in (arch, "any") and cm["asic"] in (asic, "any"):
+                cand.append((p, cm))
         if not cand:
             missing.append(comp)
             continue
-        cepk = cand[-1]
-        cm = epk.read_manifest(cepk)
+        cepk, cm = cand[-1]
         ok, problems = epk.verify(cepk)
         if not ok:
             raise SystemExit(f"error: {cepk} failed verify: {problems}")

@@ -136,11 +136,19 @@ board.
   re-squashes, and wraps per platform (`onie-sfx` `.bin` for the 5610, `onl-swi` `.swi`
   for the 4610). `catalog` lists downloadable switches from the DB. Both real installers
   produced + validated. (The 4610 final `mkshar` ONIE-wrap runs in the ONL builder.)
-- **Phase 4 (in progress):** migrate the boards onto `core/`+`platform/`. **AS5610 done**
-  (`MIGRATION.md`): `edged` split into `core/datapath` + `asic/bcm56846` + the board dir;
-  build wired (`arch/powerpc/toolchain.mk`, `asic/bcm56846/sdk.mk`, board `Makefile`,
-  `board.yml`); structure validated (compile pending the cross-build container). Next:
-  control plane → `core/`, package remaining components, then the 4610; retire the forks.
+- **Phase 4 (in progress):** migrate the boards onto `core/`+`platform/`.
+  - **AS5610 source migrated** (`MIGRATION.md`): `edged` split into `core/datapath` +
+    `asic/bcm56846` + the board dir; build wired; structure validated (compile pending
+    the cross-build container).
+  - **ONL-style platform layer**: per-board class + `baseconfig()` + ONLP-style HAL +
+    resolver (see "Prior art: ONL").
+  - **Control plane → `core/control-plane/`** (quagga: recipe + config + units).
+  - **AS5610 image fully package-composed**: all 6 components are real `.epk`s
+    (`edged`, `linux-kernel-bde`, `linux-user-bde`, `bde-tmon`, `quagga` [asic=any],
+    `platform-svc` [board drivers + bring-up + platform class]) — nothing "from base
+    bits". The shipped image is self-describing (installed-pkg DB lists all 6).
+  - Next: migrate the 4610 onto the same framework; flesh out the HAL with real CPLD/
+    sensor reads; then retire the forks once the unified build is container-validated.
 
 ## Current support matrix
 

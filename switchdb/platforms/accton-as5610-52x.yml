@@ -8,7 +8,7 @@ aliases:
 
 arch: powerpc
 asic: bcm56846
-kernel: "5.10"
+kernel: "6.1"            # 6.1.175-edgenos — the kernel the shipped rootfs runs
 
 datapath: edged
 components:

@@ -1,0 +1,8 @@
+# EdgeNOS package: bde-tmon (chip die-temperature sensor)
+name: bde-tmon
+summary: BCM on-die temperature sensor kernel module
+type: overlay
+runtime_installable: false
+depends: [linux-kernel-bde]
+files:
+  - {src: newnos/output/kernel/modules/lib/modules/6.1.175-edgenos/extra/linux-bde-tmon.ko, dst: /lib/modules/6.1.175-edgenos/extra/linux-bde-tmon.ko, mode: "0644"}
