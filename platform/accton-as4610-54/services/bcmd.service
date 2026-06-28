@@ -1,0 +1,17 @@
+[Unit]
+Description=EdgeNOS-4610 bcmd — BCM56340 datapath daemon
+After=local-fs.target
+ConditionPathExists=/opt/edgenos/bcmd
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/edgenos
+ExecStartPre=/opt/edgenos/bcmd-prep.sh
+ExecStart=/opt/edgenos/bcmd
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/tmp/bcmd.log
+StandardError=append:/tmp/bcmd.log
+
+[Install]
+WantedBy=multi-user.target

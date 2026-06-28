@@ -9,7 +9,7 @@ aliases:
 
 arch: armhf
 asic: bcm56340
-kernel: "4.14"           # ONL LTS baseline; forward-ported 4.19/5.10/5.15/6.1 trees exist
+kernel: "6.1"            # 6.1.175 own-build (Buildroot+systemd); was 4.14 (stale)
 
 datapath: bcmd
 components:
@@ -29,7 +29,7 @@ dts: arm-accton-as4610.dts
 
 installer: onl-swi
 persistence: onl-swi
-init: sysvinit           # ONL ARM Track A; Buildroot own-build track is systemd
+init: systemd            # 6.1 own-build is Buildroot+systemd (Track A 4.14 was sysvinit)
 
 status: production       # 0% ping, 30+ OSPF routes to chip
 notes: >

@@ -1,0 +1,13 @@
+[Unit]
+Description=Quagga ospfd (OSPF)
+After=zebra.service
+Wants=zebra.service
+
+[Service]
+Type=simple
+ExecStart=/opt/edgenos/ospfd-arm -f /etc/quagga/ospfd.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

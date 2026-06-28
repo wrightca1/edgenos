@@ -1,0 +1,8 @@
+# EdgeNOS package: linux-user-bde (AS4610 / 6.1) — loaded from /opt/edgenos by bcmd-prep.sh
+name: linux-user-bde
+summary: linux-user-bde kernel module (BCM56340, kernel 6.1.175)
+type: overlay
+depends: [linux-kernel-bde]
+runtime_installable: false
+files:
+  - {src: edgecore-4610-54t/output/kport61/ko61/linux-user-bde.ko, dst: /opt/edgenos/linux-user-bde.ko, mode: "0644"}

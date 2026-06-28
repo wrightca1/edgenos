@@ -1,0 +1,7 @@
+# EdgeNOS package: linux-kernel-bde (AS4610 / 6.1) — loaded from /opt/edgenos by bcmd-prep.sh
+name: linux-kernel-bde
+summary: linux-kernel-bde kernel module (BCM56340, kernel 6.1.175)
+type: overlay
+runtime_installable: false
+files:
+  - {src: edgecore-4610-54t/output/kport61/ko61/linux-kernel-bde.ko, dst: /opt/edgenos/linux-kernel-bde.ko, mode: "0644"}

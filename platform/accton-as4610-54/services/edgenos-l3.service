@@ -1,0 +1,15 @@
+[Unit]
+Description=EdgeNOS-4610 L3 config (addrs + static routes from /etc/edged)
+After=bcmd.service
+Wants=bcmd.service
+ConditionPathExists=/etc/edged/addrs.conf
+
+[Service]
+Type=oneshot
+Environment=EDGENOS_ETC=/etc/edged
+ExecStart=/opt/edgenos/edgenos-l3-config.sh
+RemainAfterExit=yes
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

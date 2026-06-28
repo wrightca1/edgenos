@@ -62,14 +62,17 @@ class EdgeNOSPlatformBase(PlatformHAL):
     SYS_OBJECT_ID = None
     DRIVERS = []                    # [(module, params), ...] loaded in order by baseconfig()
     INIT_SCRIPTS = []              # board bring-up scripts run after drivers
+    MODULE_DIRS = []               # extra dirs (rel to root) to find .ko, e.g. ["opt/edgenos"]
 
     def __init__(self, root="/"):
         self.root = root
 
     # -- helpers (ONL insmod() analog) --
     def _modpath(self, mod):
-        for base in (f"lib/modules/{os.uname().release}/extra", "usr/lib/modules/extra"):
-            p = os.path.join(self.root, base, mod + ".ko")
+        dirs = [f"lib/modules/{os.uname().release}/extra", "usr/lib/modules/extra"]
+        dirs += list(self.MODULE_DIRS)
+        for d in dirs:
+            p = os.path.join(self.root, d, mod + ".ko")
             if os.path.exists(p):
                 return p
         return None

@@ -147,8 +147,15 @@ board.
     (`edged`, `linux-kernel-bde`, `linux-user-bde`, `bde-tmon`, `quagga` [asic=any],
     `platform-svc` [board drivers + bring-up + platform class]) — nothing "from base
     bits". The shipped image is self-describing (installed-pkg DB lists all 6).
-  - Next: migrate the 4610 onto the same framework; flesh out the HAL with real CPLD/
-    sensor reads; then retire the forks once the unified build is container-validated.
+  - **AS4610 migrated onto the same framework**: source split into `asic/bcm56340` +
+    `platform/accton-as4610-54`; ONL-style platform class (`PortConfig_48x1_4x10`,
+    drivers loaded from `/opt/edgenos` via `MODULE_DIRS`); base re-captured from the
+    **6.1** own-build (the DB's 4.14/sysvinit was stale → fixed to 6.1/systemd); 6 of 7
+    components packaged (`bcmd`, the 3 BDE/KNET modules, `quagga` [armhf-any],
+    `platform-svc`) — only `onlp` stays from base (it's ONL's). The resolver picks the
+    right board class among both platforms by platform string.
+  - Next: flesh out the HAL with real CPLD/sensor reads; package `onlp`; then retire the
+    forks once the unified builds are container-validated.
 
 ## Current support matrix
 

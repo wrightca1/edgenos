@@ -1,0 +1,22 @@
+# Board manifest: Accton/Edgecore AS4610-54T (6.1 own-build)
+# Read alongside switchdb/platforms/accton-as4610-54.yml.
+platform: arm-accton-as4610-54-r0
+arch: armhf
+asic: bcm56340
+
+datapath:
+  target: bcmd                       # OpenBCM socdiag with diag_shell diverted to bcmd_run
+  build: edgecore-4610-54t/nos/datapath/bcmd/build-bcmd.sh   # full SDK build (in container)
+  sources:
+    asic: asic/bcm56340              # bcmd.c
+  layout: /opt/edgenos              # 6.1 own-build keeps bcmd + .ko + quagga here
+
+config:    platform/accton-as4610-54/config        # config.bcm, zebra.conf, ospfd.conf
+dts:       platform/accton-as4610-54/dts/arm-accton-as4610.dts
+services:  platform/accton-as4610-54/services       # bcmd/edgenos-l3/zebra/ospfd units + prep scripts
+
+# ONLP platform layer (sensors/SFP/PSU/fan/LED) comes from ONL's as4610-54 package
+# (the 'onlp' component) — present in the base, not repackaged by EdgeNOS.
+notes: >
+  6.1 own-build is Buildroot + systemd. Modules load from /opt/edgenos via bcmd-prep.sh
+  (dmasize=8M, default_mtu=1600). 84758 SFP+ PHY ucode is a request_firmware blob.

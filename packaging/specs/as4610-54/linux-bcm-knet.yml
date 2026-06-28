@@ -1,0 +1,8 @@
+# EdgeNOS package: linux-bcm-knet (AS4610 / 6.1) — loaded from /opt/edgenos by bcmd-prep.sh
+name: linux-bcm-knet
+summary: linux-bcm-knet kernel module (BCM56340, kernel 6.1.175)
+type: overlay
+depends: [linux-kernel-bde]
+runtime_installable: false
+files:
+  - {src: edgecore-4610-54t/output/kport61/ko61/linux-bcm-knet.ko, dst: /opt/edgenos/linux-bcm-knet.ko, mode: "0644"}

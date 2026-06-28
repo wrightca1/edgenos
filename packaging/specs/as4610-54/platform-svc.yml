@@ -1,0 +1,11 @@
+# EdgeNOS package: platform-svc (AS4610 platform class + L3 sync). ONLP comes from ONL (base).
+name: platform-svc
+summary: AS4610-54 platform class + edgenos-l3 sync service
+type: overlay
+runtime_installable: true
+files:
+  - {src: edgenos/platform/accton-as4610-54/platform.py, dst: /usr/lib/edgenos/platform/platform.py, mode: "0644"}
+  - {src: edgenos/core/platform/base.py, dst: /usr/lib/edgenos/platform/base.py, mode: "0644"}
+  - {src: edgenos/core/platform/current.py, dst: /usr/lib/edgenos/platform/current.py, mode: "0644"}
+  - {src: edgenos/platform/accton-as4610-54/services/edgenos-l3-config.sh, dst: /opt/edgenos/edgenos-l3-config.sh, mode: "0755"}
+  - {src: edgenos/platform/accton-as4610-54/services/edgenos-l3.service, dst: /etc/systemd/system/edgenos-l3.service, mode: "0644"}

@@ -1,0 +1,13 @@
+[Unit]
+Description=Quagga zebra (RIB manager)
+After=edgenos-l3.service
+Wants=edgenos-l3.service
+
+[Service]
+Type=simple
+ExecStart=/opt/edgenos/zebra-arm -f /etc/quagga/zebra.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
