@@ -34,3 +34,7 @@ class EdgeNOSPlatform_arm_accton_as4610_54_r0(EdgeNOSPlatformBase, PortConfig_48
 
     def psu_count(self):
         return 2
+
+    # thermals() comes from the generic hwmon base implementation.
+    # Fans/PSUs/SFPs are provided by ONL's ONLP layer on this board (the `onlp`
+    # component); query via onlpdump until a native HAL is wired here.

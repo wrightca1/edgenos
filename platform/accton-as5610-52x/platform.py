@@ -48,9 +48,40 @@ class EdgeNOSPlatform_powerpc_accton_as5610_52x_r0(EdgeNOSPlatformBase, PortConf
         f"{_SVC}/fan-controller.sh",
     ]
 
-    # --- HAL: a couple of board specifics filled in; rest inherit HALUnsupported ---
+    # --- HAL: real board reads via the CPLD driver's sysfs (never devmem) ---
+    CPLD = "sys/devices/platform/as5610_52x_cpld"   # driver sysfs base (root-relative)
+
     def fan_count(self):
         return 4
 
     def psu_count(self):
         return 2
+
+    def fans(self):
+        # CPLD exposes board-wide fan status + a single PWM (no per-fan tach).
+        status = self._read_int("/%s/fan_status" % self.CPLD)
+        pwm = self._read_int("/%s/fan_pwm" % self.CPLD)
+        return [{"id": i + 1, "fan_status_raw": status, "pwm": pwm} for i in range(self.fan_count())]
+
+    def fan_set(self, pct):
+        # fan_pwm is 0..255 on this CPLD
+        return self._write("/%s/fan_pwm" % self.CPLD, max(0, min(255, int(pct * 255 / 100))))
+
+    def psus(self):
+        out = []
+        for i in (1, 2):
+            out.append({"id": i,
+                        "present": self._read_int("/%s/psu%d_present" % (self.CPLD, i)),
+                        "ok": self._read_int("/%s/psu%d_good" % (self.CPLD, i))})
+        return out
+
+    def leds(self):
+        return {n: self._read("/%s/%s" % (self.CPLD, n)) for n in ("led_sys", "led_loc")}
+
+    def led_set(self, name, state):
+        if name not in ("led_sys", "led_loc"):
+            raise ValueError("unknown LED %r (have led_sys, led_loc)" % name)
+        return self._write("/%s/%s" % (self.CPLD, name), state)
+
+    def cpld_version(self):
+        return self._read("/%s/version" % self.CPLD)

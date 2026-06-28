@@ -154,8 +154,14 @@ board.
     components packaged (`bcmd`, the 3 BDE/KNET modules, `quagga` [armhf-any],
     `platform-svc`) — only `onlp` stays from base (it's ONL's). The resolver picks the
     right board class among both platforms by platform string.
-  - Next: flesh out the HAL with real CPLD/sensor reads; package `onlp`; then retire the
-    forks once the unified builds are container-validated.
+  - **Both datapaths build from the unified tree**: `build/build-sdk-and-edged.sh`
+    (5610 edged, PowerPC) and `build/build-bcmd.sh` (4610 bcmd, ARM) — each produces a
+    real from-source binary, repackaged into its image. The chip SDKs (OpenMDK/OpenBCM)
+    are shared vendor deps, not vendored.
+  - **HAL fleshed out**: `PlatformHAL` has real reads — generic hwmon `thermals()` in the
+    base, and 5610 `fans()`/`psus()`/`leds()`/`fan_set()` via the CPLD driver sysfs (never
+    devmem). `edgenos platform hal` reports it; 4610 gets generic temps + ONLP for the rest.
+  - Next: package `onlp`; native 4610 fan/PSU HAL; reflash-test on real HW; retire the forks.
 
 ## Current support matrix
 

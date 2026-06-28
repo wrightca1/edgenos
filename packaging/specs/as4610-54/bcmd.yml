@@ -4,7 +4,7 @@ summary: BCM56340 (Helix4) datapath daemon (OpenBCM socdiag, diag_shell->bcmd_ru
 type: overlay
 runtime_installable: true
 files:
-  - {src: edgecore-4610-54t/nos/datapath/artifacts/bcmd, dst: /opt/edgenos/bcmd, mode: "0755"}
+  - {src: edgenos/output/bcmd, dst: /opt/edgenos/bcmd, mode: "0755"}
   - {src: edgenos/platform/accton-as4610-54/config/config.bcm, dst: /opt/edgenos/config.bcm, mode: "0644"}
   - {src: edgenos/platform/accton-as4610-54/services/bcmd-prep.sh, dst: /opt/edgenos/bcmd-prep.sh, mode: "0755"}
   - {src: edgenos/platform/accton-as4610-54/services/bcmd.service, dst: /etc/systemd/system/bcmd.service, mode: "0644"}

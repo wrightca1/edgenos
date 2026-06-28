@@ -73,7 +73,7 @@ def load_platform(name=None, root="/"):
 def main(argv):
     ap = argparse.ArgumentParser(prog="edgenos platform")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for c in ("show", "init", "name"):
+    for c in ("show", "init", "name", "hal"):
         s = sub.add_parser(c)
         s.add_argument("--root", default="/")
         s.add_argument("--platform", default=None, help="override detected platform")
@@ -85,6 +85,9 @@ def main(argv):
     plat = load_platform(args.platform, root=args.root)
     if args.cmd == "show":
         print(json.dumps(plat.info(), indent=2))
+        return 0
+    if args.cmd == "hal":
+        print(json.dumps(plat.hal_report(), indent=2))
         return 0
     if args.cmd == "init":
         print(f"platform: baseconfig for {plat.PLATFORM} ({plat.MODEL})")

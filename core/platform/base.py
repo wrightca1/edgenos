@@ -10,6 +10,7 @@ one image PER SWITCH — so an image has exactly one platform class — but the 
 is identical, which keeps every board uniform and the HAL board-agnostic.
 """
 import os
+import glob
 import subprocess
 
 
@@ -18,18 +19,21 @@ class HALUnsupported(NotImplementedError):
 
 
 class PlatformHAL:
-    """ONLP-analog hardware abstraction. Boards override what they support."""
-    def sfp_count(self):            raise HALUnsupported
-    def sfp_present(self, port):    raise HALUnsupported
-    def sfp_eeprom(self, port):     raise HALUnsupported
-    def fan_count(self):            raise HALUnsupported
-    def fan_rpm(self, idx):         raise HALUnsupported
-    def fan_set(self, idx, pct):    raise HALUnsupported
-    def psu_count(self):            raise HALUnsupported
-    def psu_present(self, idx):     raise HALUnsupported
-    def thermal_count(self):        raise HALUnsupported
-    def thermal_celsius(self, idx): raise HALUnsupported
+    """ONLP-analog hardware abstraction (sensors/fans/PSUs/SFPs/LEDs).
+
+    Boards implement what they support; unimplemented queries raise HALUnsupported.
+    thermals() has a generic hwmon-based default (works on any board with hwmon).
+    All reads are sysfs-based (never devmem) and degrade gracefully off-hardware.
+    """
+    def thermals(self):  raise HALUnsupported   # [{name, celsius}]
+    def fans(self):      raise HALUnsupported   # [{id, present, pwm, ...}]
+    def psus(self):      raise HALUnsupported   # [{id, present, ok}]
+    def sfps(self):      raise HALUnsupported   # [{port, present}]
+    def leds(self):      raise HALUnsupported   # {name: state}
     def led_set(self, name, state): raise HALUnsupported
+    # simple counts (boards may set as constants)
+    def fan_count(self): raise HALUnsupported
+    def psu_count(self): raise HALUnsupported
 
 
 # --- port profiles (ONL OnlPlatformPortConfig analog) -----------------------
@@ -113,3 +117,54 @@ class EdgeNOSPlatformBase(PlatformHAL):
             "drivers": [m for m, _ in self.DRIVERS],
             "init_scripts": list(self.INIT_SCRIPTS),
         }
+
+    # -- HAL helpers (sysfs, root-relative, graceful off-hardware) --
+    def _read(self, relpath):
+        try:
+            with open(os.path.join(self.root, relpath.lstrip("/")), encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return None
+
+    def _read_int(self, relpath):
+        v = self._read(relpath)
+        if v is None:
+            return None
+        try:
+            return int(v, 0)
+        except ValueError:
+            return None
+
+    def _write(self, relpath, value):
+        try:
+            with open(os.path.join(self.root, relpath.lstrip("/")), "w", encoding="utf-8") as f:
+                f.write(str(value))
+            return True
+        except OSError:
+            return False
+
+    def thermals(self):
+        """Generic: every hwmon temp*_input under /sys/class/hwmon (milli-C -> C)."""
+        out = []
+        for inp in sorted(glob.glob(os.path.join(self.root, "sys/class/hwmon/hwmon*/temp*_input"))):
+            v = self._read_int("/" + os.path.relpath(inp, self.root))
+            if v is None:
+                continue
+            label = self._read("/" + os.path.relpath(inp.replace("_input", "_label"), self.root))
+            name = label or "%s/%s" % (os.path.basename(os.path.dirname(inp)),
+                                       os.path.basename(inp).replace("_input", ""))
+            out.append({"name": name, "celsius": round(v / 1000.0, 1)})
+        return out
+
+    def hal_report(self):
+        """Collect whatever the board's HAL implements; mark the rest unsupported."""
+        rep = {"platform": self.PLATFORM, "model": self.MODEL}
+        for key, fn in (("thermals", self.thermals), ("fans", self.fans),
+                        ("psus", self.psus), ("sfps", self.sfps), ("leds", self.leds)):
+            try:
+                rep[key] = fn()
+            except HALUnsupported:
+                rep[key] = "unsupported"
+            except Exception as e:                       # noqa: BLE001 — never let one sensor break the report
+                rep[key] = "error: %s" % e
+        return rep
