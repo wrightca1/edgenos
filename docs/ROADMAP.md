@@ -25,9 +25,12 @@ Two L3 implementations exist, and IPv6 effort is asymmetric:
    the tables stay flat under churn. Verified on the AS5610 (slot reuse, ECMP group
    freed at refcount 0). Same layer to be reused by IPv6.
 
-2. **Host-route / neighbor deletion** (`l3_host_delete` is a TODO) — a deleted ARP
-   leaves a stale chip next-hop, and re-resolving a gateway leaks a next-hop index.
-   The smaller remaining piece of the lifecycle work. **(still open)**
+2. **Host-route / neighbor deletion** — ✅ **DONE** (edged 8a7f617).
+   `next_hop_alloc/release` free-list; `l3_host_add` reuses a gateway's existing
+   next-hop on ARP refresh (no re-resolution leak); `l3_host_del` implemented
+   (deletes the L3_ENTRY via a new SCHAN delete, clears ING/EGR next-hop, frees the
+   index). Verified on the AS5610 (re-resolve keeps nh 9, delete frees it, new
+   gateway reuses 9). All four L3 allocators now alloc/free/reuse cleanly.
 
 3. **ECMP member-change detection** — ✅ **DONE** with #1. `route_add_paths` now sorts
    the next-hop set and signatures it, so a re-dump of the same paths is a no-op and a
