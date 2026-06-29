@@ -143,6 +143,18 @@ class EdgeNOSPlatformBase(PlatformHAL):
         except OSError:
             return False
 
+    def _read_bytes(self, relpath, nbytes, timeout=0.6):
+        """Read up to nbytes from a file with a hard timeout (via dd subprocess) —
+        so a hung i2c eeprom on a broken mux bus can't block the caller. Threads
+        can't use SIGALRM, hence subprocess. Returns bytes or None."""
+        path = os.path.join(self.root, relpath.lstrip("/"))
+        try:
+            p = subprocess.run(["dd", "if=" + path, "bs=%d" % nbytes, "count=1", "status=none"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout)
+            return p.stdout or None
+        except Exception:
+            return None
+
     def _i2c_read(self, bus, addr, reg):
         """Read one byte via the `i2cget` CLI (for CPLDs with no kernel sysfs driver).
         Returns int or None. Only meaningful on the box; None off-hardware."""
@@ -189,11 +201,10 @@ class EdgeNOSPlatformBase(PlatformHAL):
         for path in sorted(glob.glob(os.path.join(self.root, self.SFP_EEPROMS)),
                            key=lambda p: int((p.split("/")[-2].split("-")[0]) or 0)
                            if p.split("/")[-2].split("-")[0].isdigit() else 0):
-            try:
-                with open(path, "rb") as f:
-                    data = f.read(256)
-            except OSError:
-                continue                        # absent module -> i2c NAK -> skip
+            rel = "/" + os.path.relpath(path, self.root)
+            data = self._read_bytes(rel, 256)   # bounded: broken i2c mux bus skips fast
+            if not data:
+                continue                        # absent module / NAK / timeout -> skip
             opt = self._decode_optic(data)
             if opt:
                 bus = path.split("/")[-2].split("-")[0]

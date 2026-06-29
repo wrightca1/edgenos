@@ -1,0 +1,12 @@
+[Unit]
+Description=EdgeNOS web UI (mgmt-bound)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/lib/edgenos/webui/server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

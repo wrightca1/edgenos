@@ -1,0 +1,24 @@
+# EdgeNOS package: edgenos-webui — lightweight modular web UI (mgmt-bound).
+# Pure stdlib Python; arch=any. Build:
+#   pkg build packaging/specs/edgenos-webui.yml --source-root <repo-top> --arch any --asic any
+name: edgenos-webui
+summary: Lightweight modular web UI (capability-driven; mgmt-interface bound)
+type: overlay
+runtime_installable: true
+depends:
+  - edgenos-cli            # uses `edgenos platform hal` / `pkg` and the platform layer
+files:
+  - {src: edgenos/core/webui/server.py, dst: /usr/lib/edgenos/webui/server.py, mode: "0755"}
+  - {src: edgenos/core/webui/util.py,   dst: /usr/lib/edgenos/webui/util.py,   mode: "0644"}
+  - {src: edgenos/core/webui/modules/dashboard.py,  dst: /usr/lib/edgenos/webui/modules/dashboard.py,  mode: "0644"}
+  - {src: edgenos/core/webui/modules/interfaces.py, dst: /usr/lib/edgenos/webui/modules/interfaces.py, mode: "0644"}
+  - {src: edgenos/core/webui/modules/ospf.py,       dst: /usr/lib/edgenos/webui/modules/ospf.py,       mode: "0644"}
+  - {src: edgenos/core/webui/modules/apps.py,       dst: /usr/lib/edgenos/webui/modules/apps.py,       mode: "0644"}
+  - {src: edgenos/core/webui/webui.conf,            dst: /etc/edgenos/webui.conf,                      mode: "0644"}
+  - {src: edgenos/core/webui/edgenos-webui.service, dst: /etc/systemd/system/edgenos-webui.service,    mode: "0644"}
+hooks:
+  postinst: |
+    #!/bin/sh
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable edgenos-webui 2>/dev/null || true
+    systemctl restart edgenos-webui 2>/dev/null || true
