@@ -97,7 +97,15 @@
 static const bcm_mac_t BCMD_HOST_MAC = {0x02, 0x10, 0x18, 0x96, 0x59, 0xdd};
 
 static volatile sig_atomic_t bcmd_g_run = 1;
-static void bcmd_on_sig(int s) { (void)s; bcmd_g_run = 0; }
+static volatile sig_atomic_t bcmd_l2_resync_req = 0;  /* SIGHUP: re-sync L2 groups */
+static void bcmd_on_sig(int s)
+{
+    if (s == SIGHUP) bcmd_l2_resync_req = 1;   /* live L2-group re-sync, in main loop */
+    else             bcmd_g_run = 0;           /* SIGINT/SIGTERM: shut down */
+}
+
+/* Per-port current L2-group VID (0 = default per-port isolation). */
+static bcm_vlan_t bcmd_port_group[BCMD_MAXPORT];
 
 /* Front-panel ethernet LOGICAL ports: copper ge0..ge47 = logical 1..48; SFP+
  * xe0..xe3 = 50..53; stacking xe4..xe5 = 54..55; logical 49 (ge48) is internal.
@@ -240,6 +248,7 @@ static int bcmd_l2_group_apply(bcm_vlan_t vlan, const bcm_port_t *ports, int n)
         (void)bcm_vlan_port_remove(BCMD_UNIT, bcmd_vlan_for_port(ports[i]), rbmp);
         (void)bcm_vlan_port_remove(BCMD_UNIT, BCMD_VLAN, rbmp);
         (void)bcm_port_untagged_vlan_set(BCMD_UNIT, ports[i], vlan);   /* PVID */
+        bcmd_port_group[ports[i]] = vlan;                              /* track */
     }
     printf("[bcmd] L2 group: VLAN %d bridging %d ports\n", vlan, n);
     return 0;
@@ -275,6 +284,23 @@ static int bcmd_load_l2_groups(const char *path)
     fclose(f);
     printf("[bcmd] L2 groups: applied %d from %s\n", groups, path);
     return groups;
+}
+
+/* Restore every grouped port to its per-port isolation VLAN (reverse of L2 group),
+ * so an SIGHUP re-sync can rebuild groups cleanly from the config. */
+static void bcmd_l2_reset(void)
+{
+    bcm_pbmp_t rbmp;
+    int port, n = 0;
+    for (port = 0; port < BCMD_MAXPORT; port++) {
+        if (!bcmd_port_group[port]) continue;
+        BCM_PBMP_CLEAR(rbmp); BCM_PBMP_PORT_ADD(rbmp, port);
+        (void)bcm_vlan_port_remove(BCMD_UNIT, bcmd_port_group[port], rbmp);
+        bcmd_port_group[port] = 0;
+        (void)bcmd_vlan_isolate(port);     /* back to own VLAN (100+port) + PVID */
+        n++;
+    }
+    if (n) printf("[bcmd] L2 groups: reset %d ports to isolation\n", n);
 }
 
 static int bcmd_port_up(bcm_port_t port)
@@ -1348,6 +1374,7 @@ int bcmd_run(void)
 
     signal(SIGINT,  bcmd_on_sig);
     signal(SIGTERM, bcmd_on_sig);
+    signal(SIGHUP,  bcmd_on_sig);   /* live L2-switch group re-sync from config */
     bcmd_link_summary();
     while (bcmd_g_run) {
         if (nlfd >= 0) {
@@ -1357,6 +1384,12 @@ int bcmd_run(void)
                 bcmd_nl_process(nlfd);     /* apply link/addr/neigh/route to chip */
         } else {
             sal_sleep(2);
+        }
+        if (bcmd_l2_resync_req) {       /* SIGHUP: re-apply L2 groups from config, live */
+            bcmd_l2_resync_req = 0;
+            printf("[bcmd] SIGHUP: re-syncing L2 switch groups\n");
+            bcmd_l2_reset();
+            bcmd_load_l2_groups("/etc/bcmd/l2-groups.conf");
         }
         /* periodic FIB re-dump: converge routes whose gateway resolved later. */
         if (nlfd >= 0 && (tick % 15) == 14) {
