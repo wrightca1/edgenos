@@ -98,9 +98,11 @@ Depends on the IPv4 lifecycle layer above. Then:
   TCAM overlap). netlink parses v6 dst/gateways. Neighbor + transit + termination all
   program the chip; verified on hardware (writes wr=0, v4 unaffected). Actual v6
   *forwarding* awaits v6 on the peer (Nexus) — chip programming is verified.
-- **Control plane**: enable `ospf6d` (OSPFv3) and/or rely on static + RA; the
-  FIB→chip sync already carries any protocol's v6 routes once the datapath programs
-  them.
+- **Control plane**: ✅ **OSPFv3 (`ospf6d`) DONE** (8676612) — enabled in the Quagga
+  build + shipped (config/service/spec). Verified on the AS5610: ospf6d runs OSPFv3 on
+  the uplinks (area 0, DR) and emits Hellos to `ff02::5` every 10s. v6 routes it learns
+  flow zebra → kernel FIB → edged → `L3_DEFIP_128`. Adjacency/routes need OSPFv3 on the
+  peer.
 - **Web UI**: v6 addresses/routes on the Interfaces/ECMP pages (currently `ip -4`
   only); an OSPFv3 view if `ospf6d` is enabled.
 - **Validation**: v6 transit + ECMP forwarding test, mirroring the v4 validation.
