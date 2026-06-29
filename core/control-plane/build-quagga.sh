@@ -18,7 +18,7 @@
 set -e
 
 QUAGGA_VER=1.2.4
-QUAGGA_URL="https://download.savannah.gnu.org/releases/quagga/quagga-${QUAGGA_VER}.tar.gz"
+QUAGGA_URL="https://github.com/Quagga/quagga/releases/download/quagga-${QUAGGA_VER}/quagga-${QUAGGA_VER}.tar.gz"
 IMG=edgenos-builder
 export DOCKER_HOST=${DOCKER_HOST:-unix:///run/user/1000/docker.sock}
 TOP=$(cd "$(dirname "$0")/.." && pwd)
@@ -57,6 +57,7 @@ sed -i "s|return crypt (passwd, salt);|(void)salt; return (char *)passwd;|" lib/
     --disable-bgpd --disable-ripd --disable-ripngd --disable-ospf6d \
     --disable-isisd --disable-pimd --disable-nhrpd \
     --enable-user=root --enable-group=root --enable-vty-group=root \
+    --enable-multipath=8 \
     --enable-static --disable-shared \
     LDFLAGS="-static" CFLAGS="-O2 -fcommon" ac_cv_lib_readline_main=no
 
