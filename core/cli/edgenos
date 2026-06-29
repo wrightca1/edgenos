@@ -10,10 +10,14 @@ dispatcher over the on-box modules under /usr/lib/edgenos.
   edgenos pkg info|verify <file.epk>    inspect a package
   edgenos pkg install <file.epk>        install/upgrade a component on the LIVE switch
   edgenos pkg remove|show <name>        manage installed packages
+  edgenos l2 show                       show L2-switch groups (bridged port sets)
+  edgenos l2 set <vid> <port>...        bridge ports into one L2 switch (live)
+  edgenos l2 del <vid> | l2 clear       remove a group / all groups (back to L3, live)
 """
 import os
 import sys
 import json
+import subprocess
 
 LIB = os.environ.get("EDGENOS_LIB", "/usr/lib/edgenos")
 
@@ -28,6 +32,70 @@ def cmd_version():
     print(f"  platform : {d.get('onie_platform')}")
     print(f"  arch/asic: {d.get('arch')} / {d.get('asic')}   kernel {d.get('kernel')}")
     print(f"  datapath : {d.get('datapath')}")
+    return 0
+
+
+def _datapath():
+    """(daemon, l2-groups.conf path) for the running datapath, else (None, None)."""
+    for name, conf in (("edged", "/etc/edged/l2-groups.conf"),
+                       ("bcmd", "/etc/bcmd/l2-groups.conf")):
+        if subprocess.call(["pgrep", "-x", name], stdout=subprocess.DEVNULL) == 0:
+            return name, conf
+    return None, None
+
+
+def _l2_read(conf):
+    groups = {}
+    try:
+        for line in open(conf):
+            line = line.split("#")[0].strip()
+            t = line.split()
+            if len(t) >= 2:
+                groups[t[0]] = t[1:]
+    except OSError:
+        pass
+    return groups
+
+
+def _l2_write(conf, groups):
+    os.makedirs(os.path.dirname(conf), exist_ok=True)
+    with open(conf, "w") as f:
+        f.write("# EdgeNOS L2-switch groups — bridge a set of ports into one VLAN.\n")
+        f.write("# <vid> <port> <port> ...   (ports: swpN on 5610, geN/xeN on 4610)\n")
+        for vid in sorted(groups, key=int):
+            f.write("%s %s\n" % (vid, " ".join(groups[vid])))
+
+
+def cmd_l2(rest):
+    daemon, conf = _datapath()
+    if not daemon:
+        print("no datapath daemon (edged/bcmd) running — cannot manage L2 groups")
+        return 1
+    sub = rest[0] if rest else "show"
+    groups = _l2_read(conf)
+
+    if sub == "show":
+        if not groups:
+            print("no L2-switch groups (every port is its own L3 interface)")
+            return 0
+        print("L2-switch groups [%s %s]:" % (daemon, conf))
+        for vid in sorted(groups, key=int):
+            print("  VLAN %s  ⇄  %s" % (vid, " ".join(groups[vid])))
+        return 0
+    if sub == "set" and len(rest) >= 3:
+        vid, ports = rest[1], rest[2:]
+        groups[vid] = ports
+    elif sub == "del" and len(rest) >= 2:
+        groups.pop(rest[1], None)
+    elif sub == "clear":
+        groups = {}
+    else:
+        print("usage: edgenos l2 [show | set <vid> <port>... | del <vid> | clear]")
+        return 1
+
+    _l2_write(conf, groups)
+    subprocess.call(["pkill", "-HUP", "-x", daemon])      # live re-sync
+    print("applied — %s re-synced L2 groups from %s" % (daemon, conf))
     return 0
 
 
@@ -46,6 +114,8 @@ def main(argv):
         sys.path.insert(0, LIB)                  # epkg.py + epk.py live here on-box
         import epkg
         return epkg.main(["epkg"] + rest)
+    if cmd == "l2":
+        return cmd_l2(rest)
     print(__doc__.strip())
     return 1
 

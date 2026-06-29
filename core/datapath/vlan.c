@@ -41,6 +41,9 @@
 #define EDGED_RESV_VLAN_LO  3300
 #define EDGED_RESV_VLAN_HI  3999
 
+/* Current L2-group VID per swp (0 = default per-port L3 isolation). */
+static int port_group_vid[EDGED_MAX_PORTS + 1];
+
 static int vid_is_reserved(int vid)
 {
     return vid >= EDGED_RESV_VLAN_LO && vid <= EDGED_RESV_VLAN_HI;
@@ -446,12 +449,55 @@ int vlan_l2_group_apply(int vid, const int *swps, int n)
                    vid, p->ifname, rv);
 
         added++;
+        port_group_vid[swp] = vid;          /* track for live reset/re-sync */
         syslog(LOG_INFO, "L2 group %d: + %s (lane %d, moved off service VID %d)",
                vid, p->ifname, p->physical_lane, rvid);
     }
 
     syslog(LOG_INFO, "L2 group VLAN %d: %d/%d member ports active", vid, added, n);
     return added > 0 ? 0 : -1;
+}
+
+/* Restore one swp from its current L2 group back to its per-port L3 service VLAN
+ * (the reverse of the per-port move in vlan_l2_group_apply). */
+static int vlan_port_restore_l3(int swp)
+{
+    struct port_state *p;
+    int rvid, gvid;
+
+    if (swp < 1 || swp > EDGED_MAX_PORTS || !edged.ports[swp - 1].valid)
+        return -1;
+    gvid = port_group_vid[swp];
+    if (gvid == 0)
+        return 0;                           /* already L3-isolated */
+    p = &edged.ports[swp - 1];
+    rvid = edged_resv_vid_for_port(p->logical_port);
+    (void)bmd_vlan_port_remove(edged.unit, gvid, p->physical_lane);
+    (void)bmd_vlan_port_add(edged.unit, rvid, p->physical_lane, BMD_VLAN_PORT_F_UNTAGGED);
+    (void)bmd_port_vlan_set(edged.unit, p->physical_lane, rvid);
+    (void)bmd_port_stp_set(edged.unit, p->physical_lane, bmdSpanningTreeForwarding);
+    port_group_vid[swp] = 0;
+    syslog(LOG_INFO, "L2 group: %s restored to L3 service VID %d", p->ifname, rvid);
+    return 0;
+}
+
+/* Tear down every L2 group — restore all grouped ports to per-port L3 isolation. */
+void vlan_l2_reset(void)
+{
+    int swp, n = 0;
+    for (swp = 1; swp <= EDGED_MAX_PORTS; swp++)
+        if (port_group_vid[swp] && vlan_port_restore_l3(swp) == 0)
+            n++;
+    if (n)
+        syslog(LOG_INFO, "L2 groups: reset %d ports to L3", n);
+}
+
+/* Live re-sync: tear down current groups, then re-apply from the config file.
+ * Driven by SIGHUP so the CLI / web UI can flip ports without a chip re-init. */
+int vlan_l2_resync(const char *path)
+{
+    vlan_l2_reset();
+    return vlan_load_l2_groups(path);
 }
 
 /*

@@ -45,6 +45,7 @@ static volatile int running = 1;
 
 static volatile int rx_diag_req = 0;
 static volatile int led_diag_req = 0;
+static volatile int vlan_resync_req = 0;   /* SIGHUP: re-sync L2 groups from config */
 
 /*
  * Readiness sentinel. edged drops /run/edged.ready ONLY after it has fully
@@ -84,6 +85,8 @@ static void signal_handler(int sig)
         rx_diag_req = 1;  /* serviced in main loop (chip reads not signal-safe) */
     } else if (sig == SIGUSR2) {
         led_diag_req = 1; /* LED state dump, serviced in main loop */
+    } else if (sig == SIGHUP) {
+        vlan_resync_req = 1; /* re-apply L2 groups from config, in main loop */
     }
 }
 
@@ -339,6 +342,7 @@ int main(int argc, char **argv)
     signal(SIGINT, signal_handler);
     signal(SIGUSR1, signal_handler);  /* RX-path drop-counter dump */
     signal(SIGUSR2, signal_handler);  /* LED state dump */
+    signal(SIGHUP,  signal_handler);  /* re-sync L2 switch groups from config */
 
     /* Remove any stale readiness sentinel from a prior instance — until init
      * completes below, edged is NOT ready and loaders must keep waiting. */
@@ -447,6 +451,12 @@ int main(int argc, char **argv)
         if (led_diag_req) {
             led_diag_req = 0;
             led_diag();
+        }
+
+        if (vlan_resync_req) {
+            vlan_resync_req = 0;
+            syslog(LOG_INFO, "SIGHUP: re-syncing L2 switch groups");
+            vlan_l2_resync("/etc/edged/l2-groups.conf");
         }
 
         /* Link poll every ~30ms (300 iterations at 100us) */

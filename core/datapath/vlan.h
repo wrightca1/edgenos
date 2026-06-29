@@ -34,4 +34,11 @@ int vlan_l2_group_apply(int vid, const int *swps, int n);
  * Returns the number of groups applied. Missing file = 0 (not an error). */
 int vlan_load_l2_groups(const char *path);
 
+/* Tear down all L2 groups (restore every grouped port to per-port L3 isolation). */
+void vlan_l2_reset(void);
+
+/* Live re-sync from the config file: reset, then re-apply. Driven by SIGHUP so the
+ * CLI / web UI can flip ports into/out of L2-switch mode without a chip re-init. */
+int vlan_l2_resync(const char *path);
+
 #endif /* __VLAN_H__ */
