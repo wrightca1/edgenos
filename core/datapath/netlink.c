@@ -201,9 +201,13 @@ static void handle_route(struct nlmsghdr *nlh)
     int oif = 0;
     uint32_t gws[64];      /* gateways, network byte order */
     int ngw = 0;
+    uint8_t dst6[16] = {0};
+    uint8_t gws6[64][16];  /* v6 gateways, network byte order */
+    int is6;
 
     if (rtm->rtm_family != AF_INET && rtm->rtm_family != AF_INET6)
         return;
+    is6 = (rtm->rtm_family == AF_INET6);
 
     /* Skip non-main table routes */
     if (rtm->rtm_table != RT_TABLE_MAIN)
@@ -215,11 +219,13 @@ static void handle_route(struct nlmsghdr *nlh)
     while (RTA_OK(rta, rtl)) {
         switch (rta->rta_type) {
         case RTA_DST:
-            if (rtm->rtm_family == AF_INET)
-                memcpy(&dst, RTA_DATA(rta), 4);
+            if (is6) memcpy(dst6, RTA_DATA(rta), 16);
+            else     memcpy(&dst, RTA_DATA(rta), 4);
             break;
         case RTA_GATEWAY:
-            if (rtm->rtm_family == AF_INET) {
+            if (is6) {
+                if (ngw < 64) memcpy(gws6[ngw++], RTA_DATA(rta), 16);
+            } else {
                 memcpy(&gw, RTA_DATA(rta), 4);
                 if (ngw < 64) gws[ngw++] = gw;
             }
@@ -236,10 +242,9 @@ static void handle_route(struct nlmsghdr *nlh)
                 struct rtattr *nha = RTNH_DATA(rtnh);
                 int nhalen = rtnh->rtnh_len - sizeof(*rtnh);
                 while (RTA_OK(nha, nhalen)) {
-                    if (nha->rta_type == RTA_GATEWAY &&
-                        rtm->rtm_family == AF_INET && ngw < 64) {
-                        memcpy(&gws[ngw], RTA_DATA(nha), 4);
-                        ngw++;
+                    if (nha->rta_type == RTA_GATEWAY && ngw < 64) {
+                        if (is6) memcpy(gws6[ngw++], RTA_DATA(nha), 16);
+                        else     memcpy(&gws[ngw++], RTA_DATA(nha), 4);
                     }
                     nha = RTA_NEXT(nha, nhalen);
                 }
@@ -252,9 +257,11 @@ static void handle_route(struct nlmsghdr *nlh)
     }
 
     if (nlh->nlmsg_type == RTM_NEWROUTE) {
-        syslog(LOG_DEBUG, "Route add: dst=%08x/%d ngw=%d oif=%d",
-               dst, rtm->rtm_dst_len, ngw, oif);
-        if (rtm->rtm_family == AF_INET && ngw > 0) {
+        if (is6) {
+            if (ngw > 0)
+                l3_route_add_paths_v6(dst6, rtm->rtm_dst_len, gws6, ngw);
+            /* else: v6 connected route — no chip transit entry needed */
+        } else if (ngw > 0) {
             /* Program transit/ECMP into the chip (host byte order). */
             uint32_t dst_host = ntohl(dst);
             uint32_t gw_host[64];
@@ -265,8 +272,10 @@ static void handle_route(struct nlmsghdr *nlh)
             l3_route_add(rtm->rtm_family, &dst, rtm->rtm_dst_len, &gw, oif);
         }
     } else if (nlh->nlmsg_type == RTM_DELROUTE) {
-        syslog(LOG_DEBUG, "Route del: dst=%08x/%d", dst, rtm->rtm_dst_len);
-        l3_route_del(rtm->rtm_family, &dst, rtm->rtm_dst_len);
+        if (is6)
+            l3_route_del_v6(dst6, rtm->rtm_dst_len);
+        else
+            l3_route_del(rtm->rtm_family, &dst, rtm->rtm_dst_len);
     }
 }
 

@@ -51,4 +51,9 @@ int l3_local_host_add(uint32_t ipv4_addr, int logical_port);
 int l3_route_add_paths(uint32_t dst_host, int prefix_len,
                        const uint32_t *gw_host, int ngw);
 
+/* IPv6 transit route into L3_DEFIP_128 (dst/gateways are 16-byte, network order). */
+int l3_route_add_paths_v6(const uint8_t *dst16, int prefix_len,
+                          const uint8_t gw16[][16], int ngw);
+int l3_route_del_v6(const uint8_t *dst16, int prefix_len);
+
 #endif /* __L3_H__ */

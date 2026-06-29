@@ -1433,3 +1433,173 @@ int l3_route_add_paths(uint32_t dst_host, int prefix_len,
                prefix_len, new_ref, rv);
     return rv < 0 ? -1 : 0;
 }
+
+/* ===========================================================================
+ * IPv6 transit routes -> L3_DEFIP_128 (a dedicated 256-entry table, separate
+ * from the v4 L3_DEFIP TCAM). Own slot free-list; ECMP groups + path signatures
+ * are shared with v4 (groups just hold next-hop indices).
+ * ========================================================================= */
+#define L3_ROUTE6_MAX 256
+
+struct l3_rt6 {
+    uint8_t  target[16];     /* prefix network (already masked by the kernel) */
+    int      prefix_len;
+    int      slot;           /* L3_DEFIP_128 index (0..255) */
+    int      is_ecmp;
+    int      ref;            /* ECMP group_id or single next-hop index */
+    uint64_t sig;
+    int      valid;
+};
+static struct l3_rt6 route6_tab[L3_ROUTE6_MAX];
+
+static int defip128_next_slot;          /* high-water of L3_DEFIP_128 */
+static int defip128_free[L3_ROUTE6_MAX];
+static int defip128_free_n;
+
+static int defip128_alloc(void)
+{
+    if (defip128_free_n > 0) return defip128_free[--defip128_free_n];
+    if (defip128_next_slot > L3_DEFIP_128m_MAX) return -1;
+    return defip128_next_slot++;
+}
+static void defip128_release(int s)
+{
+    if (defip128_free_n < L3_ROUTE6_MAX) defip128_free[defip128_free_n++] = s;
+}
+static struct l3_rt6 *route6_find(const uint8_t *t, int plen)
+{
+    for (int i = 0; i < L3_ROUTE6_MAX; i++)
+        if (route6_tab[i].valid && route6_tab[i].prefix_len == plen &&
+            memcmp(route6_tab[i].target, t, 16) == 0)
+            return &route6_tab[i];
+    return NULL;
+}
+static struct l3_rt6 *route6_alloc(void)
+{
+    for (int i = 0; i < L3_ROUTE6_MAX; i++)
+        if (!route6_tab[i].valid) return &route6_tab[i];
+    return NULL;
+}
+
+/* 128-bit address -> 4 words (word[3] = most significant 32 bits). */
+static void v6_addr_words(const uint8_t *a, uint32_t w[4])
+{
+    w[3] = ((uint32_t)a[0]<<24)|((uint32_t)a[1]<<16)|((uint32_t)a[2]<<8)|a[3];
+    w[2] = ((uint32_t)a[4]<<24)|((uint32_t)a[5]<<16)|((uint32_t)a[6]<<8)|a[7];
+    w[1] = ((uint32_t)a[8]<<24)|((uint32_t)a[9]<<16)|((uint32_t)a[10]<<8)|a[11];
+    w[0] = ((uint32_t)a[12]<<24)|((uint32_t)a[13]<<16)|((uint32_t)a[14]<<8)|a[15];
+}
+/* /plen prefix -> 4-word mask (top `plen` bits set; word[3] holds bits 127..96). */
+static void v6_mask_words(int plen, uint32_t w[4])
+{
+    int bits = plen, word;
+    for (word = 0; word < 4; word++) w[word] = 0;
+    for (word = 3; word >= 0 && bits > 0; word--) {
+        int n = bits >= 32 ? 32 : bits;
+        w[word] = (n == 32) ? 0xffffffffu : (0xffffffffu << (32 - n));
+        bits -= n;
+    }
+}
+
+int l3_route_add_paths_v6(const uint8_t *dst16, int prefix_len,
+                          const uint8_t gw16[][16], int ngw)
+{
+    int nh_idx[64], n = 0, rv;
+    char ds[INET6_ADDRSTRLEN] = "?";
+    inet_ntop(AF_INET6, dst16, ds, sizeof(ds));
+
+    if (ngw < 1) return -1;
+    if (ngw > 64) ngw = 64;
+
+    for (int i = 0; i < ngw; i++) {
+        int nh = l3_neigh6_lookup(gw16[i]);
+        if (nh < 0) continue;               /* gateway not resolved yet (re-dump heals) */
+        nh_idx[n++] = nh;
+    }
+    if (n == 0) {
+        syslog(LOG_WARNING, "v6 route %s/%d: no resolved next-hops, not programmed",
+               ds, prefix_len);
+        return -1;
+    }
+
+    for (int a = 0; a < n; a++)
+        for (int b = a + 1; b < n; b++)
+            if (nh_idx[b] < nh_idx[a]) { int t = nh_idx[a]; nh_idx[a] = nh_idx[b]; nh_idx[b] = t; }
+    uint64_t sig = path_sig(nh_idx, n);
+
+    struct l3_rt6 *r = route6_find(dst16, prefix_len);
+    if (r && r->sig == sig)
+        return 0;                           /* unchanged */
+
+    int is_ecmp = (n > 1);
+    int new_ref = is_ecmp ? ecmp_group_ref(nh_idx, n, sig) : nh_idx[0];
+    if (is_ecmp && new_ref < 0) return -1;
+
+    int slot = r ? r->slot : defip128_alloc();
+    if (slot < 0) {
+        syslog(LOG_ERR, "v6 route %s/%d: L3_DEFIP_128 full", ds, prefix_len);
+        if (is_ecmp) ecmp_group_unref(new_ref);
+        return -1;
+    }
+
+    uint32_t aw[4], mw[4];
+    v6_addr_words(dst16, aw);
+    v6_mask_words(prefix_len, mw);
+
+    L3_DEFIP_128m_t d;
+    L3_DEFIP_128m_CLR(d);
+    L3_DEFIP_128m_VALID_0f_SET(d, 1);
+    L3_DEFIP_128m_VALID_1f_SET(d, 1);
+    L3_DEFIP_128m_IP_ADDRf_SET(d, aw);
+    L3_DEFIP_128m_IP_ADDR_MASKf_SET(d, mw);
+    L3_DEFIP_128m_VRF_IDf_SET(d, 0);
+    L3_DEFIP_128m_VRF_ID_MASKf_SET(d, 0x3ff);
+    if (is_ecmp) {
+        L3_DEFIP_128m_ECMPf_SET(d, 1);
+        L3_DEFIP_128m_ECMP_PTRf_SET(d, new_ref);
+    } else {
+        L3_DEFIP_128m_ECMPf_SET(d, 0);
+        L3_DEFIP_128m_NEXT_HOP_INDEXf_SET(d, new_ref);
+    }
+    rv = WRITE_L3_DEFIP_128m(edged.unit, slot, d);
+
+    if (r && r->is_ecmp)
+        ecmp_group_unref(r->ref);
+    if (!r) {
+        r = route6_alloc();
+        if (!r) { syslog(LOG_ERR, "v6 route table full — %s/%d", ds, prefix_len); return -1; }
+        memcpy(r->target, dst16, 16);
+        r->prefix_len = prefix_len; r->slot = slot; r->valid = 1;
+    }
+    r->is_ecmp = is_ecmp; r->ref = new_ref; r->sig = sig;
+
+    if (is_ecmp)
+        syslog(LOG_INFO, "route L3_DEFIP_128[%d] %s/%d -> ECMP grp=%d (%d paths) wr=%d",
+               slot, ds, prefix_len, new_ref, n, rv);
+    else
+        syslog(LOG_INFO, "route L3_DEFIP_128[%d] %s/%d -> nh_idx=%d wr=%d",
+               slot, ds, prefix_len, new_ref, rv);
+    return rv < 0 ? -1 : 0;
+}
+
+int l3_route_del_v6(const uint8_t *dst16, int prefix_len)
+{
+    char ds[INET6_ADDRSTRLEN] = "?";
+    inet_ntop(AF_INET6, dst16, ds, sizeof(ds));
+
+    struct l3_rt6 *r = route6_find(dst16, prefix_len);
+    if (!r) {
+        syslog(LOG_DEBUG, "v6 route del: %s/%d not in L3_DEFIP_128", ds, prefix_len);
+        return 0;
+    }
+    L3_DEFIP_128m_t d;
+    L3_DEFIP_128m_CLR(d);
+    int rv = WRITE_L3_DEFIP_128m(edged.unit, r->slot, d);
+    defip128_release(r->slot);
+    if (r->is_ecmp)
+        ecmp_group_unref(r->ref);
+    syslog(LOG_INFO, "route L3_DEFIP_128[%d] %s/%d removed (wr=%d), slot freed%s",
+           r->slot, ds, prefix_len, rv, r->is_ecmp ? ", ECMP group dereffed" : "");
+    r->valid = 0;
+    return 0;
+}
