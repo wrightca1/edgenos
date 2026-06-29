@@ -134,6 +134,95 @@ static int l3_v4_schan_delete(int unit, L3_ENTRY_IPV4_UNICASTm_t *key)
 }
 
 /*
+ * IPv6 host entry SCHAN insert/delete. L3_ENTRY_IPV6_UNICAST is a *double-wide*
+ * hashed entry (6 words / 24 bytes, vs 3 words for v4), so the SCHAN op carries
+ * 24 bytes of key+data. Same machinery as the v4 helpers above.
+ */
+static int l3_v6_schan_insert(int unit, L3_ENTRY_IPV6_UNICASTm_t *e)
+{
+    schan_msg_t schan_msg;
+    int ipipe_blk = cdk_xgs_block_number(unit, BLKTYPE_IPIPE, 0);
+    int rv, type;
+
+    if (ipipe_blk < 0)
+        return -1;
+
+    SCHAN_MSG_CLEAR(&schan_msg);
+    SCMH_OPCODE_SET(schan_msg.gencmd.header, TABLE_INSERT_CMD_MSG);
+    SCMH_SRCBLK_SET(schan_msg.gencmd.header, CDK_XGS_CMIC_BLOCK(unit));
+    SCMH_DSTBLK_SET(schan_msg.gencmd.header, ipipe_blk);
+    SCMH_DATALEN_SET(schan_msg.gencmd.header, 24);   /* 6 words */
+    schan_msg.gencmd.address = L3_ENTRY_IPV6_UNICASTm;
+    CDK_MEMCPY(schan_msg.gencmd.data, e->v, 24);
+
+    /* writes = 1 header + 1 address + 6 data = 8; reads = 2 */
+    rv = cdk_xgs_schan_op(unit, &schan_msg, 8, 2);
+    if (rv < 0)
+        return rv;
+    type = SCGR_TYPE_GET(schan_msg.genresp.response);
+    if (type == SCGR_TYPE_INSERTED || type == SCGR_TYPE_REPLACED)
+        return SCGR_INDEX_GET(schan_msg.genresp.response);
+    if (type == SCGR_TYPE_FULL)
+        return -2;
+    return -3;
+}
+
+static int l3_v6_schan_delete(int unit, L3_ENTRY_IPV6_UNICASTm_t *key)
+{
+    schan_msg_t schan_msg;
+    int ipipe_blk = cdk_xgs_block_number(unit, BLKTYPE_IPIPE, 0);
+    int rv, type;
+
+    if (ipipe_blk < 0)
+        return -1;
+
+    SCHAN_MSG_CLEAR(&schan_msg);
+    SCMH_OPCODE_SET(schan_msg.gencmd.header, TABLE_DELETE_CMD_MSG);
+    SCMH_SRCBLK_SET(schan_msg.gencmd.header, CDK_XGS_CMIC_BLOCK(unit));
+    SCMH_DSTBLK_SET(schan_msg.gencmd.header, ipipe_blk);
+    SCMH_DATALEN_SET(schan_msg.gencmd.header, 24);
+    schan_msg.gencmd.address = L3_ENTRY_IPV6_UNICASTm;
+    CDK_MEMCPY(schan_msg.gencmd.data, key->v, 24);
+
+    rv = cdk_xgs_schan_op(unit, &schan_msg, 8, 2);
+    if (rv < 0)
+        return rv;
+    type = SCGR_TYPE_GET(schan_msg.genresp.response);
+    if (type == SCGR_TYPE_DELETED || type == SCGR_TYPE_NOT_FOUND)
+        return 0;
+    return -3;
+}
+
+static int l3_v6_schan_lookup(int unit, L3_ENTRY_IPV6_UNICASTm_t *key,
+                              L3_ENTRY_IPV6_UNICASTm_t *out)
+{
+    schan_msg_t schan_msg;
+    int ipipe_blk = cdk_xgs_block_number(unit, BLKTYPE_IPIPE, 0);
+    int rv, type;
+
+    if (ipipe_blk < 0)
+        return -1;
+
+    SCHAN_MSG_CLEAR(&schan_msg);
+    SCMH_OPCODE_SET(schan_msg.gencmd.header, TABLE_LOOKUP_CMD_MSG);
+    SCMH_SRCBLK_SET(schan_msg.gencmd.header, CDK_XGS_CMIC_BLOCK(unit));
+    SCMH_DSTBLK_SET(schan_msg.gencmd.header, ipipe_blk);
+    SCMH_DATALEN_SET(schan_msg.gencmd.header, 24);
+    schan_msg.gencmd.address = L3_ENTRY_IPV6_UNICASTm;
+    CDK_MEMCPY(schan_msg.gencmd.data, key->v, 24);
+
+    rv = cdk_xgs_schan_op(unit, &schan_msg, 8, 8);
+    if (rv < 0)
+        return rv;
+    type = SCGR_TYPE_GET(schan_msg.genresp.response);
+    if (type == SCGR_TYPE_NOT_FOUND)
+        return -2;
+    if (out)
+        CDK_MEMCPY(out->v, schan_msg.genresp.data, 24);
+    return SCGR_INDEX_GET(schan_msg.genresp.response);
+}
+
+/*
  * Convert a 6-byte MAC into the 2-word field format used by chip
  * tables (BMD_PORT_MAC, L2X, MY_STATION_TCAM all use the same
  * encoding from xgs_mac_to_field_val).
@@ -558,6 +647,39 @@ static void l3_neigh_nh_remove(uint32_t ip_host)
         }
 }
 
+/* IPv6 gateway/host -> chip next-hop map (mirrors the v4 one, 16-byte key). */
+static struct { uint8_t ip[16]; int nh_idx; int valid; } l3_neigh_nh6[L3_NEIGH_MAX];
+
+static int l3_neigh6_lookup(const uint8_t *ip16)
+{
+    for (int i = 0; i < L3_NEIGH_MAX; i++)
+        if (l3_neigh_nh6[i].valid && memcmp(l3_neigh_nh6[i].ip, ip16, 16) == 0)
+            return l3_neigh_nh6[i].nh_idx;
+    return -1;
+}
+static void l3_neigh6_record(const uint8_t *ip16, int nh_idx)
+{
+    int free_slot = -1;
+    for (int i = 0; i < L3_NEIGH_MAX; i++) {
+        if (l3_neigh_nh6[i].valid && memcmp(l3_neigh_nh6[i].ip, ip16, 16) == 0) {
+            l3_neigh_nh6[i].nh_idx = nh_idx; return;
+        }
+        if (free_slot < 0 && !l3_neigh_nh6[i].valid) free_slot = i;
+    }
+    if (free_slot >= 0) {
+        memcpy(l3_neigh_nh6[free_slot].ip, ip16, 16);
+        l3_neigh_nh6[free_slot].nh_idx = nh_idx;
+        l3_neigh_nh6[free_slot].valid = 1;
+    }
+}
+static void l3_neigh6_remove(const uint8_t *ip16)
+{
+    for (int i = 0; i < L3_NEIGH_MAX; i++)
+        if (l3_neigh_nh6[i].valid && memcmp(l3_neigh_nh6[i].ip, ip16, 16) == 0) {
+            l3_neigh_nh6[i].valid = 0; return;
+        }
+}
+
 /* Map a swpN logical port to its L3_INTF index.  Simple 1:1. */
 static int l3_intf_for_logical_port(int logical_port)
 {
@@ -807,12 +929,8 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
     if (ifindex)
         if_indextoname(ifindex, ifname);
 
-    if (family != AF_INET) {
-        /* IPv6 path not implemented yet — kernel still routes via TUN. */
-        syslog(LOG_DEBUG, "L3 host add (v6 not chip-routed): %s dev %s",
-               addr_str, ifname);
-        return 0;
-    }
+    int is_v6 = (family == AF_INET6);   /* v4 and v6 share the next-hop setup below;
+                                           only the nh-map + L3_ENTRY insert differ. */
 
     /* Map dev "swpN" -> our port_state -> physical_lane + service VID. */
     if (strncmp(ifname, "swp", 3) != 0) {
@@ -857,10 +975,15 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
      *    refresh re-fires l3_host_add), else allocate one. Reusing keeps the
      *    gateway's nh_idx stable and stops re-resolution leaking next-hop indices. */
     {
-        const uint8_t *ipb2 = (const uint8_t *)addr;
-        uint32_t ip_h = ((uint32_t)ipb2[0] << 24) | ((uint32_t)ipb2[1] << 16)
-                      | ((uint32_t)ipb2[2] <<  8) |  (uint32_t)ipb2[3];
-        int existing = l3_neigh_nh_lookup(ip_h);
+        int existing;
+        if (is_v6) {
+            existing = l3_neigh6_lookup((const uint8_t *)addr);
+        } else {
+            const uint8_t *ipb2 = (const uint8_t *)addr;
+            uint32_t ip_h = ((uint32_t)ipb2[0] << 24) | ((uint32_t)ipb2[1] << 16)
+                          | ((uint32_t)ipb2[2] <<  8) |  (uint32_t)ipb2[3];
+            existing = l3_neigh_nh_lookup(ip_h);
+        }
         nh_idx = (existing >= 0) ? existing : next_hop_alloc();
     }
 
@@ -910,8 +1033,47 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
         }
     }
 
-    /* 3) L3 host entry: map host IP -> our nh_idx. */
-    {
+    /* 3) L3 host entry: map host IP -> our nh_idx (v4 or v6 hash table). */
+    if (is_v6) {
+        const uint8_t *a = (const uint8_t *)addr;       /* 16 bytes, network order */
+        L3_ENTRY_IPV6_UNICASTm_t h6;
+        /* Each 64-bit half as {low-word, high-word}; byte a[0] is most significant. */
+        uint32_t upr[2], lwr[2];
+        upr[1] = ((uint32_t)a[0]<<24)|((uint32_t)a[1]<<16)|((uint32_t)a[2]<<8)|a[3];
+        upr[0] = ((uint32_t)a[4]<<24)|((uint32_t)a[5]<<16)|((uint32_t)a[6]<<8)|a[7];
+        lwr[1] = ((uint32_t)a[8]<<24)|((uint32_t)a[9]<<16)|((uint32_t)a[10]<<8)|a[11];
+        lwr[0] = ((uint32_t)a[12]<<24)|((uint32_t)a[13]<<16)|((uint32_t)a[14]<<8)|a[15];
+
+        L3_ENTRY_IPV6_UNICASTm_CLR(h6);
+        L3_ENTRY_IPV6_UNICASTm_KEY_TYPE_0f_SET(h6, 2);   /* IPv6 unicast host */
+        L3_ENTRY_IPV6_UNICASTm_KEY_TYPE_1f_SET(h6, 2);
+        L3_ENTRY_IPV6_UNICASTm_V6_0f_SET(h6, 1);
+        L3_ENTRY_IPV6_UNICASTm_V6_1f_SET(h6, 1);
+        L3_ENTRY_IPV6_UNICASTm_IPV6UC_IP_ADDR_UPR_64f_SET(h6, upr);
+        L3_ENTRY_IPV6_UNICASTm_IPV6UC_IP_ADDR_LWR_64f_SET(h6, lwr);
+        L3_ENTRY_IPV6_UNICASTm_IPV6UC_NEXT_HOP_INDEXf_SET(h6, nh_idx);
+        L3_ENTRY_IPV6_UNICASTm_VALID_0f_SET(h6, 1);
+        L3_ENTRY_IPV6_UNICASTm_VALID_1f_SET(h6, 1);
+
+        int idx = l3_v6_schan_insert(edged.unit, &h6);
+        if (idx < 0) {
+            syslog(LOG_WARNING, "L3_ENTRY_IPV6 schan_insert failed: %d", idx);
+            return -1;
+        }
+        /* Read it back to confirm the key encoding hashes/looks up. */
+        L3_ENTRY_IPV6_UNICASTm_t key;
+        L3_ENTRY_IPV6_UNICASTm_CLR(key);
+        L3_ENTRY_IPV6_UNICASTm_KEY_TYPE_0f_SET(key, 2);
+        L3_ENTRY_IPV6_UNICASTm_KEY_TYPE_1f_SET(key, 2);
+        L3_ENTRY_IPV6_UNICASTm_V6_0f_SET(key, 1);
+        L3_ENTRY_IPV6_UNICASTm_V6_1f_SET(key, 1);
+        L3_ENTRY_IPV6_UNICASTm_IPV6UC_IP_ADDR_UPR_64f_SET(key, upr);
+        L3_ENTRY_IPV6_UNICASTm_IPV6UC_IP_ADDR_LWR_64f_SET(key, lwr);
+        int lk = l3_v6_schan_lookup(edged.unit, &key, NULL);
+        syslog(LOG_INFO, "L3_ENTRY_IPV6: %s -> nh_idx=%d insert=%d lookup=%s",
+               addr_str, nh_idx, idx, lk >= 0 ? "FOUND" : "NOT-FOUND(encoding?)");
+        l3_neigh6_record(a, nh_idx);
+    } else {
         L3_ENTRY_IPV4_UNICASTm_t hst;
         const uint8_t *ipb = (const uint8_t *)addr;
         uint32_t ip_be = ((uint32_t)ipb[0] << 24) | ((uint32_t)ipb[1] << 16)
@@ -926,19 +1088,13 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
         L3_ENTRY_IPV4_UNICASTm_HITf_SET(hst, 0);
         L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(hst, 1);
 
-        /* SCHAN HASH_INSERT — chip picks the bucket itself based on
-         * its internal hash over (IP, VRF, KEY_TYPE). */
         int idx = l3_v4_schan_insert(edged.unit, &hst);
         if (idx < 0) {
             syslog(LOG_WARNING,
-                   "L3_ENTRY_IPV4_UNICAST schan_insert failed: %d",
-                   idx);
+                   "L3_ENTRY_IPV4_UNICAST schan_insert failed: %d", idx);
             return -1;
         }
         syslog(LOG_DEBUG, "L3 host schan_insert placed at idx=%d", idx);
-
-        /* Register this resolved neighbor's chip next-hop so ECMP route
-         * programming can reference it by gateway IP. */
         l3_neigh_nh_record(ip_be, nh_idx);
     }
 
@@ -956,8 +1112,35 @@ int l3_host_del(int family, const void *addr)
     char addr_str[INET6_ADDRSTRLEN] = "?";
     inet_ntop(family, addr, addr_str, sizeof(addr_str));
 
-    if (family != AF_INET) {
-        syslog(LOG_DEBUG, "L3 host del (v6 not chip-routed): %s", addr_str);
+    if (family == AF_INET6) {
+        const uint8_t *a = (const uint8_t *)addr;
+        int nh = l3_neigh6_lookup(a);
+        if (nh < 0) {
+            syslog(LOG_DEBUG, "L3 host del: %s not tracked", addr_str);
+            return 0;
+        }
+        uint32_t upr[2], lwr[2];
+        upr[1] = ((uint32_t)a[0]<<24)|((uint32_t)a[1]<<16)|((uint32_t)a[2]<<8)|a[3];
+        upr[0] = ((uint32_t)a[4]<<24)|((uint32_t)a[5]<<16)|((uint32_t)a[6]<<8)|a[7];
+        lwr[1] = ((uint32_t)a[8]<<24)|((uint32_t)a[9]<<16)|((uint32_t)a[10]<<8)|a[11];
+        lwr[0] = ((uint32_t)a[12]<<24)|((uint32_t)a[13]<<16)|((uint32_t)a[14]<<8)|a[15];
+        L3_ENTRY_IPV6_UNICASTm_t k;
+        L3_ENTRY_IPV6_UNICASTm_CLR(k);
+        L3_ENTRY_IPV6_UNICASTm_KEY_TYPE_0f_SET(k, 2);
+        L3_ENTRY_IPV6_UNICASTm_KEY_TYPE_1f_SET(k, 2);
+        L3_ENTRY_IPV6_UNICASTm_V6_0f_SET(k, 1);
+        L3_ENTRY_IPV6_UNICASTm_V6_1f_SET(k, 1);
+        L3_ENTRY_IPV6_UNICASTm_IPV6UC_IP_ADDR_UPR_64f_SET(k, upr);
+        L3_ENTRY_IPV6_UNICASTm_IPV6UC_IP_ADDR_LWR_64f_SET(k, lwr);
+        (void)l3_v6_schan_delete(edged.unit, &k);
+
+        ING_L3_NEXT_HOPm_t ing; ING_L3_NEXT_HOPm_CLR(ing);
+        (void)WRITE_ING_L3_NEXT_HOPm(edged.unit, nh, ing);
+        EGR_L3_NEXT_HOPm_t egr; EGR_L3_NEXT_HOPm_CLR(egr);
+        (void)WRITE_EGR_L3_NEXT_HOPm(edged.unit, nh, egr);
+        next_hop_release(nh);
+        l3_neigh6_remove(a);
+        syslog(LOG_INFO, "L3 host del (v6): %s nh_idx %d freed", addr_str, nh);
         return 0;
     }
 
