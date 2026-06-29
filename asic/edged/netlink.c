@@ -387,6 +387,31 @@ void netlink_poll(void)
     }
 }
 
+void netlink_redump_routes(void)
+{
+    /* Periodically re-request a neighbor + route dump on the live socket. A
+     * transit/ECMP route whose gateway resolved *after* the route was first seen
+     * is skipped on first sight ("no resolved next-hops"); this re-dump reprograms
+     * it once the gateway's chip next-hop exists. l3_route_add_paths() is
+     * idempotent (skips prefixes already in L3_DEFIP), so re-dumping is cheap and
+     * non-destructive. Mirrors the 4610 bcmd periodic FIB re-dump. */
+    if (edged.netlink_fd <= 0)
+        return;
+    struct { struct nlmsghdr nlh; struct rtgenmsg gen; } req;
+    int kinds[2] = { RTM_GETNEIGH, RTM_GETROUTE };
+    for (int k = 0; k < 2; k++) {
+        memset(&req, 0, sizeof(req));
+        req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
+        req.nlh.nlmsg_type = kinds[k];
+        req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+        req.nlh.nlmsg_seq = 10 + k;
+        req.gen.rtgen_family = AF_INET;
+        if (send(edged.netlink_fd, &req, req.nlh.nlmsg_len, 0) < 0)
+            syslog(LOG_WARNING, "Netlink: periodic redump type=%d failed: %s",
+                   kinds[k], strerror(errno));
+    }
+}
+
 void netlink_cleanup(void)
 {
     if (edged.netlink_fd > 0) {

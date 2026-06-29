@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <signal.h>
 #include <getopt.h>
 #include <errno.h>
@@ -422,9 +423,21 @@ int main(int argc, char **argv)
      *      on page 0x1800 and enables/disables MAC on change)
      */
     int poll_count = 0;
+    time_t last_redump = time(NULL);
     while (running) {
         packet_io_rx_poll();
         netlink_poll();
+
+        /* Every 15s, re-dump neighbors + routes so a transit/ECMP route whose
+         * gateway resolved after the route was first seen gets programmed into
+         * the chip (l3_route_add_paths is idempotent, so this is non-destructive). */
+        {
+            time_t now = time(NULL);
+            if (now - last_redump >= 15) {
+                last_redump = now;
+                netlink_redump_routes();
+            }
+        }
 
         if (rx_diag_req) {
             rx_diag_req = 0;

@@ -10,6 +10,7 @@
 
 int netlink_init(void);
 void netlink_poll(void);
+void netlink_redump_routes(void);
 void netlink_cleanup(void);
 
 #endif /* __NETLINK_H__ */
