@@ -134,6 +134,7 @@
 
 			mux@70 {
 				compatible = "nxp,pca9548";
+				i2c-mux-idle-disconnect;
 				reg = <0x70>;
 				#address-cells = <1>;
 				#size-cells = <0>;
@@ -230,6 +231,7 @@
 					reg = <0>;
 					mux@74 {
 						compatible = "nxp,pca9548";
+						i2c-mux-idle-disconnect;
 						reg = <0x74>;
 						#address-cells = <1>;
 						#size-cells = <0>;
@@ -271,6 +273,7 @@
 					reg = <1>;
 					mux@74 {
 						compatible = "nxp,pca9548";
+						i2c-mux-idle-disconnect;
 						reg = <0x74>;
 						#address-cells = <1>;
 						#size-cells = <0>;
@@ -312,6 +315,7 @@
 					reg = <2>;
 					mux@74 {
 						compatible = "nxp,pca9548";
+						i2c-mux-idle-disconnect;
 						reg = <0x74>;
 						#address-cells = <1>;
 						#size-cells = <0>;
@@ -353,6 +357,7 @@
 					reg = <3>;
 					mux@74 {
 						compatible = "nxp,pca9548";
+						i2c-mux-idle-disconnect;
 						reg = <0x74>;
 						#address-cells = <1>;
 						#size-cells = <0>;
@@ -403,6 +408,7 @@
 					reg = <0>;
 					mux@74 {
 						compatible = "nxp,pca9548";
+						i2c-mux-idle-disconnect;
 						reg = <0x74>;
 						#address-cells = <1>;
 						#size-cells = <0>;
@@ -444,6 +450,7 @@
 					reg = <1>;
 					mux@74 {
 						compatible = "nxp,pca9548";
+						i2c-mux-idle-disconnect;
 						reg = <0x74>;
 						#address-cells = <1>;
 						#size-cells = <0>;
