@@ -32,6 +32,8 @@
 #include <sys/socket.h>
 #include <errno.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <poll.h>
 #include <net/if.h>
@@ -189,6 +191,90 @@ static int bcmd_vlan_isolate(bcm_port_t port)
     (void)bcm_vlan_port_remove(BCMD_UNIT, BCMD_VLAN, rbmp);   /* off default VLAN 1 */
     (void)bcm_port_untagged_vlan_set(BCMD_UNIT, port, vlan);  /* PVID */
     return 0;
+}
+
+/* Resolve an l2-groups.conf token to a front bcm_port: accepts the SOC port name
+ * ("ge1", "xe0") or a raw bcm port number. Returns -1 if unknown/not-front. */
+static int bcmd_port_from_token(const char *tok)
+{
+    char *end;
+    long num = strtol(tok, &end, 10);
+    if (*end == '\0') {                     /* pure number */
+        int p = (int)num;
+        return (p >= 0 && p < BCMD_MAXPORT && bcmd_is_front(p)) ? p : -1;
+    }
+    for (int p = 0; p < BCMD_MAXPORT; p++)
+        if (bcmd_is_front(p) && strcmp(SOC_PORT_NAME(BCMD_UNIT, p), tok) == 0)
+            return p;
+    return -1;
+}
+
+/* L2 switch group — the inverse of bcmd_vlan_isolate(): bridge the listed front
+ * ports into one shared VLAN (untagged, PVID set), pulling each off its per-port
+ * isolation VLAN (100+port) and default VLAN 1. The chip then L2-bridges them
+ * directly (MAC learning + flood among members); CPU stays a member for punt.
+ * Mirrors the 5610 edged vlan_l2_group_apply(). */
+static int bcmd_l2_group_apply(bcm_vlan_t vlan, const bcm_port_t *ports, int n)
+{
+    bcm_pbmp_t pbmp, ubmp, rbmp;
+    int i, rv;
+
+    if (vlan < 2 || vlan > 4094) {
+        printf("[bcmd] L2 group: invalid VID %d (must be 2-4094)\n", vlan);
+        return -1;
+    }
+    rv = bcm_vlan_create(BCMD_UNIT, vlan);
+    if (rv != BCM_E_NONE && rv != BCM_E_EXISTS) {
+        printf("[bcmd] L2 group vlan %d create rv=%d\n", vlan, rv);
+        return rv;
+    }
+    BCM_PBMP_CLEAR(pbmp); BCM_PBMP_CLEAR(ubmp);
+    BCM_PBMP_PORT_ADD(pbmp, BCMD_CPU_PORT);            /* CPU member for flood/punt */
+    for (i = 0; i < n; i++) {
+        BCM_PBMP_PORT_ADD(pbmp, ports[i]);
+        BCM_PBMP_PORT_ADD(ubmp, ports[i]);            /* untagged member */
+    }
+    (void)bcm_vlan_port_add(BCMD_UNIT, vlan, pbmp, ubmp);
+    for (i = 0; i < n; i++) {
+        BCM_PBMP_CLEAR(rbmp); BCM_PBMP_PORT_ADD(rbmp, ports[i]);
+        (void)bcm_vlan_port_remove(BCMD_UNIT, bcmd_vlan_for_port(ports[i]), rbmp);
+        (void)bcm_vlan_port_remove(BCMD_UNIT, BCMD_VLAN, rbmp);
+        (void)bcm_port_untagged_vlan_set(BCMD_UNIT, ports[i], vlan);   /* PVID */
+    }
+    printf("[bcmd] L2 group: VLAN %d bridging %d ports\n", vlan, n);
+    return 0;
+}
+
+/* Parse l2-groups.conf and apply each group. One group per line:
+ *   <vid> <portA> <portB> [portC ...]   (ports as "ge1"/"xe0" or a number)
+ * '#' comments and blank lines ignored. Missing file = 0 (not an error). */
+static int bcmd_load_l2_groups(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    char line[256];
+    int groups = 0;
+
+    if (!f) { printf("[bcmd] L2 groups: no %s (none configured)\n", path); return 0; }
+    while (fgets(line, sizeof(line), f)) {
+        bcm_port_t ports[BCMD_MAXPORT];
+        int np = 0, vid;
+        char *s = line, *tok;
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s == '#' || *s == '\n' || *s == '\0') continue;
+        tok = strtok(s, " \t\n");
+        if (!tok) continue;
+        vid = atoi(tok);
+        while ((tok = strtok(NULL, " \t\n")) && np < BCMD_MAXPORT) {
+            int p = bcmd_port_from_token(tok);
+            if (p < 0) { printf("[bcmd] L2 group %d: unknown port '%s'\n", vid, tok); continue; }
+            ports[np++] = p;
+        }
+        if (vid >= 2 && np >= 1 && bcmd_l2_group_apply(vid, ports, np) == 0)
+            groups++;
+    }
+    fclose(f);
+    printf("[bcmd] L2 groups: applied %d from %s\n", groups, path);
+    return groups;
 }
 
 static int bcmd_port_up(bcm_port_t port)
@@ -1234,6 +1320,10 @@ int bcmd_run(void)
         if (bcmd_port_up(port) == BCM_E_NONE) n++;
     }
     printf("[bcmd] enabled %d ports\n", n);
+
+    /* L2 switch groups: bridge selected ports into one shared VLAN, overriding
+     * their per-port isolation. Mirrors the 5610 edged /etc/edged/l2-groups.conf. */
+    bcmd_load_l2_groups("/etc/bcmd/l2-groups.conf");
 
     bcmd_sfp_laser_all();   /* SFP+ optic TX laser on xe0-3 (harmless on copper) */
     if (bcmd_rx_start()          != BCM_E_NONE) return 1;
