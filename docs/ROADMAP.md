@@ -92,8 +92,13 @@ Depends on the IPv4 lifecycle layer above. Then:
 - **Datapath — AS4610 `bcmd`**: handle `AF_INET6` in the netlink route/host/neigh
   path; call the SDK `bcm_l3_*` with v6 addresses. Low effort (SDK does the table
   work). *Good first milestone — proves the v6 path with little new code.*
-- **Datapath — AS5610 `edged`**: program `L3_DEFIP_128` (128-bit LPM) and
-  `L3_ENTRY_IPV6` from the v6 FIB, reusing the lifecycle layer. The substantial item.
+- **Datapath — AS5610 `edged`**: ✅ **`L3_ENTRY_IPV6` (host/neighbor) DONE** (5054f0f,
+  milestone 1) — v6 neighbors program the chip; encoding validated on hardware
+  (insert + readback FOUND); delete frees the next-hop. Directly-connected v6
+  forwarding works (chip already v6-termination-enabled). **Remaining:** v6 transit
+  routes via `L3_DEFIP_128` (128-bit LPM) — wire netlink v6 routes (16-byte dst/gw) to
+  a v6 `l3_route_add_paths` reusing the lifecycle layer. (`L3_DEFIP_128` shares the
+  TCAM with v4 via paired entries — the substantial part.)
 - **Control plane**: enable `ospf6d` (OSPFv3) and/or rely on static + RA; the
   FIB→chip sync already carries any protocol's v6 routes once the datapath programs
   them.
