@@ -54,7 +54,7 @@ sed -i "s|return crypt (passwd, salt);|(void)salt; return (char *)passwd;|" lib/
 ./configure \
     --host=powerpc-linux-gnu --build=x86_64-pc-linux-gnu CC=powerpc-linux-gnu-gcc \
     --disable-vtysh --disable-doc \
-    --disable-bgpd --disable-ripd --disable-ripngd --disable-ospf6d \
+    --disable-bgpd --disable-ripd --disable-ripngd \
     --disable-isisd --disable-pimd --disable-nhrpd \
     --enable-user=root --enable-group=root --enable-vty-group=root \
     --enable-multipath=8 \
@@ -65,6 +65,7 @@ make -j"$(nproc)"
 
 powerpc-linux-gnu-strip zebra/zebra -o /build/src/output/zebra-ppc
 powerpc-linux-gnu-strip ospfd/ospfd -o /build/src/output/ospfd-ppc
+powerpc-linux-gnu-strip ospf6d/ospf6d -o /build/src/output/ospf6d-ppc
 echo "==> built:"
 ls -l /build/src/output/zebra-ppc /build/src/output/ospfd-ppc
 '

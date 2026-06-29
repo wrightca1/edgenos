@@ -1,15 +1,18 @@
 # EdgeNOS package: quagga (control plane — zebra + ospfd). arch-specific, asic=any.
 name: quagga
-summary: Quagga control plane (zebra FIB manager + ospfd)
+summary: Quagga control plane (zebra + ospfd IPv4 + ospf6d IPv6)
 type: overlay
 runtime_installable: true
 files:
   - {src: newnos/output/zebra-ppc, dst: /usr/sbin/zebra, mode: "0755"}
   - {src: newnos/output/ospfd-ppc, dst: /usr/sbin/ospfd, mode: "0755"}
+  - {src: newnos/output/ospf6d-ppc, dst: /usr/sbin/ospf6d, mode: "0755"}
   - {src: edgenos/core/control-plane/config/zebra.conf, dst: /etc/quagga/zebra.conf, mode: "0644"}
   - {src: edgenos/core/control-plane/config/ospfd.conf, dst: /etc/quagga/ospfd.conf, mode: "0644"}
+  - {src: edgenos/core/control-plane/config/ospf6d.conf, dst: /etc/quagga/ospf6d.conf, mode: "0644"}
   - {src: edgenos/core/control-plane/services/zebra.service, dst: /etc/systemd/system/zebra.service, mode: "0644"}
   - {src: edgenos/core/control-plane/services/ospfd.service, dst: /etc/systemd/system/ospfd.service, mode: "0644"}
+  - {src: edgenos/core/control-plane/services/ospf6d.service, dst: /etc/systemd/system/ospf6d.service, mode: "0644"}
 hooks:
   postinst: |
     #!/bin/sh
