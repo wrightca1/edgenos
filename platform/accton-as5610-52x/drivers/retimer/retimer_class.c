@@ -71,7 +71,7 @@ static ssize_t label_show(struct device *dev,
 			   struct device_attribute *attr, char *buf)
 {
 	struct retimer_dev *rdev = dev_get_drvdata(dev);
-	return sprintf(buf, "%s\n", rdev->label);
+	return sysfs_emit(buf, "%s\n", rdev->label);
 }
 static DEVICE_ATTR_RO(label);
 
