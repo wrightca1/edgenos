@@ -105,6 +105,34 @@ static int l3_v4_schan_lookup(int unit, L3_ENTRY_IPV4_UNICASTm_t *key,
     return SCGR_INDEX_GET(schan_msg.genresp.response);
 }
 
+/* Remove a host entry from the hashed L3_ENTRY table (chip finds the bucket from
+ * the key, same as insert/lookup). Returns 0 on delete or not-found, <0 on error. */
+static int l3_v4_schan_delete(int unit, L3_ENTRY_IPV4_UNICASTm_t *key)
+{
+    schan_msg_t schan_msg;
+    int ipipe_blk = cdk_xgs_block_number(unit, BLKTYPE_IPIPE, 0);
+    int rv, type;
+
+    if (ipipe_blk < 0)
+        return -1;
+
+    SCHAN_MSG_CLEAR(&schan_msg);
+    SCMH_OPCODE_SET(schan_msg.gencmd.header, TABLE_DELETE_CMD_MSG);
+    SCMH_SRCBLK_SET(schan_msg.gencmd.header, CDK_XGS_CMIC_BLOCK(unit));
+    SCMH_DSTBLK_SET(schan_msg.gencmd.header, ipipe_blk);
+    SCMH_DATALEN_SET(schan_msg.gencmd.header, 12);
+    schan_msg.gencmd.address = L3_ENTRY_IPV4_UNICASTm;
+    CDK_MEMCPY(schan_msg.gencmd.data, &key->_l3_entry_ipv4_unicast, 12);
+
+    rv = cdk_xgs_schan_op(unit, &schan_msg, 5, 2);
+    if (rv < 0)
+        return rv;
+    type = SCGR_TYPE_GET(schan_msg.genresp.response);
+    if (type == SCGR_TYPE_DELETED || type == SCGR_TYPE_NOT_FOUND)
+        return 0;
+    return -3;
+}
+
 /*
  * Convert a 6-byte MAC into the 2-word field format used by chip
  * tables (BMD_PORT_MAC, L2X, MY_STATION_TCAM all use the same
@@ -471,7 +499,20 @@ int l3_route_del(int family, const void *dst, int prefix_len)
  *   l3_intf_num = logical_port (1..52), since the chip has 4096
  *   L3_INTFm entries.
  */
-static int next_hop_idx = 1;   /* index 0 reserved as 'invalid' */
+static int next_hop_idx = 1;   /* high-water; index 0 reserved as 'invalid' */
+
+/* Released next-hop indices, reused before growing. */
+static int nh_free[512];
+static int nh_free_n;
+static int next_hop_alloc(void)
+{
+    if (nh_free_n > 0) return nh_free[--nh_free_n];
+    return next_hop_idx++;
+}
+static void next_hop_release(int idx)
+{
+    if (nh_free_n < 512) nh_free[nh_free_n++] = idx;
+}
 
 /*
  * Gateway -> chip next-hop index map.  Populated by l3_host_add() whenever the
@@ -506,6 +547,15 @@ static int l3_neigh_nh_lookup(uint32_t ip_host)
         if (l3_neigh_nh[i].valid && l3_neigh_nh[i].ip == ip_host)
             return l3_neigh_nh[i].nh_idx;
     return -1;
+}
+
+static void l3_neigh_nh_remove(uint32_t ip_host)
+{
+    for (int i = 0; i < L3_NEIGH_MAX; i++)
+        if (l3_neigh_nh[i].valid && l3_neigh_nh[i].ip == ip_host) {
+            l3_neigh_nh[i].valid = 0;
+            return;
+        }
 }
 
 /* Map a swpN logical port to its L3_INTF index.  Simple 1:1. */
@@ -803,8 +853,16 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
     if (intf_idx < 0)
         return -1;
 
-    /* 2) Allocate a next-hop index and program both halves. */
-    nh_idx = next_hop_idx++;
+    /* 2) Reuse this gateway's existing chip next-hop if already resolved (an ARP
+     *    refresh re-fires l3_host_add), else allocate one. Reusing keeps the
+     *    gateway's nh_idx stable and stops re-resolution leaking next-hop indices. */
+    {
+        const uint8_t *ipb2 = (const uint8_t *)addr;
+        uint32_t ip_h = ((uint32_t)ipb2[0] << 24) | ((uint32_t)ipb2[1] << 16)
+                      | ((uint32_t)ipb2[2] <<  8) |  (uint32_t)ipb2[3];
+        int existing = l3_neigh_nh_lookup(ip_h);
+        nh_idx = (existing >= 0) ? existing : next_hop_alloc();
+    }
 
     /* Ingress L3 next-hop — tells egress port + module for routed pkt.
      * We need to encode the physical port into the chip's "MODULE+PORT"
@@ -898,12 +956,46 @@ int l3_host_del(int family, const void *addr)
     char addr_str[INET6_ADDRSTRLEN] = "?";
     inet_ntop(family, addr, addr_str, sizeof(addr_str));
 
-    syslog(LOG_DEBUG, "L3 host del: %s", addr_str);
+    if (family != AF_INET) {
+        syslog(LOG_DEBUG, "L3 host del (v6 not chip-routed): %s", addr_str);
+        return 0;
+    }
 
-    /*
-     * TODO: bcm_l3_host_delete(unit, &host)
-     */
+    const uint8_t *ipb = (const uint8_t *)addr;
+    uint32_t ip_host = ((uint32_t)ipb[0] << 24) | ((uint32_t)ipb[1] << 16)
+                     | ((uint32_t)ipb[2] <<  8) |  (uint32_t)ipb[3];
+    int nh = l3_neigh_nh_lookup(ip_host);
+    if (nh < 0) {
+        syslog(LOG_DEBUG, "L3 host del: %s not tracked", addr_str);
+        return 0;
+    }
 
+    /* 1) Remove the host /32 from the hashed L3_ENTRY table. */
+    {
+        L3_ENTRY_IPV4_UNICASTm_t hst;
+        L3_ENTRY_IPV4_UNICASTm_CLR(hst);
+        L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_V6f_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(hst, ip_host);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(hst, 0);
+        (void)l3_v4_schan_delete(edged.unit, &hst);
+    }
+
+    /* 2) Invalidate the next-hop's chip halves and return its index to the
+     *    free-list. A transit route via this gateway is withdrawn by the kernel
+     *    when the neighbor goes away (so it's already out of L3_DEFIP), and the
+     *    15s re-dump reprograms anything still in flight — so reusing the freed
+     *    index is safe in practice. */
+    {
+        ING_L3_NEXT_HOPm_t ing; ING_L3_NEXT_HOPm_CLR(ing);
+        (void)WRITE_ING_L3_NEXT_HOPm(edged.unit, nh, ing);
+        EGR_L3_NEXT_HOPm_t egr; EGR_L3_NEXT_HOPm_CLR(egr);
+        (void)WRITE_EGR_L3_NEXT_HOPm(edged.unit, nh, egr);
+    }
+    next_hop_release(nh);
+    l3_neigh_nh_remove(ip_host);
+
+    syslog(LOG_INFO, "L3 host del: %s nh_idx %d freed", addr_str, nh);
     return 0;
 }
 
