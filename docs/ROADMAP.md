@@ -1,0 +1,75 @@
+# EdgeNOS Roadmap
+
+## Where IPv4 L3 stands today
+
+Working end-to-end on both switches: kernel FIB (static / OSPF) → chip L3, with
+ECMP hardware-forwarded. The chip is **already configured for IPv6 L3 too** —
+`MY_STATION_TCAM`, `PORT_TAB`, and `CPU_CONTROL_1` all enable v6 termination/traps
+(9 v6 bits set in `core/datapath/l3.c`). What's missing for v6 is only the route/
+host *programming* (v6 lookup tables), not the chip bring-up.
+
+Two L3 implementations exist, and IPv6 effort is asymmetric:
+- **AS4610 `bcmd`** — OpenBCM SDK (`bcm_l3_route_add` / `bcm_l3_host_add`). IPv6 is
+  nearly free: pass v6 addresses + handle v6 in the netlink path.
+- **AS5610 `edged`** — hand-rolled `L3_DEFIP` writes. IPv6 needs `L3_DEFIP_128` /
+  `L3_ENTRY_IPV6` programming written from scratch — the real work.
+
+---
+
+## Do BEFORE IPv6 (IPv4 foundation — v6 will duplicate this code)
+
+1. **L3 table lifecycle / reclamation** — *highest leverage.*
+   Today `defip_transit_slot`, `l3_ecmp_next_slot`, and `l3_ecmp_next_group_id`
+   only ever increment; route delete invalidates the DEFIP entry but **never frees
+   the slot or the ECMP group** ("reclaimed on the next edged restart"). Under
+   route churn (link flaps, OSPF reconvergence) these tables leak until they
+   exhaust. IPv6 adds a *second* set of tables — fix the alloc/free model **once**.
+   Recommended: a proper bookkeeping layer in edged — `prefix → {slot, ecmp_group,
+   path-signature}` with a free-list. That single layer also closes #2 and #3.
+
+2. **Host-route / neighbor deletion** (`l3_host_delete` is a TODO) — a deleted ARP
+   leaves a stale chip next-hop. Part of the same lifecycle gap as #1.
+
+3. **ECMP member-change detection** — the route-sync idempotency currently re-detects
+   single↔ECMP shape changes but **not** a change of ECMP *members* at the same path
+   count (e.g. path A→C, still 2 paths). The `path-signature` from #1 closes this.
+
+4. **Functional forwarding validation** — we've verified routes are *programmed*
+   into `L3_DEFIP`; confirm transit traffic actually **hardware-forwards and
+   load-balances** across the ECMP members with real traffic (not just table reads),
+   so v6 is built on a proven v4 datapath.
+
+## Control-plane gaps (IPv4 feature parity, can run in parallel)
+
+- **BGP** is disabled in the Quagga build (`--disable-bgpd` in
+  `core/control-plane/build-quagga.sh`). The FIB→chip sync is protocol-agnostic, so
+  enabling `bgpd` would give BGP (v4 now, v6 later) "for free" on the datapath side
+  — plus a webui BGP module (the UI is already capability-driven).
+- **OSPFv3** (`ospf6d`, also `--disable-ospf6d`) is the v6 control-plane counterpart
+  to enable alongside the IPv6 datapath work.
+
+---
+
+## IPv6 (the todo)
+
+Depends on the IPv4 lifecycle layer above. Then:
+
+- **Datapath — AS4610 `bcmd`**: handle `AF_INET6` in the netlink route/host/neigh
+  path; call the SDK `bcm_l3_*` with v6 addresses. Low effort (SDK does the table
+  work). *Good first milestone — proves the v6 path with little new code.*
+- **Datapath — AS5610 `edged`**: program `L3_DEFIP_128` (128-bit LPM) and
+  `L3_ENTRY_IPV6` from the v6 FIB, reusing the lifecycle layer. The substantial item.
+- **Control plane**: enable `ospf6d` (OSPFv3) and/or rely on static + RA; the
+  FIB→chip sync already carries any protocol's v6 routes once the datapath programs
+  them.
+- **Web UI**: v6 addresses/routes on the Interfaces/ECMP pages (currently `ip -4`
+  only); an OSPFv3 view if `ospf6d` is enabled.
+- **Validation**: v6 transit + ECMP forwarding test, mirroring the v4 validation.
+
+## Suggested sequencing
+
+1. IPv4 lifecycle/bookkeeping layer (#1–#3) — one focused change in `edged`.
+2. IPv4 functional forwarding/ECMP validation (#4).
+3. IPv6 on `bcmd` (4610) — quick win, validates the v6 netlink path.
+4. IPv6 on `edged` (5610) — the `L3_DEFIP_128` work, on top of the lifecycle layer.
+5. Control-plane parity (bgpd / ospf6d) + webui v6 — parallelizable.
