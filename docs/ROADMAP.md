@@ -50,6 +50,39 @@ Two L3 implementations exist, and IPv6 effort is asymmetric:
 
 ---
 
+## L2 / VLAN (parallel to the L3 work)
+
+### Dumb L2-switch mode for selected ports
+Bridge a chosen set of ports into one L2 broadcast domain (MAC-learning + flooding
+among them, like an unmanaged switch), instead of the default model where every port
+is its own L3-routed interface.
+
+- **AS5610 `edged` — already works today.** Write `/etc/edged/l2-groups.conf`:
+  ```
+  # <vid> <swpA> <swpB> [swpC ...]      (ports as "swp10" or "10")
+  100 swp1 swp2 swp3
+  ```
+  At startup `vlan_load_l2_groups()` → `vlan_l2_group_apply()` pulls those ports off
+  their per-port service VLANs onto the shared VID (untagged, PVID set, STG-1), so
+  the chip L2-bridges them directly and isolates them from the L3-routed ports.
+  Persists via the config overlay. **To do:** document it (currently undiscoverable),
+  and add a remove/toggle back to L3.
+- **AS4610 `bcmd` — parity to add.** Ports default to VLAN 1 (chip already L2-bridges
+  same-VLAN ports); `bcmd_port_own_vlan` does the inverse (isolate). Add the same
+  config-driven `l2-groups.conf` + apply using the SDK `bcm_vlan_port_add` /
+  `bcm_port_untagged_vlan_set` primitives (already used in bcmd).
+- **Web UI** — a VLAN/L2 view to pick ports into a group (writes `l2-groups.conf` +
+  applies live), since the UI is already capability-driven.
+
+### VLAN testing on ports
+No validation harness exists yet. Build one covering:
+- Access (untagged / PVID classification) vs trunk (tagged) ingress/egress.
+- VLAN isolation (no leak between groups / L3 ports) and L2-group bridging.
+- Per-VLAN MAC learning + flooding (DLF) behavior.
+- The CPU service-VLAN scheme (tagged CPU member, untagged egress strip).
+- Real-traffic tests: inject tagged/untagged frames, capture on member/non-member
+  ports, assert tag in/out and isolation — on both `edged` (5610) and `bcmd` (4610).
+
 ## IPv6 (the todo)
 
 Depends on the IPv4 lifecycle layer above. Then:
@@ -73,3 +106,7 @@ Depends on the IPv4 lifecycle layer above. Then:
 3. IPv6 on `bcmd` (4610) — quick win, validates the v6 netlink path.
 4. IPv6 on `edged` (5610) — the `L3_DEFIP_128` work, on top of the lifecycle layer.
 5. Control-plane parity (bgpd / ospf6d) + webui v6 — parallelizable.
+
+L2/VLAN work is independent of the L3/IPv6 track and can run in parallel:
+the 5610 L2-switch mode already works (document it + add toggle-off), then 4610
+parity, the VLAN test harness, and a webui VLAN view.
