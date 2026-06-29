@@ -5,6 +5,7 @@ params) and the post-driver init phases. Mirrors the proven sequence in
 services/platform-init.sh (itself a replica of the Cumulus boot order).
 """
 import os
+import re
 import sys
 
 # import the shared framework — works both in-tree (core/platform/) and installed
@@ -68,12 +69,33 @@ class EdgeNOSPlatform_powerpc_accton_as5610_52x_r0(EdgeNOSPlatformBase, PortConf
         # fan_pwm is 0..255 on this CPLD
         return self._write("/%s/fan_pwm" % self.CPLD, max(0, min(255, int(pct * 255 / 100))))
 
+    def _cpld_regs(self):
+        """Parse the CPLD driver's `reg` dump node -> {offset: value}."""
+        regs = {}
+        for line in (self._read("/%s/reg" % self.CPLD) or "").splitlines():
+            m = re.match(r"\s*([0-9a-fA-F]+):\s*(.*)", line)
+            if not m:
+                continue
+            base = int(m.group(1), 16)
+            for i, tok in enumerate(m.group(2).split()):
+                try:
+                    regs[base + i] = int(tok, 16)
+                except ValueError:
+                    break
+        return regs
+
     def psus(self):
+        # The migrated cpld driver mis-decodes PSU (all bits in 0x01, active-high).
+        # Use the Cumulus-proven map instead: PSU1 status in reg 0x02, PSU2 in 0x01;
+        # present is ACTIVE-LOW (bit0=0 => present), power-good = bit1.
+        r = self._cpld_regs()
         out = []
-        for i in (1, 2):
-            out.append({"id": i,
-                        "present": self._read_int("/%s/psu%d_present" % (self.CPLD, i)),
-                        "ok": self._read_int("/%s/psu%d_good" % (self.CPLD, i))})
+        for pid, reg in ((1, 0x02), (2, 0x01)):
+            v = r.get(reg)
+            if v is None:
+                out.append({"id": pid, "present": None, "ok": None})
+            else:
+                out.append({"id": pid, "present": int((v & 0x01) == 0), "ok": int((v & 0x02) != 0)})
         return out
 
     def leds(self):

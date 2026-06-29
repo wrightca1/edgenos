@@ -22,11 +22,21 @@ def _pw(req):
     return req.ctx.conf.get("ospf_vty_password", "zebra")
 
 
+_CACHE = {"t": 0, "v": {}}
+
+
 def _show(req, cmds):
+    # vty round-trips are slow; cache the parsed output briefly so reloads are snappy.
+    import time
+    if time.time() - _CACHE["t"] <= 6 and all(c in _CACHE["v"] for c in cmds):
+        return _CACHE["v"]
     out, err = util.vty(VTY, _pw(req), cmds)
     if err:
         return {c: "(%s)" % err for c in cmds}
-    return {c: _clean(o) for c, o in zip(cmds, out)}
+    data = {c: _clean(o) for c, o in zip(cmds, out)}
+    _CACHE["v"] = data
+    _CACHE["t"] = time.time()
+    return data
 
 
 def _clean(s):
@@ -47,9 +57,24 @@ def _neighbors(text):
     return rows
 
 
+def _routes(text):
+    """Parse `show ip ospf route` -> [{net,cost,area,vias:[(nexthop,iface)]}]."""
+    rows, cur = [], None
+    for line in text.splitlines():
+        m = re.match(r"^([NR])\s+(\S+)\s+\[(\d+)\]\s+area:\s+(\S+)", line.strip())
+        if m:
+            cur = {"net": m.group(2), "cost": m.group(3), "area": m.group(4), "vias": []}
+            rows.append(cur)
+            continue
+        v = re.match(r"^via\s+(\S+),\s+(\S+)", line.strip())
+        if v and cur is not None:
+            cur["vias"].append((v.group(1), v.group(2)))
+    return rows
+
+
 def page(req):
-    d = _show(req, ["show ip ospf", "show ip ospf neighbor",
-                    "show ip ospf interface", "show running-config"])
+    d = _show(req, ["show ip ospf", "show ip ospf route", "show ip ospf neighbor",
+                    "show running-config"])
     summary = d.get("show ip ospf", "")
     rid = ""
     m = re.search(r"Router ID:?\s*(\d+\.\d+\.\d+\.\d+)", summary)
@@ -75,11 +100,25 @@ def page(req):
             block.append(l)
     ospf_cfg = "\n".join(block) or "(no router ospf block)"
 
+    # learned routes (which router/nexthop each network was learned from)
+    routes = _routes(d.get("show ip ospf route", ""))
+    rt_rows = []
+    for r in routes:
+        paths = "<br>".join("%s via %s" % (util.h(dev), util.h(nh)) for nh, dev in r["vias"]) \
+            or "<span class=sub>(local)</span>"
+        ecmp = ' <span class="badge ecmp">ECMP</span>' if len(r["vias"]) > 1 else ""
+        rt_rows.append("<tr><td>%s%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
+                       (util.h(r["net"]), ecmp, util.h(r["cost"]), util.h(r["area"]), paths))
+    rt_html = "".join(rt_rows) or "<tr><td colspan=4 class=sub>no OSPF routes</td></tr>"
+
     return """
 <h1>OSPF</h1><p class=sub>Router ID: <b>%s</b> · live via ospfd vty (config changes apply without restart)</p>
 
 <div class=card><h2 style="margin-top:0">Neighbors</h2>
 <table><tr><th>Neighbor</th><th>State</th><th>Dead</th><th>Address</th><th>Interface</th></tr>%s</table></div>
+
+<div class=card><h2 style="margin-top:0">Learned routes</h2>
+<table><tr><th>Network</th><th>Cost</th><th>Area</th><th>Learned via (router / interface)</th></tr>%s</table></div>
 
 <div class=card><h2 style="margin-top:0">Add network to OSPF</h2>
 <form method=post action="/m/ospf">
@@ -93,7 +132,7 @@ def page(req):
 
 <div class=card><h2 style="margin-top:0">Running OSPF config</h2><pre>%s</pre></div>
 <div class=card><h2 style="margin-top:0">Status</h2><pre>%s</pre></div>
-""" % (util.h(rid or "?"), nb_rows, util.h(ospf_cfg), util.h(summary or "(no data)"))
+""" % (util.h(rid or "?"), nb_rows, rt_html, util.h(ospf_cfg), util.h(summary or "(no data)"))
 
 
 def handle(req):
@@ -108,5 +147,6 @@ def handle(req):
                              "network %s area %s" % (net, area), "end", "write memory"])
         if err:
             return "msg=%s" % err
+        _CACHE["t"] = 0     # force re-query so the change shows immediately
         return "msg=added network %s area %s (live)" % (net, area)
     return "msg=unknown action"

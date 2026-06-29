@@ -185,11 +185,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, body, code=200, ctype="text/html; charset=utf-8"):
         b = body.encode("utf-8") if isinstance(body, str) else body
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(b)))
-        self.end_headers()
-        self.wfile.write(b)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+        except (BrokenPipeError, ConnectionError):
+            pass        # client navigated away / gave up before we finished
 
     def _redirect(self, path):
         self.send_response(303)

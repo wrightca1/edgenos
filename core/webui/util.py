@@ -37,33 +37,35 @@ def h(s):
     return html.escape("" if s is None else str(s))
 
 
-def vty(port, password, commands, timeout=2, deadline=6):
+def vty(port, password, commands, connect_timeout=2, idle=0.4, deadline=6):
     """Talk to a Quagga vty (zebra=2601, ospfd=2604, bgpd=2605) over telnet.
     Sends the password, `terminal length 0`, then each command; returns the text.
     Uses the vty so config changes apply live WITHOUT restarting the daemon.
-    Bounded: short recv timeout + an overall deadline so a slow/unresponsive vty
-    can never hang the UI."""
+    Bounded: a drain returns as soon as the vty goes idle for `idle` seconds (short
+    recv timeout, so idle is detected fast), with an overall `deadline` hard cap —
+    a slow/unresponsive vty can never hang the UI."""
     import time
     start = time.time()
     try:
-        s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        s = socket.create_connection(("127.0.0.1", port), timeout=connect_timeout)
     except OSError as e:
         return None, "vty %d unreachable: %s" % (port, e)
-    s.settimeout(timeout)
+    s.settimeout(idle)
     buf = b""
 
-    def drain(wait=0.25):
+    def drain():
         nonlocal buf
-        end = time.time() + wait
-        while time.time() < end and (time.time() - start) < deadline:
+        last = time.time()
+        while (time.time() - start) < deadline:
             try:
                 d = s.recv(4096)
                 if not d:
                     break
                 buf += d
-                end = time.time() + 0.2
+                last = time.time()
             except socket.timeout:
-                break
+                if time.time() - last >= idle:
+                    break
 
     drain()
     if password:
@@ -73,7 +75,7 @@ def vty(port, password, commands, timeout=2, deadline=6):
     for c in commands:
         marker_before = len(buf)
         s.sendall((c + "\n").encode())
-        drain(0.35)
+        drain()
         out.append(buf[marker_before:].decode("latin1"))
     try:
         s.sendall(b"exit\n"); s.close()
