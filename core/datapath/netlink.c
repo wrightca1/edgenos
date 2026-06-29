@@ -97,6 +97,36 @@ int netlink_init(void)
         }
     }
 
+    /*
+     * Also dump existing NEIGHBORS then ROUTES.  Same reasoning as the address
+     * dump: a neighbor (e.g. the OSPF gateway) that resolved, or a route that
+     * was installed, *before* edged finished its ~12s ASIC init is never seen as
+     * a live event — so its chip next-hop / L3_DEFIP entry is never programmed,
+     * and every transit/ECMP route fails next-hop resolution.  The kernel
+     * serializes dumps per socket, so neighbors are fully processed (chip
+     * next-hops populated) before the route dump arrives and resolves against
+     * them.  Order: NEIGH (seq 2) then ROUTE (seq 3).
+     */
+    {
+        struct { struct nlmsghdr nlh; struct rtgenmsg gen; } req;
+        int kinds[2] = { RTM_GETNEIGH, RTM_GETROUTE };
+        for (int k = 0; k < 2; k++) {
+            memset(&req, 0, sizeof(req));
+            req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
+            req.nlh.nlmsg_type = kinds[k];
+            req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+            req.nlh.nlmsg_seq = 2 + k;
+            req.gen.rtgen_family = AF_INET;
+            if (send(fd, &req, req.nlh.nlmsg_len, 0) < 0) {
+                syslog(LOG_WARNING, "Netlink: dump type=%d request failed: %s",
+                       kinds[k], strerror(errno));
+            } else {
+                syslog(LOG_INFO, "Netlink: requested %s dump",
+                       kinds[k] == RTM_GETNEIGH ? "neighbor" : "route");
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -354,6 +384,31 @@ void netlink_poll(void)
             syslog(LOG_INFO, "NL: unhandled nlmsg_type=%d", nlh->nlmsg_type);
             break;
         }
+    }
+}
+
+void netlink_redump_routes(void)
+{
+    /* Periodically re-request a neighbor + route dump on the live socket. A
+     * transit/ECMP route whose gateway resolved *after* the route was first seen
+     * is skipped on first sight ("no resolved next-hops"); this re-dump reprograms
+     * it once the gateway's chip next-hop exists. l3_route_add_paths() is
+     * idempotent (skips prefixes already in L3_DEFIP), so re-dumping is cheap and
+     * non-destructive. Mirrors the 4610 bcmd periodic FIB re-dump. */
+    if (edged.netlink_fd <= 0)
+        return;
+    struct { struct nlmsghdr nlh; struct rtgenmsg gen; } req;
+    int kinds[2] = { RTM_GETNEIGH, RTM_GETROUTE };
+    for (int k = 0; k < 2; k++) {
+        memset(&req, 0, sizeof(req));
+        req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
+        req.nlh.nlmsg_type = kinds[k];
+        req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+        req.nlh.nlmsg_seq = 10 + k;
+        req.gen.rtgen_family = AF_INET;
+        if (send(edged.netlink_fd, &req, req.nlh.nlmsg_len, 0) < 0)
+            syslog(LOG_WARNING, "Netlink: periodic redump type=%d failed: %s",
+                   kinds[k], strerror(errno));
     }
 }
 

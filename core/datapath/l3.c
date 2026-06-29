@@ -937,6 +937,23 @@ int l3_ecmp_group_create(const int *intf_ids, int count)
     return group_id;  /* ECMP_PTR0 value for L3_DEFIP (index into L3_ECMP_COUNT) */
 }
 
+/* Find the transit DEFIP slot already holding this prefix (key = IP_ADDR0 +
+ * IP_ADDR_MASK0), or -1 if not present. Linear scan of the small transit band. */
+static int l3_defip_find(uint32_t target, uint32_t mask)
+{
+    for (int slot = defip_transit_base; slot < defip_transit_slot; slot++) {
+        L3_DEFIPm_t d;
+        if (READ_L3_DEFIPm(edged.unit, slot, &d) != 0)
+            continue;
+        if (!L3_DEFIPm_VALID0f_GET(d))
+            continue;
+        if (L3_DEFIPm_IP_ADDR0f_GET(d) == target &&
+            L3_DEFIPm_IP_ADDR_MASK0f_GET(d) == mask)
+            return slot;
+    }
+    return -1;
+}
+
 /*
  * l3_route_add_paths() — program a transit IPv4 prefix route into L3_DEFIP.
  *
@@ -958,6 +975,11 @@ int l3_route_add_paths(uint32_t dst_host, int prefix_len,
 
     if (ngw < 1) return -1;
     if (ngw > 64) ngw = 64;
+
+    uint32_t mask = (prefix_len == 0)  ? 0 :
+                    (prefix_len >= 32) ? 0xffffffffu :
+                    (0xffffffffu << (32 - prefix_len));
+    uint32_t target = dst_host & mask;
 
     /* Resolve each gateway IP to its chip next-hop (programmed by l3_host_add
      * when the kernel ARP'd it). Skip unresolved ones. */
@@ -982,11 +1004,23 @@ int l3_route_add_paths(uint32_t dst_host, int prefix_len,
         return -1;
     }
 
-    uint32_t mask = (prefix_len == 0) ? 0 :
-                    (prefix_len >= 32) ? 0xffffffffu :
-                    (0xffffffffu << (32 - prefix_len));
-
-    int slot = defip_transit_slot++;
+    /* Idempotent re-program. The periodic re-dump re-announces every route; this
+     * also catches a route whose gateway resolved late (first sight skipped above
+     * with "no resolved next-hops"). If the prefix is already programmed, reuse
+     * its slot — but only rewrite when the single/ECMP *shape* changed (e.g. a 2nd
+     * path converged: single -> ECMP), so a steady-state re-dump is a no-op and we
+     * don't churn ECMP groups. (A change of ECMP *members* keeping the same path
+     * count is not re-detected here — a follow-up.) */
+    int slot = l3_defip_find(target, mask);
+    if (slot >= 0) {
+        L3_DEFIPm_t cur;
+        if (READ_L3_DEFIPm(edged.unit, slot, &cur) == 0 &&
+            (int)L3_DEFIPm_ECMP0f_GET(cur) == (n > 1 ? 1 : 0))
+            return 0;                       /* same shape — idempotent, leave it */
+        /* shape changed — overwrite this same slot below */
+    } else {
+        slot = defip_transit_slot++;
+    }
     L3_DEFIPm_t d;
     L3_DEFIPm_CLR(d);
     L3_DEFIPm_VALID0f_SET(d, 1);
