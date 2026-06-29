@@ -6,14 +6,13 @@ EdgeNOS package format (.epk) — shared library used by both the host-side buil
 An .epk is a plain (uncompressed) tar container with exactly two members, in order:
 
     manifest.json     metadata (read without touching the payload)
-    data.tar          the file payload (paths relative to the rootfs root)
+    data.tar.gz       the gzip-compressed file payload (paths relative to rootfs root)
 
-Everything is stdlib-only (tarfile, json, hashlib) and the payload is an
-*uncompressed* tar — the minimal Buildroot Python on the switches ships NO
-compression modules (no zlib/gzip/bz2/lzma), so epkg.py must not depend on any.
-The image itself is squashfs-compressed, so the .epk is only transport. Builds are
-reproducible: file mtime/uid/gid are normalized, members are sorted, timestamps
-come from an explicit epoch.
+The payload is gzip-compressed AND sha256-hashed. The minimal Buildroot Python on
+the switches has NO compression modules (no zlib/lzma), but the `gzip` CLI is present
+on host and box — so epk.py compresses/decompresses via the `gzip` command (subprocess),
+not a Python module. Builds are reproducible: `gzip -n` (no name/mtime), file
+mtime/uid/gid normalized, members sorted, timestamps from an explicit epoch.
 
 manifest.json schema (format_version 1):
     format_version      int
@@ -27,15 +26,27 @@ manifest.json schema (format_version 1):
     depends             [str]       other package names
     hooks               {preinst,postinst,prerm,postrm: str|null}
     files               [{path, mode, size, sha256}]   target paths (no leading /)
-    payload_sha256      str         sha256 of the data.tar member
+    payload_sha256      str         sha256 of the data.tar.gz member
     build               {epoch, timestamp}
 """
-import io, os, json, tarfile, hashlib
+import io, os, json, tarfile, hashlib, subprocess
 
 FORMAT_VERSION = 1
 MANIFEST_NAME = "manifest.json"
-PAYLOAD_NAME = "data.tar"
+PAYLOAD_NAME = "data.tar.gz"
 HOOK_NAMES = ("preinst", "postinst", "prerm", "postrm")
+
+
+# Compress via the `gzip` CLI (present on host + the switches), not a Python module —
+# the Buildroot Python on-box has no zlib/lzma. `-n` => reproducible (no name/mtime).
+def _gzip(data):
+    return subprocess.run(["gzip", "-nc"], input=data,
+                          stdout=subprocess.PIPE, check=True).stdout
+
+
+def _gunzip(data):
+    return subprocess.run(["gzip", "-dc"], input=data,
+                          stdout=subprocess.PIPE, check=True).stdout
 
 
 def sha256_bytes(b):
@@ -68,7 +79,7 @@ def build_payload(staged, epoch):
     Returns (payload_bytes, files_meta). Deterministic."""
     files_meta = []
     raw = io.BytesIO()
-    # uncompressed payload tar (no compression module needed on-box)
+    # build an uncompressed tar, then gzip it via the CLI (returned payload is .gz)
     with tarfile.open(fileobj=raw, mode="w") as tar:
         for dst, src, mode in sorted(staged, key=lambda x: x[0]):
             ti = tarfile.TarInfo(name=dst.lstrip("/"))
@@ -83,7 +94,7 @@ def build_payload(staged, epoch):
                 "size": len(data),
                 "sha256": sha256_bytes(data),
             })
-    return raw.getvalue(), files_meta
+    return _gzip(raw.getvalue()), files_meta
 
 
 def write_epk(out_path, manifest, payload_bytes, epoch):
@@ -127,7 +138,7 @@ def verify(epk_path):
         problems.append("payload_sha256 mismatch")
         return False, problems
     want = {f["path"]: f["sha256"] for f in manifest.get("files", [])}
-    with tarfile.open(fileobj=io.BytesIO(payload), mode="r") as ptar:
+    with tarfile.open(fileobj=io.BytesIO(_gunzip(payload)), mode="r") as ptar:
         seen = set()
         for ti in ptar.getmembers():
             if not ti.isfile():
@@ -150,7 +161,7 @@ def extract_payload(epk_path, root):
     written = []
     with tarfile.open(epk_path, mode="r") as tar:
         payload = _read_payload(tar)
-    with tarfile.open(fileobj=io.BytesIO(payload), mode="r") as ptar:
+    with tarfile.open(fileobj=io.BytesIO(_gunzip(payload)), mode="r") as ptar:
         for ti in ptar.getmembers():
             if not ti.isfile():
                 continue

@@ -143,6 +143,17 @@ class EdgeNOSPlatformBase(PlatformHAL):
         except OSError:
             return False
 
+    def _i2c_read(self, bus, addr, reg):
+        """Read one byte via the `i2cget` CLI (for CPLDs with no kernel sysfs driver).
+        Returns int or None. Only meaningful on the box; None off-hardware."""
+        try:
+            out = subprocess.run(["i2cget", "-y", str(bus), hex(addr), hex(reg)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 timeout=5).stdout.decode().strip()
+            return int(out, 16) if out else None
+        except Exception:
+            return None
+
     # SFP/QSFP optic decode (SFF-8472 / SFF-8636) from bound i2c `eeprom` sysfs nodes.
     SFP_EEPROMS = None      # board sets a glob (root-relative), e.g. "sys/bus/i2c/devices/*-0050/eeprom"
     _SFF_ID = {0x03: "SFP", 0x0b: "DWDM-SFP", 0x0c: "QSFP", 0x0d: "QSFP+",

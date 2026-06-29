@@ -63,11 +63,12 @@ Every component builds into an **arch/ASIC-tagged package**:
 
 An `.epk` is an uncompressed outer tar holding `manifest.json` (name, version, arch,
 asic, depends, `type: base|overlay`, `runtime_installable`, pre/post hooks, per-file
-sha256) + `data.tar` (payload). The payload is an **uncompressed** tar: the minimal
-Buildroot Python on the switches ships **no** compression modules (no zlib/gzip/bz2/
-lzma — verified on hardware), so `epkg` must not depend on any. The image itself is
-squashfs-compressed, so the `.epk` is only transport. Builds are reproducible
-(normalized mtime/uid/gid, sorted members, `SOURCE_DATE_EPOCH`).
+sha256) + `data.tar.gz` (payload), **gzip-compressed and sha256-hashed**. The minimal
+Buildroot Python on the switches has no compression modules (no zlib/lzma — verified on
+hardware), but the `gzip` CLI is present on host and box, so `epk.py` compresses/
+decompresses via the `gzip` command (subprocess), not a Python module. Builds are
+reproducible (`gzip -n`, normalized mtime/uid/gid, sorted members, `SOURCE_DATE_EPOCH`).
+Compression is real: e.g. the 18 MB `edged` packs to a 6.2 MB `.epk`.
 
 **On-box CLI:** the `edgenos-cli` package installs `/usr/sbin/edgenos` + `epkg`/`epk`
 so a switch has first-class `edgenos version` / `platform hal` / `pkg install` — the
