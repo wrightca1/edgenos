@@ -353,7 +353,73 @@ int l3_route_add(int family, const void *dst, int prefix_len,
  * File-scope so both add and del see the same allocator.
  */
 static const int defip_transit_base = 1536;  /* first transit DEFIP slot */
-static int defip_transit_slot = 1536;        /* next free transit DEFIP slot */
+static int defip_transit_slot = 1536;        /* high-water mark of the transit band */
+
+/* ---------------------------------------------------------------------------
+ * L3 route lifecycle bookkeeping.
+ *
+ * Without this, every allocator (DEFIP slot, ECMP group, ECMP member slots) only
+ * ever grows and is reclaimed solely on edged restart — so route churn (flaps,
+ * OSPF reconvergence) leaks chip-table entries until they exhaust. Here we keep a
+ * per-prefix record + free-lists so del() frees what add() allocated, ECMP groups
+ * are de-duplicated + refcounted (identical member-sets share one group, so the
+ * count is O(unique-member-sets), not O(routes)), and a path signature lets the
+ * periodic re-dump skip unchanged routes and correctly re-program changed ones.
+ * ------------------------------------------------------------------------- */
+#define L3_ROUTE_MAX     8192
+#define L3_ECMP_GRP_MAX  1024
+
+struct l3_rt {                 /* one per programmed transit prefix */
+    uint32_t target, mask;
+    int      slot;             /* L3_DEFIP slot */
+    int      is_ecmp;          /* 1 => ref is an ECMP group_id; 0 => a next-hop idx */
+    int      ref;              /* ECMP group_id or single next-hop index */
+    uint64_t sig;              /* path-set signature (for skip-unchanged) */
+    int      valid;
+};
+static struct l3_rt route_tab[L3_ROUTE_MAX];
+
+/* Released transit DEFIP slots, reused before growing the band. */
+static int defip_free[L3_ROUTE_MAX];
+static int defip_free_n;
+
+static int defip_slot_alloc(void)
+{
+    if (defip_free_n > 0) return defip_free[--defip_free_n];
+    return defip_transit_slot++;
+}
+static void defip_slot_free(int slot)
+{
+    if (defip_free_n < L3_ROUTE_MAX) defip_free[defip_free_n++] = slot;
+}
+
+static struct l3_rt *route_find(uint32_t target, uint32_t mask)
+{
+    for (int i = 0; i < L3_ROUTE_MAX; i++)
+        if (route_tab[i].valid &&
+            route_tab[i].target == target && route_tab[i].mask == mask)
+            return &route_tab[i];
+    return NULL;
+}
+static struct l3_rt *route_alloc(void)
+{
+    for (int i = 0; i < L3_ROUTE_MAX; i++)
+        if (!route_tab[i].valid) return &route_tab[i];
+    return NULL;
+}
+
+/* Order-independent signature over a (sorted) next-hop set. */
+static uint64_t path_sig(const int *nh, int n)
+{
+    uint64_t s = (uint64_t)n * 1000003ull;
+    for (int i = 0; i < n; i++)
+        s ^= ((uint64_t)(nh[i] + 1) * 2654435761ull) + (s << 6) + (s >> 2);
+    return s;
+}
+
+/* ECMP group dedup + refcount — defined after l3_ecmp_group_create(). */
+static int  ecmp_group_ref(const int *nh, int n, uint64_t sig);
+static void ecmp_group_unref(int group_id);
 
 int l3_route_del(int family, const void *dst, int prefix_len)
 {
@@ -372,33 +438,23 @@ int l3_route_del(int family, const void *dst, int prefix_len)
                     (0xffffffffu << (32 - prefix_len));
     uint32_t target = dst_host & mask;
 
-    /*
-     * No prefix->slot map is kept, so scan the transit band and invalidate the
-     * entry whose key (IP_ADDR0 + IP_ADDR_MASK0) matches this prefix. The band
-     * is small (a handful of routes), so a linear scan is fine. Clearing VALID0
-     * removes it from the lookup; any ECMP group it referenced is left in place
-     * (harmless orphan, reclaimed on the next edged restart).
-     */
-    int removed = 0;
-    for (int slot = defip_transit_base; slot < defip_transit_slot; slot++) {
-        L3_DEFIPm_t d;
-        if (READ_L3_DEFIPm(edged.unit, slot, &d) != 0)
-            continue;
-        if (!L3_DEFIPm_VALID0f_GET(d))
-            continue;
-        if (L3_DEFIPm_IP_ADDR0f_GET(d) != target ||
-            L3_DEFIPm_IP_ADDR_MASK0f_GET(d) != mask)
-            continue;
-
-        L3_DEFIPm_CLR(d);
-        int rv = WRITE_L3_DEFIPm(edged.unit, slot, d);
-        syslog(LOG_INFO, "route L3_DEFIP[%d] %s/%d removed (wr=%d)",
-               slot, dst_str, prefix_len, rv);
-        removed++;
-    }
-    if (!removed)
+    /* Look the prefix up in the route table, invalidate its DEFIP slot, and return
+     * the slot + any ECMP group to their free-lists so they get reused. */
+    struct l3_rt *r = route_find(target, mask);
+    if (!r) {
         syslog(LOG_INFO, "L3 route del: %s/%d not in transit DEFIP", dst_str, prefix_len);
-
+        return 0;
+    }
+    L3_DEFIPm_t d;
+    L3_DEFIPm_CLR(d);
+    int rv = WRITE_L3_DEFIPm(edged.unit, r->slot, d);
+    defip_slot_free(r->slot);
+    if (r->is_ecmp)
+        ecmp_group_unref(r->ref);
+    syslog(LOG_INFO, "route L3_DEFIP[%d] %s/%d removed (wr=%d), slot freed%s",
+           r->slot, dst_str, prefix_len, rv,
+           r->is_ecmp ? ", ECMP group dereffed" : "");
+    r->valid = 0;
     return 0;
 }
 
@@ -869,35 +925,67 @@ int l3_host_del(int family, const void *addr)
  * next free slot in L3_ECMP.  No reuse / no fragmentation handling.  Enough
  * for OSPF/BGP multipath in a single small network.
  */
-static int l3_ecmp_next_slot = 0;     /* next free L3_ECMP slot to allocate from */
-static int l3_ecmp_next_group_id = 1; /* group IDs start at 1; 0 reserved */
+static int l3_ecmp_next_slot = 0;     /* high-water of L3_ECMP member slots */
+static int l3_ecmp_next_group_id = 1; /* high-water of group IDs (0 reserved) */
+
+/* Live ECMP groups — dedup + refcount so identical member-sets share one group
+ * (so the live group count is O(unique-member-sets), not O(routes)). */
+struct ecmp_grp { uint64_t sig; int group_id; int base; int count; int ref; int valid; };
+static struct ecmp_grp ecmp_tab[L3_ECMP_GRP_MAX];
+
+/* Free-lists: released member-slot blocks (reused by exact count) + group IDs. */
+static struct { int base, count; } ecmp_blk_free[L3_ECMP_GRP_MAX];
+static int ecmp_blk_free_n;
+static int ecmp_gid_free[L3_ECMP_GRP_MAX];
+static int ecmp_gid_free_n;
+
+static int ecmp_slots_alloc(int count)
+{
+    for (int i = 0; i < ecmp_blk_free_n; i++)
+        if (ecmp_blk_free[i].count == count) {           /* exact-fit reuse */
+            int b = ecmp_blk_free[i].base;
+            ecmp_blk_free[i] = ecmp_blk_free[--ecmp_blk_free_n];
+            return b;
+        }
+    if (l3_ecmp_next_slot + count > L3_ECMPm_MAX + 1) return -1;
+    int b = l3_ecmp_next_slot; l3_ecmp_next_slot += count; return b;
+}
+static void ecmp_slots_release(int base, int count)
+{
+    if (ecmp_blk_free_n < L3_ECMP_GRP_MAX) {
+        ecmp_blk_free[ecmp_blk_free_n].base = base;
+        ecmp_blk_free[ecmp_blk_free_n].count = count;
+        ecmp_blk_free_n++;
+    }
+}
+static int ecmp_gid_alloc(void)
+{
+    if (ecmp_gid_free_n > 0) return ecmp_gid_free[--ecmp_gid_free_n];
+    return l3_ecmp_next_group_id++;
+}
+static void ecmp_gid_release(int gid)
+{
+    if (ecmp_gid_free_n < L3_ECMP_GRP_MAX) ecmp_gid_free[ecmp_gid_free_n++] = gid;
+}
 
 /*
- * l3_ecmp_group_create(intf_ids, count) — write `count` consecutive L3_ECMP
- * slots with the given NEXT_HOP_INDEX values, and one L3_ECMP_COUNT entry.
- * Returns the group's base slot index, which is what L3_DEFIP entries put in
- * their ECMP_PTR field.  Returns -1 on error.
- *
- * NB: intf_ids here are CHIP-SIDE next-hop indices (i.e. the value 4 for
- * "INTF 100004").  Caller is responsible for allocating those via the
- * existing l3_egr_intf_program / ING_L3_NEXT_HOP writes.
+ * Write a NEW L3_ECMP group: `count` consecutive L3_ECMP member slots + one
+ * L3_ECMP_COUNT entry, and record it in ecmp_tab. Slots/group-id come from the
+ * free-lists. Returns the group_id (the L3_DEFIP ECMP_PTR0 value), -1 on error.
+ * Encoding verified on live Cumulus 56846: BASE_PTR_0[21:10], COUNT_0[9:0].
  */
-int l3_ecmp_group_create(const int *intf_ids, int count)
+static int l3_ecmp_group_create(const int *intf_ids, int count, uint64_t sig)
 {
-    int base = l3_ecmp_next_slot;
-    int group_id = l3_ecmp_next_group_id++;
     int i, rv;
 
     if (count <= 0 || count > 64) {
-        syslog(LOG_ERR, "ECMP group_create: invalid count=%d", count);
+        syslog(LOG_ERR, "ECMP create: invalid count=%d", count);
         return -1;
     }
-    if (base + count > L3_ECMPm_MAX + 1) {
-        syslog(LOG_ERR, "ECMP table full (base=%d count=%d)", base, count);
-        return -1;
-    }
+    int base = ecmp_slots_alloc(count);
+    if (base < 0) { syslog(LOG_ERR, "ECMP member table full (count=%d)", count); return -1; }
+    int group_id = ecmp_gid_alloc();
 
-    /* Write each L3_ECMP slot. */
     for (i = 0; i < count; i++) {
         L3_ECMPm_t entry;
         L3_ECMPm_CLR(entry);
@@ -905,15 +993,10 @@ int l3_ecmp_group_create(const int *intf_ids, int count)
         rv = WRITE_L3_ECMPm(edged.unit, base + i, entry);
         if (rv < 0) {
             syslog(LOG_WARNING, "ECMP slot %d write failed: %d", base + i, rv);
+            ecmp_slots_release(base, count); ecmp_gid_release(group_id);
             return -1;
         }
     }
-
-    /* Write the L3_ECMP_COUNT (group) entry.  The chip indexes this table by
-     * the L3_DEFIP ECMP_PTR0 field (= group_id here), reads BASE_PTR + COUNT,
-     * then selects L3_ECMP[BASE_PTR + (hash % COUNT)].  Encoding verified on a
-     * live Cumulus 56846: BASE_PTR_0[21:10], COUNT_0[9:0], COUNT = #members
-     * (project_cumulus_route_storage_decoded / L3_NEXTHOP_FORMAT). */
     {
         L3_ECMP_COUNTm_t cnt;
         L3_ECMP_COUNTm_CLR(cnt);
@@ -921,38 +1004,51 @@ int l3_ecmp_group_create(const int *intf_ids, int count)
         L3_ECMP_COUNTm_COUNT_0f_SET(cnt, count);
         rv = WRITE_L3_ECMP_COUNTm(edged.unit, group_id, cnt);
         if (rv < 0) {
-            syslog(LOG_WARNING, "L3_ECMP_COUNT[%d] write failed: %d",
-                   group_id, rv);
+            syslog(LOG_WARNING, "L3_ECMP_COUNT[%d] write failed: %d", group_id, rv);
+            ecmp_slots_release(base, count); ecmp_gid_release(group_id);
             return -1;
         }
     }
-
-    syslog(LOG_INFO, "ECMP group %d: base=%d count=%d members=[%d%s%d%s]",
-           group_id, base, count,
-           intf_ids[0], count > 1 ? "," : "",
-           count > 1 ? intf_ids[1] : 0,
-           count > 2 ? ",..." : "");
-
-    l3_ecmp_next_slot += count;
-    return group_id;  /* ECMP_PTR0 value for L3_DEFIP (index into L3_ECMP_COUNT) */
+    for (i = 0; i < L3_ECMP_GRP_MAX; i++)
+        if (!ecmp_tab[i].valid) {
+            ecmp_tab[i].sig = sig; ecmp_tab[i].group_id = group_id;
+            ecmp_tab[i].base = base; ecmp_tab[i].count = count;
+            ecmp_tab[i].ref = 1; ecmp_tab[i].valid = 1;
+            break;
+        }
+    syslog(LOG_INFO, "ECMP group %d: base=%d count=%d (new)", group_id, base, count);
+    return group_id;
 }
 
-/* Find the transit DEFIP slot already holding this prefix (key = IP_ADDR0 +
- * IP_ADDR_MASK0), or -1 if not present. Linear scan of the small transit band. */
-static int l3_defip_find(uint32_t target, uint32_t mask)
+/* Reference an ECMP group for this member-set: share an identical existing group
+ * (refcount++), else create a new one. */
+static int ecmp_group_ref(const int *nh, int n, uint64_t sig)
 {
-    for (int slot = defip_transit_base; slot < defip_transit_slot; slot++) {
-        L3_DEFIPm_t d;
-        if (READ_L3_DEFIPm(edged.unit, slot, &d) != 0)
-            continue;
-        if (!L3_DEFIPm_VALID0f_GET(d))
-            continue;
-        if (L3_DEFIPm_IP_ADDR0f_GET(d) == target &&
-            L3_DEFIPm_IP_ADDR_MASK0f_GET(d) == mask)
-            return slot;
-    }
-    return -1;
+    for (int i = 0; i < L3_ECMP_GRP_MAX; i++)
+        if (ecmp_tab[i].valid && ecmp_tab[i].sig == sig && ecmp_tab[i].count == n) {
+            ecmp_tab[i].ref++;
+            return ecmp_tab[i].group_id;
+        }
+    return l3_ecmp_group_create(nh, n, sig);
 }
+
+/* Drop a reference; on the last one, free the chip group + slots + id. */
+static void ecmp_group_unref(int group_id)
+{
+    for (int i = 0; i < L3_ECMP_GRP_MAX; i++)
+        if (ecmp_tab[i].valid && ecmp_tab[i].group_id == group_id) {
+            if (--ecmp_tab[i].ref > 0) return;
+            L3_ECMP_COUNTm_t cnt;
+            L3_ECMP_COUNTm_CLR(cnt);
+            (void)WRITE_L3_ECMP_COUNTm(edged.unit, group_id, cnt);
+            ecmp_slots_release(ecmp_tab[i].base, ecmp_tab[i].count);
+            ecmp_gid_release(group_id);
+            ecmp_tab[i].valid = 0;
+            syslog(LOG_INFO, "ECMP group %d freed (refcount 0)", group_id);
+            return;
+        }
+}
+
 
 /*
  * l3_route_add_paths() — program a transit IPv4 prefix route into L3_DEFIP.
@@ -1004,51 +1100,61 @@ int l3_route_add_paths(uint32_t dst_host, int prefix_len,
         return -1;
     }
 
-    /* Idempotent re-program. The periodic re-dump re-announces every route; this
-     * also catches a route whose gateway resolved late (first sight skipped above
-     * with "no resolved next-hops"). If the prefix is already programmed, reuse
-     * its slot — but only rewrite when the single/ECMP *shape* changed (e.g. a 2nd
-     * path converged: single -> ECMP), so a steady-state re-dump is a no-op and we
-     * don't churn ECMP groups. (A change of ECMP *members* keeping the same path
-     * count is not re-detected here — a follow-up.) */
-    int slot = l3_defip_find(target, mask);
-    if (slot >= 0) {
-        L3_DEFIPm_t cur;
-        if (READ_L3_DEFIPm(edged.unit, slot, &cur) == 0 &&
-            (int)L3_DEFIPm_ECMP0f_GET(cur) == (n > 1 ? 1 : 0))
-            return 0;                       /* same shape — idempotent, leave it */
-        /* shape changed — overwrite this same slot below */
-    } else {
-        slot = defip_transit_slot++;
-    }
+    /* Canonicalize the next-hop set (sort) and signature it, so a re-dump of the
+     * same paths in any order is a no-op, and any real change (shape OR members) is
+     * detected. The bookkeeping layer then reuses the slot, refcounts the ECMP
+     * group, and frees what's no longer referenced — no leak under churn. */
+    for (int a = 0; a < n; a++)
+        for (int b = a + 1; b < n; b++)
+            if (nh_idx[b] < nh_idx[a]) { int t = nh_idx[a]; nh_idx[a] = nh_idx[b]; nh_idx[b] = t; }
+    uint64_t sig = path_sig(nh_idx, n);
+
+    struct l3_rt *r = route_find(target, mask);
+    if (r && r->sig == sig)
+        return 0;                           /* already programmed, unchanged */
+
+    int is_ecmp = (n > 1);
+    int new_ref = is_ecmp ? ecmp_group_ref(nh_idx, n, sig) : nh_idx[0];
+    if (is_ecmp && new_ref < 0) return -1;
+
+    int slot = r ? r->slot : defip_slot_alloc();
+
     L3_DEFIPm_t d;
     L3_DEFIPm_CLR(d);
     L3_DEFIPm_VALID0f_SET(d, 1);
     L3_DEFIPm_MODE0f_SET(d, 0);
     L3_DEFIPm_MODE_MASK0f_SET(d, 1);
-    L3_DEFIPm_IP_ADDR0f_SET(d, dst_host & mask);
+    L3_DEFIPm_IP_ADDR0f_SET(d, target);
     L3_DEFIPm_IP_ADDR_MASK0f_SET(d, mask);
     L3_DEFIPm_VRF_ID_0f_SET(d, 0);
     L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0x3ff);
-
-    if (n == 1) {
-        L3_DEFIPm_ECMP0f_SET(d, 0);
-        L3_DEFIPm_NEXT_HOP_INDEX0f_SET(d, nh_idx[0]);
-        rv = WRITE_L3_DEFIPm(edged.unit, slot, d);
-        syslog(LOG_INFO,
-               "route L3_DEFIP[%d] %u.%u.%u.%u/%d -> nh_idx=%d wr=%d",
-               slot,(dst_host>>24)&0xff,(dst_host>>16)&0xff,(dst_host>>8)&0xff,
-               dst_host&0xff,prefix_len,nh_idx[0],rv);
-    } else {
-        int grp = l3_ecmp_group_create(nh_idx, n);
-        if (grp < 0) return -1;
+    if (is_ecmp) {
         L3_DEFIPm_ECMP0f_SET(d, 1);
-        L3_DEFIPm_ECMP_PTR0f_SET(d, grp);
-        rv = WRITE_L3_DEFIPm(edged.unit, slot, d);
-        syslog(LOG_INFO,
-               "route L3_DEFIP[%d] %u.%u.%u.%u/%d -> ECMP grp=%d (%d paths) wr=%d",
-               slot,(dst_host>>24)&0xff,(dst_host>>16)&0xff,(dst_host>>8)&0xff,
-               dst_host&0xff,prefix_len,grp,n,rv);
+        L3_DEFIPm_ECMP_PTR0f_SET(d, new_ref);
+    } else {
+        L3_DEFIPm_ECMP0f_SET(d, 0);
+        L3_DEFIPm_NEXT_HOP_INDEX0f_SET(d, new_ref);
     }
+    rv = WRITE_L3_DEFIPm(edged.unit, slot, d);
+
+    if (r && r->is_ecmp)                     /* drop the old group reference */
+        ecmp_group_unref(r->ref);
+    if (!r) {
+        r = route_alloc();
+        if (!r) { syslog(LOG_ERR, "L3 route table full — %u.%u.%u.%u/%d not tracked",
+                         (target>>24)&0xff,(target>>16)&0xff,(target>>8)&0xff,target&0xff,
+                         prefix_len); return -1; }
+        r->target = target; r->mask = mask; r->slot = slot; r->valid = 1;
+    }
+    r->is_ecmp = is_ecmp; r->ref = new_ref; r->sig = sig;
+
+    if (is_ecmp)
+        syslog(LOG_INFO, "route L3_DEFIP[%d] %u.%u.%u.%u/%d -> ECMP grp=%d (%d paths) wr=%d",
+               slot,(dst_host>>24)&0xff,(dst_host>>16)&0xff,(dst_host>>8)&0xff,dst_host&0xff,
+               prefix_len, new_ref, n, rv);
+    else
+        syslog(LOG_INFO, "route L3_DEFIP[%d] %u.%u.%u.%u/%d -> nh_idx=%d wr=%d",
+               slot,(dst_host>>24)&0xff,(dst_host>>16)&0xff,(dst_host>>8)&0xff,dst_host&0xff,
+               prefix_len, new_ref, rv);
     return rv < 0 ? -1 : 0;
 }

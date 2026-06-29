@@ -41,7 +41,6 @@ int l3_local_host_add(uint32_t ipv4_addr, int logical_port);
  * to put in L3_DEFIP entries that route via this group), or -1 on error.
  * Mirrors Cumulus's multipath model (project_cumulus_chip_init_complete).
  */
-int l3_ecmp_group_create(const int *intf_ids, int count);
 
 /*
  * Program a transit IPv4 prefix into L3_DEFIP with one or more next-hops.
