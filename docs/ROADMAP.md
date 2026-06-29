@@ -18,21 +18,20 @@ Two L3 implementations exist, and IPv6 effort is asymmetric:
 
 ## Do BEFORE IPv6 (IPv4 foundation — v6 will duplicate this code)
 
-1. **L3 table lifecycle / reclamation** — *highest leverage.*
-   Today `defip_transit_slot`, `l3_ecmp_next_slot`, and `l3_ecmp_next_group_id`
-   only ever increment; route delete invalidates the DEFIP entry but **never frees
-   the slot or the ECMP group** ("reclaimed on the next edged restart"). Under
-   route churn (link flaps, OSPF reconvergence) these tables leak until they
-   exhaust. IPv6 adds a *second* set of tables — fix the alloc/free model **once**.
-   Recommended: a proper bookkeeping layer in edged — `prefix → {slot, ecmp_group,
-   path-signature}` with a free-list. That single layer also closes #2 and #3.
+1. **L3 table lifecycle / reclamation** — ✅ **DONE** (edged 72c0d4e).
+   Added a route bookkeeping layer (`route_tab`: prefix → {slot, ecmp_group,
+   path-signature}) + DEFIP slot free-list + ECMP group dedup/refcount with member-
+   slot and group-id free-lists. Slots/groups are now freed on delete and reused, so
+   the tables stay flat under churn. Verified on the AS5610 (slot reuse, ECMP group
+   freed at refcount 0). Same layer to be reused by IPv6.
 
 2. **Host-route / neighbor deletion** (`l3_host_delete` is a TODO) — a deleted ARP
-   leaves a stale chip next-hop. Part of the same lifecycle gap as #1.
+   leaves a stale chip next-hop, and re-resolving a gateway leaks a next-hop index.
+   The smaller remaining piece of the lifecycle work. **(still open)**
 
-3. **ECMP member-change detection** — the route-sync idempotency currently re-detects
-   single↔ECMP shape changes but **not** a change of ECMP *members* at the same path
-   count (e.g. path A→C, still 2 paths). The `path-signature` from #1 closes this.
+3. **ECMP member-change detection** — ✅ **DONE** with #1. `route_add_paths` now sorts
+   the next-hop set and signatures it, so a re-dump of the same paths is a no-op and a
+   change of ECMP *members* at the same path count is detected and reprogrammed.
 
 4. **Functional forwarding validation** — we've verified routes are *programmed*
    into `L3_DEFIP`; confirm transit traffic actually **hardware-forwards and
