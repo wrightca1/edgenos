@@ -15,6 +15,7 @@ files:
   - {src: edgenos/platform/accton-as5610-52x/services/sfp-enable.sh, dst: /usr/lib/edgenos/platform/sfp-enable.sh, mode: "0755"}
   - {src: edgenos/platform/accton-as5610-52x/services/fan-controller.sh, dst: /usr/lib/edgenos/platform/fan-controller.sh, mode: "0755"}
   - {src: edgenos/platform/accton-as5610-52x/services/swp-l3-config.sh, dst: /usr/lib/edgenos/platform/swp-l3-config.sh, mode: "0755"}
+  - {src: edgenos/platform/accton-as5610-52x/config/swp-addrs.conf, dst: /etc/edged/swp-addrs.conf, mode: "0644"}
   # the ONL-style platform layer
   - {src: edgenos/platform/accton-as5610-52x/platform.py, dst: /usr/lib/edgenos/platform/platform.py, mode: "0644"}
   - {src: edgenos/core/platform/base.py, dst: /usr/lib/edgenos/platform/base.py, mode: "0644"}
