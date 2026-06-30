@@ -899,6 +899,161 @@ static bcm_if_t bcmd_l3_intf_ensure(int port, bcm_vlan_t vlan)
     return intf.l3a_intf_id;
 }
 
+/* ===========================================================================
+ * IPv6 L3 — parallel to the v4 path above. The SDK does the table work; v6
+ * differs only by the BCM_L3_IP6 flag + 16-byte address fields. The L3 egress
+ * objects and interfaces are family-agnostic (MAC/port/VLAN), so v4 and v6 host
+ * routes can share them, but we keep a separate v6 next-hop cache keyed by the
+ * 16-byte gateway address.
+ * ========================================================================= */
+static struct rtattr *bcmd_rta(struct rtattr *rta, int len, int type);  /* fwd (netlink section) */
+
+static struct { int port; bcm_ip6_t ip; bcm_if_t egr; } bcmd_nh6[512];
+static int bcmd_nnh6 = 0;
+
+static bcm_if_t bcmd_nh6_find(int port, const bcm_ip6_t ip)
+{
+    int i;
+    for (i = 0; i < bcmd_nnh6; i++)
+        if (bcmd_nh6[i].port == port && sal_memcmp(bcmd_nh6[i].ip, ip, 16) == 0)
+            return bcmd_nh6[i].egr;
+    return -1;
+}
+static bcm_if_t bcmd_nh6_take(int port, const bcm_ip6_t ip)
+{
+    int i;
+    for (i = 0; i < bcmd_nnh6; i++)
+        if (bcmd_nh6[i].port == port && sal_memcmp(bcmd_nh6[i].ip, ip, 16) == 0) {
+            bcm_if_t e = bcmd_nh6[i].egr;
+            bcmd_nh6[i].port = -99; sal_memset(bcmd_nh6[i].ip, 0, 16);
+            return e;
+        }
+    return -1;
+}
+static int bcmd_nh6_slot(void)
+{
+    int i;
+    for (i = 0; i < bcmd_nnh6; i++) if (bcmd_nh6[i].port == -99) return i;
+    if (bcmd_nnh6 < (int)(sizeof(bcmd_nh6) / sizeof(bcmd_nh6[0]))) return bcmd_nnh6++;
+    return -1;
+}
+/* prefix length -> 16-byte v6 mask */
+static void bcmd_v6_mask(int len, bcm_ip6_t out)
+{
+    int i;
+    for (i = 0; i < 16; i++) {
+        int b = len - i * 8;
+        out[i] = (b >= 8) ? 0xff : (b <= 0 ? 0 : (uint8)(0xff << (8 - b)));
+    }
+}
+/* compact (uncompressed) v6 string for logs */
+static const char *bcmd_ip6s(const bcm_ip6_t a, char *b)
+{
+    sprintf(b, "%x:%x:%x:%x:%x:%x:%x:%x",
+            (a[0]<<8)|a[1], (a[2]<<8)|a[3], (a[4]<<8)|a[5], (a[6]<<8)|a[7],
+            (a[8]<<8)|a[9], (a[10]<<8)|a[11], (a[12]<<8)|a[13], (a[14]<<8)|a[15]);
+    return b;
+}
+
+/* RTM_NEWADDR (switch's own IPv6): host entry that punts to the CPU. */
+static void bcmd_l3_local_ip6(const bcm_ip6_t ip)
+{
+    bcm_l3_host_t host;
+    char b[48];
+    if (bcmd_nh6_find(-1, ip) >= 0) return;
+    bcm_l3_host_t_init(&host);
+    host.l3a_flags = BCM_L3_L2TOCPU | BCM_L3_IP6;
+    sal_memcpy(host.l3a_ip6_addr, ip, 16);
+    host.l3a_intf = 0;
+    if (bcm_l3_host_add(BCMD_UNIT, &host) != BCM_E_NONE) return;
+    { int s = bcmd_nh6_slot();
+      if (s >= 0) { bcmd_nh6[s].port = -1; sal_memcpy(bcmd_nh6[s].ip, ip, 16); bcmd_nh6[s].egr = 0; } }
+    printf("[bcmd] L3v6: local %s -> CPU (HW punt)\n", bcmd_ip6s(ip, b));
+}
+
+/* RTM_NEWNEIGH (v6): directly-connected host -> L3 egress next-hop + host route. */
+static void bcmd_l3_neigh_add6(int port, const bcm_ip6_t ip, const unsigned char *mac)
+{
+    bcm_l3_egress_t egr;
+    bcm_l3_host_t host;
+    bcm_if_t intf, eid = 0;
+    int i, rv;
+    char b[48];
+    if (bcmd_nh6_find(port, ip) >= 0) return;
+    intf = bcmd_l3_intf_ensure(port, bcmd_vlan_for_port(port));
+    if (intf < 0) return;
+    bcm_l3_egress_t_init(&egr);
+    egr.intf = intf;
+    egr.vlan = bcmd_vlan_for_port(port);
+    egr.port = port;
+    for (i = 0; i < 6; i++) egr.mac_addr[i] = mac[i];
+    rv = bcm_l3_egress_create(BCMD_UNIT, 0, &egr, &eid);
+    if (rv != BCM_E_NONE) {
+        printf("[bcmd] L3v6: neigh %s port %d: egress_create rv=%d\n", bcmd_ip6s(ip, b), port, rv);
+        return;
+    }
+    bcm_l3_host_t_init(&host);
+    host.l3a_flags = BCM_L3_IP6;
+    sal_memcpy(host.l3a_ip6_addr, ip, 16);
+    host.l3a_intf = eid;
+    rv = bcm_l3_host_add(BCMD_UNIT, &host);
+    if (rv != BCM_E_NONE)
+        printf("[bcmd] L3v6: host_add %s rv=%d (egr %d still cached)\n", bcmd_ip6s(ip, b), rv, eid);
+    { int s = bcmd_nh6_slot();
+      if (s >= 0) { bcmd_nh6[s].port = port; sal_memcpy(bcmd_nh6[s].ip, ip, 16); bcmd_nh6[s].egr = eid; } }
+    printf("[bcmd] L3v6: host %s -> egr %d port %d (HW)\n", bcmd_ip6s(ip, b), eid, port);
+}
+
+/* RTM_NEWROUTE (v6): prefix via gateway -> L3 route at the gateway egress. */
+static void bcmd_l3_route_add6(const bcm_ip6_t prefix, int len, const bcm_ip6_t gw, int oif_port)
+{
+    bcm_l3_route_t rt;
+    bcm_if_t eid;
+    char b[48];
+    eid = bcmd_nh6_find(oif_port, gw);
+    if (eid < 0) return;                 /* gateway not resolved yet (deferred to re-dump) */
+    bcm_l3_route_t_init(&rt);
+    rt.l3a_flags = BCM_L3_IP6;
+    sal_memcpy(rt.l3a_ip6_net, prefix, 16);
+    bcmd_v6_mask(len, rt.l3a_ip6_mask);
+    rt.l3a_intf = eid;
+    if (bcm_l3_route_add(BCMD_UNIT, &rt) == BCM_E_NONE)
+        printf("[bcmd] L3v6: route %s/%d -> egr %d (HW)\n", bcmd_ip6s(prefix, b), len, eid);
+}
+
+/* RTM_NEWROUTE (v6) multipath -> ECMP group across the resolved v6 gateways. */
+static void bcmd_l3_route_add_ecmp6(const bcm_ip6_t prefix, int len, struct rtattr *mp, int mplen)
+{
+    bcm_if_t intfs[16];
+    int n = 0;
+    bcm_l3_egress_ecmp_t ecmp;
+    bcm_l3_route_t rt;
+    char b[48];
+    struct rtnexthop *rtnh = (struct rtnexthop *)RTA_DATA(mp);
+    int rem = mplen;
+    while (RTNH_OK(rtnh, rem) && n < 16) {
+        struct rtattr *gwa = bcmd_rta(RTNH_DATA(rtnh),
+                                      (int)(rtnh->rtnh_len - sizeof(*rtnh)), RTA_GATEWAY);
+        int port = bcmd_port_for_ifindex(rtnh->rtnh_ifindex);
+        if (gwa && port >= 0) {
+            bcm_if_t e = bcmd_nh6_find(port, (uint8 *)RTA_DATA(gwa));
+            if (e >= 0) intfs[n++] = e;
+        }
+        rtnh = RTNH_NEXT(rtnh);
+    }
+    if (n < 2) return;                       /* <2 resolved paths: defer to re-dump */
+    bcm_l3_egress_ecmp_t_init(&ecmp);
+    ecmp.max_paths = n;
+    if (bcm_l3_egress_ecmp_create(BCMD_UNIT, &ecmp, n, intfs) != BCM_E_NONE) return;
+    bcm_l3_route_t_init(&rt);
+    rt.l3a_flags = BCM_L3_IP6 | BCM_L3_MULTIPATH;
+    sal_memcpy(rt.l3a_ip6_net, prefix, 16);
+    bcmd_v6_mask(len, rt.l3a_ip6_mask);
+    rt.l3a_intf = ecmp.ecmp_intf;
+    if (bcm_l3_route_add(BCMD_UNIT, &rt) == BCM_E_NONE)
+        printf("[bcmd] L3v6: route %s/%d -> ECMP %d paths (HW)\n", bcmd_ip6s(prefix, b), len, n);
+}
+
 /* RTM_NEWADDR (switch's own IP): /32 L3 host entry that punts to the CPU.
  * Required once MY_STATION is installed: MY_STATION makes the chip L3-route any
  * frame addressed to the router MAC instead of CPU-punting it, so without a
@@ -1090,6 +1245,39 @@ static void bcmd_l3_route_del(bcm_ip_t prefix, int len)
                (prefix>>24)&0xff,(prefix>>16)&0xff,(prefix>>8)&0xff,prefix&0xff, len);
 }
 
+/* ---- IPv6 delete path ---- */
+static void bcmd_l3_local_ip6_del(const bcm_ip6_t ip)
+{
+    bcm_l3_host_t host;
+    if (bcmd_nh6_take(-1, ip) < 0) return;
+    bcm_l3_host_t_init(&host);
+    host.l3a_flags = BCM_L3_L2TOCPU | BCM_L3_IP6;
+    sal_memcpy(host.l3a_ip6_addr, ip, 16);
+    (void)bcm_l3_host_delete(BCMD_UNIT, &host);
+}
+static void bcmd_l3_neigh_del6(int port, const bcm_ip6_t ip)
+{
+    bcm_l3_host_t host;
+    bcm_if_t eid = bcmd_nh6_take(port, ip);
+    char b[48];
+    if (eid < 0) return;
+    bcm_l3_host_t_init(&host);
+    host.l3a_flags = BCM_L3_IP6;
+    sal_memcpy(host.l3a_ip6_addr, ip, 16);
+    (void)bcm_l3_host_delete(BCMD_UNIT, &host);
+    (void)bcm_l3_egress_destroy(BCMD_UNIT, eid);
+    printf("[bcmd] L3v6: del host %s (egr %d) port %d\n", bcmd_ip6s(ip, b), eid, port);
+}
+static void bcmd_l3_route_del6(const bcm_ip6_t prefix, int len)
+{
+    bcm_l3_route_t rt;
+    bcm_l3_route_t_init(&rt);
+    rt.l3a_flags = BCM_L3_IP6;
+    sal_memcpy(rt.l3a_ip6_net, prefix, 16);
+    bcmd_v6_mask(len, rt.l3a_ip6_mask);
+    (void)bcm_l3_route_delete(BCMD_UNIT, &rt);
+}
+
 /* Set a netdev admin-UP via ioctl, so its admin state matches the chip-enabled
  * state at startup. Without this, the netdevs start admin-DOWN while the chip
  * ports are enabled; carrier-change RTM_NEWLINK events (IFF_UP clear) would then
@@ -1120,7 +1308,9 @@ static int bcmd_nl_open(void)
     memset(&sa, 0, sizeof(sa));
     sa.nl_family = AF_NETLINK;
     /* link admin + IPv4 addr/neigh/route — the full L3 FIB mirror. */
-    sa.nl_groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_NEIGH | RTMGRP_IPV4_ROUTE;
+    sa.nl_groups = RTMGRP_LINK | RTMGRP_NEIGH |
+                   RTMGRP_IPV4_IFADDR | RTMGRP_IPV4_ROUTE |
+                   RTMGRP_IPV6_IFADDR | RTMGRP_IPV6_ROUTE;
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         printf("[bcmd] netlink bind: %s\n", strerror(errno)); close(fd); return -1;
     }
@@ -1132,7 +1322,7 @@ static int bcmd_nl_open(void)
  * handled by bcmd_nl_process. Order addr->neigh->route so gateways resolve. */
 static void bcmd_nl_drain(int fd);   /* fwd: consume a dump fully before the next */
 
-static void bcmd_nl_dump(int fd, int type)
+static void bcmd_nl_dump(int fd, int type, int family)
 {
     struct { struct nlmsghdr nh; struct rtgenmsg g; } req;
     struct sockaddr_nl sa;
@@ -1140,7 +1330,7 @@ static void bcmd_nl_dump(int fd, int type)
     req.nh.nlmsg_len = sizeof(req);
     req.nh.nlmsg_type = type;
     req.nh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-    req.g.rtgen_family = AF_INET;
+    req.g.rtgen_family = family;
     memset(&sa, 0, sizeof(sa)); sa.nl_family = AF_NETLINK;
     (void)sendto(fd, &req, sizeof(req), 0, (struct sockaddr *)&sa, sizeof(sa));
     /* Netlink allows only one dump in flight per socket — drain this one fully
@@ -1174,32 +1364,52 @@ static void bcmd_nl_handle(struct nlmsghdr *nh)
         struct ifaddrmsg *ifa = (struct ifaddrmsg *)NLMSG_DATA(nh);
         int port = bcmd_port_for_ifindex(ifa->ifa_index), alen;
         struct rtattr *local;
-        bcm_ip_t ip;
-        if (port < 0 || ifa->ifa_family != AF_INET) return;
+        if (port < 0) return;
+        if (ifa->ifa_family != AF_INET && ifa->ifa_family != AF_INET6) return;
         alen = (int)(nh->nlmsg_len - NLMSG_LENGTH(sizeof(*ifa)));
         local = bcmd_rta((struct rtattr *)IFA_RTA(ifa), alen, IFA_LOCAL);
         if (!local)
             local = bcmd_rta((struct rtattr *)IFA_RTA(ifa), alen, IFA_ADDRESS);
         if (!local) return;
-        ip = ntohl(*(unsigned int *)RTA_DATA(local));
-        if (nh->nlmsg_type == RTM_NEWADDR) {
-            (void)bcmd_l3_intf_ensure(port, bcmd_vlan_for_port(port));  /* switch IP -> L3 intf */
-            bcmd_l3_local_ip(ip);
+        if (ifa->ifa_family == AF_INET6) {
+            bcm_ip6_t ip6; sal_memcpy(ip6, RTA_DATA(local), 16);
+            if (nh->nlmsg_type == RTM_NEWADDR) {
+                (void)bcmd_l3_intf_ensure(port, bcmd_vlan_for_port(port));
+                bcmd_l3_local_ip6(ip6);
+            } else {
+                bcmd_l3_local_ip6_del(ip6);
+            }
         } else {
-            bcmd_l3_local_ip_del(ip);                  /* leave the L3 intf in place */
+            bcm_ip_t ip = ntohl(*(unsigned int *)RTA_DATA(local));
+            if (nh->nlmsg_type == RTM_NEWADDR) {
+                (void)bcmd_l3_intf_ensure(port, bcmd_vlan_for_port(port));  /* switch IP -> L3 intf */
+                bcmd_l3_local_ip(ip);
+            } else {
+                bcmd_l3_local_ip_del(ip);              /* leave the L3 intf in place */
+            }
         }
 
     } else if (nh->nlmsg_type == RTM_NEWNEIGH || nh->nlmsg_type == RTM_DELNEIGH) {
         struct ndmsg *nd = (struct ndmsg *)NLMSG_DATA(nh);
         struct rtattr *dst, *lla;
         int port = bcmd_port_for_ifindex(nd->ndm_ifindex);
-        if (port < 0 || nd->ndm_family != AF_INET) return;
+        if (port < 0) return;
+        if (nd->ndm_family != AF_INET && nd->ndm_family != AF_INET6) return;
         dst = bcmd_rta((struct rtattr *)((char *)nd + NLMSG_ALIGN(sizeof(*nd))),
                        (int)(nh->nlmsg_len - NLMSG_LENGTH(sizeof(*nd))), NDA_DST);
         lla = bcmd_rta((struct rtattr *)((char *)nd + NLMSG_ALIGN(sizeof(*nd))),
                        (int)(nh->nlmsg_len - NLMSG_LENGTH(sizeof(*nd))), NDA_LLADDR);
         if (!dst) return;
-        if (nh->nlmsg_type == RTM_NEWNEIGH) {
+        if (nd->ndm_family == AF_INET6) {
+            bcm_ip6_t ip6; sal_memcpy(ip6, RTA_DATA(dst), 16);
+            if (nh->nlmsg_type == RTM_NEWNEIGH) {
+                if (!(nd->ndm_state & (NUD_REACHABLE|NUD_PERMANENT|NUD_STALE|NUD_DELAY|NUD_PROBE)))
+                    return;
+                if (lla) bcmd_l3_neigh_add6(port, ip6, (unsigned char *)RTA_DATA(lla));
+            } else {
+                bcmd_l3_neigh_del6(port, ip6);
+            }
+        } else if (nh->nlmsg_type == RTM_NEWNEIGH) {
             if (!(nd->ndm_state & (NUD_REACHABLE|NUD_PERMANENT|NUD_STALE|NUD_DELAY|NUD_PROBE)))
                 return;                                /* skip FAILED/INCOMPLETE */
             if (lla)
@@ -1213,8 +1423,9 @@ static void bcmd_nl_handle(struct nlmsghdr *nh)
         struct rtmsg *rtm = (struct rtmsg *)NLMSG_DATA(nh);
         struct rtattr *base, *dst, *gw, *oif, *mp;
         int alen, port, len = rtm->rtm_dst_len;
+        int is6 = (rtm->rtm_family == AF_INET6);
         bcm_ip_t pfx = 0;
-        if (rtm->rtm_family != AF_INET) return;
+        if (rtm->rtm_family != AF_INET && !is6) return;
         if (rtm->rtm_table != RT_TABLE_MAIN && rtm->rtm_table != 0) return;
         if (rtm->rtm_type != RTN_UNICAST) return;      /* skip local/broadcast/etc */
         base = (struct rtattr *)((char *)rtm + NLMSG_ALIGN(sizeof(*rtm)));
@@ -1223,6 +1434,22 @@ static void bcmd_nl_handle(struct nlmsghdr *nh)
         gw  = bcmd_rta(base, alen, RTA_GATEWAY);
         oif = bcmd_rta(base, alen, RTA_OIF);
         mp  = bcmd_rta(base, alen, RTA_MULTIPATH);
+        if (is6) {
+            bcm_ip6_t pfx6, gw6;
+            sal_memset(pfx6, 0, 16);
+            if (dst) sal_memcpy(pfx6, RTA_DATA(dst), 16);
+            if (nh->nlmsg_type == RTM_DELROUTE) { bcmd_l3_route_del6(pfx6, len); return; }
+            if (mp) {
+                bcmd_l3_route_add_ecmp6(pfx6, len, mp, (int)RTA_PAYLOAD(mp));
+            } else if (gw && oif) {
+                port = bcmd_port_for_ifindex(*(int *)RTA_DATA(oif));
+                sal_memcpy(gw6, RTA_DATA(gw), 16);
+                if (port >= 0) bcmd_l3_route_add6(pfx6, len, gw6, port);
+            }
+            /* v6 directly-connected glean: not yet — kernel ND resolves on-link
+             * hosts and the resulting RTM_NEWNEIGH programs a /128 host route. */
+            return;
+        }
         if (dst) pfx = ntohl(*(unsigned int *)RTA_DATA(dst));
         if (nh->nlmsg_type == RTM_DELROUTE) { bcmd_l3_route_del(pfx, len); return; }
         /* NEWROUTE: ECMP (multipath) > single-gateway > directly-connected glean */
@@ -1364,9 +1591,12 @@ int bcmd_run(void)
         if (bcmd_is_front(port)) bcmd_netdev_up(SOC_PORT_NAME(BCMD_UNIT, port));
     nlfd = bcmd_nl_open();
     if (nlfd >= 0) {                       /* program the existing FIB into the chip */
-        bcmd_nl_dump(nlfd, RTM_GETADDR);
-        bcmd_nl_dump(nlfd, RTM_GETNEIGH);
-        bcmd_nl_dump(nlfd, RTM_GETROUTE);
+        bcmd_nl_dump(nlfd, RTM_GETADDR,  AF_INET);
+        bcmd_nl_dump(nlfd, RTM_GETNEIGH, AF_INET);
+        bcmd_nl_dump(nlfd, RTM_GETROUTE, AF_INET);
+        bcmd_nl_dump(nlfd, RTM_GETADDR,  AF_INET6);
+        bcmd_nl_dump(nlfd, RTM_GETNEIGH, AF_INET6);
+        bcmd_nl_dump(nlfd, RTM_GETROUTE, AF_INET6);
     }
 
     printf("[bcmd] datapath UP — every port a Linux netdev; L3 FIB mirrored to chip.\n"
@@ -1393,8 +1623,10 @@ int bcmd_run(void)
         }
         /* periodic FIB re-dump: converge routes whose gateway resolved later. */
         if (nlfd >= 0 && (tick % 15) == 14) {
-            bcmd_nl_dump(nlfd, RTM_GETNEIGH);
-            bcmd_nl_dump(nlfd, RTM_GETROUTE);
+            bcmd_nl_dump(nlfd, RTM_GETNEIGH, AF_INET);
+            bcmd_nl_dump(nlfd, RTM_GETROUTE, AF_INET);
+            bcmd_nl_dump(nlfd, RTM_GETNEIGH, AF_INET6);
+            bcmd_nl_dump(nlfd, RTM_GETROUTE, AF_INET6);
         }
         if ((++tick % 5) == 0) { bcmd_link_summary(); bcmd_xe_counters(); }  /* ~10s */
         /* One-shot 84758 media-RX re-acquire once the link has settled (~16s) and
