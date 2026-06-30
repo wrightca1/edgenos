@@ -1364,7 +1364,12 @@ static void bcmd_nl_handle(struct nlmsghdr *nh)
         struct ifaddrmsg *ifa = (struct ifaddrmsg *)NLMSG_DATA(nh);
         int port = bcmd_port_for_ifindex(ifa->ifa_index), alen;
         struct rtattr *local;
-        if (port < 0) return;
+        /* Loopback (always ifindex 1) carries the router's own IPs (OSPF loopback
+         * etc.). Program those as CPU-punt local hosts too, so the chip doesn't drop
+         * v4 destined to them (v6 survives via the L3-miss trap; v4 does not). The
+         * L3-interface step is front-port only — loopback needs just the host punt. */
+        int is_lo = (ifa->ifa_index == 1);
+        if (port < 0 && !is_lo) return;
         if (ifa->ifa_family != AF_INET && ifa->ifa_family != AF_INET6) return;
         alen = (int)(nh->nlmsg_len - NLMSG_LENGTH(sizeof(*ifa)));
         local = bcmd_rta((struct rtattr *)IFA_RTA(ifa), alen, IFA_LOCAL);
@@ -1374,7 +1379,7 @@ static void bcmd_nl_handle(struct nlmsghdr *nh)
         if (ifa->ifa_family == AF_INET6) {
             bcm_ip6_t ip6; sal_memcpy(ip6, RTA_DATA(local), 16);
             if (nh->nlmsg_type == RTM_NEWADDR) {
-                (void)bcmd_l3_intf_ensure(port, bcmd_vlan_for_port(port));
+                if (port >= 0) (void)bcmd_l3_intf_ensure(port, bcmd_vlan_for_port(port));
                 bcmd_l3_local_ip6(ip6);
             } else {
                 bcmd_l3_local_ip6_del(ip6);
@@ -1382,7 +1387,7 @@ static void bcmd_nl_handle(struct nlmsghdr *nh)
         } else {
             bcm_ip_t ip = ntohl(*(unsigned int *)RTA_DATA(local));
             if (nh->nlmsg_type == RTM_NEWADDR) {
-                (void)bcmd_l3_intf_ensure(port, bcmd_vlan_for_port(port));  /* switch IP -> L3 intf */
+                if (port >= 0) (void)bcmd_l3_intf_ensure(port, bcmd_vlan_for_port(port));  /* switch IP -> L3 intf */
                 bcmd_l3_local_ip(ip);
             } else {
                 bcmd_l3_local_ip_del(ip);              /* leave the L3 intf in place */
