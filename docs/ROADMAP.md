@@ -89,9 +89,12 @@ No validation harness exists yet. Build one covering:
 
 Depends on the IPv4 lifecycle layer above. Then:
 
-- **Datapath — AS4610 `bcmd`**: handle `AF_INET6` in the netlink route/host/neigh
-  path; call the SDK `bcm_l3_*` with v6 addresses. Low effort (SDK does the table
-  work). *Good first milestone — proves the v6 path with little new code.*
+- **Datapath — AS4610 `bcmd`**: ✅ **IMPLEMENTED** (514f77d) — `AF_INET6` in the
+  netlink addr/neigh/route path + SDK `bcm_l3_*` with `BCM_L3_IP6` and 16-byte
+  addresses (host/neighbor/route/ECMP, with a v6 next-hop cache); dumps both families.
+  Builds clean against the full OpenBCM SDK. **Pending HW validation** — the AS4610 is
+  offline. OSPFv3 (`ospf6d-arm`) shipped too (261a57d). bcmd was already EBUSY-safe and
+  accepts `rtm_table==0`, so it needed no netlink fixes (unlike edged).
 - **Datapath — AS5610 `edged`**: ✅ **DONE** — v6 host/neighbor `L3_ENTRY_IPV6`
   (5054f0f, encoding validated by readback) + v6 transit `L3_DEFIP_128` (3356991,
   single + ECMP, own lifecycle). `L3_DEFIP_128` is a dedicated 256-entry table (no v4
@@ -107,8 +110,10 @@ Depends on the IPv4 lifecycle layer above. Then:
   Nexus's OSPF loopback /64) + explicit interface `::2` addresses persist via
   `swp-addrs.conf`. v6 ping to the Nexus link addresses + loopback all reply.
   Note: the box has no `ping6`/`ping -6` (BusyBox) — use a v6-capable tool to test.
-- **Web UI**: v6 addresses/routes on the Interfaces/ECMP pages (currently `ip -4`
-  only); an OSPFv3 view if `ospf6d` is enabled.
+- **Web UI**: ✅ **OSPFv3 module DONE** (d6065f2) — `core/webui/modules/ospf6.py`,
+  neighbors/learned-routes/add-interface-to-area via the ospf6d vty (2606), verified
+  on the AS5610. Still todo: v6 addresses/routes on the Interfaces/ECMP pages
+  (currently `ip -4` only).
 - **Validation**: v6 transit + ECMP forwarding test, mirroring the v4 validation.
 
 ## Suggested sequencing
