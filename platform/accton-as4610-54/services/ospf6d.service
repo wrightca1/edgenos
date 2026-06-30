@@ -1,0 +1,13 @@
+[Unit]
+Description=Quagga ospf6d (OSPFv3 / IPv6)
+After=zebra.service
+Wants=zebra.service
+
+[Service]
+Type=simple
+ExecStart=/opt/edgenos/ospf6d-arm -f /etc/quagga/ospf6d.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
