@@ -98,11 +98,15 @@ Depends on the IPv4 lifecycle layer above. Then:
   TCAM overlap). netlink parses v6 dst/gateways. Neighbor + transit + termination all
   program the chip; verified on hardware (writes wr=0, v4 unaffected). Actual v6
   *forwarding* awaits v6 on the peer (Nexus) — chip programming is verified.
-- **Control plane**: ✅ **OSPFv3 (`ospf6d`) DONE** (8676612) — enabled in the Quagga
-  build + shipped (config/service/spec). Verified on the AS5610: ospf6d runs OSPFv3 on
-  the uplinks (area 0, DR) and emits Hellos to `ff02::5` every 10s. v6 routes it learns
-  flow zebra → kernel FIB → edged → `L3_DEFIP_128`. Adjacency/routes need OSPFv3 on the
-  peer.
+- **Control plane**: ✅ **OSPFv3 (`ospf6d`) DONE + VERIFIED AGAINST A LIVE PEER**
+  (8676612, 50117f3). With the Nexus running OSPFv3, the AS5610 forms Full adjacencies
+  on swp1/swp2/swp49, learns 43 v6 routes, and edged programs them into `L3_DEFIP_128`
+  incl 3-way ECMP across the uplinks. Key fix: zebra installs v6 routes with
+  `rtm_table=UNSPEC` + `RTA_TABLE`, so handle_route now honors `RTA_TABLE` (was
+  dropping every OSPFv3 route). v6 loopback `2001:470:882d:1111::241/128` (in the
+  Nexus's OSPF loopback /64) + explicit interface `::2` addresses persist via
+  `swp-addrs.conf`. v6 ping to the Nexus link addresses + loopback all reply.
+  Note: the box has no `ping6`/`ping -6` (BusyBox) — use a v6-capable tool to test.
 - **Web UI**: v6 addresses/routes on the Interfaces/ECMP pages (currently `ip -4`
   only); an OSPFv3 view if `ospf6d` is enabled.
 - **Validation**: v6 transit + ECMP forwarding test, mirroring the v4 validation.
