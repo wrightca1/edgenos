@@ -13,6 +13,7 @@ files:
   - {src: edgenos/core/webui/modules/dashboard.py,  dst: /usr/lib/edgenos/webui/modules/dashboard.py,  mode: "0644"}
   - {src: edgenos/core/webui/modules/interfaces.py, dst: /usr/lib/edgenos/webui/modules/interfaces.py, mode: "0644"}
   - {src: edgenos/core/webui/modules/ospf.py,       dst: /usr/lib/edgenos/webui/modules/ospf.py,       mode: "0644"}
+  - {src: edgenos/core/webui/modules/ospf6.py,      dst: /usr/lib/edgenos/webui/modules/ospf6.py,      mode: "0644"}
   - {src: edgenos/core/webui/modules/apps.py,       dst: /usr/lib/edgenos/webui/modules/apps.py,       mode: "0644"}
   - {src: edgenos/core/webui/modules/ecmp.py,       dst: /usr/lib/edgenos/webui/modules/ecmp.py,       mode: "0644"}
   - {src: edgenos/core/webui/modules/vlan.py,       dst: /usr/lib/edgenos/webui/modules/vlan.py,       mode: "0644"}
