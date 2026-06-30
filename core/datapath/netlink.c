@@ -40,7 +40,7 @@
 /* BMD headers for port mode control */
 #include <bmd/bmd.h>
 
-#define NETLINK_BUF_SIZE  16384
+#define NETLINK_BUF_SIZE  65536   /* large enough for batched dump datagrams */
 
 int netlink_init(void)
 {
@@ -110,21 +110,20 @@ int netlink_init(void)
     {
         struct { struct nlmsghdr nlh; struct rtgenmsg gen; } req;
         int kinds[2] = { RTM_GETNEIGH, RTM_GETROUTE };
+        int fams[2]  = { AF_INET, AF_INET6 };       /* dump both v4 and v6 */
+        for (int fi = 0; fi < 2; fi++)
         for (int k = 0; k < 2; k++) {
             memset(&req, 0, sizeof(req));
             req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
             req.nlh.nlmsg_type = kinds[k];
             req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-            req.nlh.nlmsg_seq = 2 + k;
-            req.gen.rtgen_family = AF_INET;
-            if (send(fd, &req, req.nlh.nlmsg_len, 0) < 0) {
-                syslog(LOG_WARNING, "Netlink: dump type=%d request failed: %s",
-                       kinds[k], strerror(errno));
-            } else {
-                syslog(LOG_INFO, "Netlink: requested %s dump",
-                       kinds[k] == RTM_GETNEIGH ? "neighbor" : "route");
-            }
+            req.nlh.nlmsg_seq = 2 + fi * 2 + k;
+            req.gen.rtgen_family = fams[fi];
+            if (send(fd, &req, req.nlh.nlmsg_len, 0) < 0)
+                syslog(LOG_WARNING, "Netlink: dump type=%d fam=%d failed: %s",
+                       kinds[k], fams[fi], strerror(errno));
         }
+        syslog(LOG_INFO, "Netlink: requested neighbor + route dumps (v4 + v6)");
     }
 
     return 0;
@@ -204,14 +203,15 @@ static void handle_route(struct nlmsghdr *nlh)
     uint8_t dst6[16] = {0};
     uint8_t gws6[64][16];  /* v6 gateways, network byte order */
     int is6;
+    uint32_t rta_table = 0;   /* RTA_TABLE — authoritative when rtm_table==UNSPEC */
 
     if (rtm->rtm_family != AF_INET && rtm->rtm_family != AF_INET6)
         return;
     is6 = (rtm->rtm_family == AF_INET6);
 
-    /* Skip non-main table routes */
-    if (rtm->rtm_table != RT_TABLE_MAIN)
-        return;
+    /* The table check is deferred until after RTA parsing: zebra installs IPv6
+     * routes with rtm_table=RT_TABLE_UNSPEC and the real table id in RTA_TABLE,
+     * so checking rtm_table here would wrongly drop every OSPFv3 route. */
 
     rta = RTM_RTA(rtm);
     rtl = RTM_PAYLOAD(nlh);
@@ -232,6 +232,9 @@ static void handle_route(struct nlmsghdr *nlh)
             break;
         case RTA_OIF:
             oif = *(int *)RTA_DATA(rta);
+            break;
+        case RTA_TABLE:
+            rta_table = *(uint32_t *)RTA_DATA(rta);
             break;
         case RTA_MULTIPATH: {
             /* ECMP route: a sequence of struct rtnexthop, each with its own
@@ -256,8 +259,19 @@ static void handle_route(struct nlmsghdr *nlh)
         rta = RTA_NEXT(rta, rtl);
     }
 
+    /* Only main-table routes. Effective table = RTA_TABLE when present (this is
+     * how zebra tags IPv6 routes, with rtm_table left UNSPEC), else rtm_table. */
+    {
+        uint32_t eff_table = rta_table ? rta_table : rtm->rtm_table;
+        if (eff_table != RT_TABLE_MAIN)
+            return;
+    }
+
     if (nlh->nlmsg_type == RTM_NEWROUTE) {
         if (is6) {
+            char ds[64] = "?"; inet_ntop(AF_INET6, dst6, ds, sizeof(ds));
+            syslog(LOG_DEBUG, "v6 Route add: %s/%d ngw=%d table=%d", ds,
+                   rtm->rtm_dst_len, ngw, rtm->rtm_table);
             if (ngw > 0)
                 l3_route_add_paths_v6(dst6, rtm->rtm_dst_len, gws6, ngw);
             /* else: v6 connected route — no chip transit entry needed */
@@ -329,10 +343,10 @@ void netlink_poll(void)
     if (edged.netlink_fd <= 0)
         return;
 
-    len = recv(edged.netlink_fd, buf, sizeof(buf), MSG_DONTWAIT);
-    if (len <= 0)
-        return;
-
+    /* Drain ALL pending datagrams per call — a dump or a convergence burst
+     * arrives as many datagrams; reading only one per poll lets the kernel
+     * socket buffer back up (and the routes never get programmed). */
+    while ((len = recv(edged.netlink_fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
     for (nlh = (struct nlmsghdr *)buf;
          NLMSG_OK(nlh, (unsigned int)len);
          nlh = NLMSG_NEXT(nlh, len)) {
@@ -390,9 +404,10 @@ void netlink_poll(void)
         }
 
         default:
-            syslog(LOG_INFO, "NL: unhandled nlmsg_type=%d", nlh->nlmsg_type);
+            syslog(LOG_DEBUG, "NL: unhandled nlmsg_type=%d", nlh->nlmsg_type);
             break;
         }
+    }
     }
 }
 
@@ -406,19 +421,29 @@ void netlink_redump_routes(void)
      * non-destructive. Mirrors the 4610 bcmd periodic FIB re-dump. */
     if (edged.netlink_fd <= 0)
         return;
+    /* A netlink socket allows only ONE dump in flight: firing several
+     * NLM_F_DUMP requests back-to-back makes all but the first fail with EBUSY,
+     * so the v4+v6 neigh+route dumps would never all complete. Issue ONE dump per
+     * tick, round-robin — over a few ticks everything is re-dumped, no EBUSY. */
+    static const struct { int type; int fam; } seq[] = {
+        { RTM_GETROUTE, AF_INET  },
+        { RTM_GETROUTE, AF_INET6 },
+        { RTM_GETNEIGH, AF_INET6 },
+        { RTM_GETNEIGH, AF_INET  },
+    };
+    static unsigned tick = 0;
+    int i = tick++ % (int)(sizeof(seq) / sizeof(seq[0]));
+
     struct { struct nlmsghdr nlh; struct rtgenmsg gen; } req;
-    int kinds[2] = { RTM_GETNEIGH, RTM_GETROUTE };
-    for (int k = 0; k < 2; k++) {
-        memset(&req, 0, sizeof(req));
-        req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
-        req.nlh.nlmsg_type = kinds[k];
-        req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-        req.nlh.nlmsg_seq = 10 + k;
-        req.gen.rtgen_family = AF_INET;
-        if (send(edged.netlink_fd, &req, req.nlh.nlmsg_len, 0) < 0)
-            syslog(LOG_WARNING, "Netlink: periodic redump type=%d failed: %s",
-                   kinds[k], strerror(errno));
-    }
+    memset(&req, 0, sizeof(req));
+    req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
+    req.nlh.nlmsg_type = seq[i].type;
+    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.nlh.nlmsg_seq = 10 + i;
+    req.gen.rtgen_family = seq[i].fam;
+    if (send(edged.netlink_fd, &req, req.nlh.nlmsg_len, 0) < 0)
+        syslog(LOG_WARNING, "Netlink: periodic redump type=%d fam=%d failed: %s",
+               seq[i].type, seq[i].fam, strerror(errno));
 }
 
 void netlink_cleanup(void)
