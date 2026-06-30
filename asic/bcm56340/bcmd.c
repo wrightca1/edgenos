@@ -1531,6 +1531,43 @@ static void bcmd_xe_counters(void)
     }
 }
 
+/* Reflect the chip link in the KNET netif's operstate so `ip link` shows UP/DOWN.
+ * The linux-bcm-knet netdevs don't manage carrier (operstate stays UNKNOWN, every
+ * netif shows LOWER_UP regardless of link, and IFLA_CARRIER set is unsupported), but
+ * for such carrier-unmanaged devices the kernel lets userspace set IFLA_OPERSTATE.
+ * So the link-scan loop pushes IF_OPER_UP/IF_OPER_DOWN here (admin state untouched). */
+static void bcmd_netif_link(const char *name, int up)
+{
+    unsigned int idx;
+    int s;
+    struct sockaddr_nl sa;
+    char buf[64];
+    struct nlmsghdr *nlh;
+    struct ifinfomsg *ifi;
+    struct rtattr *rta;
+    if (!name || !name[0]) return;
+    idx = if_nametoindex(name);
+    if (!idx) return;
+    s = socket(AF_NETLINK, SOCK_RAW, 0);             /* NETLINK_ROUTE */
+    if (s < 0) return;
+    memset(&sa, 0, sizeof(sa)); sa.nl_family = AF_NETLINK;
+    memset(buf, 0, sizeof(buf));
+    nlh = (struct nlmsghdr *)buf;
+    nlh->nlmsg_type  = RTM_NEWLINK;
+    nlh->nlmsg_flags = NLM_F_REQUEST;
+    nlh->nlmsg_len   = NLMSG_LENGTH(sizeof(*ifi));
+    ifi = (struct ifinfomsg *)NLMSG_DATA(nlh);
+    ifi->ifi_family = AF_UNSPEC;
+    ifi->ifi_index  = (int)idx;
+    rta = (struct rtattr *)(buf + NLMSG_ALIGN(nlh->nlmsg_len));
+    rta->rta_type = 16;                              /* IFLA_OPERSTATE */
+    rta->rta_len  = RTA_LENGTH(1);
+    *(unsigned char *)RTA_DATA(rta) = up ? 6 : 2;    /* IF_OPER_UP : IF_OPER_DOWN */
+    nlh->nlmsg_len = NLMSG_ALIGN(nlh->nlmsg_len) + RTA_LENGTH(1);
+    (void)sendto(s, buf, nlh->nlmsg_len, 0, (struct sockaddr *)&sa, sizeof(sa));
+    close(s);
+}
+
 /* ------------------------------------------------------------------- entry */
 /* Called from socdiag's main() in place of diag_shell(). SAL/kcom/chip_info
  * config + config.bcm have already been done by main(). */
@@ -1544,13 +1581,19 @@ static void bcmd_link_summary(void)
         if (!bcmd_is_front(port)) continue;
         total++;
         link = 0;
-        if (bcm_port_link_status_get(BCMD_UNIT, port, &link) == BCM_E_NONE &&
-            link == BCM_PORT_LINK_STATUS_UP) {
-            int sp = 0; bcm_port_speed_get(BCMD_UNIT, port, &sp);
-            up++;
-            if (n < (int)sizeof(buf) - 24)
-                n += snprintf(buf + n, sizeof(buf) - n, " %s(%dG)",
-                                  SOC_PORT_NAME(BCMD_UNIT, port), sp / 1000);
+        (void)bcm_port_link_status_get(BCMD_UNIT, port, &link);
+        {
+            int isup = (link == BCM_PORT_LINK_STATUS_UP);
+            /* Re-assert every cycle: the copper link-up sequence can reset the
+             * netif operstate after we set it, so a one-shot set wouldn't stick. */
+            bcmd_netif_link(SOC_PORT_NAME(BCMD_UNIT, port), isup);
+            if (isup) {
+                int sp = 0; bcm_port_speed_get(BCMD_UNIT, port, &sp);
+                up++;
+                if (n < (int)sizeof(buf) - 24)
+                    n += snprintf(buf + n, sizeof(buf) - n, " %s(%dG)",
+                                      SOC_PORT_NAME(BCMD_UNIT, port), sp / 1000);
+            }
         }
     }
     printf("[bcmd] link: %d/%d up:%s\n", up, total, up ? buf : " (none)");

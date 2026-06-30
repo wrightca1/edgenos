@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""ping6 — IPv6 ICMP echo. These switches ship BusyBox ping (no IPv6) and no
+iputils ping6, so this provides a real v6 ping. Supports global + link-local
+(host%iface) destinations."""
+import socket, struct, select, sys, os, time, argparse
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="ping6", description="send ICMPv6 ECHO_REQUEST")
+    ap.add_argument("host", help="IPv6 address or name (link-local as addr%%iface)")
+    ap.add_argument("-c", type=int, default=4, metavar="N", help="stop after N packets")
+    ap.add_argument("-W", type=float, default=2.0, metavar="S", help="reply timeout (s)")
+    ap.add_argument("-i", type=float, default=1.0, metavar="S", help="interval (s)")
+    a = ap.parse_args()
+    try:
+        ai = socket.getaddrinfo(a.host, None, socket.AF_INET6, socket.SOCK_RAW)[0][4]
+    except socket.gaierror as e:
+        print("ping6: %s: %s" % (a.host, e.strerror or e))
+        return 2
+    dst = ai[0]
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
+    except PermissionError:
+        print("ping6: raw socket needs root")
+        return 2
+    ident = os.getpid() & 0xffff
+    print("PING6 %s (%s)" % (a.host, dst))
+    rx = 0
+    for seq in range(1, a.c + 1):
+        pkt = struct.pack("!BBHHH", 128, 0, 0, ident, seq) + b"edgenos-ping6"
+        t = time.time()
+        s.sendto(pkt, ai)
+        end = t + a.W
+        got = False
+        while time.time() < end:
+            r, _, _ = select.select([s], [], [], max(0, end - time.time()))
+            if not r:
+                break
+            data, src = s.recvfrom(1500)
+            if len(data) >= 8 and data[0] == 129:                       # echo reply
+                _, _, _, rid, rseq = struct.unpack("!BBHHH", data[:8])
+                if rid == ident and rseq == seq:
+                    print("%d bytes from %s: icmp_seq=%d time=%.2f ms"
+                          % (len(data), src[0], seq, (time.time() - t) * 1000))
+                    rx += 1
+                    got = True
+                    break
+        if not got:
+            print("seq=%d timeout" % seq)
+        if seq < a.c:
+            time.sleep(a.i)
+    loss = 100 * (a.c - rx) // a.c if a.c else 0
+    print("--- %s ping6 statistics ---" % a.host)
+    print("%d packets transmitted, %d received, %d%% packet loss" % (a.c, rx, loss))
+    return 0 if rx else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

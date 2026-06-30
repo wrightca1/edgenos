@@ -9,5 +9,6 @@ depends:
   - platform-svc            # provides /usr/lib/edgenos/platform/{base,current,platform}.py
 files:
   - {src: edgenos/core/cli/edgenos, dst: /usr/sbin/edgenos, mode: "0755"}
+  - {src: edgenos/core/cli/ping6, dst: /usr/bin/ping6, mode: "0755"}
   - {src: edgenos/packaging/pkgtool/epkg.py, dst: /usr/lib/edgenos/epkg.py, mode: "0644"}
   - {src: edgenos/packaging/pkgtool/epk.py, dst: /usr/lib/edgenos/epk.py, mode: "0644"}
