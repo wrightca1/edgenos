@@ -1,0 +1,7 @@
+# EdgeNOS-4610 default: only the mgmt port is addressed, via DHCP. Front-panel
+# ports (ge*/xe*) carry NO IPs by default — see ../deploy/ for the site config.
+auto lo
+iface lo inet loopback
+
+auto ma1
+iface ma1 inet dhcp

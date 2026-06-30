@@ -9,3 +9,5 @@ files:
   - {src: edgenos/core/platform/current.py, dst: /usr/lib/edgenos/platform/current.py, mode: "0644"}
   - {src: edgenos/platform/accton-as4610-54/services/edgenos-l3-config.sh, dst: /opt/edgenos/edgenos-l3-config.sh, mode: "0755"}
   - {src: edgenos/platform/accton-as4610-54/services/edgenos-l3.service, dst: /etc/systemd/system/edgenos-l3.service, mode: "0644"}
+  - {src: edgenos/platform/accton-as4610-54/config/interfaces, dst: /etc/network/interfaces, mode: "0644"}
+  - {src: edgenos/platform/accton-as4610-54/config/addrs.conf, dst: /etc/edged/addrs.conf, mode: "0644"}
