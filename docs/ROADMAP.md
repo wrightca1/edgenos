@@ -89,12 +89,13 @@ No validation harness exists yet. Build one covering:
 
 Depends on the IPv4 lifecycle layer above. Then:
 
-- **Datapath — AS4610 `bcmd`**: ✅ **IMPLEMENTED** (514f77d) — `AF_INET6` in the
-  netlink addr/neigh/route path + SDK `bcm_l3_*` with `BCM_L3_IP6` and 16-byte
-  addresses (host/neighbor/route/ECMP, with a v6 next-hop cache); dumps both families.
-  Builds clean against the full OpenBCM SDK. **Pending HW validation** — the AS4610 is
-  offline. OSPFv3 (`ospf6d-arm`) shipped too (261a57d). bcmd was already EBUSY-safe and
-  accepts `rtm_table==0`, so it needed no netlink fixes (unlike edged).
+- **Datapath — AS4610 `bcmd`**: ✅ **DONE + HW-VALIDATED** (514f77d) — `AF_INET6` in
+  the netlink addr/neigh/route path + SDK `bcm_l3_*` with `BCM_L3_IP6`/16-byte addresses
+  (host/neighbor/route/ECMP, v6 next-hop cache); dumps both families. **Validated on the
+  live AS4610** (2026-06-30): programs v6 local/host/single/ECMP into the chip ("L3v6:
+  ... (HW)"), stable 8+ min (NRestarts=0), v4 a clean superset (v4 ping intact under the
+  v6 binary). Promoted to the build artifact. OSPFv3 (`ospf6d-arm`) shipped (261a57d).
+  bcmd was already EBUSY-safe and accepts `rtm_table==0`, so it needed no netlink fixes.
 - **Datapath — AS5610 `edged`**: ✅ **DONE** — v6 host/neighbor `L3_ENTRY_IPV6`
   (5054f0f, encoding validated by readback) + v6 transit `L3_DEFIP_128` (3356991,
   single + ECMP, own lifecycle). `L3_DEFIP_128` is a dedicated 256-entry table (no v4
