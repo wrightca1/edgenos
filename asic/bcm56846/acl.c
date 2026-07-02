@@ -192,6 +192,30 @@ static void acl_gm_map_init(void)
     acl_log("IFP_GM_LOGIC_TO_PHYS_MAP written for 66 ports (the missing GM port map)");
 }
 
+/* soc_mem_clear(FP_GLOBAL_MASK_TCAM) — the SDK's _soc_trident_misc_init does exactly
+ * this at soc_init time ("Must clear FP_GLOBAL_MASK_TCAM after port-to-pipe mappings are
+ * initialized", src/soc/esw/trident.c). OpenMDK's bmd_init never does. Without the memory
+ * being initialized, the IFP global-mask lookup hits uninitialized entries and NO FP rule
+ * ever matches (match-any reads counter=0). This is an OPERATION, not a register value —
+ * which is why register replication never reproduced it. Init all 2048 entries to 0. */
+static void acl_clear_global_mask(void)
+{
+    int i;
+    /* The full SDK init: _bcm_field_tr_hw_clear() (src/bcm/esw/triumph/field.c) clears
+     * every ingress-FP memory + _soc_trident_misc_init clears FP_GLOBAL_MASK_TCAM. OpenMDK
+     * inits NONE of these, so the FP pipeline reads uninitialized (bad-parity) entries and
+     * no lookup ever fires. Init them all (typed CLR+WRITE handle the word counts). */
+    { FP_TCAMm_t e;             FP_TCAMm_CLR(e);             for (i=0;i<=2047;i++) (void)WRITE_FP_TCAMm(ACL_UNIT,i,e); }
+    { FP_GLOBAL_MASK_TCAMm_t e; FP_GLOBAL_MASK_TCAMm_CLR(e); for (i=0;i<=2047;i++) (void)WRITE_FP_GLOBAL_MASK_TCAMm(ACL_UNIT,i,e); }
+    { FP_POLICY_TABLEm_t e;     FP_POLICY_TABLEm_CLR(e);     for (i=0;i<=2047;i++) (void)WRITE_FP_POLICY_TABLEm(ACL_UNIT,i,e); }
+    { FP_METER_TABLEm_t e;      FP_METER_TABLEm_CLR(e);      for (i=0;i<=2047;i++) (void)WRITE_FP_METER_TABLEm(ACL_UNIT,i,e); }
+    { FP_COUNTER_TABLEm_t e;    FP_COUNTER_TABLEm_CLR(e);    for (i=0;i<=2047;i++) (void)WRITE_FP_COUNTER_TABLEm(ACL_UNIT,i,e); }
+    { FP_UDF_TCAMm_t e;         FP_UDF_TCAMm_CLR(e);         for (i=0;i<=511;i++)  (void)WRITE_FP_UDF_TCAMm(ACL_UNIT,i,e); }
+    { FP_UDF_OFFSETm_t e;       FP_UDF_OFFSETm_CLR(e);       for (i=0;i<=511;i++)  (void)WRITE_FP_UDF_OFFSETm(ACL_UNIT,i,e); }
+    { FP_RANGE_CHECKm_t e;      FP_RANGE_CHECKm_CLR(e);      for (i=0;i<=31;i++)   (void)WRITE_FP_RANGE_CHECKm(ACL_UNIT,i,e); }
+    acl_log("FP mem init: TCAM/GMASK/POLICY/METER/COUNTER/UDF_TCAM/UDF_OFFSET/RANGE_CHECK");
+}
+
 int edged_acl_load(const char *path)
 {
     static struct acl_rule rules[ACL_MAX_RULES];
@@ -244,6 +268,7 @@ int edged_acl_load(const char *path)
     }
     acl_enable_port_filter();               /* the missing per-port IFP enable */
     acl_gm_map_init();                      /* the missing IFP global-mask port map */
+    acl_clear_global_mask();                /* the missing FP_GLOBAL_MASK_TCAM init */
     while (acl_n < ACL_MAX) {
         int best = -1;
         for (i = 0; i < nr; i++) {
