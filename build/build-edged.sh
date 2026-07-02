@@ -32,7 +32,7 @@ docker run --rm --network host -v "$TOP:/src" -w /src/edgenos --entrypoint /bin/
 
   SRCS="core/datapath/edged.c core/datapath/packet_io.c core/datapath/netlink.c \
         core/datapath/l2.c core/datapath/l3.c core/datapath/vlan.c core/datapath/datapath.c \
-        asic/bcm56846/bde_interface.c asic/bcm56846/cumulus_replicate.c \
+        asic/bcm56846/bde_interface.c asic/bcm56846/cumulus_replicate.c asic/bcm56846/acl.c \
         platform/accton-as5610-52x/portmap.c platform/accton-as5610-52x/led.c"
 
   echo "== compiling unified edged sources (PowerPC) =="

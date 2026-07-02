@@ -232,6 +232,7 @@ static int asic_init(void)
      * VLAN setup above for the listed ports — they become one isolated L2
      * domain instead of CPU/L3-routed). No file = no groups. */
     vlan_load_l2_groups("/etc/edged/l2-groups.conf");
+    edged_acl_load("/etc/edged/acls.conf");     /* operator ACLs (Field Processor) */
 
     /* Configure datapath: CPU punt, hash, buffer thresholds */
     rv = datapath_init();
@@ -455,8 +456,10 @@ int main(int argc, char **argv)
 
         if (vlan_resync_req) {
             vlan_resync_req = 0;
-            syslog(LOG_INFO, "SIGHUP: re-syncing L2 switch groups");
+            syslog(LOG_INFO, "SIGHUP: re-syncing L2 switch groups + ACLs");
             vlan_l2_resync("/etc/edged/l2-groups.conf");
+            edged_acl_reset();
+            edged_acl_load("/etc/edged/acls.conf");
         }
 
         /* Link poll every ~30ms (300 iterations at 100us) */

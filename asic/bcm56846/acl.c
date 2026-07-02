@@ -1,0 +1,185 @@
+/*
+ * acl.c — EdgeNOS operator ACLs on the BCM56846 Field Processor (AS5610 / edged).
+ *
+ * Phase 2a: destination-IP deny/permit. Programmed by hand into the FP (no SDK),
+ * reusing the single-wide VS6 slice that cumulus_replicate.c already stands up and
+ * enables — physical slice 4, FPF2 selcode 1, which places the 32-bit DstIP at the
+ * F2 field (bits 96..127, first octet at the MSB). The OSPF 224/8 trap lives at
+ * entry 0 (idx 1024); ACL entries go at 1025+ (lower index = higher precedence, so
+ * the OSPF trap and lower-seq rules win). deny -> FP_POLICY *_DROP=1; permit -> a
+ * matching entry with no action (packet proceeds), giving permit-over-deny by seq.
+ *
+ * v1 matches DESTINATION IP only. Rules that also constrain protocol / source /
+ * L4 ports can't be expressed on this slice yet (the src/proto/L4 key-bit layout is
+ * not mapped), so they are SKIPPED with a warning rather than over-matching.
+ * Shares the /etc/edged/acls.conf format + the edgenos acl CLI with the 4610.
+ * See docs/acl-design.md.
+ */
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <syslog.h>
+#include <arpa/inet.h>
+
+#include "edged.h"
+#include <cdk/chip/bcm56840_a0_defs.h>
+#include <cdk/arch/xgs_chip.h>
+#include <cdk/arch/xgs_reg.h>
+
+#define ACL_UNIT      0
+#define ACL_IDX_BASE  1025      /* VS6 / phys slice 4, after the OSPF trap @1024 */
+#define ACL_MAX       64        /* 1025..1088 — safely within slice 4 */
+
+static int acl_idx_used[ACL_MAX];
+static int acl_n = 0;
+
+/* edged's syslog is buried under DMA-timeout spam in the journal — mirror ACL
+ * activity to a dedicated file for visibility. */
+static void acl_log(const char *fmt, ...)
+{
+    FILE *lf = fopen("/tmp/edged-acl.log", "a");
+    va_list ap;
+    if (!lf) return;
+    va_start(ap, fmt);
+    vfprintf(lf, fmt, ap);
+    va_end(ap);
+    fputc('\n', lf);
+    fclose(lf);
+}
+
+/* "10.1.1.0/24" / "any" -> dst ip (host order, first octet = MSB) + mask. -1 = bad. */
+static int acl_cidr(const char *tok, uint32_t *ip, uint32_t *mask)
+{
+    char buf[48], *slash;
+    int bits = 32;
+    struct in_addr a;
+    if (!strcmp(tok, "any") || !strcmp(tok, "0.0.0.0/0")) { *ip = 0; *mask = 0; return 0; }
+    strncpy(buf, tok, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+    slash = strchr(buf, '/'); if (slash) { *slash = 0; bits = atoi(slash + 1); }
+    if (inet_pton(AF_INET, buf, &a) != 1) return -1;
+    *ip = ntohl(a.s_addr);      /* f2[3] wants first octet at the MSB */
+    *mask = bits <= 0 ? 0 : (bits >= 32 ? 0xFFFFFFFFu : (0xFFFFFFFFu << (32 - bits)));
+    return 0;
+}
+
+static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask, int deny)
+{
+    FP_TCAMm_t t;
+    FP_GLOBAL_MASK_TCAMm_t g;
+    FP_POLICY_TABLEm_t p;
+    uint32_t f2[4]  = {0};
+    uint32_t f2m[4] = {0};
+
+    f2[3]  = dstip;             /* DstIP at F2 bits 96..127 (VS6 selcode 1) */
+    f2m[3] = dstmask;
+
+    FP_TCAMm_CLR(t);
+    FP_TCAMm_VALIDf_SET(t, 3);  /* single-wide valid (as the VS6 OSPF trap) */
+    FP_TCAMm_F2f_SET(t, f2);
+    FP_TCAMm_F2_MASKf_SET(t, f2m);
+    (void)WRITE_FP_TCAMm(unit, idx, t);
+
+    FP_GLOBAL_MASK_TCAMm_CLR(g);
+    FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);      /* match any ingress port (v1) */
+    (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
+
+    FP_POLICY_TABLEm_CLR(p);
+    if (deny) {                                 /* permit = no action, packet proceeds */
+        FP_POLICY_TABLEm_G_DROPf_SET(p, 1);
+        FP_POLICY_TABLEm_Y_DROPf_SET(p, 1);
+        FP_POLICY_TABLEm_R_DROPf_SET(p, 1);
+    }
+    (void)WRITE_FP_POLICY_TABLEm(unit, idx, p);
+    acl_log("prog idx=%d f2[3]=0x%08x/0x%08x %s", idx, dstip, dstmask, deny ? "DENY" : "permit");
+}
+
+/* Invalidate every ACL entry we programmed (VALID=0), so a reload rebuilds cleanly. */
+void edged_acl_reset(void)
+{
+    FP_TCAMm_t t;
+    int i;
+    FP_TCAMm_CLR(t);            /* VALID=0 -> entry disabled */
+    for (i = 0; i < acl_n; i++)
+        (void)WRITE_FP_TCAMm(ACL_UNIT, acl_idx_used[i], t);
+    acl_n = 0;
+}
+
+#define ACL_MAX_RULES 128
+#define ACL_MAX_BINDS 32
+
+struct acl_rule { char name[32]; char dst[48]; int seq, deny, supported; };
+
+int edged_acl_load(const char *path)
+{
+    static struct acl_rule rules[ACL_MAX_RULES];
+    static char applied[ACL_MAX_BINDS][32];
+    FILE *f = fopen(path, "r");
+    char line[256];
+    int nr = 0, nb = 0, i, j, done = 0, skipped = 0;
+
+    if (!f) { syslog(LOG_INFO, "ACL: no %s (none configured)", path); return 0; }
+    while (fgets(line, sizeof(line), f)) {
+        char *s = line, *name, *t2;
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s == '#' || *s == '\n' || *s == '\0') continue;
+        name = strtok(s, " \t\n"); if (!name) continue;
+        t2 = strtok(NULL, " \t\n"); if (!t2) continue;
+        if (!strcmp(t2, "apply")) {                 /* <name> apply <port>... (ports ignored in v1) */
+            for (i = 0; i < nb; i++) if (!strcmp(applied[i], name)) break;
+            if (i == nb && nb < ACL_MAX_BINDS) { strncpy(applied[nb], name, 31); applied[nb][31] = 0; nb++; }
+        } else {                                    /* <name> <seq> <act> <proto> <src> <dst> [dport N]... */
+            char *act, *pr, *sr, *ds, *k;
+            int proto_any, src_any, has_l4 = 0;
+            if (nr >= ACL_MAX_RULES) continue;
+            act = strtok(NULL, " \t\n"); pr = strtok(NULL, " \t\n");
+            sr  = strtok(NULL, " \t\n"); ds = strtok(NULL, " \t\n");
+            if (!act || !pr || !sr || !ds) continue;
+            while ((k = strtok(NULL, " \t\n")))
+                if (!strcmp(k, "dport") || !strcmp(k, "sport")) has_l4 = 1;
+            memset(&rules[nr], 0, sizeof(rules[nr]));
+            strncpy(rules[nr].name, name, 31);
+            rules[nr].seq  = atoi(t2);
+            rules[nr].deny = !strcmp(act, "deny");
+            strncpy(rules[nr].dst, ds, sizeof(rules[nr].dst) - 1);
+            proto_any = (!strcmp(pr, "ip") || !strcmp(pr, "any") || !strcmp(pr, "all"));
+            src_any   = (!strcmp(sr, "any") || !strcmp(sr, "0.0.0.0/0"));
+            rules[nr].supported = (proto_any && src_any && !has_l4 && !strchr(ds, ':'));
+            nr++;
+        }
+    }
+    fclose(f);
+
+    /* Program applied+supported rules in ascending seq order (lower seq -> lower
+     * index -> higher FP precedence), skipping unsupported ones with a warning. */
+    edged_acl_reset();
+    while (acl_n < ACL_MAX) {
+        int best = -1;
+        for (i = 0; i < nr; i++) {
+            if (rules[i].seq < 0) continue;                     /* already taken */
+            for (j = 0; j < nb; j++) if (!strcmp(applied[j], rules[i].name)) break;
+            if (j == nb) continue;                               /* ACL not applied: inert */
+            if (best < 0 || rules[i].seq < rules[best].seq) best = i;
+        }
+        if (best < 0) break;
+        if (rules[best].supported) {
+            uint32_t ip, mask;
+            if (acl_cidr(rules[best].dst, &ip, &mask) == 0) {
+                int idx = ACL_IDX_BASE + acl_n;
+                acl_program_one(ACL_UNIT, idx, ip, mask, rules[best].deny);
+                acl_idx_used[acl_n++] = idx;
+                done++;
+            }
+        } else {
+            syslog(LOG_WARNING, "ACL %s seq %d: 5610 v1 matches dst-IP only "
+                   "(proto/src/L4 unsupported) — skipped", rules[best].name, rules[best].seq);
+            skipped++;
+        }
+        rules[best].seq = -1;                                    /* mark taken */
+    }
+    syslog(LOG_INFO, "ACL: installed %d FP entr%s from %s (%d skipped, dst-IP only)",
+           done, done == 1 ? "y" : "ies", path, skipped);
+    acl_log("load %s: %d rules, %d applied-bindings -> %d installed, %d skipped",
+            path, nr, nb, done, skipped);
+    return done;
+}

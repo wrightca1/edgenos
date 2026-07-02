@@ -66,6 +66,10 @@ void datapath_rx_diag(void);  /* SIGUSR1 RX-path drop-counter dump */
  * EGR_VLAN, FP_TCAM, FP_POLICY_TABLE) from captured dumps. */
 int cumulus_replicate_init(void);
 
+/* Operator ACLs on the Field Processor (asic/bcm56846/acl.c). */
+int  edged_acl_load(const char *path);   /* load + program /etc/edged/acls.conf */
+void edged_acl_reset(void);              /* invalidate all programmed ACL entries */
+
 /* iProc AXI sub-window register I/O (for CMICm regs whose writes
  * don't stick via direct BAR0 access). */
 int bde_iproc_read32(uint32_t offset, uint32_t *data);

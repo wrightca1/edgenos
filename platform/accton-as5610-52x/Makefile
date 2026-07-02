@@ -23,7 +23,7 @@ VPATH    := $(CORE_DIR):$(ASIC_DIR):$(PLAT_DIR)
 
 # Source composition (== the proven SRCS list, now split by seam)
 CORE_SRCS := edged.c packet_io.c netlink.c l2.c l3.c vlan.c datapath.c
-ASIC_SRCS := bde_interface.c cumulus_replicate.c
+ASIC_SRCS := bde_interface.c cumulus_replicate.c acl.c
 PLAT_SRCS := portmap.c led.c
 SRCS := $(CORE_SRCS) $(ASIC_SRCS) $(PLAT_SRCS)
 OBJS := $(SRCS:.c=.o)
