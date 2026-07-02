@@ -447,6 +447,7 @@ int main(int argc, char **argv)
         if (rx_diag_req) {
             rx_diag_req = 0;
             datapath_rx_diag();
+            edged_acl_diag();           /* dump ACL FP match counters too */
         }
 
         if (led_diag_req) {

@@ -90,8 +90,43 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
         FP_POLICY_TABLEm_Y_DROPf_SET(p, 1);
         FP_POLICY_TABLEm_R_DROPf_SET(p, 1);
     }
+    FP_POLICY_TABLEm_COUNTER_MODEf_SET(p, 7);   /* count all colors: a match signal */
+    FP_POLICY_TABLEm_COUNTER_INDEXf_SET(p, idx);
     (void)WRITE_FP_POLICY_TABLEm(unit, idx, p);
     acl_log("prog idx=%d f2[3]=0x%08x/0x%08x %s", idx, dstip, dstmask, deny ? "DENY" : "permit");
+}
+
+/* Dump each ACL entry's FP match counter to the file-log (wired to SIGUSR1). A
+ * non-zero count means the entry MATCHED — distinguishing "didn't match" (key/slice
+ * wrong) from "matched but didn't drop" (drop/action wrong). */
+void edged_acl_diag(void)
+{
+    FP_COUNTER_TABLEm_t c;
+    uint32_t pkts;
+    int i;
+
+    /* Reference: the cumulus OSPF trap @1024 in the same VS6 slice — it sees real
+     * 224.0.0.5 traffic, so its counter proves whether VS6 lookup + the counter work. */
+    FP_COUNTER_TABLEm_CLR(c); pkts = 0xffffffff;
+    if (cdk_xgs_mem_read(ACL_UNIT, FP_COUNTER_TABLEm, 1024, c.v, 3) >= 0)
+        pkts = c.v[0] & 0x1fffffff;
+    acl_log("diag ref: OSPF-trap idx=1024 counter=%u", pkts);
+
+    for (i = 0; i < acl_n; i++) {
+        FP_TCAMm_t t;
+        uint32_t f2[4] = {0};
+        int valid = -1;
+        FP_TCAMm_CLR(t);
+        if (cdk_xgs_mem_read(ACL_UNIT, FP_TCAMm, acl_idx_used[i], t.v, 15) >= 0) {
+            valid = FP_TCAMm_VALIDf_GET(t);
+            FP_TCAMm_F2f_GET(t, f2);
+        }
+        FP_COUNTER_TABLEm_CLR(c); pkts = 0xffffffff;
+        if (cdk_xgs_mem_read(ACL_UNIT, FP_COUNTER_TABLEm, acl_idx_used[i], c.v, 3) >= 0)
+            pkts = c.v[0] & 0x1fffffff;
+        acl_log("diag idx=%d readback valid=%d f2[3]=0x%08x counter=%u",
+                acl_idx_used[i], valid, f2[3], pkts);
+    }
 }
 
 /* Invalidate every ACL entry we programmed (VALID=0), so a reload rebuilds cleanly. */

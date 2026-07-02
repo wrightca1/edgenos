@@ -69,6 +69,7 @@ int cumulus_replicate_init(void);
 /* Operator ACLs on the Field Processor (asic/bcm56846/acl.c). */
 int  edged_acl_load(const char *path);   /* load + program /etc/edged/acls.conf */
 void edged_acl_reset(void);              /* invalidate all programmed ACL entries */
+void edged_acl_diag(void);               /* dump per-entry FP match counters (SIGUSR1) */
 
 /* iProc AXI sub-window register I/O (for CMICm regs whose writes
  * don't stick via direct BAR0 access). */
