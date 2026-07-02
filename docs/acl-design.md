@@ -145,4 +145,19 @@ down the portable model + CLI + config that Phase 2 reuses.
 a bare flush left stale drops in place (clear looked applied but traffic stayed blocked). Fix: track
 each installed entry and `bcm_field_entry_remove` + `bcm_field_entry_destroy` on reset.
 
-**Next:** Phase 2 (5610 raw-FP backend), then meters/actions, then the Web UI module.
+**Phase 2a — IN PROGRESS on the AS5610 (edged, raw FP).** `asic/bcm56846/acl.c` parses the same
+`acls.conf` and hand-programs the FP for **destination-IP** deny/permit, reusing the VS6 single-wide
+DstIP slice that `cumulus_replicate.c` stands up (OSPF trap at entry 0 / idx 1024; ACL entries at
+1025+). Wired into boot + SIGHUP; shares the `edgenos acl` CLI + config with the 4610. Rules needing
+src/proto/L4 are skipped (that slice-key layout isn't mapped yet).
+
+- **Pipeline proven** on the live 5610: CLI → `acls.conf` → SIGHUP → edged, and the FP entry is
+  programmed with the correct key/action (file-log `/tmp/edged-acl.log`:
+  `prog idx=1025 f2[3]=0x0a656601/0xffffffff DENY`).
+- **Not yet dropping:** the deny didn't drop a ping to the switch's *own* IP — that dest is punted to
+  the CPU by MY_STATION independent of the IFP drop, so the hand-rolled drop needs to suppress the
+  local-CPU punt (the 4610 SDK does this for free). **Next:** add an FP match counter (like the VS6
+  trap) for observability, test on forwarded/transit traffic, then resolve the IFP-drop / local-punt
+  interaction; afterwards, map src/proto/L4 key bits for the full 5-tuple.
+
+**Then:** meters/rate-limit + copy-to-cpu actions, and the Web UI ACL module.
