@@ -13,6 +13,10 @@ dispatcher over the on-box modules under /usr/lib/edgenos.
   edgenos l2 show                       show L2-switch groups (bridged port sets)
   edgenos l2 set <vid> <port>...        bridge ports into one L2 switch (live)
   edgenos l2 del <vid> | l2 clear       remove a group / all groups (back to L3, live)
+  edgenos acl show                      show ACLs (Field Processor rules) and bindings
+  edgenos acl set <name> <seq> permit|deny <proto> <src> <dst> [dport N] [sport N]
+  edgenos acl apply <name> <port>...    bind an ACL to ingress ports (live)
+  edgenos acl del <name> [<seq>] | acl unapply <name> | acl clear
 """
 import os
 import sys
@@ -99,6 +103,92 @@ def cmd_l2(rest):
     return 0
 
 
+def _acl_read(conf):
+    rules, binds = {}, {}
+    try:
+        for line in open(conf):
+            line = line.split("#")[0].strip()
+            t = line.split()
+            if len(t) < 2:
+                continue
+            if t[1] == "apply":
+                binds[t[0]] = t[2:]
+            else:
+                try:
+                    rules[(t[0], int(t[1]))] = t[2:]
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return rules, binds
+
+
+def _acl_write(conf, rules, binds):
+    os.makedirs(os.path.dirname(conf), exist_ok=True)
+    with open(conf, "w") as f:
+        f.write("# EdgeNOS ACLs — ingress Field Processor rules (see docs/acl-design.md).\n")
+        f.write("# rule:  <name> <seq> permit|deny <proto> <src-cidr> <dst-cidr> [dport N] [sport N]\n")
+        f.write("# bind:  <name> apply <port>...   (ports: swpN on 5610, geN/xeN on 4610)\n")
+        for name, seq in sorted(rules, key=lambda k: (k[0], k[1])):
+            f.write("%s %d %s\n" % (name, seq, " ".join(rules[(name, seq)])))
+        for name in sorted(binds):
+            f.write("%s apply %s\n" % (name, " ".join(binds[name])))
+
+
+def cmd_acl(rest):
+    daemon, l2conf = _datapath()
+    if not daemon:
+        print("no datapath daemon (edged/bcmd) running — cannot manage ACLs")
+        return 1
+    conf = os.path.join(os.path.dirname(l2conf), "acls.conf")
+    sub = rest[0] if rest else "show"
+    rules, binds = _acl_read(conf)
+
+    if sub == "show":
+        if not rules and not binds:
+            print("no ACLs configured")
+            return 0
+        print("ACLs [%s %s]:" % (daemon, conf))
+        for name in sorted(set([n for n, _ in rules] + list(binds))):
+            applied = " ".join(binds.get(name, [])) or "(not applied — inert)"
+            print("  %s   apply: %s" % (name, applied))
+            for n, seq in sorted([k for k in rules if k[0] == name], key=lambda k: k[1]):
+                print("    %4d  %s" % (seq, " ".join(rules[(n, seq)])))
+        return 0
+    if sub == "set" and len(rest) >= 7 and rest[3] in ("permit", "deny"):
+        try:
+            rules[(rest[1], int(rest[2]))] = rest[3:]      # action proto src dst [dport N]...
+        except ValueError:
+            print("seq must be a number")
+            return 1
+    elif sub == "del" and len(rest) >= 2:
+        if len(rest) >= 3:
+            try:
+                rules.pop((rest[1], int(rest[2])), None)
+            except ValueError:
+                print("seq must be a number")
+                return 1
+        else:
+            rules = {k: v for k, v in rules.items() if k[0] != rest[1]}
+            binds.pop(rest[1], None)
+    elif sub == "apply" and len(rest) >= 3:
+        binds[rest[1]] = rest[2:]
+    elif sub == "unapply" and len(rest) >= 2:
+        binds.pop(rest[1], None)
+    elif sub == "clear":
+        rules, binds = {}, {}
+    else:
+        print("usage: edgenos acl [show |")
+        print("   set <name> <seq> permit|deny <proto> <src-cidr> <dst-cidr> [dport N] [sport N] |")
+        print("   del <name> [<seq>] | apply <name> <port>... | unapply <name> | clear]")
+        return 1
+
+    _acl_write(conf, rules, binds)
+    subprocess.call(["pkill", "-HUP", "-x", daemon])          # live re-program
+    print("applied — %s re-synced ACLs from %s" % (daemon, conf))
+    return 0
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__.strip())
@@ -116,6 +206,8 @@ def main(argv):
         return epkg.main(["epkg"] + rest)
     if cmd == "l2":
         return cmd_l2(rest)
+    if cmd == "acl":
+        return cmd_acl(rest)
     print(__doc__.strip())
     return 1
 

@@ -64,6 +64,7 @@
 #include <bcm/knet.h>
 #include <bcm/l2.h>
 #include <bcm/l3.h>
+#include <bcm/field.h>
 #include <bcm/vlan.h>
 #include <bcm/stat.h>
 #include <bcm/switch.h>
@@ -1599,6 +1600,205 @@ static void bcmd_link_summary(void)
     printf("[bcmd] link: %d/%d up:%s\n", up, total, up ? buf : " (none)");
 }
 
+/* ============================ ACLs (Field Processor) ======================= *
+ * Operator ACLs programmed into the ingress Field Processor via the OpenBCM SDK.
+ * Config /etc/bcmd/acls.conf, reloaded on SIGHUP alongside L2 groups:
+ *   rule:  <name> <seq> permit|deny <proto> <src-cidr> <dst-cidr> [dport N] [sport N]
+ *   bind:  <name> apply <port> [<port> ...]
+ * A rule is programmed only for ACLs that have an apply line; unmatched traffic is
+ * permitted (implicit permit). v4 and v6 rules use separate FP groups. Lower seq =
+ * higher precedence. See docs/acl-design.md (Phase 1). */
+
+static bcm_field_group_t bcmd_acl_g4 = -1, bcmd_acl_g6 = -1;
+
+/* Installed entries, tracked so a reload can remove them (group_flush does not
+ * uninstall from HW on this chip — a bare flush left stale drops in the TCAM). */
+#define BCMD_ACL_MAX_ENTRIES 1024
+static bcm_field_entry_t bcmd_acl_entries[BCMD_ACL_MAX_ENTRIES];
+static int bcmd_acl_nent = 0;
+
+#define BCMD_ACL_MAX_RULES 128
+#define BCMD_ACL_MAX_BINDS 32
+#define BCMD_ACL_PRIO_BASE 30000
+
+struct bcmd_acl_rule { char name[32]; char src[48]; char dst[48];
+                       int seq, deny, proto, dport, sport; };
+struct bcmd_acl_bind { char name[32]; bcm_pbmp_t pbmp; };
+
+/* Get (creating on first use) the v4 or v6 ingress FP group. */
+static bcm_field_group_t bcmd_acl_group(int v6)
+{
+    bcm_field_group_t *g = v6 ? &bcmd_acl_g6 : &bcmd_acl_g4;
+    bcm_field_qset_t qs;
+    int rv;
+    if (*g >= 0) return *g;
+    BCM_FIELD_QSET_INIT(qs);
+    BCM_FIELD_QSET_ADD(qs, bcmFieldQualifyInPorts);
+    if (v6) { BCM_FIELD_QSET_ADD(qs, bcmFieldQualifySrcIp6);
+              BCM_FIELD_QSET_ADD(qs, bcmFieldQualifyDstIp6); }
+    else    { BCM_FIELD_QSET_ADD(qs, bcmFieldQualifySrcIp);
+              BCM_FIELD_QSET_ADD(qs, bcmFieldQualifyDstIp); }
+    BCM_FIELD_QSET_ADD(qs, bcmFieldQualifyIpProtocol);
+    BCM_FIELD_QSET_ADD(qs, bcmFieldQualifyL4SrcPort);
+    BCM_FIELD_QSET_ADD(qs, bcmFieldQualifyL4DstPort);
+    rv = bcm_field_group_create(BCMD_UNIT, qs, BCM_FIELD_GROUP_PRIO_ANY, g);
+    if (rv != BCM_E_NONE) {
+        printf("[bcmd] ACL: field_group_create(v%d) rv=%d (%s)\n",
+               v6 ? 6 : 4, rv, bcm_errmsg(rv));
+        *g = -1; return -1;
+    }
+    return *g;
+}
+
+/* "10.0.0.0/24"/"any" -> ip+mask. Returns 1 = wildcard (skip qualifier), 0 = ok, -1 err. */
+static int bcmd_acl_cidr4(const char *tok, bcm_ip_t *ip, bcm_ip_t *mask)
+{
+    char buf[48], *slash; int bits = 32; struct in_addr a;
+    if (!strcmp(tok, "any") || !strcmp(tok, "0.0.0.0/0")) return 1;
+    sal_strncpy(buf, tok, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+    slash = strchr(buf, '/'); if (slash) { *slash = 0; bits = atoi(slash + 1); }
+    if (inet_pton(AF_INET, buf, &a) != 1) return -1;
+    *ip = ntohl(a.s_addr);
+    *mask = bits <= 0 ? 0 : (bits >= 32 ? 0xFFFFFFFFu : (0xFFFFFFFFu << (32 - bits)));
+    return 0;
+}
+
+/* Same for v6. ip/mask are bcm_ip6_t (uint8[16]). */
+static int bcmd_acl_cidr6(const char *tok, bcm_ip6_t ip, bcm_ip6_t mask)
+{
+    char buf[48], *slash; int bits = 128, i; struct in6_addr a;
+    if (!strcmp(tok, "any") || !strcmp(tok, "::/0")) return 1;
+    sal_strncpy(buf, tok, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+    slash = strchr(buf, '/'); if (slash) { *slash = 0; bits = atoi(slash + 1); }
+    if (inet_pton(AF_INET6, buf, &a) != 1) return -1;
+    memcpy(ip, a.s6_addr, 16);
+    memset(mask, 0, 16);
+    for (i = 0; i < bits && i < 128; i++) mask[i / 8] |= (unsigned char)(0x80 >> (i % 8));
+    return 0;
+}
+
+static int bcmd_acl_proto(const char *p)
+{
+    if (!strcmp(p, "ip") || !strcmp(p, "any") || !strcmp(p, "all")) return 0;
+    if (!strcmp(p, "tcp"))  return 6;
+    if (!strcmp(p, "udp"))  return 17;
+    if (!strcmp(p, "icmp")) return 1;
+    if (!strcmp(p, "icmp6") || !strcmp(p, "ipv6-icmp")) return 58;
+    return atoi(p);   /* numeric protocol number */
+}
+
+/* Program one rule as one FP entry matching exactly one ingress port. */
+static int bcmd_acl_program_one(const struct bcmd_acl_rule *r, bcm_port_t port)
+{
+    int v6 = (strchr(r->src, ':') || strchr(r->dst, ':'));
+    bcm_field_group_t g = bcmd_acl_group(v6);
+    bcm_field_entry_t e;
+    bcm_pbmp_t data, mask;
+    int p, rv;
+    if (g < 0) return -1;
+    if (bcm_field_entry_create(BCMD_UNIT, g, &e) != BCM_E_NONE) return -1;
+    BCM_PBMP_CLEAR(data); BCM_PBMP_PORT_ADD(data, port);
+    BCM_PBMP_CLEAR(mask); for (p = 0; p < BCMD_MAXPORT; p++) BCM_PBMP_PORT_ADD(mask, p);
+    bcm_field_qualify_InPorts(BCMD_UNIT, e, data, mask);
+    if (v6) {
+        bcm_ip6_t s, sm, d, dm;
+        if (bcmd_acl_cidr6(r->src, s, sm) == 0) bcm_field_qualify_SrcIp6(BCMD_UNIT, e, s, sm);
+        if (bcmd_acl_cidr6(r->dst, d, dm) == 0) bcm_field_qualify_DstIp6(BCMD_UNIT, e, d, dm);
+    } else {
+        bcm_ip_t s, sm, d, dm;
+        if (bcmd_acl_cidr4(r->src, &s, &sm) == 0) bcm_field_qualify_SrcIp(BCMD_UNIT, e, s, sm);
+        if (bcmd_acl_cidr4(r->dst, &d, &dm) == 0) bcm_field_qualify_DstIp(BCMD_UNIT, e, d, dm);
+    }
+    if (r->proto) bcm_field_qualify_IpProtocol(BCMD_UNIT, e, (uint8)r->proto, 0xff);
+    if (r->dport) bcm_field_qualify_L4DstPort(BCMD_UNIT, e, r->dport, 0xffff);
+    if (r->sport) bcm_field_qualify_L4SrcPort(BCMD_UNIT, e, r->sport, 0xffff);
+    if (r->deny)  bcm_field_action_add(BCMD_UNIT, e, bcmFieldActionDrop, 0, 0);
+    bcm_field_entry_prio_set(BCMD_UNIT, e, BCMD_ACL_PRIO_BASE - r->seq);
+    rv = bcm_field_entry_install(BCMD_UNIT, e);
+    if (rv != BCM_E_NONE) {
+        printf("[bcmd] ACL %s seq %d: install rv=%d (%s)\n",
+               r->name, r->seq, rv, bcm_errmsg(rv));
+        (void)bcm_field_entry_destroy(BCMD_UNIT, e);
+        return -1;
+    }
+    if (bcmd_acl_nent < BCMD_ACL_MAX_ENTRIES) bcmd_acl_entries[bcmd_acl_nent++] = e;
+    return 0;
+}
+
+/* Remove all ACL entries (keep the groups) so a reload rebuilds cleanly. Each
+ * entry is explicitly removed from HW then destroyed — group_flush alone left the
+ * TCAM drops in place on this chip. */
+static void bcmd_acl_reset(void)
+{
+    int i;
+    for (i = 0; i < bcmd_acl_nent; i++) {
+        (void)bcm_field_entry_remove(BCMD_UNIT, bcmd_acl_entries[i]);
+        (void)bcm_field_entry_destroy(BCMD_UNIT, bcmd_acl_entries[i]);
+    }
+    bcmd_acl_nent = 0;
+}
+
+static int bcmd_load_acls(const char *path)
+{
+    static struct bcmd_acl_rule rules[BCMD_ACL_MAX_RULES];
+    static struct bcmd_acl_bind binds[BCMD_ACL_MAX_BINDS];
+    FILE *f = fopen(path, "r");
+    char line[256];
+    int nr = 0, nb = 0, i, j, done = 0;
+    if (!f) { printf("[bcmd] ACL: no %s (none configured)\n", path); return 0; }
+    while (fgets(line, sizeof(line), f)) {
+        char *s = line, *name, *t2;
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s == '#' || *s == '\n' || *s == '\0') continue;
+        name = strtok(s, " \t\n"); if (!name) continue;
+        t2 = strtok(NULL, " \t\n"); if (!t2) continue;
+        if (!strcmp(t2, "apply")) {                       /* bind: <name> apply <port>... */
+            struct bcmd_acl_bind *b = NULL; char *pt;
+            for (i = 0; i < nb; i++) if (!strcmp(binds[i].name, name)) b = &binds[i];
+            if (!b && nb < BCMD_ACL_MAX_BINDS) {
+                b = &binds[nb++]; sal_strncpy(b->name, name, sizeof(b->name) - 1);
+                b->name[sizeof(b->name) - 1] = 0; BCM_PBMP_CLEAR(b->pbmp);
+            }
+            while ((pt = strtok(NULL, " \t\n"))) {
+                int pp = bcmd_port_from_token(pt);
+                if (pp >= 0 && b) BCM_PBMP_PORT_ADD(b->pbmp, pp);
+                else if (pp < 0)  printf("[bcmd] ACL %s: unknown port '%s'\n", name, pt);
+            }
+        } else {                                          /* rule: <name> <seq> ... */
+            struct bcmd_acl_rule *r; char *act, *pr, *sr, *ds, *k;
+            if (nr >= BCMD_ACL_MAX_RULES) continue;
+            r = &rules[nr];
+            memset(r, 0, sizeof(*r));
+            sal_strncpy(r->name, name, sizeof(r->name) - 1);
+            r->seq = atoi(t2);
+            act = strtok(NULL, " \t\n"); pr = strtok(NULL, " \t\n");
+            sr  = strtok(NULL, " \t\n"); ds = strtok(NULL, " \t\n");
+            if (!act || !pr || !sr || !ds) { printf("[bcmd] ACL %s: short rule\n", name); continue; }
+            r->deny  = !strcmp(act, "deny");
+            r->proto = bcmd_acl_proto(pr);
+            sal_strncpy(r->src, sr, sizeof(r->src) - 1);
+            sal_strncpy(r->dst, ds, sizeof(r->dst) - 1);
+            while ((k = strtok(NULL, " \t\n"))) {
+                char *v = strtok(NULL, " \t\n"); if (!v) break;
+                if      (!strcmp(k, "dport")) r->dport = atoi(v);
+                else if (!strcmp(k, "sport")) r->sport = atoi(v);
+            }
+            nr++;
+        }
+    }
+    fclose(f);
+    for (i = 0; i < nr; i++) {                             /* program bound rules per port */
+        struct bcmd_acl_bind *b = NULL; int p;
+        for (j = 0; j < nb; j++) if (!strcmp(binds[j].name, rules[i].name)) b = &binds[j];
+        if (!b) continue;                                 /* ACL with no apply line: inert */
+        for (p = 0; p < BCMD_MAXPORT; p++)
+            if (BCM_PBMP_MEMBER(b->pbmp, p) && bcmd_acl_program_one(&rules[i], p) == 0) done++;
+    }
+    printf("[bcmd] ACL: installed %d entr%s from %s (%d rules, %d bound ACLs)\n",
+           done, done == 1 ? "y" : "ies", path, nr, nb);
+    return done;
+}
+
 int bcmd_run(void)
 {
     static int netif_ids[BCMD_MAXPORT + 1];
@@ -1625,6 +1825,7 @@ int bcmd_run(void)
     /* L2 switch groups: bridge selected ports into one shared VLAN, overriding
      * their per-port isolation. Mirrors the 5610 edged /etc/edged/l2-groups.conf. */
     bcmd_load_l2_groups("/etc/bcmd/l2-groups.conf");
+    bcmd_load_acls("/etc/bcmd/acls.conf");            /* operator ACLs (Field Processor) */
 
     bcmd_sfp_laser_all();   /* SFP+ optic TX laser on xe0-3 (harmless on copper) */
     if (bcmd_rx_start()          != BCM_E_NONE) return 1;
@@ -1665,9 +1866,11 @@ int bcmd_run(void)
         }
         if (bcmd_l2_resync_req) {       /* SIGHUP: re-apply L2 groups from config, live */
             bcmd_l2_resync_req = 0;
-            printf("[bcmd] SIGHUP: re-syncing L2 switch groups\n");
+            printf("[bcmd] SIGHUP: re-syncing L2 switch groups + ACLs\n");
             bcmd_l2_reset();
             bcmd_load_l2_groups("/etc/bcmd/l2-groups.conf");
+            bcmd_acl_reset();
+            bcmd_load_acls("/etc/bcmd/acls.conf");
         }
         /* periodic FIB re-dump: converge routes whose gateway resolved later. */
         if (nlfd >= 0 && (tick % 15) == 14) {

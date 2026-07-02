@@ -131,3 +131,18 @@ No SDK — program the Field Processor directly over SCHAN, as `cumulus_replicat
 
 **Recommended start:** Phase 1 on the AS4610 (live + SDK does the heavy lifting), which also nails
 down the portable model + CLI + config that Phase 2 reuses.
+
+---
+
+## 9. Status
+
+**Phase 1 — DONE and hardware-verified on the AS4610 (bcmd).**
+- `edgenos acl set|apply|del|unapply|show|clear` (core/cli/edgenos) → `/etc/bcmd/acls.conf`, SIGHUP → live re-program.
+- `bcmd` ingress FP backend (`bcm_field`): v4/v6 groups, InPorts + src/dst + proto + L4 ports, `permit`/`deny`, `seq → priority`.
+- Verified live (5610 → 4610 xe0): baseline 0% → `deny icmp` 100% (dropped in silicon) → `clear` 0% (restored); `permit` seq 5 overrides `deny` seq 10 (0%); an ACL with no `apply` line is inert.
+
+**Gotcha found:** `bcm_field_group_flush` does **not** uninstall entries from the TCAM on the BCM56340 —
+a bare flush left stale drops in place (clear looked applied but traffic stayed blocked). Fix: track
+each installed entry and `bcm_field_entry_remove` + `bcm_field_entry_destroy` on reset.
+
+**Next:** Phase 2 (5610 raw-FP backend), then meters/actions, then the Web UI module.
