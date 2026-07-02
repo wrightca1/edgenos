@@ -28,8 +28,14 @@
 #include <cdk/arch/xgs_reg.h>
 
 #define ACL_UNIT      0
-#define ACL_IDX_BASE  1025      /* VS6 / phys slice 4, after the OSPF trap @1024 */
-#define ACL_MAX       64        /* 1025..1088 — safely within slice 4 */
+/* Virtual slice 2 -> physical slice 8, which the Cumulus capture proves is
+ * lookup-enabled (FP_SLICE_ENABLE) with field-select F2=1 = DstIP at F2[96..127].
+ * The FP_TCAM is virtual-slice indexed, 256 entries/slice, so VS2 = idx 512..767 —
+ * empty in the capture (no trap collision). (cumulus_replicate's "idx 1024 = VS6"
+ * was wrong: idx 1024 is VS4 -> phys0, which has NO lookup enable, so entries there
+ * never matched.) */
+#define ACL_IDX_BASE  512       /* VS2 -> phys slice 8 (DstIP, lookup-enabled) */
+#define ACL_MAX       64        /* 512..575 — within VS2 */
 
 static int acl_idx_used[ACL_MAX];
 static int acl_n = 0;
@@ -105,13 +111,6 @@ void edged_acl_diag(void)
     uint32_t pkts;
     int i;
 
-    /* Reference: the cumulus OSPF trap @1024 in the same VS6 slice — it sees real
-     * 224.0.0.5 traffic, so its counter proves whether VS6 lookup + the counter work. */
-    FP_COUNTER_TABLEm_CLR(c); pkts = 0xffffffff;
-    if (cdk_xgs_mem_read(ACL_UNIT, FP_COUNTER_TABLEm, 1024, c.v, 3) >= 0)
-        pkts = c.v[0] & 0x1fffffff;
-    acl_log("diag ref: OSPF-trap idx=1024 counter=%u", pkts);
-
     for (i = 0; i < acl_n; i++) {
         FP_TCAMm_t t;
         uint32_t f2[4] = {0};
@@ -144,21 +143,6 @@ void edged_acl_reset(void)
 #define ACL_MAX_BINDS 32
 
 struct acl_rule { char name[32]; char dst[48]; int seq, deny, supported; };
-
-/* VS6 (our ACL slice) maps to PHYSICAL slice 4, but cumulus_replicate's
- * FP_SLICE_ENABLE=0x000f33ff turns on FP_LOOKUP for physical slices 0-3 only (its
- * "bit16 = SLICE_6" comment is wrong — bit 16 is LOOKUP_ENABLE_SLICE_0). Without
- * physical-slice-4 lookup, the OSPF trap AND our ACL entries never match (both read
- * counter=0). Turn on slice-4 lookup so VS6 actually gets looked up. */
-static void acl_enable_slice4_lookup(void)
-{
-    FP_SLICE_ENABLEr_t se;
-    FP_SLICE_ENABLEr_CLR(se);
-    FP_SLICE_ENABLEr_SET(se, 0x000f33ff);                    /* cumulus base */
-    FP_SLICE_ENABLEr_FP_LOOKUP_ENABLE_SLICE_4f_SET(se, 1);   /* + VS6 (phys slice 4) */
-    (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
-    acl_log("enabled FP_LOOKUP_ENABLE_SLICE_4 (VS6 lookup)");
-}
 
 int edged_acl_load(const char *path)
 {
@@ -203,7 +187,6 @@ int edged_acl_load(const char *path)
     /* Program applied+supported rules in ascending seq order (lower seq -> lower
      * index -> higher FP precedence), skipping unsupported ones with a warning. */
     edged_acl_reset();
-    acl_enable_slice4_lookup();
     while (acl_n < ACL_MAX) {
         int best = -1;
         for (i = 0; i < nr; i++) {
