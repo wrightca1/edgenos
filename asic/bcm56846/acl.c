@@ -108,8 +108,11 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
 void edged_acl_diag(void)
 {
     FP_COUNTER_TABLEm_t c;
-    uint32_t pkts;
+    uint32_t pkts, sev = 0;
     int i;
+
+    cdk_xgs_reg32_read(ACL_UNIT, FP_SLICE_ENABLEr, &sev);
+    acl_log("diag FP_SLICE_ENABLE(runtime)=0x%08x (want lookup bit for phys8)", sev);
 
     for (i = 0; i < acl_n; i++) {
         FP_TCAMm_t t;
@@ -143,6 +146,23 @@ void edged_acl_reset(void)
 #define ACL_MAX_BINDS 32
 
 struct acl_rule { char name[32]; char dst[48]; int seq, deny, supported; };
+
+/* Per-port IFP enable — PORT_TAB.FILTER_ENABLE. The SDK sets this per port at init;
+ * cumulus_replicate never does and OpenMDK's bmd_init doesn't either, so the IFP never
+ * looks up ANY port's packets (even a match-any entry reads counter=0). RMW so other
+ * port config is preserved. Found by diffing the OpenBCM SDK field/port init. */
+static void acl_enable_port_filter(void)
+{
+    int p, n = 0;
+    for (p = 0; p < 64; p++) {
+        PORT_TABm_t pt;
+        PORT_TABm_CLR(pt);
+        if (cdk_xgs_mem_read(ACL_UNIT, PORT_TABm, p, pt.v, 10) < 0) continue;
+        PORT_TABm_FILTER_ENABLEf_SET(pt, 1);
+        if (WRITE_PORT_TABm(ACL_UNIT, p, pt) >= 0) n++;
+    }
+    acl_log("PORT_TAB.FILTER_ENABLE set on %d ports (per-port IFP enable)", n);
+}
 
 int edged_acl_load(const char *path)
 {
@@ -187,6 +207,14 @@ int edged_acl_load(const char *path)
     /* Program applied+supported rules in ascending seq order (lower seq -> lower
      * index -> higher FP precedence), skipping unsupported ones with a warning. */
     edged_acl_reset();
+    {   /* Re-assert Cumulus's FP_SLICE_ENABLE in case it didn't stick / was overwritten
+         * (0x000f33ff = lookup enabled on phys slices 2,3,6,7,8,9). */
+        FP_SLICE_ENABLEr_t se;
+        FP_SLICE_ENABLEr_CLR(se);
+        FP_SLICE_ENABLEr_SET(se, 0x000f33ff);
+        (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
+    }
+    acl_enable_port_filter();               /* the missing per-port IFP enable */
     while (acl_n < ACL_MAX) {
         int best = -1;
         for (i = 0; i < nr; i++) {
