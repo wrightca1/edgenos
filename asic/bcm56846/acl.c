@@ -145,6 +145,21 @@ void edged_acl_reset(void)
 
 struct acl_rule { char name[32]; char dst[48]; int seq, deny, supported; };
 
+/* VS6 (our ACL slice) maps to PHYSICAL slice 4, but cumulus_replicate's
+ * FP_SLICE_ENABLE=0x000f33ff turns on FP_LOOKUP for physical slices 0-3 only (its
+ * "bit16 = SLICE_6" comment is wrong — bit 16 is LOOKUP_ENABLE_SLICE_0). Without
+ * physical-slice-4 lookup, the OSPF trap AND our ACL entries never match (both read
+ * counter=0). Turn on slice-4 lookup so VS6 actually gets looked up. */
+static void acl_enable_slice4_lookup(void)
+{
+    FP_SLICE_ENABLEr_t se;
+    FP_SLICE_ENABLEr_CLR(se);
+    FP_SLICE_ENABLEr_SET(se, 0x000f33ff);                    /* cumulus base */
+    FP_SLICE_ENABLEr_FP_LOOKUP_ENABLE_SLICE_4f_SET(se, 1);   /* + VS6 (phys slice 4) */
+    (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
+    acl_log("enabled FP_LOOKUP_ENABLE_SLICE_4 (VS6 lookup)");
+}
+
 int edged_acl_load(const char *path)
 {
     static struct acl_rule rules[ACL_MAX_RULES];
@@ -188,6 +203,7 @@ int edged_acl_load(const char *path)
     /* Program applied+supported rules in ascending seq order (lower seq -> lower
      * index -> higher FP precedence), skipping unsupported ones with a warning. */
     edged_acl_reset();
+    acl_enable_slice4_lookup();
     while (acl_n < ACL_MAX) {
         int best = -1;
         for (i = 0; i < nr; i++) {
