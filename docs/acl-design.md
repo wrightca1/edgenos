@@ -157,7 +157,10 @@ src/proto/L4 are skipped (that slice-key layout isn't mapped yet).
 - **Not yet dropping:** the deny didn't drop a ping to the switch's *own* IP — that dest is punted to
   the CPU by MY_STATION independent of the IFP drop, so the hand-rolled drop needs to suppress the
   local-CPU punt (the 4610 SDK does this for free). **Next:** add an FP match counter (like the VS6
-  trap) for observability, test on forwarded/transit traffic, then resolve the IFP-drop / local-punt
-  interaction; afterwards, map src/proto/L4 key bits for the full 5-tuple.
+  trap) for observability, the FP entry is written correctly (read-back confirms) but the VS6 slice does **no IFP
+  lookup** — counter stays 0 for the ACL entry *and* the pre-existing OSPF trap in that slice. Enabling
+  physical-slice-4 lookup didn't fix it. **Blocker:** the FP slice-lookup config (virtual-vs-physical
+  slice indexing, slice size, which slice actually matches) needs the real config off a working Cumulus
+  box (`bcmcmd fp show` / reg diff) or the BCM56846 FP register spec — not blind bit-guessing.
 
 **Then:** meters/rate-limit + copy-to-cpu actions, and the Web UI ACL module.
