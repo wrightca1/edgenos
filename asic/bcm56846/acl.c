@@ -164,6 +164,34 @@ static void acl_enable_port_filter(void)
     acl_log("PORT_TAB.FILTER_ENABLE set on %d ports (per-port IFP enable)", n);
 }
 
+/* IFP global-mask logical->physical port map. Cumulus programs this per port; OpenMDK
+ * and cumulus_replicate never did (the register is abbreviated IFP_GM_LOGIC_TO_PHYS_MAP
+ * in the CDK, easy to miss). With it all-zero the IFP global-mask lookup can't resolve
+ * the ingress port, so NO FP entry ever matches on any port. Values verbatim from the
+ * Cumulus SOC register diff (dump_soc_diff.txt), indexed by SOC port. */
+static void acl_gm_map_init(void)
+{
+    static const uint32_t gm[66] = {
+        0x00,0x41,0x42,0x43,0x44,0x45,0x46,0x47,
+        0x48,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,
+        0x0c,0x0d,0x0e,0x0f,0x10,0x12,0x11,0x14,
+        0x13,0x16,0x15,0x18,0x17,0x19,0x1a,0x1b,
+        0x1c,0x1d,0x1e,0x1f,0x20,0x21,0x22,0x23,
+        0x24,0x25,0x26,0x27,0x28,0x29,0x2a,0x2b,
+        0x2c,0x31,0x2d,0x3d,0x39,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x49,
+    };
+    int port;
+    for (port = 0; port < 66; port++) {
+        IFP_GM_LOGIC_TO_PHYS_MAPr_t r;
+        IFP_GM_LOGIC_TO_PHYS_MAPr_CLR(r);
+        IFP_GM_LOGIC_TO_PHYS_MAPr_PHYSICAL_PORT_NUMf_SET(r, gm[port]);
+        (void)WRITE_IFP_GM_LOGIC_TO_PHYS_MAPr(ACL_UNIT, port, r);
+    }
+    acl_log("IFP_GM_LOGIC_TO_PHYS_MAP written for 66 ports (the missing GM port map)");
+}
+
 int edged_acl_load(const char *path)
 {
     static struct acl_rule rules[ACL_MAX_RULES];
@@ -215,6 +243,7 @@ int edged_acl_load(const char *path)
         (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
     }
     acl_enable_port_filter();               /* the missing per-port IFP enable */
+    acl_gm_map_init();                      /* the missing IFP global-mask port map */
     while (acl_n < ACL_MAX) {
         int best = -1;
         for (i = 0; i < nr; i++) {
