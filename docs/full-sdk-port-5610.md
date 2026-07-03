@@ -20,17 +20,24 @@ bring-up (which raw register replication can't reproduce — see `docs/acl-desig
 ## Progress (this session)
 - **Feasibility CONFIRMED.** `BCM_56840_A0 = 1` in `make/Make.config` (+ `make/local/esw/Make.pkg.56840`);
   Trident+ field driver at `src/bcm/esw/trident/field.c`; PPC toolchain `powerpc-linux-gnu-gcc` works.
-- Build recipe started: `edgenos/build/build-sdk-5610.sh` (docker debian:bullseye + PPC toolchain).
-- Cleared: the `Make 4.3 not supported` gate (the script patches `ALLOWED_MAKE_VERSIONS`).
-- **Blocker found:** the SDK's PPC platform `gto` is a *specific board* (GTO_MPC8548) — it hardcodes a
-  `powerpc-broadcom-linux-gnuspe` toolchain + a `/projects/ntsw-tools/...` kernel path and builds
-  **kernel modules** the 5610 doesn't use. Its `bcm` target has no `LOCAL_BCM_TARGETS`, so it doesn't
-  produce `bcm.user`. The 4610's `iproc-4_4` platform *does* (that's the difference).
+- **✅ SDK BUILDS + LINKS for PPC/56840 (milestones 1+2 DONE).** `build/build-sdk-5610.sh` produces
+  **159 libs** — incl. `libbcm.a` (the `bcm_field` API) and `libsoc.a` (`soc_init` = the correct FP
+  init) — and links a **137 MB static `bcm.user`** (ELF 32-bit MSB PowerPC). Verified with `file`.
+- **How** (the gates cleared, all in the build script):
+  - Build **`user_libs`** directly in `systems/linux/user/common` (the `gto` platform doesn't need a
+    custom dir after all — just don't build its kernel modules; `user_libs` skips them).
+  - `ALLOWED_MAKE_VERSIONS` += 4.3 (SDK rejects make ≥4.2).
+  - `Makefile.unix-user`: `-Werror`→`-Wno-error` (gcc-10 warns more than the SDK's era).
+  - Add `-I systems/bde/linux/include` (the user build omits the BDE headers).
+  - Link: drop `-lnsl` (in modern libc) + `-Wl,-z,muldefs` (gcc-10 `-fno-common` collides the
+    *unused* chip globals trident3/helix5; our chip is `trident.o`, so first-def is harmless).
+  - Runs in a `sdk5610build:1` docker image (debian:bullseye + PPC toolchain). Incremental — in a
+    time-capped sandbox, re-run until done; on a normal host it's one ~40-min shot.
+- Binary: `OpenBCM/sdk-6.5.16/build/linux/user/common/bcm.user`.
 
-## Next milestones (multi-session)
-1. **Custom 5610 user platform** — a `systems/linux/user/<5610>` dir mirroring `iproc-4_4`
-   (`LOCAL_BCM_TARGETS = bcm.user`, `LINUX_MAKE_USER=1`, PPC cross), 56840 config, NO kernel modules.
-2. **Build the SDK user libs + `bcm.user`** for PPC/56840 (this answers the last compile question).
+## Next milestones
+1. ✅ ~~Custom 5610 user platform~~ — not needed; `user_libs` in `common` (gto platform) works.
+2. ✅ ~~Build the SDK user libs + `bcm.user`~~ — DONE (159 libs + PPC `bcm.user`).
 3. **BDE integration** — plug the 5610's existing user-mode BDE (mmap /dev/mem BAR0 + PAXB sub-window,
    see `asic/bcm56846/bde_interface.c`) into the SDK's `bde_create`/`bde_t` interface, so the SDK
    reaches the chip over PCIe. (The 5610 has no KNET; this replaces the SDK's kernel BDE.)
