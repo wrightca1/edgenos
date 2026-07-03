@@ -24,11 +24,11 @@ docker run --rm -v "$SDK":/sdk "$IMG" bash -c '
   sed -i "s/^LIBS =-lnsl -pthread -lm -lrt/LIBS =-Wl,-z,muldefs -pthread -lm -lrt/" /sdk/make/Makefile.unix-user
   mkdir -p /sdk/build/linux/user/common
   cd /sdk/systems/linux/user/common
-  # One-time: patch bde_create() to branch to our adapter, and append the adapter source.
-  if ! grep -q bcm5610_bde_create socdiag.c; then
-    perl -0pi -e "s/return linux_bde_create\(&bus, &bde\);/{ extern int bcm5610_bde_create(ibde_t **); if (getenv(\"BCM5610_BDE\")) return bcm5610_bde_create(\&bde); }\n    return linux_bde_create(\&bus, \&bde);/" socdiag.c
-    cat bcm5610_bde.c >> socdiag.c
-  fi
+  # Strip any previously-appended adapter (so adapter edits take effect), keep the one-time
+  # bde_create() branch patch, then re-append the current adapter source.
+  perl -0pi -e "s{\n/\*\n \* bcm5610_bde\.c .*}{\n}s" socdiag.c
+  grep -q "BCM5610_BDE" socdiag.c || perl -0pi -e "s/return linux_bde_create\(&bus, &bde\);/{ extern int bcm5610_bde_create(ibde_t **); if (getenv(\"BCM5610_BDE\")) return bcm5610_bde_create(\&bde); }\n    return linux_bde_create(\&bus, \&bde);/" socdiag.c
+  cat bcm5610_bde.c >> socdiag.c
   MV="SDK=/sdk platform=gto bldroot_suffix=/gto kernel_version=4_4 \
       PPC_CROSS_COMPILE=powerpc-linux-gnu- CROSS_COMPILE=powerpc-linux-gnu- \
       LINUX_MAKE_USER=1 LINUX_MAKE_SHARED_LIB=0 SHAREDLIBVER=1 ADD_TO_CFLAGS=\"'"$CF"'\""

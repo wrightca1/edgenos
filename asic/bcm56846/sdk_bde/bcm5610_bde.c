@@ -78,19 +78,30 @@ static uint32 bde_get_dev_type(int d)
     return BDE_PCI_DEV_TYPE | BDE_SWITCH_DEV_TYPE | BDE_256K_REG_SPACE;
 }
 
+/* The 56846 is iProc: CMIC registers live at AXI 0x18000000+offset and need the PAXB
+ * sub-window translation, NOT direct BAR0. Route the SDK's read/write through edged's
+ * IPROC ioctl (which does the sub-window), passing the full AXI address like edged's own
+ * bde_iproc_*. (PAXB config regs go via pci_conf, not here.) BCM5610_BDE_LOG=1 dumps the
+ * first accesses so we can see the SCHAN register sequence. */
+#define IPROC_AXI_BASE 0x18000000u
+static int g_log_n = 0, g_log_on = -1;
+static int bde_logging(void) { if (g_log_on < 0) g_log_on = getenv("BCM5610_BDE_LOG") ? 1 : 0; return g_log_on; }
+
 static uint32 bde_read(int d, uint32 addr)
 {
-    struct bde_reg_io rio = { 0, addr, 0 };
+    struct bde_reg_io rio = { 0, IPROC_AXI_BASE + addr, 0 };
     (void)d;
-    if (g_fd < 0 || ioctl(g_fd, BDE_IOC_REG_READ, &rio) < 0) return 0;
+    if (bde_logging() && g_log_n < 80) { fprintf(stderr, "BDE rd  off=0x%05x axi=0x%08x\n", addr, rio.addr); g_log_n++; }
+    if (g_fd < 0 || ioctl(g_fd, BDE_IOC_IPROC_READ, &rio) < 0) return 0;
     return rio.val;
 }
 
 static int bde_write(int d, uint32 addr, uint32 data)
 {
-    struct bde_reg_io rio = { 0, addr, data };
+    struct bde_reg_io rio = { 0, IPROC_AXI_BASE + addr, data };
     (void)d;
-    if (g_fd < 0 || ioctl(g_fd, BDE_IOC_REG_WRITE, &rio) < 0) return -1;
+    if (bde_logging() && g_log_n < 80) { fprintf(stderr, "BDE wr  off=0x%05x axi=0x%08x =0x%08x\n", addr, rio.addr, data); g_log_n++; }
+    if (g_fd < 0 || ioctl(g_fd, BDE_IOC_IPROC_WRITE, &rio) < 0) return -1;
     return 0;
 }
 
@@ -242,7 +253,11 @@ int bcm5610_bde_create(ibde_t **bde)
 
     g_dev.device       = info.device_id ? info.device_id : BCM56846_DEVICE_ID;
     g_dev.rev          = info.revision  ? info.revision  : BCM56846_REVISION;
-    g_dev.base_address = (sal_vaddr_t)(uintptr_t)g_bar0;
+    /* base_address MUST be 0: the SDK's CMREAD/CMWRITE (Makefile.unix-user = runtime check)
+     * dereferences base_address directly when set, which bypasses this adapter and misses
+     * the iProc PAXB sub-window the AS5610's PCIe path needs. With base_address==0 it falls
+     * through to CMVEC.read/write -> our bde_read/bde_write (which do the sub-window). */
+    g_dev.base_address = 0;
     g_dev.base_address1= 0;
     g_dev.base_address2= 0;
 
