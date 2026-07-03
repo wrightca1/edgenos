@@ -216,6 +216,31 @@ static void acl_clear_global_mask(void)
     acl_log("FP mem init: TCAM/GMASK/POLICY/METER/COUNTER/UDF_TCAM/UDF_OFFSET/RANGE_CHECK");
 }
 
+/* Pipeline-level IFP enables from _soc_trident_misc_init (src/soc/esw/trident.c), found by
+ * statically tracing the SDK's soc-init FP setup. OpenMDK sets NEITHER, so the IFP stage
+ * never runs regardless of slice/entry setup: (1) IFP_BYPASS_ENABLE must be 0 (else the FP
+ * stage is bypassed); (2) ING_EN_EFILTER_BITMAP must include the ports (else the ingress
+ * filter runs on no port). These gate the whole stage — the missing global switch. */
+static void acl_ifp_pipeline_enable(void)
+{
+    {
+        ING_BYPASS_CTRLr_t r;
+        uint32_t val = 0;
+        cdk_xgs_reg32_read(ACL_UNIT, ING_BYPASS_CTRLr, &val);
+        ING_BYPASS_CTRLr_SET(r, val);
+        ING_BYPASS_CTRLr_IFP_BYPASS_ENABLEf_SET(r, 0);   /* IFP stage NOT bypassed */
+        (void)WRITE_ING_BYPASS_CTRLr(ACL_UNIT, r);
+    }
+    {
+        ING_EN_EFILTER_BITMAPm_t e;
+        uint32_t ones[3] = { 0xffffffff, 0xffffffff, 0xffffffff };
+        ING_EN_EFILTER_BITMAPm_CLR(e);
+        ING_EN_EFILTER_BITMAPm_BITMAPf_SET(e, ones);     /* filter enabled on all ports */
+        (void)WRITE_ING_EN_EFILTER_BITMAPm(ACL_UNIT, 0, e);
+    }
+    acl_log("IFP pipeline enable: IFP_BYPASS=0 + ING_EN_EFILTER_BITMAP=all-ports");
+}
+
 int edged_acl_load(const char *path)
 {
     static struct acl_rule rules[ACL_MAX_RULES];
@@ -269,6 +294,7 @@ int edged_acl_load(const char *path)
     acl_enable_port_filter();               /* the missing per-port IFP enable */
     acl_gm_map_init();                      /* the missing IFP global-mask port map */
     acl_clear_global_mask();                /* the missing FP_GLOBAL_MASK_TCAM init */
+    acl_ifp_pipeline_enable();              /* the missing IFP stage enable (bypass+filter) */
     while (acl_n < ACL_MAX) {
         int best = -1;
         for (i = 0; i < nr; i++) {
