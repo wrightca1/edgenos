@@ -296,21 +296,12 @@ static int cumulus_replicate_fp(int unit)
 
         FP_PORT_FIELD_SELm_CLR(fs);
         FP_PORT_FIELD_SELm_SLICE2_F1f_SET(fs, 0xc);
-        /* F2=1 = DstIP at F2 bits 96..127 (selcode confirmed via SDK: slices 6/8 use
-         * F2=1 for DstIP). edged's configurable ACL lives in physical slice 2 (idx 512+);
-         * it puts DstIP in the F2 container, so this slice's F2 selcode MUST be 1 (DstIP),
-         * not the capture's 2. Slice 2 holds no other (Cumulus) entries, so this is safe. */
-        FP_PORT_FIELD_SELm_SLICE2_F2f_SET(fs, 1);
+        FP_PORT_FIELD_SELm_SLICE2_F2f_SET(fs, 2);
         FP_PORT_FIELD_SELm_SLICE2_F3f_SET(fs, 7);
         FP_PORT_FIELD_SELm_SLICE3_F1f_SET(fs, 0xa);
         FP_PORT_FIELD_SELm_SLICE3_F2f_SET(fs, 3);
         FP_PORT_FIELD_SELm_SLICE3_F3f_SET(fs, 6);
-        /* Unpair slices 2/3 -> slice 2 is SINGLE-WIDE. edged's ACL writes single-wide
-         * entries (VALID=3) into physical slice 2; a single-wide entry in a paired
-         * (double-wide) slice is malformed and never matches — the same reason the
-         * OSPF trap (Path B) was put in single-wide slice 6. Slice 3 carries no edged
-         * entries, so dropping the pairing is safe. */
-        FP_PORT_FIELD_SELm_SLICE3_2_PAIRINGf_SET(fs, 0);
+        FP_PORT_FIELD_SELm_SLICE3_2_PAIRINGf_SET(fs, 1);
         FP_PORT_FIELD_SELm_SLICE8_F1f_SET(fs, 5);
         FP_PORT_FIELD_SELm_SLICE8_F2f_SET(fs, 1);
         FP_PORT_FIELD_SELm_SLICE8_F3f_SET(fs, 7);

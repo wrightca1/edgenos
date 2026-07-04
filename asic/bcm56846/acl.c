@@ -28,14 +28,18 @@
 #include <cdk/arch/xgs_reg.h>
 
 #define ACL_UNIT      0
-/* Virtual slice 2 -> physical slice 8, which the Cumulus capture proves is
- * lookup-enabled (FP_SLICE_ENABLE) with field-select F2=1 = DstIP at F2[96..127].
- * The FP_TCAM is virtual-slice indexed, 256 entries/slice, so VS2 = idx 512..767 —
- * empty in the capture (no trap collision). (cumulus_replicate's "idx 1024 = VS6"
- * was wrong: idx 1024 is VS4 -> phys0, which has NO lookup enable, so entries there
- * never matched.) */
-#define ACL_IDX_BASE  512       /* VS2 -> phys slice 8 (DstIP, lookup-enabled) */
-#define ACL_MAX       64        /* 512..575 — within VS2 */
+/* FP_TCAM is PHYSICAL-slice indexed (256 entries/slice): idx/256 = physical slice.
+ * The IFP iterates VIRTUAL slices; virtual slice N's entries live in physical slice
+ * FP_SLICE_MAP[N]. Confirmed live via the SDK oracle: FP_SLICE_MAP has VS6 -> phys 4,
+ * and VS6 is the DstIP slice (FP_PORT_FIELD_SEL SLICE6_F2=1, single-wide, lookup-
+ * enabled). So DstIP-key entries MUST sit in physical slice 4 = idx 1024..1279.
+ *
+ * The old base 512 was wrong: idx 512 = physical slice 2 = VS0 (map), which has
+ * LOOKUP_ENABLE=0 — so entries there were never looked up (counter stayed 0, the
+ * long-standing "IFP does no lookup" bug). cumulus_replicate's OSPF trap already
+ * correctly uses idx 1024 (VS6 entry 0); ACL entries follow at 1025+. */
+#define ACL_IDX_BASE  1025      /* phys slice 4 = VS6 (DstIP, single-wide, lookup-en) */
+#define ACL_MAX       64        /* 1025..1088 — within phys slice 4 (1024..1279) */
 
 static int acl_idx_used[ACL_MAX];
 static int acl_n = 0;
