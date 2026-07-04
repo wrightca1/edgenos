@@ -1,0 +1,13 @@
+# SDK config for running the full OpenBCM SDK (bcm.user) on the AS5610 via edged's BDE.
+# soc_skip_reset=1 is the SAFEGUARD: soc_init's generic soc_reset() does CMIC_CPS_RESET=1
+# (drv.c:18755) which resets the CMIC core and drops the CPU's PCIe link -> HARD FREEZE
+# (the box needed a serial/hard-power recovery). Skipping the reset is safe here because
+# edged already brought the chip up; we only want soc_init's feature setup + FP init.
+# PROVEN: with this, `init soc` no longer freezes the box.
+soc_skip_reset=1
+os=unix
+# The AS5610 SFP+ ports use DS100DF410 retimers on a special MIIM/CPLD path; the SDK's
+# generic PHY/MIIM probe times out. We don't want port/PHY bring-up (edged owns that) —
+# only the FP. (phy_null alone doesn't suppress the soc-level SerDes MIIM write; WIP.)
+phy_null=1
+miim_intr_enable=0
