@@ -76,9 +76,28 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
     FP_POLICY_TABLEm_t p;
     uint32_t f2[4]  = {0};
     uint32_t f2m[4] = {0};
+    int w;
 
-    f2[3]  = dstip;             /* DstIP at F2 bits 96..127 (VS6 selcode 1) */
-    f2m[3] = dstmask;
+    /*
+     * FP_TCAM is a DltaCam: the hardware stores entries in X/Y form, NOT plain
+     * DATA/MASK. The SDK's soc_mem_write applies _soc_mem_tcam_dm_to_xy() before
+     * writing; the CDK's raw field-set does not. Without the transform the chip
+     * decodes our DATA/MASK as X/Y and the mask comes out garbage
+     * (decoded_mask = key | ~stored_mask), so no rule ever matches — verified on
+     * the live chip via the SDK: our old entry read back F2_MASK=<ip>ffff.. .
+     *
+     * 40nm (Trident+) encode:  K0 = mask & key  -> KEY (F2) field
+     *                          K1 = ~mask | key -> MASK (F2_MASK) field
+     * DstIP sits in F2 word 3 (bits 96..127); words 0..2 are don't-care.
+     */
+    {
+        uint32_t dm_key[4]  = { 0, 0, 0, dstip };
+        uint32_t dm_mask[4] = { 0, 0, 0, dstmask };
+        for (w = 0; w < 4; w++) {
+            f2[w]  =  dm_mask[w] & dm_key[w];   /* K0 */
+            f2m[w] = ~dm_mask[w] | dm_key[w];   /* K1 */
+        }
+    }
 
     FP_TCAMm_CLR(t);
     FP_TCAMm_VALIDf_SET(t, 3);  /* single-wide valid (as the VS6 OSPF trap) */
@@ -88,6 +107,14 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
 
     FP_GLOBAL_MASK_TCAMm_CLR(g);
     FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);      /* match any ingress port (v1) */
+    /* FP_GLOBAL_MASK_TCAM is a DltaCam too. "Match any ingress port" = the IPBM
+     * (ingress port bitmap, 66 bits) is don't-care. X/Y don't-care = K1 (the MASK
+     * field) all-ones. A CLR'd (raw 0) IPBM_MASK decodes to "match only port==0"
+     * and no real ingress port ever matches — the second half of the same bug. */
+    {
+        uint32_t ipbm_dc[3] = { 0xffffffffu, 0xffffffffu, 0x3u };   /* 66 bits set */
+        FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, ipbm_dc);
+    }
     (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
 
     FP_POLICY_TABLEm_CLR(p);
