@@ -78,30 +78,30 @@ static uint32 bde_get_dev_type(int d)
     return BDE_PCI_DEV_TYPE | BDE_SWITCH_DEV_TYPE | BDE_256K_REG_SPACE;
 }
 
-/* The 56846 is iProc: CMIC registers live at AXI 0x18000000+offset and need the PAXB
- * sub-window translation, NOT direct BAR0. Route the SDK's read/write through edged's
- * IPROC ioctl (which does the sub-window), passing the full AXI address like edged's own
- * bde_iproc_*. (PAXB config regs go via pci_conf, not here.) BCM5610_BDE_LOG=1 dumps the
- * first accesses so we can see the SCHAN register sequence. */
-#define IPROC_AXI_BASE 0x18000000u
+/* The SDK's soc_pci_read/write pass BAR0-relative offsets (CMIC regs at 0x10c, 0x50,
+ * 0x800...). Route them through edged's REG ioctl, which is the PROVEN path: the kernel
+ * module does ioread32/iowrite32 (correct PPC endianness) and auto-routes offsets >=0x1000
+ * through PAXB sub-window 7. (An earlier IPROC-path attempt passed full AXI 0x18000000+off
+ * and every read came back a constant 0x33 = wrong endian/translation.) BCM5610_BDE_LOG=1
+ * dumps the first accesses so we can see the SCHAN register sequence. */
 static int g_log_n = 0, g_log_on = -1;
 static int bde_logging(void) { if (g_log_on < 0) g_log_on = getenv("BCM5610_BDE_LOG") ? 1 : 0; return g_log_on; }
 
 static uint32 bde_read(int d, uint32 addr)
 {
-    struct bde_reg_io rio = { 0, IPROC_AXI_BASE + addr, 0 };
+    struct bde_reg_io rio = { 0, addr, 0 };
     (void)d;
-    if (bde_logging() && g_log_n < 80) { fprintf(stderr, "BDE rd  off=0x%05x axi=0x%08x\n", addr, rio.addr); g_log_n++; }
-    if (g_fd < 0 || ioctl(g_fd, BDE_IOC_IPROC_READ, &rio) < 0) return 0;
+    if (g_fd < 0 || ioctl(g_fd, BDE_IOC_REG_READ, &rio) < 0) return 0;
+    if (bde_logging() && g_log_n < 80) { fprintf(stderr, "BDE rd  off=0x%05x =0x%08x\n", addr, rio.val); g_log_n++; }
     return rio.val;
 }
 
 static int bde_write(int d, uint32 addr, uint32 data)
 {
-    struct bde_reg_io rio = { 0, IPROC_AXI_BASE + addr, data };
+    struct bde_reg_io rio = { 0, addr, data };
     (void)d;
-    if (bde_logging() && g_log_n < 80) { fprintf(stderr, "BDE wr  off=0x%05x axi=0x%08x =0x%08x\n", addr, rio.addr, data); g_log_n++; }
-    if (g_fd < 0 || ioctl(g_fd, BDE_IOC_IPROC_WRITE, &rio) < 0) return -1;
+    if (bde_logging() && g_log_n < 80) { fprintf(stderr, "BDE wr  off=0x%05x =0x%08x\n", addr, data); g_log_n++; }
+    if (g_fd < 0 || ioctl(g_fd, BDE_IOC_REG_WRITE, &rio) < 0) return -1;
     return 0;
 }
 
