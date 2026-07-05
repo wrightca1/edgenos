@@ -141,17 +141,32 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
         (void)WRITE_FP_TCAMm(unit, idx + 256, sec);
     }
 
-    FP_GLOBAL_MASK_TCAMm_CLR(g);
-    FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);      /* match any ingress port (v1) */
-    /* FP_GLOBAL_MASK_TCAM is a DltaCam too. "Match any ingress port" = the IPBM
-     * (ingress port bitmap, 66 bits) is don't-care. X/Y don't-care = K1 (the MASK
-     * field) all-ones. A CLR'd (raw 0) IPBM_MASK decodes to "match only port==0"
-     * and no real ingress port ever matches — the second half of the same bug. */
+    /* FP_GLOBAL_MASK_TCAM gates every FP_TCAM lookup by ingress port. It is PLAIN
+     * data/mask (NOT X/Y): IPBM_MASK bit=1 means "care". "Match any ingress port" =
+     * IPBM_MASK = 0 (don't care), IPBM = 0. THE BUG (found via oracle diff vs
+     * Cumulus): edged wrote IPBM_MASK = all-ones (care) + IPBM = 0, i.e. "port
+     * bitmap must == 0" — which NO real ingress packet ever satisfies, so the gate
+     * dropped EVERY match (why nothing edged programmed ever matched, incl the OSPF
+     * trap). CLR leaves IPBM=0/IPBM_MASK=0 = don't-care = match any port. */
+    /* Replicate Cumulus's per-port gate EXACTLY (oracle diff): decoded IPBM = the
+     * ingress-port bit, IPBM_MASK = 0x02001ffffffffffffe. FP_GLOBAL_MASK_TCAM is a
+     * DltaCam like the main FP_TCAM, so X/Y encode with the SAME K0/K1 transform
+     * (raw = {mask&key, ~mask|key}). swp4 = port bit 4 (0x10). edged's OLD gate
+     * decoded to "ingress port bitmap == 0", which no packet satisfies, so it
+     * dropped EVERY FP match (why nothing edged programmed ever matched). */
     {
-        uint32_t ipbm_dc[3] = { 0xffffffffu, 0xffffffffu, 0x3u };   /* 66 bits set */
-        FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, ipbm_dc);
+        /* Write Cumulus's raw gate values DIRECTLY (raw_fp_gmask.txt[1555]:
+         * KEY/IPBM=0x10, MASK/IPBM_MASK=0x02001ffffffffffffe). FP_GLOBAL_MASK_TCAM
+         * is plain KEY(bits1-66)/MASK(bits67-132), NOT X/Y — no transform. */
+        /* DltaCam encode (Broadcom standard, verified via oracle): IPBM(X)=data&mask,
+         * IPBM_MASK(Y)=~data&mask. Decodes to data=X, care=X|Y. Want decoded
+         * IPBM=0x10 (swp4), IPBM_MASK=0x02001ffffffffffffe (Cumulus). */
+        /* MATCH-ANY-PORT test: plain KEY/MASK, MASK=0 => don't care any port bit =>
+         * gate passes for every ingress port (rules out port-mapping as the blocker). */
+        FP_GLOBAL_MASK_TCAMm_CLR(g);
+        FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
+        (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
     }
-    (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
 
     FP_POLICY_TABLEm_CLR(p);
     if (deny) {                                 /* permit = no action, packet proceeds */
