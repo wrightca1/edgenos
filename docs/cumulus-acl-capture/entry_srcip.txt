@@ -1,0 +1,60 @@
+GID          7: gid=0x7, mode=Double, stage=Egress lookup=Enabled, pbmp={0x000000000000000000000000000000000000000000000000001fffffffffffff}
+         qset={SrcMac, DstMac, SrcIp, DstIp, OuterVlanId, L4SrcPort, L4DstPort, EtherType, IpProtocol, DSCP, Ttl, TcpControl, IpType, StageEgress, InterfaceClassPort, IpFrag, OutPort},
+         FPF3=0
+         FPF3=3
+         slice_pri=                    {slice_number=0, Entry count=256(0x100), active, pbmp={0x000000000000000000000000000000000000000000000000001fffffffffffff}},
+         slice_sec=                    {slice_number=1, Entry count=256(0x100), active, pbmp={0x000000000000000000000000000000000000000000000000001fffffffffffff}},
+EID 0x00000178: gid=0x7,
+    Offset: 62 Width: 8 
+    DATA=0x00000059 
+    MASK=0x000000ff 
+    Offset: 199 Width: 7 
+    DATA=0x00000000 
+    MASK=0x0000007f 
+         action={act=RpDrop, param0=0(0), param1=0(0), param2=0(0), param3=0(0)}
+EID 0x0000017a: gid=0x7,
+    Offset: 62 Width: 8 
+    DATA=0x00000006 
+    MASK=0x000000ff 
+    Offset: 22 Width: 16 
+    DATA=0x000000b3 
+    MASK=0x0000ffff 
+    Offset: 199 Width: 7 
+    DATA=0x00000000 
+    MASK=0x0000007f 
+         action={act=RpDrop, param0=0(0), param1=0(0), param2=0(0), param3=0(0)}
+EID 0x0000017c: gid=0x7,
+    Offset: 62 Width: 8 
+    DATA=0x00000006 
+    MASK=0x000000ff 
+    Offset: 38 Width: 16 
+    DATA=0x000000b3 
+    MASK=0x0000ffff 
+    Offset: 199 Width: 7 
+    DATA=0x00000000 
+    MASK=0x0000007f 
+         action={act=RpDrop, param0=0(0), param1=0(0), param2=0(0), param3=0(0)}
+EID 0x0000017e: gid=0x7,
+    Offset: 62 Width: 8 
+    DATA=0x00000006 
+    MASK=0x000000ff 
+    Offset: 22 Width: 16 
+    DATA=0x000014de 
+    MASK=0x0000ffff 
+    Offset: 199 Width: 7 
+    DATA=0x00000000 
+    MASK=0x0000007f 
+         action={act=RpDrop, param0=0(0), param1=0(0), param2=0(0), param3=0(0)}
+EID 0x00000180: gid=0x7,
+    Offset: 62 Width: 8 
+    DATA=0x00000006 
+    MASK=0x000000ff 
+    Offset: 38 Width: 16 
+    DATA=0x000014de 
+    MASK=0x0000ffff 
+    Offset: 199 Width: 7 
+    DATA=0x00000000 
+    MASK=0x0000007f 
+         action={act=RpDrop, param0=0(0), param1=0(0), param2=0(0), param3=0(0)}
+EID 0x00000182: gid=0x7,
+    Offset: 62 Width: 8 
