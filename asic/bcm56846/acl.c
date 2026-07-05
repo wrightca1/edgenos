@@ -43,8 +43,8 @@
  * secondary is written at idx+256 (physical slice 7). Cumulus put its entry at 1555
  * (slice6 offset 19); we start at 1537 and cap at 64 so primary 1537..1600 stays in
  * slice 6 and secondary 1793..1856 stays in slice 7. */
-#define ACL_IDX_BASE  1537      /* phys slice 6 primary; secondary at +256 (phys slice 7) */
-#define ACL_MAX       64        /* 1537..1600 primary / 1793..1856 secondary */
+#define ACL_IDX_BASE  1025      /* SINGLE-WIDE test: phys slice 4 = VS6 (unpaired, DstIp, lookup-en) */
+#define ACL_MAX       64        /* 1025..1088 within phys slice 4 (1024..1279) */
 
 static int acl_idx_used[ACL_MAX];
 static int acl_n = 0;
@@ -119,27 +119,16 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
      * are mirrored into the PAIRING_* fields. edged's old single-wide entry never
      * matched — this is the fix.
      */
+    /* SINGLE-WIDE test: VS6 (phys slice 4, idx 1024-1279) is unpaired single-wide
+     * with SLICE6_F2=1 (DstIp) and lookup-enabled. Now that the global-mask gate is
+     * fixed (match-any), test whether a plain single-wide DstIp entry matches — if so
+     * the double-wide machinery was the blocker. No pairing, no secondary. */
     FP_TCAMm_CLR(t);
     FP_TCAMm_VALIDf_SET(t, 3);
     FP_TCAMm_F2f_SET(t, f2);
     FP_TCAMm_F2_MASKf_SET(t, f2m);
-    FP_TCAMm_PAIRING_F2f_SET(t, f2);        /* double-wide pairing mirror */
-    FP_TCAMm_PAIRING_F2_MASKf_SET(t, f2m);
-    /* FIXED field = the slice key-mode / IpType bits — REQUIRED for the double-wide
-     * match (Cumulus FP_TCAM[1555] decodes FIXED_MASK=0x380, PAIRING_FIXED_MASK=0x700;
-     * value 0). X/Y raw = K1 = ~mask (K0=0 stays from CLR): 0x380->0x3fc7f (18b),
-     * 0x700->0x7f8ff (19b). Without these the entry is don't-care-mode and never matches. */
-    FP_TCAMm_FIXED_MASKf_SET(t, 0x3fc7fu);
-    FP_TCAMm_PAIRING_FIXED_MASKf_SET(t, 0x7f8ffu);
+    FP_TCAMm_FIXED_MASKf_SET(t, 0x3fc7fu);   /* IpType/Stage fixed bits (decodes 0x380) */
     (void)WRITE_FP_TCAMm(unit, idx, t);
-
-    /* paired SECONDARY entry (idx+256, physical slice 7): VALID=3, empty key */
-    {
-        FP_TCAMm_t sec;
-        FP_TCAMm_CLR(sec);
-        FP_TCAMm_VALIDf_SET(sec, 3);
-        (void)WRITE_FP_TCAMm(unit, idx + 256, sec);
-    }
 
     /* FP_GLOBAL_MASK_TCAM gates every FP_TCAM lookup by ingress port. It is PLAIN
      * data/mask (NOT X/Y): IPBM_MASK bit=1 means "care". "Match any ingress port" =
@@ -161,10 +150,14 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
         /* DltaCam encode (Broadcom standard, verified via oracle): IPBM(X)=data&mask,
          * IPBM_MASK(Y)=~data&mask. Decodes to data=X, care=X|Y. Want decoded
          * IPBM=0x10 (swp4), IPBM_MASK=0x02001ffffffffffffe (Cumulus). */
-        /* MATCH-ANY-PORT test: plain KEY/MASK, MASK=0 => don't care any port bit =>
-         * gate passes for every ingress port (rules out port-mapping as the blocker). */
+        /* MATCH-ANY-PORT — CORRECT DltaCam encoding. Same X/Y convention as the main
+         * FP_TCAM: raw MASK = ~mask|key, so "don't care" (decoded mask=0) = raw MASK
+         * ALL-ONES (NOT 0). A CLR'd (raw 0) IPBM_MASK decodes to "care all / port==0"
+         * = never matches — that silently blocked every earlier test. */
+        uint32_t ipbm_dc[3] = { 0xffffffffu, 0xffffffffu, 0x3u };  /* raw all-ones = don't-care */
         FP_GLOBAL_MASK_TCAMm_CLR(g);
         FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
+        FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, ipbm_dc);
         (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
     }
 
