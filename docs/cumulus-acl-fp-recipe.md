@@ -70,3 +70,37 @@ dst-IP, src-IP, L4-dport, ip-proto, **IPv6** (GID 2, SrcIp6/DstIp6), **rate-limi
 3. Write the **paired secondary** entry at idx+256 (VALID=3, empty key) to complete the pair.
 4. Put the port scope in the **InPorts qualifier** in the key, not the global-mask TCAM.
 5. Action in **FP_POLICY_TABLE**: G/Y/R_DROP=1, COPY_TO_CPU=3, COUNTER_MODE=7.
+
+## Complete match + action vocabulary (from cl-acltool.5 man page + captures)
+
+Checked switchd's full supported ACL set against the `cl-acltool.5` man page and captured
+each. Raw fp show per type in `edgecore/cumulus-acl-capture-20260705/` (`type_*.txt`,
+`gap_*.txt`).
+
+**Match qualifiers switchd uses (offset in the double-wide key where known):**
+| Match | FP qualifier | Notes |
+|---|---|---|
+| dst/src IP | DstIp@110 / SrcIp@142 | w32 |
+| IP protocol | IpProtocol | |
+| L4 dst/src port | L4DstPort@5 / L4SrcPort | w16 |
+| **port range** (`-m multiport --dports a:b`) | **RangeCheck** | uses the range-check registers, not a wide TCAM field |
+| **TCP flags** (`--tcp-flags`,`--syn`) | **TcpControl** | |
+| **ICMP type** (`--icmp-type`) | **IcmpTypeCode** | |
+| **DSCP** (`--dscp`) / ToS | **DSCP** | |
+| **addrtype** (`--dst-type LOCAL`) | **DstClassL3** | LOCAL = to-switch (CPU); IPROUTER = unresolved/glean |
+| IPv6 dst/src | DstIp6 / SrcIp6 | GID 2, double-wide |
+| ingress port | InPorts | port bitmap IN the key |
+| — | IpType, Stage, StageIngress, L2CacheHit | fixed group qualifiers |
+
+**Action encodings (FP_POLICY / SDK action):**
+| ACL action | SDK action(s) | FP_POLICY bits |
+|---|---|---|
+| `DROP` | `Drop` + `SwitchToCpuCancel` | G/Y/R_DROP=1, COPY_TO_CPU=3 |
+| `ACCEPT` (permit) | (none) | no drop |
+| `SETCLASS --class N` | **`PrioIntNew` param0=N** | sets internal priority |
+| trap-to-CPU (`addrtype LOCAL`) | **`CopyToCpu`** | COPY_TO_CPU |
+| `POLICE` (rate-limit) | meter | METER_PAIR_MODE + METER_PAIR_INDEX + FP_METER_TABLE |
+| always | counter | COUNTER_MODE=7 |
+
+**Not captured / follow-up:** SPAN + ERSPAN (port/remote mirror) did not offload in this test
+(likely need a configured analyzer/mirror-dest port). MAC/ebtables ACLs also did not offload.
