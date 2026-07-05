@@ -125,6 +125,12 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
     FP_TCAMm_F2_MASKf_SET(t, f2m);
     FP_TCAMm_PAIRING_F2f_SET(t, f2);        /* double-wide pairing mirror */
     FP_TCAMm_PAIRING_F2_MASKf_SET(t, f2m);
+    /* FIXED field = the slice key-mode / IpType bits — REQUIRED for the double-wide
+     * match (Cumulus FP_TCAM[1555] decodes FIXED_MASK=0x380, PAIRING_FIXED_MASK=0x700;
+     * value 0). X/Y raw = K1 = ~mask (K0=0 stays from CLR): 0x380->0x3fc7f (18b),
+     * 0x700->0x7f8ff (19b). Without these the entry is don't-care-mode and never matches. */
+    FP_TCAMm_FIXED_MASKf_SET(t, 0x3fc7fu);
+    FP_TCAMm_PAIRING_FIXED_MASKf_SET(t, 0x7f8ffu);
     (void)WRITE_FP_TCAMm(unit, idx, t);
 
     /* paired SECONDARY entry (idx+256, physical slice 7): VALID=3, empty key */
