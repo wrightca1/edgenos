@@ -38,8 +38,13 @@
  * LOOKUP_ENABLE=0 — so entries there were never looked up (counter stayed 0, the
  * long-standing "IFP does no lookup" bug). cumulus_replicate's OSPF trap already
  * correctly uses idx 1024 (VS6 entry 0); ACL entries follow at 1025+. */
-#define ACL_IDX_BASE  1025      /* phys slice 4 = VS6 (DstIP, single-wide, lookup-en) */
-#define ACL_MAX       64        /* 1025..1088 — within phys slice 4 (1024..1279) */
+/* DOUBLE-WIDE: primary entries in physical slice 6 (= virtual slice 8, the DstIp
+ * double-wide slice cumulus_replicate pairs with 9 via SLICE9_8_PAIRING); the paired
+ * secondary is written at idx+256 (physical slice 7). Cumulus put its entry at 1555
+ * (slice6 offset 19); we start at 1537 and cap at 64 so primary 1537..1600 stays in
+ * slice 6 and secondary 1793..1856 stays in slice 7. */
+#define ACL_IDX_BASE  1537      /* phys slice 6 primary; secondary at +256 (phys slice 7) */
+#define ACL_MAX       64        /* 1537..1600 primary / 1793..1856 secondary */
 
 static int acl_idx_used[ACL_MAX];
 static int acl_n = 0;
@@ -95,19 +100,40 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
      * DstIP sits in F2 word 3 (bits 96..127); words 0..2 are don't-care.
      */
     {
-        uint32_t dm_key[4]  = { 0, 0, 0, dstip };
-        uint32_t dm_mask[4] = { 0, 0, 0, dstmask };
+        /* DstIp sits in F2 WORD[2] (bits 64..95), per the live Cumulus capture
+         * (FP_TCAM[1555]: F2=0x00000000<ip>0000000000000000) — NOT word[3] which
+         * edged used before. docs/cumulus-acl-fp-recipe.md. */
+        uint32_t dm_key[4]  = { 0, 0, dstip, 0 };
+        uint32_t dm_mask[4] = { 0, 0, dstmask, 0 };
         for (w = 0; w < 4; w++) {
             f2[w]  =  dm_mask[w] & dm_key[w];   /* K0 */
             f2m[w] = ~dm_mask[w] | dm_key[w];   /* K1 */
         }
     }
 
+    /*
+     * DOUBLE-WIDE group (Cumulus/switchd captured recipe): the match lives in the
+     * PRIMARY slice entry (this idx, physical slice 6 = virtual slice 8, paired
+     * with slice 9 by cumulus_replicate SLICE9_8_PAIRING=1); a paired SECONDARY
+     * entry at idx+256 (physical slice 7) completes the pair. The match qualifiers
+     * are mirrored into the PAIRING_* fields. edged's old single-wide entry never
+     * matched — this is the fix.
+     */
     FP_TCAMm_CLR(t);
-    FP_TCAMm_VALIDf_SET(t, 3);  /* single-wide valid (as the VS6 OSPF trap) */
+    FP_TCAMm_VALIDf_SET(t, 3);
     FP_TCAMm_F2f_SET(t, f2);
     FP_TCAMm_F2_MASKf_SET(t, f2m);
+    FP_TCAMm_PAIRING_F2f_SET(t, f2);        /* double-wide pairing mirror */
+    FP_TCAMm_PAIRING_F2_MASKf_SET(t, f2m);
     (void)WRITE_FP_TCAMm(unit, idx, t);
+
+    /* paired SECONDARY entry (idx+256, physical slice 7): VALID=3, empty key */
+    {
+        FP_TCAMm_t sec;
+        FP_TCAMm_CLR(sec);
+        FP_TCAMm_VALIDf_SET(sec, 3);
+        (void)WRITE_FP_TCAMm(unit, idx + 256, sec);
+    }
 
     FP_GLOBAL_MASK_TCAMm_CLR(g);
     FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);      /* match any ingress port (v1) */
@@ -126,6 +152,11 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
         FP_POLICY_TABLEm_G_DROPf_SET(p, 1);
         FP_POLICY_TABLEm_Y_DROPf_SET(p, 1);
         FP_POLICY_TABLEm_R_DROPf_SET(p, 1);
+        /* COPY_TO_CPU=3 = SwitchToCpuCancel, exactly as Cumulus/switchd programs a
+         * hardware drop (captured FP_POLICY: G/Y/R_DROP=1 + COPY_TO_CPU=3). */
+        FP_POLICY_TABLEm_G_COPY_TO_CPUf_SET(p, 3);
+        FP_POLICY_TABLEm_Y_COPY_TO_CPUf_SET(p, 3);
+        FP_POLICY_TABLEm_R_COPY_TO_CPUf_SET(p, 3);
     }
     FP_POLICY_TABLEm_COUNTER_MODEf_SET(p, 7);   /* count all colors: a match signal */
     FP_POLICY_TABLEm_COUNTER_INDEXf_SET(p, idx);
@@ -168,8 +199,10 @@ void edged_acl_reset(void)
     FP_TCAMm_t t;
     int i;
     FP_TCAMm_CLR(t);            /* VALID=0 -> entry disabled */
-    for (i = 0; i < acl_n; i++)
-        (void)WRITE_FP_TCAMm(ACL_UNIT, acl_idx_used[i], t);
+    for (i = 0; i < acl_n; i++) {
+        (void)WRITE_FP_TCAMm(ACL_UNIT, acl_idx_used[i], t);          /* primary */
+        (void)WRITE_FP_TCAMm(ACL_UNIT, acl_idx_used[i] + 256, t);    /* paired secondary */
+    }
     acl_n = 0;
 }
 
