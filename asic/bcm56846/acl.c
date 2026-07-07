@@ -43,8 +43,8 @@
  * secondary is written at idx+256 (physical slice 7). Cumulus put its entry at 1555
  * (slice6 offset 19); we start at 1537 and cap at 64 so primary 1537..1600 stays in
  * slice 6 and secondary 1793..1856 stays in slice 7. */
-#define ACL_IDX_BASE  1025      /* SINGLE-WIDE test: phys slice 4 = VS6 (unpaired, DstIp, lookup-en) */
-#define ACL_MAX       64        /* 1025..1088 within phys slice 4 (1024..1279) */
+#define ACL_IDX_BASE  1537      /* DOUBLE-WIDE: phys slice 6 = VS8 (paired w/9); secondary at +256 */
+#define ACL_MAX       64        /* 1537..1600 primary / 1793..1856 secondary */
 
 static int acl_idx_used[ACL_MAX];
 static int acl_n = 0;
@@ -119,16 +119,20 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
      * are mirrored into the PAIRING_* fields. edged's old single-wide entry never
      * matched — this is the fix.
      */
-    /* SINGLE-WIDE test: VS6 (phys slice 4, idx 1024-1279) is unpaired single-wide
-     * with SLICE6_F2=1 (DstIp) and lookup-enabled. Now that the global-mask gate is
-     * fixed (match-any), test whether a plain single-wide DstIp entry matches — if so
-     * the double-wide machinery was the blocker. No pairing, no secondary. */
+    /* DOUBLE-WIDE entry (proven byte-identical to Cumulus FP_TCAM[1555] via oracle):
+     * VALID=3, DstIp in F2 word[2], PAIRING mirror, FIXED (IpType/Stage), paired
+     * secondary at idx+256. Physical slice 6 = virtual slice 8 (paired with 9). */
     FP_TCAMm_CLR(t);
     FP_TCAMm_VALIDf_SET(t, 3);
     FP_TCAMm_F2f_SET(t, f2);
     FP_TCAMm_F2_MASKf_SET(t, f2m);
-    FP_TCAMm_FIXED_MASKf_SET(t, 0x3fc7fu);   /* IpType/Stage fixed bits (decodes 0x380) */
+    FP_TCAMm_PAIRING_F2f_SET(t, f2);
+    FP_TCAMm_PAIRING_F2_MASKf_SET(t, f2m);
+    FP_TCAMm_FIXED_MASKf_SET(t, 0x3fc7fu);        /* decodes FIXED_MASK=0x380 */
+    FP_TCAMm_PAIRING_FIXED_MASKf_SET(t, 0x7f8ffu);/* decodes PAIRING_FIXED_MASK=0x700 */
     (void)WRITE_FP_TCAMm(unit, idx, t);
+    { FP_TCAMm_t sec; FP_TCAMm_CLR(sec); FP_TCAMm_VALIDf_SET(sec, 3);
+      (void)WRITE_FP_TCAMm(unit, idx + 256, sec); }   /* paired secondary */
 
     /* FP_GLOBAL_MASK_TCAM gates every FP_TCAM lookup by ingress port. It is PLAIN
      * data/mask (NOT X/Y): IPBM_MASK bit=1 means "care". "Match any ingress port" =
@@ -154,9 +158,13 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
          * FP_TCAM: raw MASK = ~mask|key, so "don't care" (decoded mask=0) = raw MASK
          * ALL-ONES (NOT 0). A CLR'd (raw 0) IPBM_MASK decodes to "care all / port==0"
          * = never matches — that silently blocked every earlier test. */
-        uint32_t ipbm_dc[3] = { 0xffffffffu, 0xffffffffu, 0x3u };  /* raw all-ones = don't-care */
+        /* DltaCam "match any port": set BOTH halves all-ones (X=1,Y=1 per bit => the
+         * bit is don't-care => matches any ingress port). Setting only IPBM_MASK
+         * all-ones (IPBM=0) decoded to "port bitmap must == 0" (never) — the last bug. */
+        uint32_t ipbm_dc[3] = { 0xffffffffu, 0xffffffffu, 0x3u };
         FP_GLOBAL_MASK_TCAMm_CLR(g);
         FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
+        FP_GLOBAL_MASK_TCAMm_IPBMf_SET(g, ipbm_dc);
         FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, ipbm_dc);
         (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
     }
