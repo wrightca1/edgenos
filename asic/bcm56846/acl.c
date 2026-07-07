@@ -158,14 +158,22 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
          * FP_TCAM: raw MASK = ~mask|key, so "don't care" (decoded mask=0) = raw MASK
          * ALL-ONES (NOT 0). A CLR'd (raw 0) IPBM_MASK decodes to "care all / port==0"
          * = never matches — that silently blocked every earlier test. */
-        /* DltaCam "match any port": set BOTH halves all-ones (X=1,Y=1 per bit => the
-         * bit is don't-care => matches any ingress port). Setting only IPBM_MASK
-         * all-ones (IPBM=0) decoded to "port bitmap must == 0" (never) — the last bug. */
-        uint32_t ipbm_dc[3] = { 0xffffffffu, 0xffffffffu, 0x3u };
+        /* THE REMAINING BLOCKER. The FP_TCAM entry is byte-perfect vs Cumulus, but it
+         * is GATED by this per-entry FP_GLOBAL_MASK_TCAM (ingress-port gate) and the
+         * gate is REQUIRED (skipping it => entry fail-closed => never matches). Cumulus's
+         * gate (cumulus-full-capture-20260706 FP_GLOBAL_MASK_TCAM[531]) logically decodes
+         * to IPBM=0x10 (swp4), IPBM_MASK=0x02001ffffffffffffe — but that is the SDK's
+         * X/Y + IFP_GM_LOGIC_TO_PHYS_MAP-remapped view. Writing those values (or any
+         * variant) via the CDK reads back IPBM=0 / "port must==0" = never matches, because
+         * the CDK writes raw fields without the SDK's soc_mem X/Y encode and port remap.
+         * TODO: get the exact RAW words from the SDK (bcm.user soc_mem_write the logical
+         * gate, then read the raw struct) and write them here verbatim. Intent below. */
+        uint32_t gm_ipbm[3] = { 0x00000010u, 0x00000000u, 0x00000000u };  /* swp4 (logical) */
+        uint32_t gm_mask[3] = { 0xfffffffeu, 0x001fffffu, 0x00000002u };  /* 0x02001ffffffffffffe */
         FP_GLOBAL_MASK_TCAMm_CLR(g);
         FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
-        FP_GLOBAL_MASK_TCAMm_IPBMf_SET(g, ipbm_dc);
-        FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, ipbm_dc);
+        FP_GLOBAL_MASK_TCAMm_IPBMf_SET(g, gm_ipbm);
+        FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, gm_mask);
         (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
     }
 
