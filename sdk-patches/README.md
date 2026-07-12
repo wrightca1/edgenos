@@ -31,3 +31,21 @@ preserving edged's SCHAN. REMAINING BLOCKER: the per-port XLPORT serdes init (fa
 edged didn't bring up (edged links only swp1/swp2). Next: skip/tolerate the whole port
 init (it's irrelevant to the FP engine) to reach `misc_init`/`bcm_field_init`. Not yet
 end-to-end; see memory `project_acl_soc_init_pathA_deadend`.
+
+## 0003-serdes-reset-skip-when-skip_reset.patch (WIP — hybrid)
+Early-return from the 5 per-port serdes-reset helpers in `src/soc/common/drv.c`
+(`soc_xgxs_reset`, `soc_xgxs_in_reset`, `soc_wc_xgxs_reset`, `soc_wc_xgxs_in_reset`,
+`soc_wc_xgxs_power_down`) when `soc_skip_reset` is set. These do fatal
+`XLPORT_XGXS_CTRL_REG` reads on port blocks edged didn't bring up (edged links only
+swp1/swp2) → SchanTimeOut. Ports are irrelevant to the FP engine. **With 0002+0003,
+`init soc` COMPLETES cleanly on edged's live chip (no SchanTimeOut) — the reset+port
+wall that blocked every prior approach is broken.**
+
+## 0004-trident-misc-memclear-skip.patch (WIP — hybrid, not sufficient yet)
+Early-return from `_soc_trident_clear_all_memory()` (`src/soc/esw/trident.c`) when
+`soc_skip_reset` is set — edged already initialized the memories and this HW memory-init
+polls a done bit that times out on our polled BDE (and would wipe edged's live tables).
+Gets `init all` past clear_all_memory, but misc_init still has further memory HW-init
+SchanTimeouts after it ("Misc init failed"). REMAINING WALL: misc_init's memory init
+needs DMA/SLAM completion signaling the polled BDE lacks — this is where BDE DMA/interrupt
+support (Option 2) genuinely matters. See memory `project_acl_soc_init_pathA_deadend`.
