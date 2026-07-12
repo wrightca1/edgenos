@@ -43,7 +43,12 @@
  * secondary is written at idx+256 (physical slice 7). Cumulus put its entry at 1555
  * (slice6 offset 19); we start at 1537 and cap at 64 so primary 1537..1600 stays in
  * slice 6 and secondary 1793..1856 stays in slice 7. */
-#define ACL_IDX_BASE  1537      /* DOUBLE-WIDE: phys slice 6 = VS8 (paired w/9); secondary at +256 */
+/* SINGLE-WIDE physical slice 4 (FP_TCAM idx 512..767). PROVEN in silicon 2026-07-09:
+ * an entry here IS consulted (a match-any drop killed 100% of traffic), whereas the old
+ * double-wide slice-6/8 placement was never consulted. Trident+ slice geometry is
+ * non-uniform (phys 0-3 = 128 entries, 4-9 = 256); slice 4 is single-wide, unpaired, and
+ * we enable its FP_LOOKUP_ENABLE bit. See docs/acl-5610-double-wide-fp.md. */
+#define ACL_IDX_BASE  512
 #define ACL_MAX       64        /* 1537..1600 primary / 1793..1856 secondary */
 
 static int acl_idx_used[ACL_MAX];
@@ -119,63 +124,42 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
      * are mirrored into the PAIRING_* fields. edged's old single-wide entry never
      * matched — this is the fix.
      */
-    /* DOUBLE-WIDE entry (proven byte-identical to Cumulus FP_TCAM[1555] via oracle):
-     * VALID=3, DstIp in F2 word[2], PAIRING mirror, FIXED (IpType/Stage), paired
-     * secondary at idx+256. Physical slice 6 = virtual slice 8 (paired with 9). */
+    /* SINGLE-WIDE entry in physical slice 4 (proven consulted in silicon). One FP_TCAM
+     * line, no paired secondary, no PAIRING_* fields, no FP_GM_FIELDS overlay (all of
+     * those are double-wide-only). DstIp lives in F2 word[2] (F2f bits 64-95 = KEY bit
+     * 110 = single-wide selcode-1 offset f2_offset(46)+64, SDK-derived + Cumulus-proven).
+     * FIXED=0x100/care 0x300 selects IpType=IPv4. F1/F3/F4 masks MUST be don't-care
+     * (all-ones), else a raw-zero DltaCam field decodes to "must==0" and blocks the match
+     * (the bug that hid the whole feature — see docs/acl-5610-double-wide-fp.md). */
     FP_TCAMm_CLR(t);
     FP_TCAMm_VALIDf_SET(t, 3);
-    FP_TCAMm_F2f_SET(t, f2);
+    FP_TCAMm_F2f_SET(t, f2);                        /* DstIp @ F2 word[2] (match-all: f2m=~0) */
     FP_TCAMm_F2_MASKf_SET(t, f2m);
-    FP_TCAMm_PAIRING_F2f_SET(t, f2);
-    FP_TCAMm_PAIRING_F2_MASKf_SET(t, f2m);
-    FP_TCAMm_FIXED_MASKf_SET(t, 0x3fc7fu);        /* decodes FIXED_MASK=0x380 */
-    FP_TCAMm_PAIRING_FIXED_MASKf_SET(t, 0x7f8ffu);/* decodes PAIRING_FIXED_MASK=0x700 */
-    (void)WRITE_FP_TCAMm(unit, idx, t);
-    { FP_TCAMm_t sec; FP_TCAMm_CLR(sec); FP_TCAMm_VALIDf_SET(sec, 3);
-      (void)WRITE_FP_TCAMm(unit, idx + 256, sec); }   /* paired secondary */
-
-    /* FP_GLOBAL_MASK_TCAM gates every FP_TCAM lookup by ingress port. It is PLAIN
-     * data/mask (NOT X/Y): IPBM_MASK bit=1 means "care". "Match any ingress port" =
-     * IPBM_MASK = 0 (don't care), IPBM = 0. THE BUG (found via oracle diff vs
-     * Cumulus): edged wrote IPBM_MASK = all-ones (care) + IPBM = 0, i.e. "port
-     * bitmap must == 0" — which NO real ingress packet ever satisfies, so the gate
-     * dropped EVERY match (why nothing edged programmed ever matched, incl the OSPF
-     * trap). CLR leaves IPBM=0/IPBM_MASK=0 = don't-care = match any port. */
-    /* Replicate Cumulus's per-port gate EXACTLY (oracle diff): decoded IPBM = the
-     * ingress-port bit, IPBM_MASK = 0x02001ffffffffffffe. FP_GLOBAL_MASK_TCAM is a
-     * DltaCam like the main FP_TCAM, so X/Y encode with the SAME K0/K1 transform
-     * (raw = {mask&key, ~mask|key}). swp4 = port bit 4 (0x10). edged's OLD gate
-     * decoded to "ingress port bitmap == 0", which no packet satisfies, so it
-     * dropped EVERY FP match (why nothing edged programmed ever matched). */
+    /* Every unused qualifier (F1/F3/F4/FIXED) MUST be don't-care = raw MASK(Y) all-ones,
+     * else a raw-zero DltaCam field decodes to "must==0" and blocks the match. FIXED is
+     * left don't-care (not IpType-constrained): its CDK field overlaps PAIRING_FIXED and
+     * the single-field write skews the decode; a dst-IP only exists on IP packets anyway,
+     * so not gating on IpType is harmless and matches the proven match-any config. */
     {
-        /* Write Cumulus's raw gate values DIRECTLY (raw_fp_gmask.txt[1555]:
-         * KEY/IPBM=0x10, MASK/IPBM_MASK=0x02001ffffffffffffe). FP_GLOBAL_MASK_TCAM
-         * is plain KEY(bits1-66)/MASK(bits67-132), NOT X/Y — no transform. */
-        /* DltaCam encode (Broadcom standard, verified via oracle): IPBM(X)=data&mask,
-         * IPBM_MASK(Y)=~data&mask. Decodes to data=X, care=X|Y. Want decoded
-         * IPBM=0x10 (swp4), IPBM_MASK=0x02001ffffffffffffe (Cumulus). */
-        /* MATCH-ANY-PORT — CORRECT DltaCam encoding. Same X/Y convention as the main
-         * FP_TCAM: raw MASK = ~mask|key, so "don't care" (decoded mask=0) = raw MASK
-         * ALL-ONES (NOT 0). A CLR'd (raw 0) IPBM_MASK decodes to "care all / port==0"
-         * = never matches — that silently blocked every earlier test. */
-        /* THE REMAINING BLOCKER. The FP_TCAM entry is byte-perfect vs Cumulus, but it
-         * is GATED by this per-entry FP_GLOBAL_MASK_TCAM (ingress-port gate) and the
-         * gate is REQUIRED (skipping it => entry fail-closed => never matches). Cumulus's
-         * gate (cumulus-full-capture-20260706 FP_GLOBAL_MASK_TCAM[531]) logically decodes
-         * to IPBM=0x10 (swp4), IPBM_MASK=0x02001ffffffffffffe — but that is the SDK's
-         * X/Y + IFP_GM_LOGIC_TO_PHYS_MAP-remapped view. Writing those values (or any
-         * variant) via the CDK reads back IPBM=0 / "port must==0" = never matches, because
-         * the CDK writes raw fields without the SDK's soc_mem X/Y encode and port remap.
-         * TODO: get the exact RAW words from the SDK (bcm.user soc_mem_write the logical
-         * gate, then read the raw struct) and write them here verbatim. Intent below. */
-        uint32_t gm_ipbm[3] = { 0x00000010u, 0x00000000u, 0x00000000u };  /* swp4 (logical) */
-        uint32_t gm_mask[3] = { 0xfffffffeu, 0x001fffffu, 0x00000002u };  /* 0x02001ffffffffffffe */
-        FP_GLOBAL_MASK_TCAMm_CLR(g);
-        FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
-        FP_GLOBAL_MASK_TCAMm_IPBMf_SET(g, gm_ipbm);
-        FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, gm_mask);
-        (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
+        uint32_t allone39[2] = { 0xffffffffu, 0x0000007fu }; /* 39-bit all-ones = don't-care */
+        FP_TCAMm_F1_MASKf_SET(t, allone39);
+        FP_TCAMm_F3_MASKf_SET(t, allone39);
+        FP_TCAMm_F4_MASKf_SET(t, 0x7fu);                     /* 7-bit all-ones */
+        /* FIXED_MASK and PAIRING_FIXED_MASK overlap the same TCAM bits; set BOTH all-ones
+         * so the FIXED (IpType/Stage) field decodes to a clean don't-care (setting one
+         * alone leaves an overlapped bit cared, over-constraining the entry). */
+        FP_TCAMm_FIXED_MASKf_SET(t, 0x1ffffu);               /* 17-bit all-ones */
+        FP_TCAMm_PAIRING_FIXED_MASKf_SET(t, 0x7ffffu);       /* 19-bit all-ones */
     }
+    (void)WRITE_FP_TCAMm(unit, idx, t);
+
+    /* FP_GLOBAL_MASK_TCAM per-entry ingress-port gate (single index for single-wide).
+     * Trident requires VALID=1 even when IPBM/IPBM_MASK are 0 (triumph/field.c:3303-3350).
+     * IPBM=0/IPBM_MASK=0/VALID=1 = match ANY ingress port (SDK default). Per-port `apply`
+     * scoping would write a real IPBM bitmap here (needs IFP_GM_LOGIC_TO_PHYS_MAP remap). */
+    FP_GLOBAL_MASK_TCAMm_CLR(g);
+    FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
+    (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
 
     FP_POLICY_TABLEm_CLR(p);
     if (deny) {                                 /* permit = no action, packet proceeds */
@@ -208,18 +192,88 @@ void edged_acl_diag(void)
 
     for (i = 0; i < acl_n; i++) {
         FP_TCAMm_t t;
-        uint32_t f2[4] = {0};
-        int valid = -1;
+        FP_GLOBAL_MASK_TCAMm_t g;
+        FP_POLICY_TABLEm_t p;
+        uint32_t f2[4] = {0}, ipbm[3] = {0}, ipbmm[3] = {0};
+        int valid = -1, gvalid = -1;
+        uint32_t cidx = 0xffffffff, cmode = 0xffffffff, gdrop = 0xffffffff;
+        int idx = acl_idx_used[i];
+
         FP_TCAMm_CLR(t);
-        if (cdk_xgs_mem_read(ACL_UNIT, FP_TCAMm, acl_idx_used[i], t.v, 15) >= 0) {
+        if (cdk_xgs_mem_read(ACL_UNIT, FP_TCAMm, idx, t.v, 15) >= 0) {
             valid = FP_TCAMm_VALIDf_GET(t);
             FP_TCAMm_F2f_GET(t, f2);
         }
+        /* Gate readback: did the FP_GLOBAL_MASK_TCAM write land? raw words + decoded. */
+        FP_GLOBAL_MASK_TCAMm_CLR(g);
+        if (cdk_xgs_mem_read(ACL_UNIT, FP_GLOBAL_MASK_TCAMm, idx, g.v, 5) >= 0) {
+            gvalid = FP_GLOBAL_MASK_TCAMm_VALIDf_GET(g);
+            FP_GLOBAL_MASK_TCAMm_IPBMf_GET(g, ipbm);
+            FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_GET(g, ipbmm);
+            acl_log("diag idx=%d GMASK raw=[%08x %08x %08x %08x %08x] valid=%d "
+                    "IPBM=%08x.%08x.%08x IPBM_MASK=%08x.%08x.%08x",
+                    idx, g.v[0], g.v[1], g.v[2], g.v[3], g.v[4], gvalid,
+                    ipbm[2], ipbm[1], ipbm[0], ipbmm[2], ipbmm[1], ipbmm[0]);
+        }
+        /* Policy readback: where does the counter actually land (COUNTER_INDEX)? */
+        FP_POLICY_TABLEm_CLR(p);
+        if (cdk_xgs_mem_read(ACL_UNIT, FP_POLICY_TABLEm, idx, p.v, 15) >= 0) {
+            cidx  = FP_POLICY_TABLEm_COUNTER_INDEXf_GET(p);
+            cmode = FP_POLICY_TABLEm_COUNTER_MODEf_GET(p);
+            gdrop = FP_POLICY_TABLEm_G_DROPf_GET(p);
+        }
         FP_COUNTER_TABLEm_CLR(c); pkts = 0xffffffff;
-        if (cdk_xgs_mem_read(ACL_UNIT, FP_COUNTER_TABLEm, acl_idx_used[i], c.v, 3) >= 0)
+        if (cdk_xgs_mem_read(ACL_UNIT, FP_COUNTER_TABLEm, idx, c.v, 3) >= 0)
             pkts = c.v[0] & 0x1fffffff;
-        acl_log("diag idx=%d readback valid=%d f2[3]=0x%08x counter=%u",
-                acl_idx_used[i], valid, f2[3], pkts);
+        acl_log("diag idx=%d valid=%d dstip(f2[2])=0x%08x COUNTER_INDEX=%u MODE=%u "
+                "G_DROP=%u counter[idx]=%u", idx, valid, f2[2], cidx, cmode, gdrop, pkts);
+    }
+
+    /* Decisive scan: hits may land at a COUNTER_INDEX != our TCAM idx. Sweep the whole
+     * FP_COUNTER_TABLE and report EVERY non-zero counter, so a match anywhere is visible
+     * regardless of index confusion. FP_COUNTER_TABLE has 2 counters/entry (G/Y/R share). */
+    {
+        int scanned = 0, hits = 0;
+        for (i = 0; i <= 2047; i++) {
+            uint32_t v0, v1;
+            FP_COUNTER_TABLEm_CLR(c);
+            if (cdk_xgs_mem_read(ACL_UNIT, FP_COUNTER_TABLEm, i, c.v, 3) < 0) continue;
+            scanned++;
+            v0 = c.v[0] & 0x1fffffff;
+            v1 = ((c.v[0] >> 29) | (c.v[1] << 3)) & 0x1fffffff;
+            if (v0 || v1) { acl_log("diag COUNTER_SCAN nonzero idx=%d c0=%u c1=%u", i, v0, v1); hits++; }
+        }
+        acl_log("diag COUNTER_SCAN done: scanned=%d nonzero=%d", scanned, hits);
+    }
+
+    /* Ingress-port state: is the field-select + per-port IFP filter actually LIVE on the
+     * ports the traffic enters (swp1=chip 65, swp2=chip 66)? If PFS reads all-zero the
+     * selcodes never reached the port; if FILTER_ENABLE=0 the IFP skips the port. */
+    {
+        int prt, pp;
+        int ports[2] = { 65, 66 };
+        for (pp = 0; pp < 2; pp++) {
+            FP_PORT_FIELD_SELm_t fs;
+            PORT_TABm_t pt;
+            int fe = -1;
+            prt = ports[pp];
+            FP_PORT_FIELD_SELm_CLR(fs);
+            PORT_TABm_CLR(pt);
+            if (cdk_xgs_mem_read(ACL_UNIT, PORT_TABm, prt, pt.v, 10) >= 0)
+                fe = PORT_TABm_FILTER_ENABLEf_GET(pt);
+            if (cdk_xgs_mem_read(ACL_UNIT, FP_PORT_FIELD_SELm, prt, fs.v, 6) >= 0) {
+                acl_log("diag INGRESS port=%d FILTER_EN=%d PFS S6.F2=%u S7.F2=%u S8.F2=%u "
+                        "S9.F2=%u PAIR7_6=%u PAIR9_8=%u", prt, fe,
+                        FP_PORT_FIELD_SELm_SLICE6_F2f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE7_F2f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE8_F2f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE9_F2f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE7_6_PAIRINGf_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE9_8_PAIRINGf_GET(fs));
+            } else {
+                acl_log("diag INGRESS port=%d FILTER_EN=%d PFS read FAILED", prt, fe);
+            }
+        }
     }
 }
 
@@ -229,10 +283,8 @@ void edged_acl_reset(void)
     FP_TCAMm_t t;
     int i;
     FP_TCAMm_CLR(t);            /* VALID=0 -> entry disabled */
-    for (i = 0; i < acl_n; i++) {
-        (void)WRITE_FP_TCAMm(ACL_UNIT, acl_idx_used[i], t);          /* primary */
-        (void)WRITE_FP_TCAMm(ACL_UNIT, acl_idx_used[i] + 256, t);    /* paired secondary */
-    }
+    for (i = 0; i < acl_n; i++)
+        (void)WRITE_FP_TCAMm(ACL_UNIT, acl_idx_used[i], t);          /* single-wide: one line */
     acl_n = 0;
 }
 
@@ -248,7 +300,11 @@ struct acl_rule { char name[32]; char dst[48]; int seq, deny, supported; };
 static void acl_enable_port_filter(void)
 {
     int p, n = 0;
-    for (p = 0; p < 64; p++) {
+    /* THE BUG: this loop stopped at p<64, but the AS5610 uplink ports ingress on chip
+     * ports 65/66 (PORT_TABm_MAX=66) — so FILTER_ENABLE was NEVER set on the ports the
+     * traffic actually enters, and the IFP silently skipped every packet on them (global
+     * "no lookup" for ALL slices — the whole project's wall). Cover every port. */
+    for (p = 0; p <= PORT_TABm_MAX; p++) {
         PORT_TABm_t pt;
         PORT_TABm_CLR(pt);
         if (cdk_xgs_mem_read(ACL_UNIT, PORT_TABm, p, pt.v, 10) < 0) continue;
@@ -378,17 +434,42 @@ int edged_acl_load(const char *path)
     /* Program applied+supported rules in ascending seq order (lower seq -> lower
      * index -> higher FP precedence), skipping unsupported ones with a warning. */
     edged_acl_reset();
-    {   /* Re-assert Cumulus's FP_SLICE_ENABLE in case it didn't stick / was overwritten
-         * (0x000f33ff = lookup enabled on phys slices 2,3,6,7,8,9). */
+    {   /* FP_SLICE_ENABLE = 0x000f73ff: slices 0-9 enabled + FP_LOOKUP_ENABLE on phys
+         * 2,3,6,7,8,9 (Cumulus set) PLUS bit 14 = FP_LOOKUP_ENABLE_SLICE_4 — our
+         * single-wide ACL slice. Without bit 14 the slice-4 entries are never consulted. */
         FP_SLICE_ENABLEr_t se;
         FP_SLICE_ENABLEr_CLR(se);
-        FP_SLICE_ENABLEr_SET(se, 0x000f33ff);
+        FP_SLICE_ENABLEr_SET(se, 0x000f73ff);
         (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
     }
     acl_enable_port_filter();               /* the missing per-port IFP enable */
     acl_gm_map_init();                      /* the missing IFP global-mask port map */
     acl_clear_global_mask();                /* the missing FP_GLOBAL_MASK_TCAM init */
     acl_ifp_pipeline_enable();              /* the missing IFP stage enable (bypass+filter) */
+
+    /* ── SLICE GEOMETRY PROBE ────────────────────────────────────────────────────
+     * If a rule named "probe" is applied, write a match-ALL count entry at base+50 of
+     * every EVEN physical slice (0,2,4,6); their paired secondaries (base+256) land in
+     * the odd slices (1,3,5,7), so no two probe entries collide. Under real IPv4
+     * traffic the counter-scan (SIGUSR1) then shows WHICH physical slice the IFP
+     * actually consults — resolving the virtual-vs-physical FP_TCAM indexing that has
+     * blocked this feature for the whole project. Non-destructive (offset 50 clears the
+     * low-offset traps; permit = no drop). */
+    {
+        int pi;
+        for (pi = 0; pi < nr; pi++) if (!strcmp(rules[pi].name, "probe")) break;
+        if (pi < nr) {
+            int s;
+            for (s = 0; s <= 6 && acl_n < ACL_MAX; s += 2) {
+                int pidx = s * 256 + 50;
+                acl_program_one(ACL_UNIT, pidx, 0, 0, 0);   /* match-all, count-only */
+                acl_idx_used[acl_n++] = pidx;
+            }
+            acl_log("SLICE PROBE: match-all count entries at even-slice bases "
+                    "50(s0)/562(s2)/1074(s4)/1586(s6) — scan counters to find live slice");
+        }
+    }
+
     while (acl_n < ACL_MAX) {
         int best = -1;
         for (i = 0; i < nr; i++) {

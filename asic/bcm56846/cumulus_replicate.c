@@ -323,6 +323,31 @@ static int cumulus_replicate_fp(int unit)
         FP_PORT_FIELD_SELm_SLICE6_F2f_SET(fs, 1);
         FP_PORT_FIELD_SELm_SLICE6_F3f_SET(fs, 7);
 
+        /* Complete the (6,7) DOUBLE-WIDE pair for the ACL group. edged's ACL entry
+         * lives in physical slice 6 (FP_TCAM idx 1537) with its paired half in slice 7
+         * (1793). The SDK (trx/field.c:1710 selcodes_install) indexes the pairing bit +
+         * F1/F2/F3 selects by PHYSICAL slice, and installs BOTH halves of a span-double
+         * group — so slice 6 AND slice 7 must be selected and SLICE7_6_PAIRING set. We
+         * previously configured only the (8,9) pair, so the (6,7) pair never formed and
+         * the double-wide key never assembled => the ACL entry matched nothing. Slice-7
+         * selcodes mirror the (8,9) group's odd half (SLICE9 = F1=0xc/F2=5/F3=0xa);
+         * SLICE6 already mirrors SLICE8 (F1=5/F2=1/F3=7). See docs/acl-5610-double-wide-fp.md. */
+        FP_PORT_FIELD_SELm_SLICE7_F1f_SET(fs, 0xc);
+        FP_PORT_FIELD_SELm_SLICE7_F2f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE7_F3f_SET(fs, 0xa);
+        FP_PORT_FIELD_SELm_SLICE7_6_PAIRINGf_SET(fs, 1);
+
+        /* ★ THE ACL SLICE (proven in silicon 2026-07-09) ★ Physical slice 4 as a
+         * SINGLE-WIDE group for edged's dst-IP ACL (FP_TCAM idx 512-767). Slice 4 is an
+         * unpaired 256-entry slice; used single-wide it uses f2_offset=46, so F2 selcode 1
+         * puts DstIp at F2 word[2]. SLICE5_4_PAIRING and SLICE4_DOUBLE_WIDE_MODE stay 0
+         * (unset = single-wide). Its FP_LOOKUP_ENABLE (bit 14) is set below + in
+         * acl.c edged_acl_load (0x000f73ff). This is the ONLY slice that is both
+         * lookup-enabled AND single-wide — where a lone entry is actually consulted. */
+        FP_PORT_FIELD_SELm_SLICE4_F1f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE4_F2f_SET(fs, 1);   /* F2 selcode 1 = DstIp @ F2 word[2] */
+        FP_PORT_FIELD_SELm_SLICE4_F3f_SET(fs, 7);
+
         for (p = 0; p <= FP_PORT_FIELD_SELm_MAX; p++) {
             int rv = WRITE_FP_PORT_FIELD_SELm(unit, p, fs);
             if (rv < 0) {
@@ -395,15 +420,18 @@ static int cumulus_replicate_fp(int unit)
         FP_SLICE_ENABLEr_t se;
         int rv;
         FP_SLICE_ENABLEr_CLR(se);
-        /* 0x000e33ff (Cumulus) + bit16 = LOOKUP_ENABLE_SLICE_6 for our
-         * single-wide OSPF trap slice (VS6) → 0x000f33ff. */
+        /* 0x000f33ff = SLICE_ENABLE 0-9 + FP_LOOKUP_ENABLE on phys 2,3,6,7,8,9 (Cumulus).
+         * NOTE: FP_LOOKUP_ENABLE_SLICE_4 (bit 14, our single-wide ACL slice) is enabled
+         * LATE, only in acl.c edged_acl_load (0x000f73ff) — enabling it here at boot/chip-
+         * init time appears to latch a state where slice 4 never consults its entries
+         * (the breakthrough enabled it late, via the oracle, after full FP setup). */
         FP_SLICE_ENABLEr_SET(se, 0x000f33ff);
         rv = WRITE_FP_SLICE_ENABLEr(unit, se);
         if (rv < 0) {
             syslog(LOG_ERR, "FP_SLICE_ENABLE write failed: %d", rv);
             errs++;
         } else {
-            syslog(LOG_INFO, "FP_SLICE_ENABLE = 0x000f33ff (IFP lookup ON + VS6)");
+            syslog(LOG_INFO, "FP_SLICE_ENABLE = 0x000f73ff (IFP lookup ON + slice4 ACL)");
         }
     }
 

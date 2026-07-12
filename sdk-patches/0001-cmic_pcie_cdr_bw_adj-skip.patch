@@ -1,0 +1,16 @@
+--- a/src/soc/esw/drv.c
++++ b/src/soc/esw/drv.c
+@@ -8495,6 +8495,13 @@
+ int cmic_pcie_cdr_bw_adj(int unit, uint16 phy_addr) {
+     int miim_intr_enb;
+ 
++    /* AS5610 (EdgeNOS custom BDE): SKIP. This is an OPTIONAL PCIe-SerDes CDR
++     * jitter-tolerance tweak that MIIMs the PCIe PHY (id=0xfa). On this board with
++     * soc_skip_reset=1 the MIIM to the PCIe PHY times out and aborts soc_init, even
++     * though the PCIe link is already fully functional (edged's kernel BDE uses it).
++     * Not needed for the datapath or the FP engine — skip it so soc_init completes. */
++    return SOC_E_NONE;
++
+     /* Interrupts may not be working yet */
+     miim_intr_enb = SOC_CONTROL(unit)->miimIntrEnb;
+     SOC_CONTROL(unit)->miimIntrEnb = 0;
