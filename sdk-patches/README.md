@@ -60,3 +60,23 @@ Tolerating SCHAN timeouts globally CORRUPTS SCHAN ("invalid S-Channel reply") â€
 reconciled (set CMIC_SBUS_RING_MAP to the SDK's expectation without the disruptive full
 reset, or align edged's map). This is the genuine Option-2 BDE work, now precisely scoped.
 See memory `project_acl_soc_init_pathA_deadend`.
+
+## Hybrid progress update (2026-07-12, session 2)
+Config that advances furthest (stop edged first, then bcm.user):
+`os=unix phy_null=1 *_intr_enable=0 polled_irq_mode=1 soc_skip_reset=1
+ table_dma_enable=0 tslam_dma_enable=0 mem_cache_enable=0`
+- **SBUS timeout (0002 now writes CMIC_SBUS_TIMEOUT=0x13500)**: edged leaves it at
+  0x7d0 which is too low for MMU/EPIPE SCHAN ops. Verified it holds through init.
+- **table_dma_enable=0 + tslam_dma_enable=0**: memory ops fall back to SCHAN PIO,
+  eliminating the `_soc_xgs3_mem_dma` TableDmaTimeOut on the polled BDE.
+- **mem_cache_enable=0**: skips the FP_GLOBAL_MASK_TCAM SW-cache full-memory read.
+- Together these took misc_init from 111 SchanTimeouts + "invalid S-Channel reply"
+  (SCHAN desync) down to ~6, desync GONE.
+REMAINING WALL: misc_init's MMU/EPIPE register ops (addr 0x0c380001 MMU, 0x0e170000
+EPIPE) time out **non-deterministically** â€” same op passes one run, times out the
+next, even with CMIC_SBUS_TIMEOUT confirmed at 0x13500. This is marginal SCHAN
+reliability to blocks edged only partially brought up (the full reset that fully
+inits them is exactly what we skip). Fixing it likely needs either bringing those
+blocks fully out of reset without disturbing edged's SCHAN, or a BDE-level SCHAN
+completion/retry that tolerates the marginal timing. See memory
+`project_acl_soc_init_pathA_deadend`.

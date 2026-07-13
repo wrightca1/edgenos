@@ -1,6 +1,6 @@
 --- a/src/soc/esw/drv.c
 +++ b/src/soc/esw/drv.c
-@@ -15318,6 +15318,16 @@
+@@ -15318,6 +15318,22 @@
                                     (10 * MILLISECOND_USEC);
  
  
@@ -12,6 +12,12 @@
 +     * ring-map / re-asserting block resets kills the working SCHAN -> SchanTimeOut.
 +     * So skip the entire chip reset and run soc_init on edged's live chip. */
 +    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) {
++        /* edged leaves CMIC_SBUS_TIMEOUT at the 0x7d0 default, which is too low for SCHAN
++         * ops to slower/farther blocks (MMU/EPIPE) -> they time out. The full reset path
++         * below sets 0x13500 (see its "0x7d0 => 0x13500" comment). Set it here too so
++         * misc_init's MMU/EPIPE config ops complete. Pure CMIC routing/timeout config; it
++         * resets no block, so edged's live SCHAN keeps working. */
++        WRITE_CMIC_SBUS_TIMEOUTr(unit, 0x13500);
 +        return SOC_E_NONE;
 +    }
      /* Use 156.25Mhz reference clock for LCPLL */
