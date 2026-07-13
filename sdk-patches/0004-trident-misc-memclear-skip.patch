@@ -14,3 +14,27 @@
      si = &SOC_INFO(unit);
  
      /*
+@@ -6007,6 +6014,9 @@
+ int
+ _soc_trident_port_mapping_init(int unit)
+ {
++    /* AS5610 hybrid: edged already set up port mappings (forwarding is live); the SDK's
++     * MMU/EGR mapping-register writes here time out on the live chip. Skip on skip_reset. */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+     soc_info_t *si;
+     soc_mem_t mem;
+     uint32 rval;
+@@ -7899,9 +7909,12 @@
+                                MEM_BLOCK_ALL, TRUE));
+     }
+ 
+-    if (!SOC_IS_RELOADING(unit) && !SOC_WARM_BOOT(unit)) {
++    if (!SOC_IS_RELOADING(unit) && !SOC_WARM_BOOT(unit) &&
++        !soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) {
+         /* Must clear FP_GLOBAL_MASK_TCAM after port to pipe mappings
+          * are initialized. */
++        /* AS5610 hybrid: this DMA-backed memory clear times out on the polled BDE;
++         * edged already initialized FP_GLOBAL_MASK_TCAM. Skip it on skip_reset. */
+         SOC_IF_ERROR_RETURN
+             (soc_mem_clear(unit, FP_GLOBAL_MASK_TCAMm, COPYNO_ALL, TRUE));
+     }

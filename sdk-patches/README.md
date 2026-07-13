@@ -41,11 +41,22 @@ swp1/swp2) → SchanTimeOut. Ports are irrelevant to the FP engine. **With 0002+
 `init soc` COMPLETES cleanly on edged's live chip (no SchanTimeOut) — the reset+port
 wall that blocked every prior approach is broken.**
 
-## 0004-trident-misc-memclear-skip.patch (WIP — hybrid, not sufficient yet)
-Early-return from `_soc_trident_clear_all_memory()` (`src/soc/esw/trident.c`) when
-`soc_skip_reset` is set — edged already initialized the memories and this HW memory-init
-polls a done bit that times out on our polled BDE (and would wipe edged's live tables).
-Gets `init all` past clear_all_memory, but misc_init still has further memory HW-init
-SchanTimeouts after it ("Misc init failed"). REMAINING WALL: misc_init's memory init
-needs DMA/SLAM completion signaling the polled BDE lacks — this is where BDE DMA/interrupt
-support (Option 2) genuinely matters. See memory `project_acl_soc_init_pathA_deadend`.
+## 0004-trident-misc-memclear-skip.patch (WIP — hybrid)
+Three skips in `_soc_trident_misc_init` / helpers (`src/soc/esw/trident.c`) when
+`soc_skip_reset` is set — edged already initialized these: `_soc_trident_clear_all_memory`,
+the `FP_GLOBAL_MASK_TCAM` `soc_mem_clear`, and `_soc_trident_port_mapping_init`. Each was a
+misc_init op that timed out on the live chip.
+
+## Hybrid status / remaining wall (2026-07-12)
+With 0002+0003, **`init soc` completes cleanly** on edged's live chip. `init all` gets deep
+into `misc_init` but hits two BDE-level limits that patches can't paper over:
+1. **MMU/EPIPE register SCHAN writes time out** (e.g. addr 0x0c380001 MMU block, 0x0e170000
+   EPIPE) — the SDK's internal SBUS ring map (from the skipped `soc_reset_bcm56840_a0`)
+   doesn't match the chip's live ring map, so SCHAN ops to those blocks route wrong.
+2. **Memory clears use TableDMA** (`_soc_xgs3_mem_dma`, e.g. FP_GLOBAL_MASK_TCAM) which
+   times out — the polled custom BDE doesn't signal DMA completion.
+Tolerating SCHAN timeouts globally CORRUPTS SCHAN ("invalid S-Channel reply") — reverted.
+=> To finish the hybrid, the BDE needs real TableDMA completion + the SBUS ring map must be
+reconciled (set CMIC_SBUS_RING_MAP to the SDK's expectation without the disruptive full
+reset, or align edged's map). This is the genuine Option-2 BDE work, now precisely scoped.
+See memory `project_acl_soc_init_pathA_deadend`.
