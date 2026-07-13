@@ -7,8 +7,10 @@ import subprocess
 
 def run(cmd, timeout=10):
     """Run a command, return combined stdout/stderr text (never raises)."""
+    if not isinstance(cmd, (list, tuple)):
+        return "(error: cmd must be a list, not a string)"
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        p = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            timeout=timeout)
         return p.stdout.decode("utf-8", "replace")
     except Exception as e:                                  # noqa: BLE001
@@ -17,8 +19,10 @@ def run(cmd, timeout=10):
 
 def run_rc(cmd, timeout=20):
     """Run a command, return (returncode, output)."""
+    if not isinstance(cmd, (list, tuple)):
+        return 1, "(error: cmd must be a list, not a string)"
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        p = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            timeout=timeout)
         return p.returncode, p.stdout.decode("utf-8", "replace")
     except Exception as e:                                  # noqa: BLE001
