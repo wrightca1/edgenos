@@ -141,7 +141,7 @@ static void handle_link(struct nlmsghdr *nlh)
 
     while (RTA_OK(rta, rtl)) {
         if (rta->rta_type == IFLA_IFNAME) {
-            strncpy(ifname, RTA_DATA(rta), IFNAMSIZ - 1);
+            snprintf(ifname, IFNAMSIZ, "%s", (char *)RTA_DATA(rta));
         }
         rta = RTA_NEXT(rta, rtl);
     }
