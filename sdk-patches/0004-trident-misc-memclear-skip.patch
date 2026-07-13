@@ -38,3 +38,22 @@
          SOC_IF_ERROR_RETURN
              (soc_mem_clear(unit, FP_GLOBAL_MASK_TCAMm, COPYNO_ALL, TRUE));
      }
+@@ -8009,6 +8022,10 @@
+     }
+ 
+     /* Setup TDM within each port group */
++    /* AS5610 hybrid: the IARB/TDM port-scheduling tables are actively arbitrating on
++     * edged's live chip; config writes to a running IARB time out (direct reads work).
++     * edged already set the schedule up. Skip the whole TDM/IARB setup on skip_reset. */
++    if (!soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) {
+     SOC_IF_ERROR_RETURN(_soc_trident_pg_tdm_init(unit));
+ 
+     /* Setup main TDM between each port group */
+@@ -8033,6 +8050,7 @@
+     }
+     soc_reg_field_set(unit, IARB_TDM_CONTROLr, &rval, TDM_WRAP_PTRf, count);
+     SOC_IF_ERROR_RETURN(WRITE_IARB_TDM_CONTROLr(unit, rval));
++    } /* end !skip_reset IARB/TDM setup (AS5610 hybrid) */
+ 
+     /* Setup EGR_PERQ_XMT_COUNTERS_BASE_ADDR for each port */
+     _soc_trident_egr_perq_xmt_counters_init(unit);

@@ -80,3 +80,23 @@ inits them is exactly what we skip). Fixing it likely needs either bringing thos
 blocks fully out of reset without disturbing edged's SCHAN, or a BDE-level SCHAN
 completion/retry that tolerates the marginal timing. See memory
 `project_acl_soc_init_pathA_deadend`.
+
+## Hybrid — FUNDAMENTAL WALL identified (2026-07-13, session 3)
+Root cause of the remaining misc_init timeouts, now pinned: **soc_init reconfigures the
+actively-running datapath-scheduling blocks (IARB ingress arbiter, MMU traffic manager),
+and those blocks refuse SCHAN config writes while live.** Evidence:
+- Failing op decoded: SCHAN addr 0x0e170000 = `IARB_MAIN_TDM.ipipe0` (base 0x170000),
+  written by `_soc_trident_pg_tdm_init` / the IARB_MAIN_TDM loop.
+- Direct oracle access on the live chip: EGR_ING_PORT (idle egress mem) read+write BOTH
+  work; IARB_MAIN_TDM read works; the misc_init IARB **write** times out.
+- `schan_timeout_usec=2000000` (2s SW poll) does NOT help -> genuine failure, not marginal
+  timing. SCHAN retry (8x) and skip-schan-reset also don't help.
+- 0004 now also skips the IARB/TDM setup block, but the count stays ~16 because MMU-init /
+  other running-block writes have many more such ops.
+CONCLUSION: you cannot run the SDK's datapath reconfiguration (IARB/MMU scheduling) on a
+chip whose datapath is already live — those blocks won't accept config writes without being
+quiesced/reset, which is the reset we skip to preserve edged's PLLs. soc_init COMPLETES up
+to this point; the FP-engine enable we want is in bcm_field_init (after soc_init). Reaching
+it requires either quiescing IARB/MMU (=~reset, breaks edged) or making the running-block
+writes cleanly non-fatal without the SCHAN desync the naive tolerate caused. See memory
+`project_acl_soc_init_pathA_deadend`.
