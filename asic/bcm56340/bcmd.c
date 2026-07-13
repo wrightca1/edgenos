@@ -268,13 +268,13 @@ static int bcmd_load_l2_groups(const char *path)
     while (fgets(line, sizeof(line), f)) {
         bcm_port_t ports[BCMD_MAXPORT];
         int np = 0, vid;
-        char *s = line, *tok;
+        char *s = line, *tok, *saveptr;
         while (*s == ' ' || *s == '\t') s++;
         if (*s == '#' || *s == '\n' || *s == '\0') continue;
-        tok = strtok(s, " \t\n");
+        tok = strtok_r(s, " \t\n", &saveptr);
         if (!tok) continue;
         vid = atoi(tok);
-        while ((tok = strtok(NULL, " \t\n")) && np < BCMD_MAXPORT) {
+        while ((tok = strtok_r(NULL, " \t\n", &saveptr)) && np < BCMD_MAXPORT) {
             int p = bcmd_port_from_token(tok);
             if (p < 0) { printf("[bcmd] L2 group %d: unknown port '%s'\n", vid, tok); continue; }
             ports[np++] = p;
@@ -950,7 +950,7 @@ static void bcmd_v6_mask(int len, bcm_ip6_t out)
 /* compact (uncompressed) v6 string for logs */
 static const char *bcmd_ip6s(const bcm_ip6_t a, char *b)
 {
-    sprintf(b, "%x:%x:%x:%x:%x:%x:%x:%x",
+    snprintf(b, 48, "%x:%x:%x:%x:%x:%x:%x:%x",
             (a[0]<<8)|a[1], (a[2]<<8)|a[3], (a[4]<<8)|a[5], (a[6]<<8)|a[7],
             (a[8]<<8)|a[9], (a[10]<<8)|a[11], (a[12]<<8)|a[13], (a[14]<<8)|a[15]);
     return b;
