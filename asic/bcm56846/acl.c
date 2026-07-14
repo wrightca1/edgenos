@@ -1,19 +1,23 @@
 /*
  * acl.c — EdgeNOS operator ACLs on the BCM56846 Field Processor (AS5610 / edged).
  *
- * Phase 2a: destination-IP deny/permit. Programmed by hand into the FP (no SDK),
- * reusing the single-wide VS6 slice that cumulus_replicate.c already stands up and
- * enables — physical slice 4, FPF2 selcode 1, which places the 32-bit DstIP at the
- * F2 field (bits 96..127, first octet at the MSB). The OSPF 224/8 trap lives at
- * entry 0 (idx 1024); ACL entries go at 1025+ (lower index = higher precedence, so
- * the OSPF trap and lower-seq rules win). deny -> FP_POLICY *_DROP=1; permit -> a
- * matching entry with no action (packet proceeds), giving permit-over-deny by seq.
+ * Phase 2b: destination-IP deny/permit. Programmed by hand into the FP (no SDK) as a
+ * DOUBLE-WIDE group on physical slices 4+5, replicating Cumulus 2.5.0's proven transit
+ * dst-IP ACL byte-for-byte (captured from this exact silicon — see
+ * CUMULUS_TRANSIT_ACL_RECIPE.md). Every prior single-wide attempt wrote a byte-perfect
+ * slice-4 entry the IFP never consulted: a dst-IP key (offset 110, width 32) does not
+ * fit one slice — the group MUST be double-wide (slices 4+5 paired via SLICE5_4_PAIRING).
  *
- * v1 matches DESTINATION IP only. Rules that also constrain protocol / source /
- * L4 ports can't be expressed on this slice yet (the src/proto/L4 key-bit layout is
- * not mapped), so they are SKIPPED with a warning rather than over-matching.
- * Shares the /etc/edged/acls.conf format + the edgenos acl CLI with the 4610.
- * See docs/acl-design.md.
+ * Each rule => a primary FP_TCAM[512+n] (slice 4, the DstIp/IpType key, spliced from the
+ * captured raw KEY/MASK template) + a secondary FP_TCAM[768+n] (slice 5, VALID=3) +
+ * FP_GM_FIELDS + FP_GLOBAL_MASK_TCAM for both halves. deny -> FP_POLICY *_DROP=1 +
+ * COPY_TO_CPU=3; permit -> no action (packet proceeds), giving permit-over-deny by seq
+ * (lower seq -> lower index -> higher FP precedence). The slice pairing/selcodes/enable
+ * are set once per load by acl_setup_doublewide().
+ *
+ * v1 matches DESTINATION IP only. Rules that also constrain protocol / source / L4 ports
+ * are SKIPPED with a warning rather than over-matching. Shares the /etc/edged/acls.conf
+ * format + the edgenos acl CLI with the 4610. See docs/acl-design.md.
  */
 #include <stdio.h>
 #include <string.h>
@@ -28,28 +32,17 @@
 #include <cdk/arch/xgs_reg.h>
 
 #define ACL_UNIT      0
-/* FP_TCAM is PHYSICAL-slice indexed (256 entries/slice): idx/256 = physical slice.
- * The IFP iterates VIRTUAL slices; virtual slice N's entries live in physical slice
- * FP_SLICE_MAP[N]. Confirmed live via the SDK oracle: FP_SLICE_MAP has VS6 -> phys 4,
- * and VS6 is the DstIP slice (FP_PORT_FIELD_SEL SLICE6_F2=1, single-wide, lookup-
- * enabled). So DstIP-key entries MUST sit in physical slice 4 = idx 1024..1279.
- *
- * The old base 512 was wrong: idx 512 = physical slice 2 = VS0 (map), which has
- * LOOKUP_ENABLE=0 — so entries there were never looked up (counter stayed 0, the
- * long-standing "IFP does no lookup" bug). cumulus_replicate's OSPF trap already
- * correctly uses idx 1024 (VS6 entry 0); ACL entries follow at 1025+. */
-/* DOUBLE-WIDE: primary entries in physical slice 6 (= virtual slice 8, the DstIp
- * double-wide slice cumulus_replicate pairs with 9 via SLICE9_8_PAIRING); the paired
- * secondary is written at idx+256 (physical slice 7). Cumulus put its entry at 1555
- * (slice6 offset 19); we start at 1537 and cap at 64 so primary 1537..1600 stays in
- * slice 6 and secondary 1793..1856 stays in slice 7. */
-/* SINGLE-WIDE physical slice 4 (FP_TCAM idx 512..767). PROVEN in silicon 2026-07-09:
- * an entry here IS consulted (a match-any drop killed 100% of traffic), whereas the old
- * double-wide slice-6/8 placement was never consulted. Trident+ slice geometry is
- * non-uniform (phys 0-3 = 128 entries, 4-9 = 256); slice 4 is single-wide, unpaired, and
- * we enable its FP_LOOKUP_ENABLE bit. See docs/acl-5610-double-wide-fp.md. */
+/* FP_TCAM index layout (Trident+, NON-uniform slice geometry): phys slices 0-3 hold 128
+ * entries each (idx 0..511), slices 4-9 hold 256 each. So:
+ *   physical slice 4 = idx 512..767   (double-wide PRIMARY   half)
+ *   physical slice 5 = idx 768..1023  (double-wide SECONDARY half, = primary idx + 256)
+ * Cumulus placed its entry at slice-4 offset 19 (idx 531) + slice-5 offset 19 (idx 787).
+ * We start at offset 0 and cap at 64: primary 512..575, secondary 768..831. Lower index
+ * = higher FP precedence, so lower-seq rules win. The captured register-diff proved the
+ * absolute slice numbers are just allocator output — what matters is the double-wide
+ * STRUCTURE (pairing + both-half selcodes + both LOOKUP-enable bits). */
 #define ACL_IDX_BASE  512
-#define ACL_MAX       64        /* 1537..1600 primary / 1793..1856 secondary */
+#define ACL_MAX       64        /* primary 512..575 / secondary 768..831 */
 
 static int acl_idx_used[ACL_MAX];
 static int acl_n = 0;
@@ -83,83 +76,80 @@ static int acl_cidr(const char *tok, uint32_t *ip, uint32_t *mask)
     return 0;
 }
 
+/* Raw FP_TCAM KEY/MASK template captured VERBATIM from Cumulus 2.5.0's working
+ * double-wide transit dst-IP deny (FP_TCAM[531], EID 0x7e, dst 10.101.101.2/32).
+ * These are the PHYSICAL fp_tcam KEY (bits 2..235) and MASK (bits 236..469) field
+ * values — copying them reproduces Cumulus's entry bit-for-bit, sidestepping the
+ * logical-DATA/MASK vs raw-X/Y DltaCam ambiguity that defeated every prior attempt.
+ * KEY holds only the DstIp @ offset 110; MASK holds the DstIp care-mask @110 PLUS the
+ * FIXED_MASK (IpType=IPv4) bits at the top. We write the template, then splice the
+ * per-rule DstIp into F2 (word[2] = KEY offset 110); the FIXED/IpType bits ride along.
+ * See CUMULUS_TRANSIT_ACL_RECIPE.md. LSW-first uint32[8]. */
+static const uint32_t ACL_KEY_TMPL[8]  =
+    { 0x00000000, 0x00000000, 0x00000000, 0x59408000, 0x00000299, 0x00000000, 0x00000000, 0x00000000 };
+static const uint32_t ACL_MASK_TMPL[8] =
+    { 0x00000000, 0x00000000, 0x00000000, 0xffffc000, 0x00003fff, 0x00000000, 0x80000000, 0x00000003 };
+
+/*
+ * Program ONE double-wide dst-IP ACL entry, matching the captured Cumulus recipe:
+ *   primary   FP_TCAM[idx]         (physical slice 4) — the DstIp/IpType key
+ *   secondary FP_TCAM[idx+256]     (physical slice 5) — VALID=3, completes the pair
+ *   FP_GM_FIELDS[idx]/[idx+256]    — the global-mask overlay (edged omitted this before)
+ *   FP_GLOBAL_MASK_TCAM[idx]/[idx+256] — VALID=1, match-ANY ingress port
+ *   FP_POLICY_TABLE[idx]           — G/Y/R_DROP + COPY_TO_CPU=3 (SwitchToCpuCancel)
+ * The slice pairing/selcodes/enable are set once per load by acl_setup_doublewide().
+ * edged's old SINGLE-WIDE slice-4 entry was never consulted: a dst-IP key at offset 110
+ * doesn't fit a single slice — the group MUST be double-wide (slices 4+5 paired).
+ */
 static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask, int deny)
 {
     FP_TCAMm_t t;
+    FP_GM_FIELDSm_t gf;
     FP_GLOBAL_MASK_TCAMm_t g;
     FP_POLICY_TABLEm_t p;
-    uint32_t f2[4]  = {0};
-    uint32_t f2m[4] = {0};
-    int w;
+    int sec = idx + 256;                        /* paired secondary in physical slice 5 */
 
-    /*
-     * FP_TCAM is a DltaCam: the hardware stores entries in X/Y form, NOT plain
-     * DATA/MASK. The SDK's soc_mem_write applies _soc_mem_tcam_dm_to_xy() before
-     * writing; the CDK's raw field-set does not. Without the transform the chip
-     * decodes our DATA/MASK as X/Y and the mask comes out garbage
-     * (decoded_mask = key | ~stored_mask), so no rule ever matches — verified on
-     * the live chip via the SDK: our old entry read back F2_MASK=<ip>ffff.. .
-     *
-     * 40nm (Trident+) encode:  K0 = mask & key  -> KEY (F2) field
-     *                          K1 = ~mask | key -> MASK (F2_MASK) field
-     * DstIP sits in F2 word 3 (bits 96..127); words 0..2 are don't-care.
-     */
-    {
-        /* DstIp sits in F2 WORD[2] (bits 64..95), per the live Cumulus capture
-         * (FP_TCAM[1555]: F2=0x00000000<ip>0000000000000000) — NOT word[3] which
-         * edged used before. docs/cumulus-acl-fp-recipe.md. */
-        uint32_t dm_key[4]  = { 0, 0, dstip, 0 };
-        uint32_t dm_mask[4] = { 0, 0, dstmask, 0 };
-        for (w = 0; w < 4; w++) {
-            f2[w]  =  dm_mask[w] & dm_key[w];   /* K0 */
-            f2m[w] = ~dm_mask[w] | dm_key[w];   /* K1 */
-        }
-    }
-
-    /*
-     * DOUBLE-WIDE group (Cumulus/switchd captured recipe): the match lives in the
-     * PRIMARY slice entry (this idx, physical slice 6 = virtual slice 8, paired
-     * with slice 9 by cumulus_replicate SLICE9_8_PAIRING=1); a paired SECONDARY
-     * entry at idx+256 (physical slice 7) completes the pair. The match qualifiers
-     * are mirrored into the PAIRING_* fields. edged's old single-wide entry never
-     * matched — this is the fix.
-     */
-    /* SINGLE-WIDE entry in physical slice 4 (proven consulted in silicon). One FP_TCAM
-     * line, no paired secondary, no PAIRING_* fields, no FP_GM_FIELDS overlay (all of
-     * those are double-wide-only). DstIp lives in F2 word[2] (F2f bits 64-95 = KEY bit
-     * 110 = single-wide selcode-1 offset f2_offset(46)+64, SDK-derived + Cumulus-proven).
-     * FIXED=0x100/care 0x300 selects IpType=IPv4. F1/F3/F4 masks MUST be don't-care
-     * (all-ones), else a raw-zero DltaCam field decodes to "must==0" and blocks the match
-     * (the bug that hid the whole feature — see docs/acl-5610-double-wide-fp.md). */
+    /* ── PRIMARY entry: template (DstIp placeholder + FIXED/IpType) then splice DstIp ── */
     FP_TCAMm_CLR(t);
     FP_TCAMm_VALIDf_SET(t, 3);
-    FP_TCAMm_F2f_SET(t, f2);                        /* DstIp @ F2 word[2] (match-all: f2m=~0) */
-    FP_TCAMm_F2_MASKf_SET(t, f2m);
-    /* Every unused qualifier (F1/F3/F4/FIXED) MUST be don't-care = raw MASK(Y) all-ones,
-     * else a raw-zero DltaCam field decodes to "must==0" and blocks the match. FIXED is
-     * left don't-care (not IpType-constrained): its CDK field overlaps PAIRING_FIXED and
-     * the single-field write skews the decode; a dst-IP only exists on IP packets anyway,
-     * so not gating on IpType is harmless and matches the proven match-any config. */
-    {
-        uint32_t allone39[2] = { 0xffffffffu, 0x0000007fu }; /* 39-bit all-ones = don't-care */
-        FP_TCAMm_F1_MASKf_SET(t, allone39);
-        FP_TCAMm_F3_MASKf_SET(t, allone39);
-        FP_TCAMm_F4_MASKf_SET(t, 0x7fu);                     /* 7-bit all-ones */
-        /* FIXED_MASK and PAIRING_FIXED_MASK overlap the same TCAM bits; set BOTH all-ones
-         * so the FIXED (IpType/Stage) field decodes to a clean don't-care (setting one
-         * alone leaves an overlapped bit cared, over-constraining the entry). */
-        FP_TCAMm_FIXED_MASKf_SET(t, 0x1ffffu);               /* 17-bit all-ones */
-        FP_TCAMm_PAIRING_FIXED_MASKf_SET(t, 0x7ffffu);       /* 19-bit all-ones */
+    FP_TCAMm_KEYf_SET(t, (uint32_t *)ACL_KEY_TMPL);
+    FP_TCAMm_MASKf_SET(t, (uint32_t *)ACL_MASK_TMPL);   /* carries FIXED_MASK=IpType */
+    {   /* splice the actual DstIp/mask into F2 word[2] (= KEY bit 110, width 32).
+         * For 10.101.101.2/32 this reproduces the template byte-for-byte; other IPs
+         * overwrite only the 32 DstIp bits, leaving FIXED_MASK (above F2_MASK) intact. */
+        uint32_t f2[4]  = { 0, 0, dstip,   0 };
+        uint32_t f2m[4] = { 0, 0, dstmask, 0 };
+        FP_TCAMm_F2f_SET(t, f2);
+        FP_TCAMm_F2_MASKf_SET(t, f2m);
     }
     (void)WRITE_FP_TCAMm(unit, idx, t);
 
-    /* FP_GLOBAL_MASK_TCAM per-entry ingress-port gate (single index for single-wide).
-     * Trident requires VALID=1 even when IPBM/IPBM_MASK are 0 (triumph/field.c:3303-3350).
-     * IPBM=0/IPBM_MASK=0/VALID=1 = match ANY ingress port (SDK default). Per-port `apply`
-     * scoping would write a real IPBM bitmap here (needs IFP_GM_LOGIC_TO_PHYS_MAP remap). */
+    /* ── SECONDARY entry: VALID=3, all else zero (Cumulus FP_TCAM[787] verbatim) ── */
+    FP_TCAMm_CLR(t);
+    FP_TCAMm_VALIDf_SET(t, 3);
+    (void)WRITE_FP_TCAMm(unit, sec, t);
+
+    /* ── FP_GM_FIELDS overlay — the memory edged never wrote (double-wide requires it).
+     * Primary: VALID=1, MASK=0x1ffffffffe (37-bit), KEY=0.  Secondary: VALID=1 only.
+     * Values verbatim from Cumulus FP_GM_FIELDS[531]/[787]. ── */
+    FP_GM_FIELDSm_CLR(gf);
+    FP_GM_FIELDSm_VALIDf_SET(gf, 1);
+    { uint32_t gm[2] = { 0xfffffffe, 0x0000001f };      /* 0x1ffffffffe */
+      FP_GM_FIELDSm_MASKf_SET(gf, gm); }
+    (void)WRITE_FP_GM_FIELDSm(unit, idx, gf);
+    FP_GM_FIELDSm_CLR(gf);
+    FP_GM_FIELDSm_VALIDf_SET(gf, 1);
+    (void)WRITE_FP_GM_FIELDSm(unit, sec, gf);
+
+    /* ── FP_GLOBAL_MASK_TCAM ingress-port gate, BOTH halves. VALID=1 required even for
+     * match-any (triumph/field.c:3303). IPBM=0/IPBM_MASK=0 = match ANY ingress port
+     * (edged deviates from Cumulus's swp1-scoped IPBM=0x2 for generality). ── */
     FP_GLOBAL_MASK_TCAMm_CLR(g);
     FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
     (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
+    FP_GLOBAL_MASK_TCAMm_CLR(g);
+    FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
+    (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, sec, g);
 
     FP_POLICY_TABLEm_CLR(p);
     if (deny) {                                 /* permit = no action, packet proceeds */
@@ -188,7 +178,8 @@ void edged_acl_diag(void)
     int i;
 
     cdk_xgs_reg32_read(ACL_UNIT, FP_SLICE_ENABLEr, &sev);
-    acl_log("diag FP_SLICE_ENABLE(runtime)=0x%08x (want lookup bit for phys8)", sev);
+    acl_log("diag FP_SLICE_ENABLE(runtime)=0x%08x (want enable+lookup bits for slices 4&5: "
+            "0x%08x)", sev, (1u<<4)|(1u<<5)|(1u<<14)|(1u<<15));
 
     for (i = 0; i < acl_n; i++) {
         FP_TCAMm_t t;
@@ -262,14 +253,15 @@ void edged_acl_diag(void)
             if (cdk_xgs_mem_read(ACL_UNIT, PORT_TABm, prt, pt.v, 10) >= 0)
                 fe = PORT_TABm_FILTER_ENABLEf_GET(pt);
             if (cdk_xgs_mem_read(ACL_UNIT, FP_PORT_FIELD_SELm, prt, fs.v, 6) >= 0) {
-                acl_log("diag INGRESS port=%d FILTER_EN=%d PFS S6.F2=%u S7.F2=%u S8.F2=%u "
-                        "S9.F2=%u PAIR7_6=%u PAIR9_8=%u", prt, fe,
-                        FP_PORT_FIELD_SELm_SLICE6_F2f_GET(fs),
-                        FP_PORT_FIELD_SELm_SLICE7_F2f_GET(fs),
-                        FP_PORT_FIELD_SELm_SLICE8_F2f_GET(fs),
-                        FP_PORT_FIELD_SELm_SLICE9_F2f_GET(fs),
-                        FP_PORT_FIELD_SELm_SLICE7_6_PAIRINGf_GET(fs),
-                        FP_PORT_FIELD_SELm_SLICE9_8_PAIRINGf_GET(fs));
+                acl_log("diag INGRESS port=%d FILTER_EN=%d PFS S4[F1=%u F2=%u F3=%u] "
+                        "S5[F1=%u F2=%u F3=%u] PAIR5_4=%u", prt, fe,
+                        FP_PORT_FIELD_SELm_SLICE4_F1f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE4_F2f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE4_F3f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE5_F1f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE5_F2f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE5_F3f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE5_4_PAIRINGf_GET(fs));
             } else {
                 acl_log("diag INGRESS port=%d FILTER_EN=%d PFS read FAILED", prt, fe);
             }
@@ -283,8 +275,11 @@ void edged_acl_reset(void)
     FP_TCAMm_t t;
     int i;
     FP_TCAMm_CLR(t);            /* VALID=0 -> entry disabled */
-    for (i = 0; i < acl_n; i++)
-        (void)WRITE_FP_TCAMm(ACL_UNIT, acl_idx_used[i], t);          /* single-wide: one line */
+    for (i = 0; i < acl_n; i++) {
+        int idx = acl_idx_used[i];
+        (void)WRITE_FP_TCAMm(ACL_UNIT, idx, t);         /* primary (slice 4)   */
+        (void)WRITE_FP_TCAMm(ACL_UNIT, idx + 256, t);   /* secondary (slice 5) */
+    }
     acl_n = 0;
 }
 
@@ -391,6 +386,61 @@ static void acl_ifp_pipeline_enable(void)
     acl_log("IFP pipeline enable: IFP_BYPASS=0 + ING_EN_EFILTER_BITMAP=all-ports");
 }
 
+/* Stand up the DOUBLE-WIDE dst-IP group on slices 4+5 — the exact control surface the
+ * Cumulus register-diff proved (only 3 registers change): FP_PORT_FIELD_SEL (per port:
+ * both-half selcodes + SLICE5_4_PAIRING=1), FP_SLICE_KEY_CONTROL (secondary DstClass),
+ * FP_SLICE_ENABLE (enable + LOOKUP-enable BOTH slices). RMW everywhere so the trap slices
+ * cumulus_replicate set up are preserved. Selcodes verbatim from the capture:
+ *   slice4 (primary):   F1=5  F2=1  F3=7
+ *   slice5 (secondary): F1=0xc F2=5 F3=0xa , SLICE_5_DST_CLASS_ID_SEL=1 */
+static void acl_setup_doublewide(void)
+{
+    int p, n = 0;
+
+    /* FP_PORT_FIELD_SEL per ingress port: selcodes for both halves + the pairing bit.
+     * edged addresses this memory by chip port (same as PORT_TAB/FILTER_ENABLE above),
+     * so cover every port 0..MAX — a transit packet may ingress on any front port. */
+    for (p = 0; p <= FP_PORT_FIELD_SELm_MAX; p++) {
+        FP_PORT_FIELD_SELm_t fs;
+        FP_PORT_FIELD_SELm_CLR(fs);
+        if (cdk_xgs_mem_read(ACL_UNIT, FP_PORT_FIELD_SELm, p, fs.v, 6) < 0) continue;
+        FP_PORT_FIELD_SELm_SLICE4_F1f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE4_F2f_SET(fs, 1);
+        FP_PORT_FIELD_SELm_SLICE4_F3f_SET(fs, 7);
+        FP_PORT_FIELD_SELm_SLICE5_F1f_SET(fs, 0xc);
+        FP_PORT_FIELD_SELm_SLICE5_F2f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE5_F3f_SET(fs, 0xa);
+        FP_PORT_FIELD_SELm_SLICE5_4_PAIRINGf_SET(fs, 1);
+        if (WRITE_FP_PORT_FIELD_SELm(ACL_UNIT, p, fs) >= 0) n++;
+    }
+
+    /* FP_SLICE_KEY_CONTROL[0]: DstClass select for the secondary slice (RMW). */
+    {
+        FP_SLICE_KEY_CONTROLm_t kc;
+        FP_SLICE_KEY_CONTROLm_CLR(kc);
+        if (cdk_xgs_mem_read(ACL_UNIT, FP_SLICE_KEY_CONTROLm, 0, kc.v, 4) >= 0) {
+            FP_SLICE_KEY_CONTROLm_SLICE_5_DST_CLASS_ID_SELf_SET(kc, 1);
+            (void)WRITE_FP_SLICE_KEY_CONTROLm(ACL_UNIT, 0, kc);
+        }
+    }
+
+    /* FP_SLICE_ENABLE: enable + LOOKUP-enable BOTH slices 4 and 5 (RMW-OR). Two distinct
+     * bit-fields: SLICE_ENABLE_SLICE_n = bit n, LOOKUP_ENABLE_SLICE_n = bit 10+n. The
+     * register-diff showed LOOKUP-enable is the bit that decides consult-vs-ignore; a
+     * paired slice with its LOOKUP bit clear is written but never looked up. */
+    {
+        FP_SLICE_ENABLEr_t se;
+        uint32_t v = 0;
+        cdk_xgs_reg32_read(ACL_UNIT, FP_SLICE_ENABLEr, &v);
+        v |= (1u << 4) | (1u << 5)          /* SLICE_ENABLE slices 4,5   */
+           | (1u << 14) | (1u << 15);       /* LOOKUP_ENABLE slices 4,5  */
+        FP_SLICE_ENABLEr_CLR(se);
+        FP_SLICE_ENABLEr_SET(se, v);
+        (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
+        acl_log("doublewide: FP_SLICE_ENABLE=0x%08x, PFS pairing on %d ports", v, n);
+    }
+}
+
 int edged_acl_load(const char *path)
 {
     static struct acl_rule rules[ACL_MAX_RULES];
@@ -434,18 +484,11 @@ int edged_acl_load(const char *path)
     /* Program applied+supported rules in ascending seq order (lower seq -> lower
      * index -> higher FP precedence), skipping unsupported ones with a warning. */
     edged_acl_reset();
-    {   /* FP_SLICE_ENABLE = 0x000f73ff: slices 0-9 enabled + FP_LOOKUP_ENABLE on phys
-         * 2,3,6,7,8,9 (Cumulus set) PLUS bit 14 = FP_LOOKUP_ENABLE_SLICE_4 — our
-         * single-wide ACL slice. Without bit 14 the slice-4 entries are never consulted. */
-        FP_SLICE_ENABLEr_t se;
-        FP_SLICE_ENABLEr_CLR(se);
-        FP_SLICE_ENABLEr_SET(se, 0x000f73ff);
-        (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
-    }
     acl_enable_port_filter();               /* the missing per-port IFP enable */
     acl_gm_map_init();                      /* the missing IFP global-mask port map */
     acl_clear_global_mask();                /* the missing FP_GLOBAL_MASK_TCAM init */
     acl_ifp_pipeline_enable();              /* the missing IFP stage enable (bypass+filter) */
+    acl_setup_doublewide();                 /* slices 4+5 pairing/selcodes/enable (the fix) */
 
     /* ── SLICE GEOMETRY PROBE ────────────────────────────────────────────────────
      * If a rule named "probe" is applied, write a match-ALL count entry at base+50 of
