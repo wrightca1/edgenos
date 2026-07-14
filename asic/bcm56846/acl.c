@@ -134,7 +134,7 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
      * Values verbatim from Cumulus FP_GM_FIELDS[531]/[787]. ── */
     FP_GM_FIELDSm_CLR(gf);
     FP_GM_FIELDSm_VALIDf_SET(gf, 1);
-    { uint32_t gm[2] = { 0xfffffffe, 0x0000001f };      /* 0x1ffffffffe */
+    { uint32_t gm[2] = { 0xfffffffe, 0x0000001f };      /* 0x1ffffffffe (Cumulus value) */
       FP_GM_FIELDSm_MASKf_SET(gf, gm); }
     (void)WRITE_FP_GM_FIELDSm(unit, idx, gf);
     FP_GM_FIELDSm_CLR(gf);
@@ -152,7 +152,7 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
     (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, sec, g);
 
     FP_POLICY_TABLEm_CLR(p);
-    if (deny) {                                 /* permit = no action, packet proceeds */
+    if (deny == 1) {                            /* permit = no action, packet proceeds */
         FP_POLICY_TABLEm_G_DROPf_SET(p, 1);
         FP_POLICY_TABLEm_Y_DROPf_SET(p, 1);
         FP_POLICY_TABLEm_R_DROPf_SET(p, 1);
@@ -161,11 +161,19 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
         FP_POLICY_TABLEm_G_COPY_TO_CPUf_SET(p, 3);
         FP_POLICY_TABLEm_Y_COPY_TO_CPUf_SET(p, 3);
         FP_POLICY_TABLEm_R_COPY_TO_CPUf_SET(p, 3);
+    } else if (deny == 2) {                     /* DIAGNOSTIC "copy": mirror match to CPU,
+         * no drop. A matched transit packet (HW-forwarded swp1->swp2) that ALSO appears on
+         * the swp1 CPU tap = proof the FP LOOKUP fired (independent of the broken counter and
+         * of whether the drop action works). COPY_TO_CPU=1 = copy (not =3 cancel). */
+        FP_POLICY_TABLEm_G_COPY_TO_CPUf_SET(p, 1);
+        FP_POLICY_TABLEm_Y_COPY_TO_CPUf_SET(p, 1);
+        FP_POLICY_TABLEm_R_COPY_TO_CPUf_SET(p, 1);
     }
     FP_POLICY_TABLEm_COUNTER_MODEf_SET(p, 7);   /* count all colors: a match signal */
-    FP_POLICY_TABLEm_COUNTER_INDEXf_SET(p, idx);
+    FP_POLICY_TABLEm_COUNTER_INDEXf_SET(p, idx & 0x7f);   /* 7-bit field (was wrapping) */
     (void)WRITE_FP_POLICY_TABLEm(unit, idx, p);
-    acl_log("prog idx=%d f2[3]=0x%08x/0x%08x %s", idx, dstip, dstmask, deny ? "DENY" : "permit");
+    acl_log("prog idx=%d f2[3]=0x%08x/0x%08x action=%s", idx, dstip, dstmask,
+            deny == 1 ? "DENY" : deny == 2 ? "COPY2CPU" : "permit");
 }
 
 /* Dump each ACL entry's FP match counter to the file-log (wired to SIGUSR1). A
@@ -180,6 +188,31 @@ void edged_acl_diag(void)
     cdk_xgs_reg32_read(ACL_UNIT, FP_SLICE_ENABLEr, &sev);
     acl_log("diag FP_SLICE_ENABLE(runtime)=0x%08x (want enable+lookup bits for slices 4&5: "
             "0x%08x)", sev, (1u<<4)|(1u<<5)|(1u<<14)|(1u<<15));
+
+    /* FP-STAGE REGDIFF: read the FP/ingress-pipeline registers that gate whether the
+     * IFP lookup runs, compare to the working-Cumulus values (from dump_soc.txt). A GAP
+     * (ours=0) on FP_TCAM_BLK_SEL / FP_GM_TCAM_BLK_SEL etc. = the missing stage init. */
+    {
+        static const struct { uint32_t addr, cval; const char *name; } fpr[] = {
+            { 0x0d180d20, 0x00000fff, "FP_TCAM_BLK_SEL" },
+            { 0x0d180d21, 0x00000fff, "FP_GM_TCAM_BLK_SEL" },
+            { 0x0d180601, 0x000e33ff, "FP_SLICE_ENABLE" },
+            { 0x01180602, 0x000001ff, "ING_CONFIG_2" },
+            { 0x01180600, 0x2080300e, "ING_CONFIG_64(lo)" },
+            { 0x0f180665, 0x0000000c, "SW2_FP_DST_ACTION_CONTROL" },
+            { 0x04180620, 0x000000ff, "VFP_SLICE_CONTROL" },
+            { 0x04180621, 0x00000003, "VFP_KEY_CONTROL" },
+            { 0x04180636, 0x0000e4e4, "VFP_SLICE_MAP" },
+        };
+        unsigned k;
+        for (k = 0; k < sizeof(fpr)/sizeof(fpr[0]); k++) {
+            uint32_t v = 0xdeadbeef;
+            cdk_xgs_reg32_read(ACL_UNIT, fpr[k].addr, &v);
+            acl_log("diag FPREG %-26s ours=0x%08x cumulus=0x%08x %s",
+                    fpr[k].name, v, fpr[k].cval,
+                    v == fpr[k].cval ? "OK" : (v == 0 ? "**GAP**" : "**DIFF**"));
+        }
+    }
 
     for (i = 0; i < acl_n; i++) {
         FP_TCAMm_t t;
@@ -383,6 +416,9 @@ static void acl_ifp_pipeline_enable(void)
         ING_EN_EFILTER_BITMAPm_BITMAPf_SET(e, ones);     /* filter enabled on all ports */
         (void)WRITE_ING_EN_EFILTER_BITMAPm(ACL_UNIT, 0, e);
     }
+    /* NOTE: ING_CONFIG_2=0x1ff (a REGDIFF gap the SDK sets for BCM56846) was tried here
+     * and BROKE box->Nexus forwarding (its USE_VLAN_ING_PORT_BITMAP bit needs subsystems
+     * edged's partial init lacks) WITHOUT enabling the IFP match. Reverted — not the gate. */
     acl_log("IFP pipeline enable: IFP_BYPASS=0 + ING_EN_EFILTER_BITMAP=all-ports");
 }
 
@@ -471,7 +507,7 @@ int edged_acl_load(const char *path)
             memset(&rules[nr], 0, sizeof(rules[nr]));
             strncpy(rules[nr].name, name, 31);
             rules[nr].seq  = atoi(t2);
-            rules[nr].deny = !strcmp(act, "deny");
+            rules[nr].deny = !strcmp(act, "deny") ? 1 : (!strcmp(act, "copy") ? 2 : 0);
             strncpy(rules[nr].dst, ds, sizeof(rules[nr].dst) - 1);
             proto_any = (!strcmp(pr, "ip") || !strcmp(pr, "any") || !strcmp(pr, "all"));
             src_any   = (!strcmp(sr, "any") || !strcmp(sr, "0.0.0.0/0"));
