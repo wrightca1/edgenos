@@ -510,6 +510,125 @@ static void defip_slot_free(int slot)
     if (defip_free_n < L3_ROUTE_MAX) defip_free[defip_free_n++] = slot;
 }
 
+/* ---------------------------------------------------------------------------
+ * dst-IP ACL denies via the L3 datapath (NOT the FP).
+ *
+ * The IFP/FP lookup is not armed by OpenMDK's init on this chip (exhaustively
+ * confirmed 2026-07-14: every FP register+memory matches Cumulus yet the lookup
+ * never fires). The L3 forwarding path, however, works (routing + ECMP proven).
+ * So a dst-IP deny is programmed as an L3 entry with DST_DISCARD=1: the chip's
+ * L3 lookup finds it and drops routed traffic to that dst.
+ *   /32  -> the hashed L3_ENTRY_IPV4_UNICAST table (IPV4UC_DST_DISCARD)
+ *   <32  -> an L3_DEFIP prefix entry (DST_DISCARD0), transit-band slot
+ * This touches NEITHER the FP nor the L2_USER_ENTRY CPU-punt, so it cannot break
+ * forwarding or the control plane. Scope: L3-routed/transit traffic (exactly what
+ * dst-IP ACLs are for), global across ingress ports. See acl.c.
+ * ------------------------------------------------------------------------- */
+#define L3_DENY_MAX 128
+static struct { uint32_t ip, mask; int slot; int valid; } l3_deny_tab[L3_DENY_MAX];
+
+int l3_v4_deny_add(uint32_t ipv4_addr, uint32_t mask)
+{
+    int i, slot = -1;
+    for (i = 0; i < L3_DENY_MAX; i++)          /* dedup */
+        if (l3_deny_tab[i].valid && l3_deny_tab[i].ip == ipv4_addr &&
+            l3_deny_tab[i].mask == mask)
+            return 0;
+    for (i = 0; i < L3_DENY_MAX; i++) if (!l3_deny_tab[i].valid) break;
+    if (i == L3_DENY_MAX) { syslog(LOG_WARNING, "ACL: L3 deny table full (%d)", L3_DENY_MAX); return -1; }
+
+    if (mask == 0xffffffff) {                   /* /32 host -> hashed L3_ENTRY */
+        L3_ENTRY_IPV4_UNICASTm_t hst;
+        L3_ENTRY_IPV4_UNICASTm_CLR(hst);
+        L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_V6f_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(hst, ipv4_addr);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(hst, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_DST_DISCARDf_SET(hst, 1);   /* the deny */
+        L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(hst, 1);
+        int ii = l3_v4_schan_insert(edged.unit, &hst);
+        if (ii < 0) {
+            syslog(LOG_WARNING, "ACL: L3 deny /32 insert failed for 0x%08x", ipv4_addr);
+            return -1;
+        }
+        /* Readback: confirm the chip placed the entry where the L3 lookup will find
+         * it, and that DST_DISCARD survived (else the deny silently no-ops). */
+        {
+            L3_ENTRY_IPV4_UNICASTm_t key, got;
+            L3_ENTRY_IPV4_UNICASTm_CLR(key);
+            L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(key, 0);
+            L3_ENTRY_IPV4_UNICASTm_V6f_SET(key, 0);
+            L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(key, ipv4_addr);
+            L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(key, 0);
+            int lk = l3_v4_schan_lookup(edged.unit, &key, &got);
+            FILE *lf = fopen("/tmp/edged-l3deny.log", "a");
+            if (lf) {
+                fprintf(lf, "L3 deny /32 0x%08x insert_idx=%d(%s) lookup=%d "
+                        "readback DST_DISCARD=%d VALID=%d NHI=%d\n",
+                        ipv4_addr, ii, ii >= 0 ? "OK" : "FAIL", lk,
+                        lk >= 0 ? L3_ENTRY_IPV4_UNICASTm_IPV4UC_DST_DISCARDf_GET(got) : -1,
+                        lk >= 0 ? L3_ENTRY_IPV4_UNICASTm_VALIDf_GET(got) : -1,
+                        lk >= 0 ? L3_ENTRY_IPV4_UNICASTm_IPV4UC_NEXT_HOP_INDEXf_GET(got) : -1);
+                fclose(lf);
+            }
+        }
+    } else {                                    /* prefix -> DST_DISCARD L3_DEFIP */
+        L3_DEFIPm_t d;
+        slot = defip_slot_alloc();
+        L3_DEFIPm_CLR(d);
+        L3_DEFIPm_VALID0f_SET(d, 1);
+        L3_DEFIPm_IP_ADDR0f_SET(d, ipv4_addr & mask);
+        L3_DEFIPm_IP_ADDR_MASK0f_SET(d, mask);
+        L3_DEFIPm_VRF_ID_0f_SET(d, 0);
+        L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0x3ff);
+        L3_DEFIPm_DST_DISCARD0f_SET(d, 1);      /* the deny */
+        if (WRITE_L3_DEFIPm(edged.unit, slot, d) < 0) {
+            syslog(LOG_WARNING, "ACL: L3 deny prefix DEFIP write failed slot %d", slot);
+            defip_slot_free(slot);
+            return -1;
+        }
+    }
+    l3_deny_tab[i].ip = ipv4_addr; l3_deny_tab[i].mask = mask;
+    l3_deny_tab[i].slot = slot; l3_deny_tab[i].valid = 1;
+    syslog(LOG_INFO, "ACL: L3 DST_DISCARD deny %u.%u.%u.%u mask=0x%08x (%s)",
+           (ipv4_addr>>24)&0xff, (ipv4_addr>>16)&0xff, (ipv4_addr>>8)&0xff, ipv4_addr&0xff,
+           mask, mask == 0xffffffff ? "L3_ENTRY" : "L3_DEFIP");
+    return 0;
+}
+
+int l3_v4_deny_del(uint32_t ipv4_addr, uint32_t mask)
+{
+    int i;
+    for (i = 0; i < L3_DENY_MAX; i++)
+        if (l3_deny_tab[i].valid && l3_deny_tab[i].ip == ipv4_addr &&
+            l3_deny_tab[i].mask == mask)
+            break;
+    if (i == L3_DENY_MAX) return 0;
+    if (l3_deny_tab[i].slot < 0) {              /* /32 -> hash delete */
+        L3_ENTRY_IPV4_UNICASTm_t key;
+        L3_ENTRY_IPV4_UNICASTm_CLR(key);
+        L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_V6f_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(key, ipv4_addr);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(key, 0);
+        (void)l3_v4_schan_delete(edged.unit, &key);
+    } else {                                    /* prefix -> invalidate DEFIP slot */
+        L3_DEFIPm_t d; L3_DEFIPm_CLR(d);
+        (void)WRITE_L3_DEFIPm(edged.unit, l3_deny_tab[i].slot, d);
+        defip_slot_free(l3_deny_tab[i].slot);
+    }
+    l3_deny_tab[i].valid = 0;
+    return 0;
+}
+
+void l3_v4_deny_reset(void)
+{
+    int i;
+    for (i = 0; i < L3_DENY_MAX; i++)
+        if (l3_deny_tab[i].valid)
+            (void)l3_v4_deny_del(l3_deny_tab[i].ip, l3_deny_tab[i].mask);
+}
+
 static struct l3_rt *route_find(uint32_t target, uint32_t mask)
 {
     for (int i = 0; i < L3_ROUTE_MAX; i++)

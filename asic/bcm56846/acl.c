@@ -517,39 +517,19 @@ int edged_acl_load(const char *path)
     }
     fclose(f);
 
-    /* Program applied+supported rules in ascending seq order (lower seq -> lower
-     * index -> higher FP precedence), skipping unsupported ones with a warning. */
-    edged_acl_reset();
-    acl_enable_port_filter();               /* the missing per-port IFP enable */
-    acl_gm_map_init();                      /* the missing IFP global-mask port map */
-    acl_clear_global_mask();                /* the missing FP_GLOBAL_MASK_TCAM init */
-    acl_ifp_pipeline_enable();              /* the missing IFP stage enable (bypass+filter) */
-    acl_setup_doublewide();                 /* slices 4+5 pairing/selcodes/enable (the fix) */
-
-    /* ── SLICE GEOMETRY PROBE ────────────────────────────────────────────────────
-     * If a rule named "probe" is applied, write a match-ALL count entry at base+50 of
-     * every EVEN physical slice (0,2,4,6); their paired secondaries (base+256) land in
-     * the odd slices (1,3,5,7), so no two probe entries collide. Under real IPv4
-     * traffic the counter-scan (SIGUSR1) then shows WHICH physical slice the IFP
-     * actually consults — resolving the virtual-vs-physical FP_TCAM indexing that has
-     * blocked this feature for the whole project. Non-destructive (offset 50 clears the
-     * low-offset traps; permit = no drop). */
-    {
-        int pi;
-        for (pi = 0; pi < nr; pi++) if (!strcmp(rules[pi].name, "probe")) break;
-        if (pi < nr) {
-            int s;
-            for (s = 0; s <= 6 && acl_n < ACL_MAX; s += 2) {
-                int pidx = s * 256 + 50;
-                acl_program_one(ACL_UNIT, pidx, 0, 0, 0);   /* match-all, count-only */
-                acl_idx_used[acl_n++] = pidx;
-            }
-            acl_log("SLICE PROBE: match-all count entries at even-slice bases "
-                    "50(s0)/562(s2)/1074(s4)/1586(s6) — scan counters to find live slice");
-        }
-    }
-
-    while (acl_n < ACL_MAX) {
+    /* ── Program applied rules via the L3 datapath (NOT the FP) ──────────────────
+     * The IFP/FP lookup is not armed by OpenMDK's init on this chip (exhaustively
+     * confirmed 2026-07-14 — every FP register+memory matches Cumulus yet the lookup
+     * never fires). The L3 forwarding path works, so a dst-IP deny is programmed as
+     * an L3 DST_DISCARD entry (l3_v4_deny_add): the chip's L3 lookup drops routed
+     * traffic to the dst. This touches NEITHER the FP nor the L2_USER_ENTRY CPU-punt,
+     * so it can't break forwarding or the control plane. deny -> a DST_DISCARD entry;
+     * permit -> nothing (permit is the default; a more-specific /32 permit would win
+     * by L3 longest-prefix-match). Scope: L3-routed/transit traffic, global ingress.
+     * The FP double-wide machinery (acl_program_one/acl_setup_doublewide/...) is kept
+     * for if/when the IFP is ever armed, but is not called on this path. */
+    l3_v4_deny_reset();
+    while (1) {
         int best = -1;
         for (i = 0; i < nr; i++) {
             if (rules[i].seq < 0) continue;                     /* already taken */
@@ -561,10 +541,12 @@ int edged_acl_load(const char *path)
         if (rules[best].supported) {
             uint32_t ip, mask;
             if (acl_cidr(rules[best].dst, &ip, &mask) == 0) {
-                int idx = ACL_IDX_BASE + acl_n;
-                acl_program_one(ACL_UNIT, idx, ip, mask, rules[best].deny);
-                acl_idx_used[acl_n++] = idx;
-                done++;
+                if (rules[best].deny == 1) {                    /* deny -> L3 DST_DISCARD */
+                    if (l3_v4_deny_add(ip, mask) == 0) done++;
+                } else {                                        /* permit/copy: default permit */
+                    acl_log("rule %s seq %d: permit (default) — no L3 entry needed",
+                            rules[best].name, rules[best].seq);
+                }
             }
         } else {
             syslog(LOG_WARNING, "ACL %s seq %d: 5610 v1 matches dst-IP only "
@@ -573,9 +555,9 @@ int edged_acl_load(const char *path)
         }
         rules[best].seq = -1;                                    /* mark taken */
     }
-    syslog(LOG_INFO, "ACL: installed %d FP entr%s from %s (%d skipped, dst-IP only)",
+    syslog(LOG_INFO, "ACL: installed %d L3 dst-IP den%s from %s (%d skipped)",
            done, done == 1 ? "y" : "ies", path, skipped);
-    acl_log("load %s: %d rules, %d applied-bindings -> %d installed, %d skipped",
+    acl_log("load %s: %d rules, %d applied-bindings -> %d L3 denies, %d skipped",
             path, nr, nb, done, skipped);
     return done;
 }
