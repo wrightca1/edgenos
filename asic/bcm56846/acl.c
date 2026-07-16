@@ -239,6 +239,24 @@ void edged_acl_diag(void)
         }
     }
 
+    /* Per-port FP key-select dump — the KEY generation for slice 8 depends on
+     * FP_PORT_FIELD_SEL[chip_port].SLICE8 selcodes being set on the port the
+     * traffic actually ingresses. Cumulus capture (all ports): SLICE8 F1=5/F2=1/
+     * F3=7, SLICE9 F1=0xc/F2=5/F3=0xa, SLICE9_8_PAIRING=1. Dump raw words 0-2 for
+     * ports 0-12 so we can confirm swp-ingress ports carry the selcodes. */
+    {
+        int pp;
+        for (pp = 0; pp <= 12; pp++) {
+            FP_PORT_FIELD_SELm_t fs;
+            FP_PORT_FIELD_SELm_CLR(fs);
+            if (cdk_xgs_mem_read(ACL_UNIT, FP_PORT_FIELD_SELm, pp, fs.v, 6) < 0) continue;
+            acl_log("diag PFS[%d] raw=%08x.%08x.%08x SLICE8_F2=%u SLICE9_8_PAIR=%u",
+                    pp, fs.v[2], fs.v[1], fs.v[0],
+                    FP_PORT_FIELD_SELm_SLICE8_F2f_GET(fs),
+                    FP_PORT_FIELD_SELm_SLICE9_8_PAIRINGf_GET(fs));
+        }
+    }
+
     for (i = 0; i < acl_n; i++) {
         FP_TCAMm_t t;
         FP_GLOBAL_MASK_TCAMm_t g;
