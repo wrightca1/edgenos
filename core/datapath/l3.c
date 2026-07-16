@@ -433,6 +433,13 @@ int l3_init(void)
                enabled);
     }
 
+    /* NOTE: enabling the L2/L3/MPLS AUX_HASH_CONTROL + L2_LEARN/L2_BULK (all REGDIFF
+     * gaps vs Cumulus, soc_init sets them) was TESTED here and (a) did NOT flip transit
+     * to HW forwarding (the datapath still missed the L3_ENTRY) and (b) BROKE the OSPF
+     * multicast->CPU punt (hellos stopped reaching ospfd). So these soc_init gaps must
+     * be applied as a COHERENT SET with the rest (egress/ING/MMU config), not piecemeal.
+     * See REGDIFF_edged_vs_cumulus.txt (61 gaps + 81 diffs) + project_init_all_insight. */
+
     return 0;
 }
 
@@ -586,6 +593,26 @@ void l3_v4_deny_reset(void)
             (void)l3_v4_deny_del(l3_deny_tab[i].ip, l3_deny_tab[i].mask);
 }
 
+/* Full register diff vs working-Cumulus (SIGUSR1). Reveals any lookup-engine-arming
+ * register edged has as a persistent VALUE gap. cmp_regs[] auto-gen'd from Cumulus. */
+void l3_regdiff_diag(void)
+{
+    #include "generated/cmp_regs.h"
+    FILE *lf = fopen("/tmp/edged-acl.log", "a");
+    int k, gaps = 0, diffs = 0;
+    if (!lf) return;
+    for (k = 0; k < CMP_REGS_N; k++) {
+        uint32_t ours = 0xdeadbeef;
+        cdk_xgs_reg32_read(edged.unit, cmp_regs[k].addr, &ours);
+        if (ours == cmp_regs[k].cval) continue;
+        fprintf(lf, "REGDIFF %-34s cumulus=0x%08x ours=0x%08x %s\n",
+                cmp_regs[k].name, cmp_regs[k].cval, ours, ours == 0 ? "GAP" : "DIFF");
+        if (ours == 0) gaps++; else diffs++;
+    }
+    fprintf(lf, "REGDIFF summary: %d gaps, %d diffs of %d regs\n", gaps, diffs, CMP_REGS_N);
+    fclose(lf);
+}
+
 /* HW-L3-forwarding diagnostic (SIGUSR1 -> /tmp/edged-acl.log). Pinpoints why transit
  * punts instead of HW-forwarding: the egress gate (EPC_LINK_BMAP / EGR_ENABLE) and
  * whether a known neighbor (Nexus 10.101.101.2) is a real HW-forward L3 entry. */
@@ -669,6 +696,7 @@ void l3_fwd_diag(void)
         }
     }
     fclose(lf);
+    l3_regdiff_diag();   /* full register diff vs Cumulus */
 }
 
 static struct l3_rt *route_find(uint32_t target, uint32_t mask)
