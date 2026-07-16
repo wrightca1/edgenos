@@ -108,26 +108,36 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
     FP_GM_FIELDSm_t gf;
     FP_GLOBAL_MASK_TCAMm_t g;
     FP_POLICY_TABLEm_t p;
-    int sec = idx + 256;                        /* paired secondary in physical slice 5 */
+    int sec = idx + 256;                        /* paired secondary in physical slice 7 */
 
-    /* ── PRIMARY entry: template (DstIp placeholder + FIXED/IpType) then splice DstIp ── */
+    /* ── PRIMARY entry (physical slice 6) — verbatim field layout from the Cumulus
+     * capture FP_TCAM[1536]: DstIp lives in the TOP 32 bits of the 128-bit F2
+     * field (F2[127:96] = LSW-first word[3]); FIXED_MASK=0x380; the paired half
+     * (PAIRING_F2/PAIRING_FIXED_MASK=0x700) carries the same DstIp. ── */
     FP_TCAMm_CLR(t);
     FP_TCAMm_VALIDf_SET(t, 3);
-    FP_TCAMm_KEYf_SET(t, (uint32_t *)ACL_KEY_TMPL);
-    FP_TCAMm_MASKf_SET(t, (uint32_t *)ACL_MASK_TMPL);   /* carries FIXED_MASK=IpType */
-    {   /* splice the actual DstIp/mask into F2 word[2] (= KEY bit 110, width 32).
-         * For 10.101.101.2/32 this reproduces the template byte-for-byte; other IPs
-         * overwrite only the 32 DstIp bits, leaving FIXED_MASK (above F2_MASK) intact. */
-        uint32_t f2[4]  = { 0, 0, dstip,   0 };
-        uint32_t f2m[4] = { 0, 0, dstmask, 0 };
+    {
+        uint32_t f2[4]  = { 0, 0, 0, dstip };
+        uint32_t f2m[4] = { 0, 0, 0, dstmask };
         FP_TCAMm_F2f_SET(t, f2);
         FP_TCAMm_F2_MASKf_SET(t, f2m);
+        FP_TCAMm_PAIRING_F2f_SET(t, f2);
+        FP_TCAMm_PAIRING_F2_MASKf_SET(t, f2m);
     }
+    FP_TCAMm_FIXED_MASKf_SET(t, 0x380);
+    FP_TCAMm_PAIRING_FIXED_MASKf_SET(t, 0x700);
     (void)WRITE_FP_TCAMm(unit, idx, t);
 
-    /* ── SECONDARY entry: VALID=3, all else zero (Cumulus FP_TCAM[787] verbatim) ── */
+    /* ── SECONDARY entry (physical slice 7) — Cumulus FP_TCAM[1792]: VALID=3 plus
+     * the fixed F3 mask the paired slice carries (F3_MASK=PAIRING_F3_MASK=
+     * 0x07fff80000). ── */
     FP_TCAMm_CLR(t);
     FP_TCAMm_VALIDf_SET(t, 3);
+    {
+        uint32_t f3m[4] = { 0xfff80000, 0x00000007, 0, 0 };   /* 0x07fff80000 */
+        FP_TCAMm_F3_MASKf_SET(t, f3m);
+        FP_TCAMm_PAIRING_F3_MASKf_SET(t, f3m);
+    }
     (void)WRITE_FP_TCAMm(unit, sec, t);
 
     /* ── FP_GM_FIELDS overlay — the memory edged never wrote (double-wide requires it).
@@ -443,22 +453,26 @@ static void acl_setup_doublewide(void)
         FP_PORT_FIELD_SELm_t fs;
         FP_PORT_FIELD_SELm_CLR(fs);
         if (cdk_xgs_mem_read(ACL_UNIT, FP_PORT_FIELD_SELm, p, fs.v, 6) < 0) continue;
-        FP_PORT_FIELD_SELm_SLICE4_F1f_SET(fs, 5);
-        FP_PORT_FIELD_SELm_SLICE4_F2f_SET(fs, 1);
-        FP_PORT_FIELD_SELm_SLICE4_F3f_SET(fs, 7);
-        FP_PORT_FIELD_SELm_SLICE5_F1f_SET(fs, 0xc);
-        FP_PORT_FIELD_SELm_SLICE5_F2f_SET(fs, 5);
-        FP_PORT_FIELD_SELm_SLICE5_F3f_SET(fs, 0xa);
-        FP_PORT_FIELD_SELm_SLICE5_4_PAIRINGf_SET(fs, 1);
+        /* The user dst-IP ingress drop group is GID 3 = virtual slices 8,9
+         * (-> physical slices 6,7 via FP_SLICE_MAP), verified in the ACL capture
+         * (static_port_field_sel.txt). Selcodes verbatim: slice8 F1=5/F2=1/F3=7,
+         * slice9 F1=0xc/F2=5/F3=0xa, SLICE9_8_PAIRING=1. */
+        FP_PORT_FIELD_SELm_SLICE8_F1f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE8_F2f_SET(fs, 1);
+        FP_PORT_FIELD_SELm_SLICE8_F3f_SET(fs, 7);
+        FP_PORT_FIELD_SELm_SLICE9_F1f_SET(fs, 0xc);
+        FP_PORT_FIELD_SELm_SLICE9_F2f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE9_F3f_SET(fs, 0xa);
+        FP_PORT_FIELD_SELm_SLICE9_8_PAIRINGf_SET(fs, 1);
         if (WRITE_FP_PORT_FIELD_SELm(ACL_UNIT, p, fs) >= 0) n++;
     }
 
-    /* FP_SLICE_KEY_CONTROL[0]: DstClass select for the secondary slice (RMW). */
+    /* FP_SLICE_KEY_CONTROL[0]: DstClass select for the secondary slice 9 (RMW). */
     {
         FP_SLICE_KEY_CONTROLm_t kc;
         FP_SLICE_KEY_CONTROLm_CLR(kc);
         if (cdk_xgs_mem_read(ACL_UNIT, FP_SLICE_KEY_CONTROLm, 0, kc.v, 4) >= 0) {
-            FP_SLICE_KEY_CONTROLm_SLICE_5_DST_CLASS_ID_SELf_SET(kc, 1);
+            FP_SLICE_KEY_CONTROLm_SLICE_9_DST_CLASS_ID_SELf_SET(kc, 1);
             (void)WRITE_FP_SLICE_KEY_CONTROLm(ACL_UNIT, 0, kc);
         }
     }
@@ -471,8 +485,8 @@ static void acl_setup_doublewide(void)
         FP_SLICE_ENABLEr_t se;
         uint32_t v = 0;
         cdk_xgs_reg32_read(ACL_UNIT, FP_SLICE_ENABLEr, &v);
-        v |= (1u << 4) | (1u << 5)          /* SLICE_ENABLE slices 4,5   */
-           | (1u << 14) | (1u << 15);       /* LOOKUP_ENABLE slices 4,5  */
+        v |= (1u << 8) | (1u << 9)          /* SLICE_ENABLE slices 8,9   */
+           | (1u << 18) | (1u << 19);       /* LOOKUP_ENABLE slices 8,9 (already in 0xe33ff) */
         FP_SLICE_ENABLEr_CLR(se);
         FP_SLICE_ENABLEr_SET(se, v);
         (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
@@ -544,11 +558,13 @@ int edged_acl_load(const char *path)
     if (fp_mode) {
         edged_acl_reset();          /* invalidate any prior FP entries */
         acl_gm_map_init();          /* IFP global-mask logical->phys port map */
-        acl_clear_global_mask();    /* init FP_GLOBAL_MASK_TCAM + FP mems */
+        /* NOTE: NOT calling acl_clear_global_mask() — it wipes cumulus_replicate's
+         * FP_TCAM/FP_POLICY traps and breaks forwarding (100% loss). The
+         * FP_GLOBAL_MASK_TCAM entries we need are written per-entry below. */
         acl_enable_port_filter();   /* PORT_TAB.FILTER_ENABLE all ports */
         acl_ifp_pipeline_enable();  /* IFP_BYPASS=0 + ING_EN_EFILTER_BITMAP */
-        acl_setup_doublewide();     /* slices 4+5 pairing/selcodes/lookup-enable */
-        acl_log("FP mode ON: double-wide IFP dst-IP drop armed (coherent soc_init)");
+        acl_setup_doublewide();     /* slices 8+9 pairing/selcodes (GID 3 recipe) */
+        acl_log("FP mode ON: double-wide IFP dst-IP drop armed (slices 8/9)");
     }
     while (1) {
         int best = -1;
@@ -565,7 +581,7 @@ int edged_acl_load(const char *path)
                 if (rules[best].deny == 1) {                    /* deny -> L3 DST_DISCARD */
                     if (l3_v4_deny_add(ip, mask) == 0) done++;
                     if (fp_mode && fp_n < ACL_MAX) {            /* + FP silicon drop */
-                        int idx = 512 + fp_n;
+                        int idx = 1536 + fp_n;   /* physical slice 6 (virtual 8) */
                         acl_program_one(ACL_UNIT, idx, ip, mask, 1);
                         acl_idx_used[acl_n++] = idx;
                         fp_n++;
