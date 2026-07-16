@@ -594,7 +594,17 @@ int edged_acl_load(const char *path)
                         acl_idx_used[acl_n++] = idx;
                         fp_n++;
                     }
-                } else {                                        /* permit/copy: default permit */
+                } else if (rules[best].deny == 2 && fp_mode && fp_n < ACL_MAX) {
+                    /* DIAGNOSTIC "copy": program an FP COPY_TO_CPU entry (mask=0
+                     * => match-any IPv4). If its FP_COUNTER increments (or copies
+                     * hit the CPU), the IFP stage IS running -> the dst-IP drop's
+                     * key is the issue; if it stays 0, the whole IFP stage is dead. */
+                    int idx = 1536 + fp_n;
+                    acl_program_one(ACL_UNIT, idx, ip, mask, 2);
+                    acl_idx_used[acl_n++] = idx;
+                    fp_n++;
+                    done++;
+                } else {                                        /* permit: default */
                     acl_log("rule %s seq %d: permit (default) — no L3 entry needed",
                             rules[best].name, rules[best].seq);
                 }
