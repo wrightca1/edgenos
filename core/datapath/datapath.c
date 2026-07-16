@@ -12,6 +12,8 @@
  */
 
 #include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 #include <syslog.h>
 
 #include "edged.h"
@@ -22,6 +24,12 @@
 
 /* From bcm56840_a0_internal.h */
 extern int bcm56840_a0_xlport_pbmp_get(int unit, cdk_pbmp_t *pbmp);
+
+/* Captured Cumulus soc_init register set ({addr, cval, name}, CMP_REGS_N).
+ * Auto-generated from the live Cumulus dump_soc.txt.  Used both by the REGDIFF
+ * diag (read-compare) and by datapath_apply_cumulus_regs() (the coherent-set
+ * write).  File-scope so both share one definition. */
+#include "generated/cmp_regs.h"
 
 /*
  * CPU punt configuration.
@@ -1246,6 +1254,60 @@ static int datapath_rc_full(int unit)
     return ioerr;
 }
 
+/*
+ * datapath_apply_cumulus_regs() - apply the captured Cumulus soc_init register
+ * set as a COHERENT WHOLE.
+ *
+ * OpenMDK's bmd_init programs only a minimal subset of the chip config that
+ * Broadcom's "init all" writes.  A full 335-register compare vs a live Cumulus
+ * dump (the REGDIFF diag below / REGDIFF_edged_vs_cumulus.txt) found 61 gaps +
+ * 81 diffs — the un-armed lookup/egress engines (L2/L3/MPLS AUX hash,
+ * EGR_CONFIG_1/2 + EGR_Q, ING_CONFIG_2=0x1ff, VFP/EFP slice control, the
+ * PP_C*_PORT block, MMU thresholds, ...).  Enabling any of these PIECEMEAL broke
+ * the control plane: arming the L2 hash AFTER cumulus_replicate had already
+ * SCHAN-hash-inserted the L2_USER_ENTRY protocol traps orphaned them (they
+ * hashed to a different bucket) -> OSPF punt died.  So the whole set must be
+ * applied HERE, before cumulus_replicate_init()'s hash inserts, so those inserts
+ * land in the correct (armed) buckets.
+ *
+ * We force Cumulus's value for every captured register EXCEPT:
+ *   - MMU_TO_{LOGIC,PHY}_PORT_MAPPING : legit port-layout differences (edged's
+ *     swp<->chip-port map differs; applying theirs mis-maps the ports).
+ *   - CPU_CONTROL_1 : edged sets MORE trap bits than Cumulus (0x18566f38 vs
+ *     0x18500600) to punt its control protocols to the CPU; keep edged's.
+ *
+ * Gated on the sentinel file /etc/edged/soc_replicate so the experiment can be
+ * enabled/reverted WITHOUT a rebuild (rm the file + restart edged to disable).
+ */
+static int datapath_apply_cumulus_regs(int unit)
+{
+    int i, applied = 0, skipped = 0;
+
+    if (access("/etc/edged/soc_replicate", F_OK) != 0) {
+        syslog(LOG_INFO,
+               "Cumulus soc_init replicate: DISABLED (no /etc/edged/soc_replicate)");
+        return 0;
+    }
+
+    for (i = 0; i < CMP_REGS_N; i++) {
+        const char *n = cmp_regs[i].name;
+        uint32_t v;
+        if (strstr(n, "MMU_TO_LOGIC_PORT_MAPPING") ||
+            strstr(n, "MMU_TO_PHY_PORT_MAPPING") ||
+            strstr(n, "CPU_CONTROL_1")) {
+            skipped++;
+            continue;
+        }
+        v = cmp_regs[i].cval;
+        cdk_xgs_reg32_write(unit, cmp_regs[i].addr, &v);
+        applied++;
+    }
+    syslog(LOG_INFO,
+           "Cumulus soc_init replicate: APPLIED %d regs, skipped %d (port-map/cpu-ctrl)",
+           applied, skipped);
+    return 0;
+}
+
 int datapath_init(void)
 {
     int ioerr = 0;
@@ -1257,6 +1319,10 @@ int datapath_init(void)
     ioerr += datapath_disable_vt(edged.unit);
     ioerr += datapath_cpu_punt_init(edged.unit);
     ioerr += datapath_hash_init(edged.unit);
+
+    /* Arm the full Cumulus soc_init config as a coherent set BEFORE the SCHAN
+     * hash inserts in cumulus_replicate_init() (see the function comment). */
+    ioerr += datapath_apply_cumulus_regs(edged.unit);
 
     /* Replicate Cumulus chip-memory state: EPC_LINK_BMAP, L2_USER_ENTRY,
      * EGR_VLAN/STG, FP_TCAM/POLICY.  See cumulus_replicate.c. */
@@ -1559,7 +1625,6 @@ void datapath_rx_diag(void)
          * have 0) plus value mismatches. cmp_regs[] auto-generated from the
          * Cumulus dump_soc.txt. */
         {
-            #include "generated/cmp_regs.h"
             int i, gaps = 0, diffs = 0;
             for (i = 0; i < CMP_REGS_N; i++) {
                 uint32_t ours = 0xdeadbeef;
