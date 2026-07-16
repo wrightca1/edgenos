@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <syslog.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 
 #include "edged.h"
@@ -486,6 +487,7 @@ int edged_acl_load(const char *path)
     FILE *f = fopen(path, "r");
     char line[256];
     int nr = 0, nb = 0, i, j, done = 0, skipped = 0;
+    int fp_mode, fp_n = 0;
 
     if (!f) { syslog(LOG_INFO, "ACL: no %s (none configured)", path); return 0; }
     while (fgets(line, sizeof(line), f)) {
@@ -530,7 +532,24 @@ int edged_acl_load(const char *path)
      * by L3 longest-prefix-match). Scope: L3-routed/transit traffic, global ingress.
      * The FP double-wide machinery (acl_program_one/acl_setup_doublewide/...) is kept
      * for if/when the IFP is ever armed, but is not called on this path. */
+    /* FP silicon-drop path (gated on /etc/edged/acl_fp): program each dst-IP deny
+     * as a double-wide Ingress Field Processor Drop entry (slices 4+5) — the way
+     * Cumulus does it (act=Drop @ DstIp). Un-armed pre-coherent-set; the coherent
+     * soc_init set may now arm the FP lookup (as it armed the L3 lookup). Arm the
+     * full recipe once, then one entry per deny. L3 hybrid runs alongside so the
+     * ACL still works if the FP doesn't fire; rdbgc1 tells them apart (FP -> chip
+     * drop / rdbgc1 climbs; hybrid -> CPU punt / rdbgc1=0). */
+    fp_mode = (access("/etc/edged/acl_fp", F_OK) == 0);
     l3_v4_deny_reset();
+    if (fp_mode) {
+        edged_acl_reset();          /* invalidate any prior FP entries */
+        acl_gm_map_init();          /* IFP global-mask logical->phys port map */
+        acl_clear_global_mask();    /* init FP_GLOBAL_MASK_TCAM + FP mems */
+        acl_enable_port_filter();   /* PORT_TAB.FILTER_ENABLE all ports */
+        acl_ifp_pipeline_enable();  /* IFP_BYPASS=0 + ING_EN_EFILTER_BITMAP */
+        acl_setup_doublewide();     /* slices 4+5 pairing/selcodes/lookup-enable */
+        acl_log("FP mode ON: double-wide IFP dst-IP drop armed (coherent soc_init)");
+    }
     while (1) {
         int best = -1;
         for (i = 0; i < nr; i++) {
@@ -545,6 +564,12 @@ int edged_acl_load(const char *path)
             if (acl_cidr(rules[best].dst, &ip, &mask) == 0) {
                 if (rules[best].deny == 1) {                    /* deny -> L3 DST_DISCARD */
                     if (l3_v4_deny_add(ip, mask) == 0) done++;
+                    if (fp_mode && fp_n < ACL_MAX) {            /* + FP silicon drop */
+                        int idx = 512 + fp_n;
+                        acl_program_one(ACL_UNIT, idx, ip, mask, 1);
+                        acl_idx_used[acl_n++] = idx;
+                        fp_n++;
+                    }
                 } else {                                        /* permit/copy: default permit */
                     acl_log("rule %s seq %d: permit (default) — no L3 entry needed",
                             rules[best].name, rules[best].seq);
