@@ -159,9 +159,10 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
      * [1792] = VALID=1 only. ── */
     FP_GLOBAL_MASK_TCAMm_CLR(g);
     FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
-    {
-        uint32_t ipbm[2]  = { 0xffffffff, 0x001fffff };   /* bits 0-52          */
-        uint32_t ipbmm[2] = { 0xffffffff, 0x021fffff };   /* bits 0-52 + bit57  */
+    {   /* 3-word arrays — the IPBM field is >64 bits; a 2-word array corrupted it
+         * (read back 0x1fffffe00, gating out all ports). */
+        uint32_t ipbm[3]  = { 0xffffffff, 0x001fffff, 0 };   /* bits 0-52          */
+        uint32_t ipbmm[3] = { 0xffffffff, 0x021fffff, 0 };   /* bits 0-52 + bit57  */
         FP_GLOBAL_MASK_TCAMm_IPBMf_SET(g, ipbm);
         FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, ipbmm);
     }
@@ -205,8 +206,7 @@ void edged_acl_diag(void)
     int i;
 
     cdk_xgs_reg32_read(ACL_UNIT, FP_SLICE_ENABLEr, &sev);
-    acl_log("diag FP_SLICE_ENABLE(runtime)=0x%08x (want enable+lookup bits for slices 4&5: "
-            "0x%08x)", sev, (1u<<4)|(1u<<5)|(1u<<14)|(1u<<15));
+    acl_log("diag FP_SLICE_ENABLE(runtime)=0x%08x (want Cumulus 0x000e33ff: slices 8/9 lookup)", sev);
 
     /* FP-STAGE REGDIFF: read the FP/ingress-pipeline registers that gate whether the
      * IFP lookup runs, compare to the working-Cumulus values (from dump_soc.txt). A GAP
@@ -222,6 +222,12 @@ void edged_acl_diag(void)
             { 0x04180620, 0x000000ff, "VFP_SLICE_CONTROL" },
             { 0x04180621, 0x00000003, "VFP_KEY_CONTROL" },
             { 0x04180636, 0x0000e4e4, "VFP_SLICE_MAP" },
+            /* IFP-STAGE gates (Cumulus dump_soc): if any of these differ after
+             * arming, the IFP lookup stage isn't running -> that's why no entry
+             * fires (the copy test proved the stage is dead). */
+            { 0x02180647, 0x00000000, "ING_BYPASS_CTRL" },
+            { 0x0f180658, 0x00000000, "ING_MISC_CONFIG" },
+            { 0x0c180606, 0x00000080, "ING_MISC_CONFIG2" },
         };
         unsigned k;
         for (k = 0; k < sizeof(fpr)/sizeof(fpr[0]); k++) {
@@ -397,6 +403,21 @@ static void acl_gm_map_init(void)
  * being initialized, the IFP global-mask lookup hits uninitialized entries and NO FP rule
  * ever matches (match-any reads counter=0). This is an OPERATION, not a register value —
  * which is why register replication never reproduced it. Init all 2048 entries to 0. */
+/* Init ONLY FP_GLOBAL_MASK_TCAM (all 2048) — "THE operation" the SDK's
+ * _soc_trident_misc_init does that OpenMDK skips ("Must clear FP_GLOBAL_MASK_TCAM
+ * ... without it NO FP rule ever matches"). Unlike acl_clear_global_mask() this
+ * does NOT touch FP_TCAM/FP_POLICY, so cumulus_replicate's FP traps + forwarding
+ * survive. Our per-entry FP_GLOBAL_MASK_TCAM is re-written afterward. */
+static void acl_init_gmask_only(void)
+{
+    FP_GLOBAL_MASK_TCAMm_t e;
+    int i;
+    FP_GLOBAL_MASK_TCAMm_CLR(e);
+    for (i = 0; i <= 2047; i++)
+        (void)WRITE_FP_GLOBAL_MASK_TCAMm(ACL_UNIT, i, e);
+    acl_log("FP_GLOBAL_MASK_TCAM initialized (2048 entries; FP_TCAM/POLICY preserved)");
+}
+
 static void acl_clear_global_mask(void)
 {
     int i;
@@ -566,9 +587,9 @@ int edged_acl_load(const char *path)
     if (fp_mode) {
         edged_acl_reset();          /* invalidate any prior FP entries */
         acl_gm_map_init();          /* IFP global-mask logical->phys port map */
-        /* NOTE: NOT calling acl_clear_global_mask() — it wipes cumulus_replicate's
-         * FP_TCAM/FP_POLICY traps and breaks forwarding (100% loss). The
-         * FP_GLOBAL_MASK_TCAM entries we need are written per-entry below. */
+        acl_init_gmask_only();      /* init FP_GLOBAL_MASK_TCAM (the SDK "operation"
+                                     * without which no FP rule matches) — but NOT
+                                     * FP_TCAM/POLICY, so forwarding + traps survive */
         acl_enable_port_filter();   /* PORT_TAB.FILTER_ENABLE all ports */
         acl_ifp_pipeline_enable();  /* IFP_BYPASS=0 + ING_EN_EFILTER_BITMAP */
         acl_setup_doublewide();     /* slices 8+9 pairing/selcodes (GID 3 recipe) */
