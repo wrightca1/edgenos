@@ -152,11 +152,19 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
     FP_GM_FIELDSm_VALIDf_SET(gf, 1);
     (void)WRITE_FP_GM_FIELDSm(unit, sec, gf);
 
-    /* ── FP_GLOBAL_MASK_TCAM ingress-port gate, BOTH halves. VALID=1 required even for
-     * match-any (triumph/field.c:3303). IPBM=0/IPBM_MASK=0 = match ANY ingress port
-     * (edged deviates from Cumulus's swp1-scoped IPBM=0x2 for generality). ── */
+    /* ── FP_GLOBAL_MASK_TCAM ingress-port gate — Cumulus FP_GLOBAL_MASK_TCAM[1536]
+     * VERBATIM: IPBM=0x00001fffffffffffff (all 53 front ports set), IPBM_MASK=
+     * 0x02001fffffffffffff (care ports 0-52 + bit57). edged's earlier IPBM=0
+     * (don't-care) did NOT match — the port gate needs the real bitmap. Secondary
+     * [1792] = VALID=1 only. ── */
     FP_GLOBAL_MASK_TCAMm_CLR(g);
     FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
+    {
+        uint32_t ipbm[2]  = { 0xffffffff, 0x001fffff };   /* bits 0-52          */
+        uint32_t ipbmm[2] = { 0xffffffff, 0x021fffff };   /* bits 0-52 + bit57  */
+        FP_GLOBAL_MASK_TCAMm_IPBMf_SET(g, ipbm);
+        FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, ipbmm);
+    }
     (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
     FP_GLOBAL_MASK_TCAMm_CLR(g);
     FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
@@ -484,9 +492,9 @@ static void acl_setup_doublewide(void)
     {
         FP_SLICE_ENABLEr_t se;
         uint32_t v = 0;
-        cdk_xgs_reg32_read(ACL_UNIT, FP_SLICE_ENABLEr, &v);
-        v |= (1u << 8) | (1u << 9)          /* SLICE_ENABLE slices 8,9   */
-           | (1u << 18) | (1u << 19);       /* LOOKUP_ENABLE slices 8,9 (already in 0xe33ff) */
+        cdk_xgs_reg32_read(ACL_UNIT, FP_SLICE_ENABLEr, &v);   /* for the log below */
+        v = 0x000e33ff;   /* Cumulus EXACT: SLICE_ENABLE all + LOOKUP_ENABLE 2,3,7,8,9
+                           * (clears the stray LOOKUP_SLICE_6 bit that read back as 0xf33ff) */
         FP_SLICE_ENABLEr_CLR(se);
         FP_SLICE_ENABLEr_SET(se, v);
         (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
