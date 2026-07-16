@@ -553,11 +553,29 @@ static struct { uint32_t ip, mask; int valid, chip, defip, slot; } l3_deny_tab[L
  * live in the SAME consulted 2560 band (base 2580, clear of the local hosts at
  * 2560+). A /32 beats the connected /29 by LPM, so the chip drops. */
 #define ACL_DEFIP_DISCARD_BASE 2580
+#define ACL_DROP_NH_IDX 4000    /* reserved ING_L3_NEXT_HOP index for ACL drops */
+static int acl_drop_nh_ready = 0;
+
+/* One-time: program a DROP next-hop the ACL /32 entries can point at, in case
+ * the datapath honors NEXT_HOP_INDEX0.DROP but not the DST_DISCARD0 bit. */
+static void acl_ensure_drop_nh(void)
+{
+    ING_L3_NEXT_HOPm_t ing;
+    if (acl_drop_nh_ready)
+        return;
+    ING_L3_NEXT_HOPm_CLR(ing);
+    ING_L3_NEXT_HOPm_DROPf_SET(ing, 1);
+    ING_L3_NEXT_HOPm_ENTRY_TYPEf_SET(ing, 0);
+    if (WRITE_ING_L3_NEXT_HOPm(edged.unit, ACL_DROP_NH_IDX, ing) >= 0)
+        acl_drop_nh_ready = 1;
+}
+
 static int l3_v4_defip_discard(uint32_t ip, uint32_t mask, int add, int slot)
 {
     L3_DEFIPm_t d;
     L3_DEFIPm_CLR(d);
     if (add) {
+        acl_ensure_drop_nh();
         L3_DEFIPm_VALID0f_SET(d, 1);
         L3_DEFIPm_MODE0f_SET(d, 0);
         L3_DEFIPm_MODE_MASK0f_SET(d, 1);
@@ -565,6 +583,11 @@ static int l3_v4_defip_discard(uint32_t ip, uint32_t mask, int add, int slot)
         L3_DEFIPm_IP_ADDR_MASK0f_SET(d, mask);
         L3_DEFIPm_VRF_ID_0f_SET(d, 0);
         L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0x3ff);
+        /* Belt-and-suspenders: both a DROP next-hop AND the discard bit, so the
+         * entry drops if the /32 is matched at all (which mechanism the datapath
+         * honors is what we're testing). */
+        L3_DEFIPm_ECMP0f_SET(d, 0);
+        L3_DEFIPm_NEXT_HOP_INDEX0f_SET(d, ACL_DROP_NH_IDX);
         L3_DEFIPm_DST_DISCARD0f_SET(d, 1);
     }
     /* remove: CLR'd d -> VALID0=0 invalidates the slot */

@@ -1392,6 +1392,29 @@ void datapath_rx_diag(void)
                     fprintf(df, "DROPCNT port[%d]: RUC=%u rdbgc0(agg)=%u "
                             "rdbgc1(ALLdrop)=%u rdbgc2(rdisc)=%u\n", p, r, a, c, rd);
             }
+            /* L3_DEFIP layout dump: every VALID entry in the likely bands, to see
+             * where the connected /29 route lives vs the /32 discard band (2580)
+             * and understand the TCAM match priority. */
+            {
+                int s;
+                static const int lo[] = {0, 1530, 2555, 4090, 7995, -1};
+                static const int hi[] = {48, 1600, 2600, 4110, 8005, -1};
+                int b;
+                for (b = 0; lo[b] >= 0; b++) {
+                    for (s = lo[b]; s <= hi[b]; s++) {
+                        L3_DEFIPm_t d;
+                        if (READ_L3_DEFIPm(unit, s, &d) < 0) continue;
+                        if (!L3_DEFIPm_VALID0f_GET(d)) continue;
+                        fprintf(df, "DEFIP[%d]: ip=0x%08x mask=0x%08x nh=%u "
+                                "ecmp=%u discard=%u\n", s,
+                                L3_DEFIPm_IP_ADDR0f_GET(d),
+                                L3_DEFIPm_IP_ADDR_MASK0f_GET(d),
+                                L3_DEFIPm_NEXT_HOP_INDEX0f_GET(d),
+                                L3_DEFIPm_ECMP0f_GET(d),
+                                L3_DEFIPm_DST_DISCARD0f_GET(d));
+                    }
+                }
+            }
             fclose(df);
         }
     }
