@@ -542,7 +542,44 @@ static void defip_slot_free(int slot)
  * forwarded (e.g. a dst with no armed chip entry / prefix denies below /32).
  * ------------------------------------------------------------------------- */
 #define L3_DENY_MAX 128
-static struct { uint32_t ip, mask; int valid, chip; } l3_deny_tab[L3_DENY_MAX];
+static struct { uint32_t ip, mask; int valid, chip, defip, slot; } l3_deny_tab[L3_DENY_MAX];
+
+/* Add (add=1) / remove (add=0) a /32 L3_DEFIP DST_DISCARD entry.
+ * The datapath's L3 lookup uses the L3_DEFIP TCAM (NOT the L3_ENTRY host hash
+ * table — verified 2026-07-16: host-table discard entries read back VALID=1
+ * DST_DISCARD=1 but HIT stays 0 and traffic still forwards). A /32 discard here
+ * is more-specific than the connected route, so it wins LPM and the chip drops.
+ * On add, returns the slot (>=0); on remove, invalidates *slotp's slot. */
+static int l3_v4_defip_discard(uint32_t ip, uint32_t mask, int add, int *slotp)
+{
+    L3_DEFIPm_t d;
+    int slot, rv;
+    L3_DEFIPm_CLR(d);
+    if (add) {
+        slot = defip_slot_alloc();
+        if (slot < 0)
+            return -1;
+        L3_DEFIPm_VALID0f_SET(d, 1);
+        L3_DEFIPm_MODE0f_SET(d, 0);
+        L3_DEFIPm_MODE_MASK0f_SET(d, 1);
+        L3_DEFIPm_IP_ADDR0f_SET(d, ip);
+        L3_DEFIPm_IP_ADDR_MASK0f_SET(d, mask);
+        L3_DEFIPm_VRF_ID_0f_SET(d, 0);
+        L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0x3ff);
+        L3_DEFIPm_DST_DISCARD0f_SET(d, 1);
+        rv = WRITE_L3_DEFIPm(edged.unit, slot, d);
+        if (rv < 0) { defip_slot_free(slot); return -1; }
+        *slotp = slot;
+        return slot;
+    }
+    slot = *slotp;
+    if (slot < 0)
+        return 0;
+    rv = WRITE_L3_DEFIPm(edged.unit, slot, d);   /* CLR'd -> VALID0=0 */
+    defip_slot_free(slot);
+    *slotp = -1;
+    return rv;
+}
 
 static void l3_deny_cidr(uint32_t ip, uint32_t mask, char *out, size_t n)
 {
@@ -572,6 +609,20 @@ static int l3_v4_discard_entry(uint32_t ip, int add)
     return l3_v4_schan_delete(edged.unit, &e);
 }
 
+/* Is this /32 dst currently ACL-denied with a chip discard entry? Lets the
+ * neighbor->chip sync (l3_host_add) HONOR a deny instead of racing it: when a
+ * denied IP is also a resolved neighbor, l3_host_add would otherwise re-insert
+ * its forward entry and silently un-deny the IP. ip is host byte order. */
+static int l3_v4_is_denied(uint32_t ip)
+{
+    int i;
+    for (i = 0; i < L3_DENY_MAX; i++)
+        if (l3_deny_tab[i].valid && l3_deny_tab[i].chip &&
+            l3_deny_tab[i].mask == 0xffffffff && l3_deny_tab[i].ip == ip)
+            return 1;
+    return 0;
+}
+
 int l3_v4_deny_add(uint32_t ipv4_addr, uint32_t mask)
 {
     int i;
@@ -594,18 +645,23 @@ int l3_v4_deny_add(uint32_t ipv4_addr, uint32_t mask)
         return -1;
     }
     l3_deny_tab[i].ip = ipv4_addr; l3_deny_tab[i].mask = mask; l3_deny_tab[i].valid = 1;
-    l3_deny_tab[i].chip = 0;
+    l3_deny_tab[i].chip = 0; l3_deny_tab[i].defip = 0; l3_deny_tab[i].slot = -1;
 
     /* /32: also drop in the chip (the datapath HW-forwards these, bypassing the
      * kernel blackhole). Prefix (<32) denies stay kernel-only for now. */
     if (mask == 0xffffffff) {
-        int idx = l3_v4_discard_entry(ipv4_addr, 1);
-        if (idx >= 0) {
-            l3_deny_tab[i].chip = 1;
-            syslog(LOG_INFO, "ACL: dst-IP deny %s -> chip L3 DST_DISCARD (idx %d) + kernel blackhole", cidr, idx);
+        int sl = -1;
+        /* Primary in-chip drop: L3_DEFIP /32 DST_DISCARD (the table the datapath
+         * actually consults). */
+        if (l3_v4_defip_discard(ipv4_addr, mask, 1, &sl) >= 0) {
+            l3_deny_tab[i].defip = 1; l3_deny_tab[i].slot = sl;
+            syslog(LOG_INFO, "ACL: dst-IP deny %s -> L3_DEFIP[%d] DST_DISCARD + kernel blackhole", cidr, sl);
         } else {
-            syslog(LOG_WARNING, "ACL: chip DST_DISCARD insert failed for %s (rv %d); kernel blackhole only", cidr, idx);
+            syslog(LOG_WARNING, "ACL: L3_DEFIP DST_DISCARD failed for %s; kernel blackhole only", cidr);
         }
+        /* Secondary: L3_ENTRY host discard (harmless; covers the host table). */
+        if (l3_v4_discard_entry(ipv4_addr, 1) >= 0)
+            l3_deny_tab[i].chip = 1;
     } else {
         syslog(LOG_INFO, "ACL: dst-IP deny %s -> kernel blackhole route (prefix, chip DST_DISCARD skipped)", cidr);
     }
@@ -621,6 +677,8 @@ int l3_v4_deny_del(uint32_t ipv4_addr, uint32_t mask)
             l3_deny_tab[i].mask == mask)
             break;
     if (i == L3_DENY_MAX) return 0;
+    if (l3_deny_tab[i].defip)
+        (void)l3_v4_defip_discard(ipv4_addr, mask, 0, &l3_deny_tab[i].slot);
     if (l3_deny_tab[i].chip)
         (void)l3_v4_discard_entry(ipv4_addr, 0);   /* remove chip DST_DISCARD */
     l3_deny_cidr(ipv4_addr, mask, cidr, sizeof(cidr));
@@ -628,6 +686,7 @@ int l3_v4_deny_del(uint32_t ipv4_addr, uint32_t mask)
     (void)system(cmd);
     l3_deny_tab[i].valid = 0;
     l3_deny_tab[i].chip = 0;
+    l3_deny_tab[i].defip = 0;
     return 0;
 }
 
@@ -1349,6 +1408,17 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
         L3_ENTRY_IPV4_UNICASTm_IPV4UC_NEXT_HOP_INDEXf_SET(hst, nh_idx);
         L3_ENTRY_IPV4_UNICASTm_HITf_SET(hst, 0);
         L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(hst, 1);
+
+        /* ACL deny wins over forwarding: if this neighbor's IP is dst-IP denied,
+         * program its host entry as DST_DISCARD so the neighbor sync can't race
+         * the ACL and un-deny it (fixes the deny-clobber observed 2026-07-16). */
+        if (l3_v4_is_denied(ip_be)) {
+            L3_ENTRY_IPV4_UNICASTm_IPV4UC_DST_DISCARDf_SET(hst, 1);
+            syslog(LOG_INFO,
+                   "L3 host %u.%u.%u.%u ACL-denied -> DST_DISCARD (not forward)",
+                   (ip_be >> 24) & 0xff, (ip_be >> 16) & 0xff,
+                   (ip_be >> 8) & 0xff, ip_be & 0xff);
+        }
 
         int idx = l3_v4_schan_insert(edged.unit, &hst);
         if (idx < 0) {

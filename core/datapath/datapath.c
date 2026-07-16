@@ -1370,6 +1370,32 @@ void datapath_rx_diag(void)
     int unit = edged.unit;
     int i;
 
+    /* FAST per-port drop-counter snapshot to a FILE, done FIRST (before the slow
+     * serdes diag below) so counter reads are reliable and don't depend on
+     * journald delivery or diag timing. Used to verify in-chip ACL drops:
+     * rdbgc1 = catch-all (all ingress drop reasons). Append; caller truncates
+     * /tmp/edged-drop.log between measurements. */
+    {
+        FILE *df = fopen("/tmp/edged-drop.log", "a");
+        if (df) {
+            int p;
+            for (p = 0; p <= 12; p++) {
+                RUCr_t ru; RDBGC0r_t d0; RDBGC1r_t d1; RDBGC2r_t d2;
+                uint32_t r, a, c, rd;
+                READ_RUCr(unit, p, &ru);
+                READ_RDBGC0r(unit, p, &d0);
+                READ_RDBGC1r(unit, p, &d1);
+                READ_RDBGC2r(unit, p, &d2);
+                r = RUCr_GET(ru); a = RDBGC0r_GET(d0);
+                c = RDBGC1r_GET(d1); rd = RDBGC2r_GET(d2);
+                if (r || a || c)
+                    fprintf(df, "DROPCNT port[%d]: RUC=%u rdbgc0(agg)=%u "
+                            "rdbgc1(ALLdrop)=%u rdbgc2(rdisc)=%u\n", p, r, a, c, rd);
+            }
+            fclose(df);
+        }
+    }
+
     extern unsigned g_tx_calls, g_tx_ok, g_tx_fail, g_tx_lastrv;
 
     syslog(LOG_INFO, "=== RX-DIAG (SIGUSR1) ===");
