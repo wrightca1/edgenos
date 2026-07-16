@@ -77,6 +77,7 @@ void edged_acl_diag(void);               /* dump per-entry FP match counters (SI
 int  l3_v4_deny_add(uint32_t ipv4_addr, uint32_t mask);
 int  l3_v4_deny_del(uint32_t ipv4_addr, uint32_t mask);
 void l3_v4_deny_reset(void);
+void l3_fwd_diag(void);                  /* HW-L3-forward state (SIGUSR1) */
 
 /* iProc AXI sub-window register I/O (for CMICm regs whose writes
  * don't stick via direct BAR0 access). */

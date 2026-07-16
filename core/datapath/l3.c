@@ -586,6 +586,91 @@ void l3_v4_deny_reset(void)
             (void)l3_v4_deny_del(l3_deny_tab[i].ip, l3_deny_tab[i].mask);
 }
 
+/* HW-L3-forwarding diagnostic (SIGUSR1 -> /tmp/edged-acl.log). Pinpoints why transit
+ * punts instead of HW-forwarding: the egress gate (EPC_LINK_BMAP / EGR_ENABLE) and
+ * whether a known neighbor (Nexus 10.101.101.2) is a real HW-forward L3 entry. */
+void l3_fwd_diag(void)
+{
+    FILE *lf = fopen("/tmp/edged-acl.log", "a");
+    int i;
+    if (!lf) return;
+
+    {   /* EPC_LINK_BMAP — which ports the egress pipeline lets frames out of */
+        EPC_LINK_BMAPm_t b; EPC_LINK_BMAPm_CLR(b);
+        if (cdk_xgs_mem_read(edged.unit, EPC_LINK_BMAPm, 0, b.v, 3) >= 0)
+            fprintf(lf, "L3FWD EPC_LINK_BMAP W0=0x%08x W1=0x%08x W2=0x%08x\n",
+                    EPC_LINK_BMAPm_PORT_BITMAP_W0f_GET(b),
+                    EPC_LINK_BMAPm_PORT_BITMAP_W1f_GET(b),
+                    EPC_LINK_BMAPm_PORT_BITMAP_W2f_GET(b));
+    }
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {   /* EGR_ENABLE for swp1/swp2/swp5 */
+        int lp = edged.ports[i].logical_port, phys, pe = -1;
+        EGR_ENABLEm_t e;
+        if (!edged.ports[i].valid || (lp != 1 && lp != 2 && lp != 5)) continue;
+        phys = edged.ports[i].physical_lane;
+        EGR_ENABLEm_CLR(e);
+        if (cdk_xgs_mem_read(edged.unit, EGR_ENABLEm, phys, e.v, 1) >= 0)
+            pe = EGR_ENABLEm_PRT_ENABLEf_GET(e);
+        fprintf(lf, "L3FWD EGR_ENABLE swp%d phys=%d PRT_ENABLE=%d\n", lp, phys, pe);
+    }
+    {   /* Nexus 10.101.101.2 (0x0a656502): HW-forward L3 entry, or missing/CPU? */
+        L3_ENTRY_IPV4_UNICASTm_t key, got;
+        L3_ENTRY_IPV4_UNICASTm_CLR(key);
+        L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_V6f_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(key, 0x0a656502);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(key, 0);
+        int lk = l3_v4_schan_lookup(edged.unit, &key, &got);
+        if (lk >= 0) {
+            int nh = L3_ENTRY_IPV4_UNICASTm_IPV4UC_NEXT_HOP_INDEXf_GET(got);
+            int pn = -1, cpu = -1;
+            ING_L3_NEXT_HOPm_t ing; ING_L3_NEXT_HOPm_CLR(ing);
+            if (cdk_xgs_mem_read(edged.unit, ING_L3_NEXT_HOPm, nh, ing.v, 4) >= 0) {
+                pn  = ING_L3_NEXT_HOPm_PORT_NUMf_GET(ing);
+                cpu = ING_L3_NEXT_HOPm_COPY_TO_CPUf_GET(ing);
+            }
+            fprintf(lf, "L3FWD Nexus 10.101.101.2 L3_ENTRY FOUND idx=%d NHI=%d "
+                    "-> ING_L3_NEXT_HOP PORT_NUM=%d COPY_TO_CPU=%d (want PORT_NUM=phys,CPU=0)\n",
+                    lk, nh, pn, cpu);
+        } else {
+            fprintf(lf, "L3FWD Nexus 10.101.101.2 L3_ENTRY NOT FOUND (lk=%d) => L3 miss => punt\n", lk);
+        }
+    }
+    {   /* HW-fwd DEFIP (neighbor band 4096+) vs local-host /32 band (2560+) that WORKS */
+        int slots[5] = { 2606, 2560, 2561, 2562, 8000 }, s;
+        for (s = 0; s < 5; s++) {
+            L3_DEFIPm_t d; L3_DEFIPm_CLR(d);
+            if (cdk_xgs_mem_read(edged.unit, L3_DEFIPm, slots[s], d.v, 15) >= 0)
+                fprintf(lf, "L3FWD DEFIP[%d] V0=%d IP0=0x%08x MASK0=0x%08x MODE0=%d NHI0=%d\n",
+                        slots[s], L3_DEFIPm_VALID0f_GET(d), L3_DEFIPm_IP_ADDR0f_GET(d),
+                        L3_DEFIPm_IP_ADDR_MASK0f_GET(d), L3_DEFIPm_MODE0f_GET(d),
+                        L3_DEFIPm_NEXT_HOP_INDEX0f_GET(d));
+        }
+    }
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {   /* swp1/swp5 ingress PORT_VID (MY_STATION key) */
+        int lp = edged.ports[i].logical_port;
+        PORT_TABm_t pt;
+        if (!edged.ports[i].valid || (lp != 1 && lp != 5)) continue;
+        PORT_TABm_CLR(pt);
+        if (cdk_xgs_mem_read(edged.unit, PORT_TABm, lp, pt.v, 10) >= 0)
+            fprintf(lf, "L3FWD swp%d PORT_VID=%d V4L3=%d\n", lp,
+                    PORT_TABm_PORT_VIDf_GET(pt), PORT_TABm_V4L3_ENABLEf_GET(pt));
+    }
+    {   /* MY_STATION entries: which {MAC,VID} L3-terminate (routed) */
+        int m;
+        for (m = 0; m <= MY_STATION_TCAMm_MAX && m < 20; m++) {
+            MY_STATION_TCAMm_t my; uint32_t mf[2] = {0, 0};
+            MY_STATION_TCAMm_CLR(my);
+            if (cdk_xgs_mem_read(edged.unit, MY_STATION_TCAMm, m, my.v, 6) < 0) continue;
+            if (!MY_STATION_TCAMm_VALIDf_GET(my)) continue;
+            MY_STATION_TCAMm_MAC_ADDRf_GET(my, mf);
+            fprintf(lf, "L3FWD MY_STATION[%d] MAC=%04x%08x VID=%d\n",
+                    m, mf[1] & 0xffff, mf[0], MY_STATION_TCAMm_VLAN_IDf_GET(my));
+        }
+    }
+    fclose(lf);
+}
+
 static struct l3_rt *route_find(uint32_t target, uint32_t mask)
 {
     for (int i = 0; i < L3_ROUTE_MAX; i++)
@@ -919,21 +1004,19 @@ int l3_local_host_add(uint32_t ipv4_addr, int logical_port)
      * earlier /32 miss was a key/VRF detail; if it STILL RIPD4s, the L3 dst
      * lookup is not being performed -> deeper soc_init gap. Slot 8000 (lowest
      * priority). Remove after diagnosis. */
-    if (logical_port == 1) {
+    if (logical_port == 1) {   /* catch-all L3_DEFIP: match-any routed IPv4 -> CPU (kernel software-forwards) */
         L3_DEFIPm_t d;
         L3_DEFIPm_CLR(d);
         L3_DEFIPm_VALID0f_SET(d, 1);
         L3_DEFIPm_MODE0f_SET(d, 0);
-        L3_DEFIPm_MODE_MASK0f_SET(d, 0);         /* match ANY mode too */
+        L3_DEFIPm_MODE_MASK0f_SET(d, 0);
         L3_DEFIPm_IP_ADDR0f_SET(d, 0);
-        L3_DEFIPm_IP_ADDR_MASK0f_SET(d, 0);      /* match any IP */
+        L3_DEFIPm_IP_ADDR_MASK0f_SET(d, 0);
         L3_DEFIPm_VRF_ID_0f_SET(d, 0);
-        L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0);       /* match any VRF */
+        L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0);
         L3_DEFIPm_NEXT_HOP_INDEX0f_SET(d, nh_idx);
         rv = WRITE_L3_DEFIPm(edged.unit, 8000, d);
-        syslog(LOG_INFO,
-               "DIAG L3_DEFIP[8000] CATCH-ALL (any mode/IP/VRF) -> nh_idx=%d (CPU) wr=%d",
-               nh_idx, rv);
+        syslog(LOG_INFO, "L3_DEFIP[8000] catch-all -> nh_idx=%d (CPU) wr=%d", nh_idx, rv);
     }
 
     /* L3 host entry: our IP -> nh_idx (-> CPU port).
@@ -1172,6 +1255,13 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
         }
         syslog(LOG_DEBUG, "L3 host schan_insert placed at idx=%d", idx);
         l3_neigh_nh_record(ip_be, nh_idx);
+        /* NOTE: a HW-forward attempt (mirror this neighbor into a /32 L3_DEFIP with
+         * the real egress next-hop) was tried and did NOT flip transit to HW — the
+         * datapath's L3 DEFIP lookup does not match programmed entries (V4L3DSTMISS
+         * fires regardless), the same un-armed-lookup-engine wall as the FP. So
+         * transit stays software-forwarded (kernel FIB) and ACLs use blackhole
+         * routes; HW L3 forwarding needs the soc_init lookup-engine arming OpenMDK
+         * skips. See project_acl_l3_dst_discard_pivot / project_init_all_insight. */
     }
 
     syslog(LOG_INFO,

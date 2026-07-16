@@ -300,6 +300,8 @@ void edged_acl_diag(void)
             }
         }
     }
+
+    l3_fwd_diag();   /* HW-L3-forward state: egress gates + Nexus neighbor entry */
 }
 
 /* Invalidate every ACL entry we programmed (VALID=0), so a reload rebuilds cleanly. */
