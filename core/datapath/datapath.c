@@ -431,6 +431,17 @@ static int datapath_mac_init(int unit)
         RDBGC0_SELECTr_t r0; RDBGC3_SELECTr_t r3;
         RDBGC4_SELECTr_t r4; RDBGC5_SELECTr_t r5;
         RDBGC6_SELECTr_t r6; TDBGC6_SELECTr_t t6;
+        RDBGC1_SELECTr_t r1; RDBGC2_SELECTr_t r2;
+
+        /* RDBGC1 = CATCH-ALL: select every ingress drop reason (0xffffffff), so a
+         * per-port before/after diff reveals whether a packet was dropped for ANY
+         * reason (used to verify the in-chip ACL L3 DST_DISCARD actually fires,
+         * independent of which specific reason bit it maps to). RDBGC2 = RDISC
+         * (0x100) alone, the candidate reason for a routed dst-discard. */
+        RDBGC1_SELECTr_SET(r1, 0xffffffff);
+        ioerr += WRITE_RDBGC1_SELECTr(unit, r1);
+        RDBGC2_SELECTr_SET(r2, 0x00000100);
+        ioerr += WRITE_RDBGC2_SELECTr(unit, r2);
 
         RDBGC0_SELECTr_SET(r0, 0x04000d11);
         ioerr += WRITE_RDBGC0_SELECTr(unit, r0);
@@ -1421,22 +1432,24 @@ void datapath_rx_diag(void)
         int pidx;
         for (pidx = 0; pidx <= 72; pidx++) {
             RUCr_t ru; RDBGC0r_t d0; RDBGC3r_t d3; RDBGC4r_t d4;
-            RDBGC5r_t d5; RDBGC6r_t d6;
-            uint32_t ruv, d0v;
+            RDBGC5r_t d5; RDBGC6r_t d6; RDBGC1r_t d1; RDBGC2r_t d2;
+            uint32_t ruv, d0v, d1v;
             READ_RUCr(unit, pidx, &ru);
             READ_RDBGC0r(unit, pidx, &d0);
-            ruv = RUCr_GET(ru); d0v = RDBGC0r_GET(d0);
-            if (ruv || d0v) {
+            READ_RDBGC1r(unit, pidx, &d1);
+            ruv = RUCr_GET(ru); d0v = RDBGC0r_GET(d0); d1v = RDBGC1r_GET(d1);
+            if (ruv || d0v || d1v) {
+                READ_RDBGC2r(unit, pidx, &d2);
                 READ_RDBGC3r(unit, pidx, &d3);
                 READ_RDBGC4r(unit, pidx, &d4);
                 READ_RDBGC5r(unit, pidx, &d5);
                 READ_RDBGC6r(unit, pidx, &d6);
                 syslog(LOG_INFO,
-                       "RX-DIAG sweep port[%d]: RUC=%u rdbgc0(agg)=%u "
-                       "rdbgc3(L3hdr)=%u rdbgc4(disc)=%u rdbgc5(filt)=%u "
-                       "rdbgc6(drop)=%u",
-                       pidx, ruv, d0v,
-                       RDBGC3r_GET(d3), RDBGC4r_GET(d4),
+                       "RX-DIAG sweep port[%d]: RUC=%u rdbgc1(ALLdrop)=%u "
+                       "rdbgc0(agg)=%u rdbgc2(rdisc)=%u rdbgc3(L3hdr)=%u "
+                       "rdbgc4(disc)=%u rdbgc5(filt)=%u rdbgc6(drop)=%u",
+                       pidx, ruv, d1v, d0v,
+                       RDBGC2r_GET(d2), RDBGC3r_GET(d3), RDBGC4r_GET(d4),
                        RDBGC5r_GET(d5), RDBGC6r_GET(d6));
             }
         }

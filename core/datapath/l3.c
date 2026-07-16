@@ -531,9 +531,18 @@ static void defip_slot_free(int slot)
  * robust, matches edged's actual forwarding model, and touches nothing on the chip,
  * so it cannot disturb the datapath or the control plane. Managed via `ip route`.
  * Scope: L3-routed/transit + locally-destined IPv4, global across ingress ports.
+ *
+ * UPDATE 2026-07-16 (commit 1d0c582 armed the chip L3 lookup): the datapath now
+ * HARDWARE-forwards L3 transit (chip consults the programmed L3_ENTRY hash), so
+ * such traffic no longer rides the CPU path — the kernel blackhole alone would
+ * MISS it. For a /32 deny we therefore also program a chip L3_ENTRY with
+ * IPV4UC_DST_DISCARD=1: the L3 lookup hits it and drops the routed packet in
+ * silicon (verified via the swp-ingress rdbgc drop counter climbing). We KEEP
+ * the kernel blackhole too — belt-and-suspenders for any flow still software-
+ * forwarded (e.g. a dst with no armed chip entry / prefix denies below /32).
  * ------------------------------------------------------------------------- */
 #define L3_DENY_MAX 128
-static struct { uint32_t ip, mask; int valid; } l3_deny_tab[L3_DENY_MAX];
+static struct { uint32_t ip, mask; int valid, chip; } l3_deny_tab[L3_DENY_MAX];
 
 static void l3_deny_cidr(uint32_t ip, uint32_t mask, char *out, size_t n)
 {
@@ -541,6 +550,26 @@ static void l3_deny_cidr(uint32_t ip, uint32_t mask, char *out, size_t n)
     while (m & 0x80000000u) { plen++; m <<= 1; }
     snprintf(out, n, "%u.%u.%u.%u/%d",
              (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff, plen);
+}
+
+/* Add (add=1) / remove (add=0) a chip L3_ENTRY DST_DISCARD for a /32 dst.
+ * Mirrors l3_host_add's key build (KEY_TYPE=0, V6=0, VRF=0) but sets
+ * IPV4UC_DST_DISCARD instead of a next-hop, so an armed L3 lookup drops the
+ * packet. Returns the schan index (>=0) on insert, 0 on delete, <0 on error. */
+static int l3_v4_discard_entry(uint32_t ip, int add)
+{
+    L3_ENTRY_IPV4_UNICASTm_t e;
+    L3_ENTRY_IPV4_UNICASTm_CLR(e);
+    L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(e, 0);
+    L3_ENTRY_IPV4_UNICASTm_V6f_SET(e, 0);
+    L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(e, ip);
+    L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(e, 0);
+    L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(e, 1);
+    if (add) {
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_DST_DISCARDf_SET(e, 1);
+        return l3_v4_schan_insert(edged.unit, &e);
+    }
+    return l3_v4_schan_delete(edged.unit, &e);
 }
 
 int l3_v4_deny_add(uint32_t ipv4_addr, uint32_t mask)
@@ -565,7 +594,21 @@ int l3_v4_deny_add(uint32_t ipv4_addr, uint32_t mask)
         return -1;
     }
     l3_deny_tab[i].ip = ipv4_addr; l3_deny_tab[i].mask = mask; l3_deny_tab[i].valid = 1;
-    syslog(LOG_INFO, "ACL: dst-IP deny %s -> kernel blackhole route", cidr);
+    l3_deny_tab[i].chip = 0;
+
+    /* /32: also drop in the chip (the datapath HW-forwards these, bypassing the
+     * kernel blackhole). Prefix (<32) denies stay kernel-only for now. */
+    if (mask == 0xffffffff) {
+        int idx = l3_v4_discard_entry(ipv4_addr, 1);
+        if (idx >= 0) {
+            l3_deny_tab[i].chip = 1;
+            syslog(LOG_INFO, "ACL: dst-IP deny %s -> chip L3 DST_DISCARD (idx %d) + kernel blackhole", cidr, idx);
+        } else {
+            syslog(LOG_WARNING, "ACL: chip DST_DISCARD insert failed for %s (rv %d); kernel blackhole only", cidr, idx);
+        }
+    } else {
+        syslog(LOG_INFO, "ACL: dst-IP deny %s -> kernel blackhole route (prefix, chip DST_DISCARD skipped)", cidr);
+    }
     return 0;
 }
 
@@ -578,10 +621,13 @@ int l3_v4_deny_del(uint32_t ipv4_addr, uint32_t mask)
             l3_deny_tab[i].mask == mask)
             break;
     if (i == L3_DENY_MAX) return 0;
+    if (l3_deny_tab[i].chip)
+        (void)l3_v4_discard_entry(ipv4_addr, 0);   /* remove chip DST_DISCARD */
     l3_deny_cidr(ipv4_addr, mask, cidr, sizeof(cidr));
     snprintf(cmd, sizeof(cmd), "ip route del blackhole %s 2>/dev/null", cidr);
     (void)system(cmd);
     l3_deny_tab[i].valid = 0;
+    l3_deny_tab[i].chip = 0;
     return 0;
 }
 
@@ -621,6 +667,35 @@ void l3_fwd_diag(void)
     FILE *lf = fopen("/tmp/edged-acl.log", "a");
     int i;
     if (!lf) return;
+
+    /* ACL DST_DISCARD readback: for each chip-programmed deny, look up the
+     * L3_ENTRY and report VALID/DST_DISCARD/HIT. The HW sets HIT when the
+     * datapath L3 lookup MATCHES the entry, so HIT=1 after sending traffic to
+     * the denied dst directly proves the chip is consulting (and thus dropping
+     * on) the discard entry — the definitive functional check for the in-chip
+     * ACL, independent of any punt/reply/counter observability. */
+    for (i = 0; i < L3_DENY_MAX; i++) {
+        L3_ENTRY_IPV4_UNICASTm_t key, got;
+        uint32_t ip = l3_deny_tab[i].ip;
+        int idx;
+        if (!l3_deny_tab[i].valid || !l3_deny_tab[i].chip) continue;
+        L3_ENTRY_IPV4_UNICASTm_CLR(key);
+        L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_V6f_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(key, ip);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(key, 1);
+        idx = l3_v4_schan_lookup(edged.unit, &key, &got);
+        if (idx < 0)
+            fprintf(lf, "ACL-DENY %u.%u.%u.%u/32: chip lookup NOT FOUND (rv %d)\n",
+                    (ip>>24)&0xff,(ip>>16)&0xff,(ip>>8)&0xff,ip&0xff, idx);
+        else
+            fprintf(lf, "ACL-DENY %u.%u.%u.%u/32: idx=%d VALID=%u DST_DISCARD=%u HIT=%u\n",
+                    (ip>>24)&0xff,(ip>>16)&0xff,(ip>>8)&0xff,ip&0xff, idx,
+                    L3_ENTRY_IPV4_UNICASTm_VALIDf_GET(got),
+                    L3_ENTRY_IPV4_UNICASTm_IPV4UC_DST_DISCARDf_GET(got),
+                    L3_ENTRY_IPV4_UNICASTm_HITf_GET(got));
+    }
 
     {   /* EPC_LINK_BMAP — which ports the egress pipeline lets frames out of */
         EPC_LINK_BMAPm_t b; EPC_LINK_BMAPm_CLR(b);
