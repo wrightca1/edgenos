@@ -544,21 +544,20 @@ static void defip_slot_free(int slot)
 #define L3_DENY_MAX 128
 static struct { uint32_t ip, mask; int valid, chip, defip, slot; } l3_deny_tab[L3_DENY_MAX];
 
-/* Add (add=1) / remove (add=0) a /32 L3_DEFIP DST_DISCARD entry.
- * The datapath's L3 lookup uses the L3_DEFIP TCAM (NOT the L3_ENTRY host hash
- * table — verified 2026-07-16: host-table discard entries read back VALID=1
- * DST_DISCARD=1 but HIT stays 0 and traffic still forwards). A /32 discard here
- * is more-specific than the connected route, so it wins LPM and the chip drops.
- * On add, returns the slot (>=0); on remove, invalidates *slotp's slot. */
-static int l3_v4_defip_discard(uint32_t ip, uint32_t mask, int add, int *slotp)
+/* Add (add=1) / remove (add=0) a /32 L3_DEFIP DST_DISCARD entry at an explicit
+ * TCAM slot. The datapath's L3 lookup uses the L3_DEFIP TCAM (NOT the L3_ENTRY
+ * host hash table — verified 2026-07-16: host-table discard entries read back
+ * VALID=1 DST_DISCARD=1 but HIT stays 0 and traffic still forwards) — AND only
+ * certain bands are consulted: the local-host /32s in the ~2560 band ARE honored
+ * (l3_local_host_add), while the transit band (1536) is NOT. So ACL /32 discards
+ * live in the SAME consulted 2560 band (base 2580, clear of the local hosts at
+ * 2560+). A /32 beats the connected /29 by LPM, so the chip drops. */
+#define ACL_DEFIP_DISCARD_BASE 2580
+static int l3_v4_defip_discard(uint32_t ip, uint32_t mask, int add, int slot)
 {
     L3_DEFIPm_t d;
-    int slot, rv;
     L3_DEFIPm_CLR(d);
     if (add) {
-        slot = defip_slot_alloc();
-        if (slot < 0)
-            return -1;
         L3_DEFIPm_VALID0f_SET(d, 1);
         L3_DEFIPm_MODE0f_SET(d, 0);
         L3_DEFIPm_MODE_MASK0f_SET(d, 1);
@@ -567,18 +566,9 @@ static int l3_v4_defip_discard(uint32_t ip, uint32_t mask, int add, int *slotp)
         L3_DEFIPm_VRF_ID_0f_SET(d, 0);
         L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0x3ff);
         L3_DEFIPm_DST_DISCARD0f_SET(d, 1);
-        rv = WRITE_L3_DEFIPm(edged.unit, slot, d);
-        if (rv < 0) { defip_slot_free(slot); return -1; }
-        *slotp = slot;
-        return slot;
     }
-    slot = *slotp;
-    if (slot < 0)
-        return 0;
-    rv = WRITE_L3_DEFIPm(edged.unit, slot, d);   /* CLR'd -> VALID0=0 */
-    defip_slot_free(slot);
-    *slotp = -1;
-    return rv;
+    /* remove: CLR'd d -> VALID0=0 invalidates the slot */
+    return WRITE_L3_DEFIPm(edged.unit, slot, d);
 }
 
 static void l3_deny_cidr(uint32_t ip, uint32_t mask, char *out, size_t n)
@@ -650,10 +640,10 @@ int l3_v4_deny_add(uint32_t ipv4_addr, uint32_t mask)
     /* /32: also drop in the chip (the datapath HW-forwards these, bypassing the
      * kernel blackhole). Prefix (<32) denies stay kernel-only for now. */
     if (mask == 0xffffffff) {
-        int sl = -1;
-        /* Primary in-chip drop: L3_DEFIP /32 DST_DISCARD (the table the datapath
-         * actually consults). */
-        if (l3_v4_defip_discard(ipv4_addr, mask, 1, &sl) >= 0) {
+        int sl = ACL_DEFIP_DISCARD_BASE + i;   /* consulted /32 band, per-entry slot */
+        /* Primary in-chip drop: L3_DEFIP /32 DST_DISCARD (the table+band the
+         * datapath actually consults). */
+        if (l3_v4_defip_discard(ipv4_addr, mask, 1, sl) >= 0) {
             l3_deny_tab[i].defip = 1; l3_deny_tab[i].slot = sl;
             syslog(LOG_INFO, "ACL: dst-IP deny %s -> L3_DEFIP[%d] DST_DISCARD + kernel blackhole", cidr, sl);
         } else {
@@ -678,7 +668,7 @@ int l3_v4_deny_del(uint32_t ipv4_addr, uint32_t mask)
             break;
     if (i == L3_DENY_MAX) return 0;
     if (l3_deny_tab[i].defip)
-        (void)l3_v4_defip_discard(ipv4_addr, mask, 0, &l3_deny_tab[i].slot);
+        (void)l3_v4_defip_discard(ipv4_addr, mask, 0, l3_deny_tab[i].slot);
     if (l3_deny_tab[i].chip)
         (void)l3_v4_discard_entry(ipv4_addr, 0);   /* remove chip DST_DISCARD */
     l3_deny_cidr(ipv4_addr, mask, cidr, sizeof(cidr));
