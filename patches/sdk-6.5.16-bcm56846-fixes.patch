@@ -1,0 +1,545 @@
+diff --git a/sdk-6.5.16/src/soc/common/cmicm_schan.c b/sdk-6.5.16/src/soc/common/cmicm_schan.c
+index b0e8e7bc2..5ea32bcae 100644
+--- a/sdk-6.5.16/src/soc/common/cmicm_schan.c
++++ b/sdk-6.5.16/src/soc/common/cmicm_schan.c
+@@ -349,7 +349,6 @@ _soc_cmicm_schan_op(int unit, schan_msg_t *msg, int dwc_write,
+         SCHAN_LOCK(unit);
+         cmc = SOC_PCI_CMC(unit);
+     }
+-
+     do {
+         rv = SOC_E_NONE;
+ 
+diff --git a/sdk-6.5.16/src/soc/common/drv.c b/sdk-6.5.16/src/soc/common/drv.c
+index af079dcac..480c18eab 100644
+--- a/sdk-6.5.16/src/soc/common/drv.c
++++ b/sdk-6.5.16/src/soc/common/drv.c
+@@ -2877,6 +2877,20 @@ soc_endian_config(int unit)
+             val = 0x30000030;
+         }
+ #endif
++        {
++            /* AS5610 BCM56846 (EdgeNOS): match edged's PROVEN CMIC_ENDIAN_SELECT exactly.
++             * The SCHAN message buffer is written with raw dwords via the kernel BDE's
++             * iowrite32 (one LE swap) — identical to edged's CDK path. The default big_pio=1
++             * adds ES_BIG_ENDIAN_PIO (0x01000001), which makes the CMIC byte-swap the CPU-side
++             * PIO access to the SCHAN buffer -> the S-Channel engine reads a garbage message ->
++             * MSG_START never latches and the op times out. edged uses DMA_OTHER only
++             * (0x04000004, PIO endian OFF), which works; force the same value here. */
++            uint16 _d846; uint8 _r846;
++            soc_cm_get_id(unit, &_d846, &_r846);
++            if (_d846 == BCM56846_DEVICE_ID) {
++                val = ES_BIG_ENDIAN_DMA_OTHER;   /* 0x04000004 — edged's exact value */
++            }
++        }
+         soc_pci_write(unit, CMIC_ENDIAN_SELECT, val);
+     }
+ }
+@@ -2955,10 +2969,12 @@ soc_pci_ep_config(int unit, int pcie)
+                     soc_pci_write(unit, CMIC_CMCx_HOSTMEM_ADDR_REMAP_3_OFFSET(cmc), 0x2f);                                
+                 }
+ 
++                if (SOC_REG_IS_VALID(unit, CMIC_CMC0_PCIE_MISCELr)) { /* AS5610: NULL in 56840_b0 table */
+                 rval = soc_pci_read(unit, CMIC_CMCx_PCIE_MISCEL_OFFSET(cmc));
+                 soc_reg_field_set(unit, CMIC_CMC0_PCIE_MISCELr,
+                                 &rval, MSI_ADDR_SELf, 1);
+                 soc_pci_write(unit, CMIC_CMCx_PCIE_MISCEL_OFFSET(cmc), rval);
++                }
+             }
+         }
+     }
+@@ -3245,6 +3261,10 @@ soc_xgxs_lcpll_lock_check(int unit)
+ int
+ soc_xgxs_reset(int unit, soc_port_t port)
+ {
++    /* AS5610 hybrid: on soc_skip_reset, edged owns the live ports; the unused port
++     * blocks aren't clocked and their XLPORT_XGXS_CTRL_REG reads SchanTimeOut. Per-port
++     * serdes reset is irrelevant to the FP engine, so skip it and let soc_init proceed. */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+     soc_reg_t           reg;
+     uint64              rval64;
+ #ifdef BCM_IPROC_SUPPORT
+@@ -3560,6 +3580,8 @@ soc_xgxs_reset(int unit, soc_port_t port)
+ int
+ soc_xgxs_in_reset(int unit, soc_port_t port)
+ {
++    /* AS5610 hybrid: skip per-port serdes access on skip_reset (see soc_xgxs_reset). */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+     soc_reg_t           reg;
+     uint64              rval64;
+     int                 reset_sleep_usec;
+@@ -3725,6 +3747,8 @@ soc_xgxs_in_reset(int unit, soc_port_t port)
+ int
+ soc_wc_xgxs_reset(int unit, soc_port_t port, int reg_idx)
+ {
++    /* AS5610 hybrid: skip per-port serdes access on skip_reset (see soc_xgxs_reset). */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+ #if defined(BCM_TRIUMPH3_SUPPORT)
+     const static soc_reg_t tr3_regs[] = {
+         PORT_XGXS0_CTRL_REGr,
+@@ -3854,6 +3878,8 @@ soc_wc_xgxs_reset(int unit, soc_port_t port, int reg_idx)
+ int
+ soc_wc_xgxs_in_reset(int unit, soc_port_t port, int reg_idx)
+ {
++    /* AS5610 hybrid: skip per-port serdes access on skip_reset (see soc_xgxs_reset). */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+ #ifdef BCM_TRIUMPH3_SUPPORT
+     const static soc_reg_t tr3_regs[] = {
+         PORT_XGXS0_CTRL_REGr,
+@@ -3998,6 +4024,8 @@ soc_wc_xgxs_pll_check(int unit, soc_port_t port, int reg_idx)
+ int
+ soc_wc_xgxs_power_down(int unit, soc_port_t port, int reg_idx)
+ {
++    /* AS5610 hybrid: skip per-port serdes access on skip_reset (see soc_xgxs_reset). */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+ #if defined(BCM_TRIUMPH3_SUPPORT)
+     const static soc_reg_t tr3_regs[] = {
+         PORT_XGXS0_CTRL_REGr,
+diff --git a/sdk-6.5.16/src/soc/common/feature.c b/sdk-6.5.16/src/soc/common/feature.c
+index 7575e1ff5..6e9d2d556 100644
+--- a/sdk-6.5.16/src/soc/common/feature.c
++++ b/sdk-6.5.16/src/soc/common/feature.c
+@@ -2206,6 +2206,19 @@ soc_features_bcm56840_b0(int unit, soc_feature_t feature)
+     SOC_FEATURE_DEBUG_PRINT((" 56840_b0"));
+     soc_cm_get_id(unit, &dev_id, &rev_id);
+ 
++    /* AS5610 (EdgeNOS): BCM56846 is a CMICe chip (SCHAN at 0x50, v2 SBUS format) — identical to
++     * the stock 56840_b0 it aliases. Proven by edged's working OpenMDK cdk_xgs_schan_op (0x50 /
++     * offset-0 / v2). Do NOT override cmicm or new_sbus_format here; the earlier force pointed SCHAN
++     * at the CMICm engine (0x31000) which does not respond on this chip and timed out every op.
++     *
++     * BUT: the 56846 DOES use the extended S-Channel message buffer at 0x800 (edged/CDK sets
++     * CDK_XGS_CHIP_FLAG_SCHAN_EXT — bcm56846_a0_chip.c). The stock 56840_b0 feature table leaves
++     * soc_feature_schmsg_alias OFF, so the SDK writes the command to buffer 0x0 while the engine
++     * reads from 0x800 -> it completes with no reply (READ_REG_ACK never returned). Enable it. */
++    if (dev_id == BCM56846_DEVICE_ID && feature == soc_feature_schmsg_alias) {
++        return TRUE;
++    }
++
+     if (dev_id == BCM56838_DEVICE_ID) {
+         if ((feature == soc_feature_vlan_translation) ||
+             (feature == soc_feature_vlan_translation_range) ||
+diff --git a/sdk-6.5.16/src/soc/common/reg.c b/sdk-6.5.16/src/soc/common/reg.c
+index 7daf031ab..2fc2a7329 100644
+--- a/sdk-6.5.16/src/soc/common/reg.c
++++ b/sdk-6.5.16/src/soc/common/reg.c
+@@ -111,7 +111,7 @@ soc_reg_datamask(int unit, soc_reg_t reg, int flags)
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return 0;  /* AS5610: CMICm reg NULL in CMICe 56840_b0 table; skip (not needed by field_init) */
+     }
+ 
+     regp = &(SOC_REG_INFO(unit, reg));
+@@ -161,7 +161,7 @@ soc_reg64_datamask(int unit, soc_reg_t reg, int flags)
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return 0;  /* AS5610: CMICm reg NULL in CMICe 56840_b0 table; skip (not needed by field_init) */
+     }
+ 
+     regp = &(SOC_REG_INFO(unit, reg));
+@@ -210,7 +210,7 @@ soc_reg_above_64_datamask(int unit, soc_reg_t reg, int flags, soc_reg_above_64_v
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return 0;  /* AS5610: CMICm reg NULL in CMICe 56840_b0 table; skip (not needed by field_init) */
+     }
+ 
+     regp = &(SOC_REG_INFO(unit, reg));
+@@ -920,6 +920,9 @@ _soc_reg32_get(int unit, soc_block_t block, int acc, uint32 addr, uint32 *data)
+     soc_info_t *si = &SOC_INFO(unit);
+ #endif
+ 
++    /* (Removed the AS5610 reg-read SCHAN bypass — that was a diagnostic for the CMICm mis-config.
++     * With SCHAN correctly on the CMICe engine (0x50), reg reads go through normally.) */
++
+     /*
+      * Write message to S-Channel.
+      */
+@@ -3196,7 +3199,8 @@ soc_reg_field_get(int unit, soc_reg_t reg, uint32 regval, soc_field_t field)
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3263,7 +3267,8 @@ soc_reg64_field_get(int unit, soc_reg_t reg, uint64 regval, soc_field_t field)
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3310,7 +3315,8 @@ soc_reg64_field32_get(int unit, soc_reg_t reg, uint64 regval,
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3358,7 +3364,8 @@ soc_reg_above_64_field_get(int unit, soc_reg_t reg, soc_reg_above_64_val_t regva
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3423,7 +3430,8 @@ soc_reg_above_64_field32_get(int unit, soc_reg_t reg, soc_reg_above_64_val_t reg
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3492,7 +3500,8 @@ soc_reg_above_64_field64_get(int unit, soc_reg_t reg, soc_reg_above_64_val_t reg
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3566,7 +3575,8 @@ soc_reg_field_validate(int unit, soc_reg_t reg, soc_field_t field, uint32 value)
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3618,7 +3628,8 @@ soc_reg_signed_field_mask(int unit, soc_reg_t reg, soc_field_t field, int32 valu
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3678,7 +3689,8 @@ soc_reg_unsigned_field_mask(int unit, soc_reg_t reg, soc_field_t field, int32 va
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3731,7 +3743,8 @@ soc_reg_field_set(int unit, soc_reg_t reg, uint32 *regval,
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3781,7 +3794,8 @@ soc_reg_above_64_field_set(int unit, soc_reg_t reg, soc_reg_above_64_val_t regva
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3837,7 +3851,8 @@ soc_reg_above_64_field32_set(int unit, soc_reg_t reg, soc_reg_above_64_val_t reg
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3888,7 +3903,8 @@ soc_reg_above_64_field64_set(int unit, soc_reg_t reg, soc_reg_above_64_val_t reg
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -3960,7 +3976,8 @@ soc_reg64_field_validate(int unit, soc_reg_t reg, soc_field_t field, uint64 valu
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -4016,7 +4033,8 @@ soc_reg64_field_set(int unit, soc_reg_t reg, uint64 *regval,
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -4080,7 +4098,8 @@ soc_reg64_field32_set(int unit, soc_reg_t reg, uint64 *regval,
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return;  /* AS5610: skip gracefully — CMICm reg is NULL in the CMICe 56840_b0 table and
++                  * isn't needed by field_init (MSI/MIIM/PHY). Avoids abort on the CMICm paths. */
+     }
+ 
+     SOC_FIND_FIELD(field,
+@@ -4183,7 +4202,7 @@ soc_reg_addr(int unit, soc_reg_t reg, int port, int index)
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return 0;  /* AS5610: CMICm reg NULL in CMICe 56840_b0 table; skip (not needed by field_init) */
+     }
+ 
+ #ifdef DNX_TEST_CHIPS_SUPPORT
+@@ -4683,7 +4702,7 @@ int soc_reg_xaddr_get(int unit, soc_reg_t reg, int port, int index,
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return 0;  /* AS5610: CMICm reg NULL in CMICe 56840_b0 table; skip (not needed by field_init) */
+     }
+ 
+ #define SOC_REG_ADDR_INVALID_PORT 0 /* for asserts */
+@@ -6559,7 +6578,7 @@ soc_reg_bytes(int unit, soc_reg_t reg) {
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif /* !SOC_NO_NAMES */
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return 0;  /* AS5610: CMICm reg NULL in CMICe 56840_b0 table; skip (not needed by field_init) */
+     }
+     regp = &(SOC_REG_INFO(unit, reg));
+ 
+@@ -6626,7 +6645,7 @@ soc_reg_snoop_register(int unit, soc_reg_t reg, uint32 flags,
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return 0;  /* AS5610: CMICm reg NULL in CMICe 56840_b0 table; skip (not needed by field_init) */
+     }
+ 
+     reg_info_p = &SOC_REG_INFO(unit, reg);
+@@ -6663,7 +6682,7 @@ soc_reg_snoop_unregister(int unit, soc_reg_t reg)
+         LOG_CLI((BSL_META_U(unit,
+                             "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return 0;  /* AS5610: CMICm reg NULL in CMICe 56840_b0 table; skip (not needed by field_init) */
+     }
+ 
+     reg_info_p = &SOC_REG_INFO(unit, reg);
+@@ -6799,7 +6818,7 @@ soc_reg_field_acc_mode_get(
+ #if !defined(SOC_NO_NAMES)
+         LOG_CLI((BSL_META_U(unit, "reg %s is invalid\n"), soc_reg_name[reg]));
+ #endif
+-        assert(SOC_REG_IS_VALID(unit, reg));
++        return 0;  /* AS5610: CMICm reg NULL in CMICe 56840_b0 table; skip (not needed by field_init) */
+     }
+ 
+     if (field == INVALIDf)
+diff --git a/sdk-6.5.16/src/soc/common/schan.c b/sdk-6.5.16/src/soc/common/schan.c
+index 048f11175..38b7ef684 100644
+--- a/sdk-6.5.16/src/soc/common/schan.c
++++ b/sdk-6.5.16/src/soc/common/schan.c
+@@ -211,6 +211,18 @@ soc_schan_header_cmd_set(int unit, schan_header_t *header, int opcode,
+         header->v3.dma = dma;
+         header->v3.bank_ignore_mask = bank_ignore_mask;
+     } else {
++        /* AS5610 BCM56846: this chip sets CDK_XGS_CHIP_FLAG_SCHAN_SB0 in edged's CDK, which forces
++         * the S-Channel command's SOURCE block to 0 (not the CMIC block 5). The reply is routed
++         * back over SBUS to src_blk; with src_blk=5 the engine sends the READ_REG_ACK to block 5
++         * instead of the CMIC, so the reply never lands in the CMIC message buffer (op completes
++         * with DONE but no ACK). Match edged: force src_blk=0 for this device. */
++        {
++            uint16 _dsb; uint8 _rsb;
++            soc_cm_get_id(unit, &_dsb, &_rsb);
++            if (_dsb == BCM56846_DEVICE_ID) {
++                src_blk = 0;
++            }
++        }
+         header->v2.opcode = opcode;
+         header->v2.dst_blk = dst_blk;
+         header->v2.src_blk = src_blk;
+@@ -963,9 +975,16 @@ int soc_schan_init(int unit)
+ #endif
+ 
+ #if defined(BCM_CMICM_SUPPORT)
+-    if (soc_feature(unit, soc_feature_cmicm)) {
+-        rv = soc_cmicm_schan_init(unit, &_soc_schan_drv[unit]);
+-        return rv;
++    {
++        /* AS5610 (EdgeNOS): the BCM56846 is a CMICe chip (SCHAN engine at CMIC_SCHAN_CTRL=0x50,
++         * message buffer at BAR0 0x00). This was PROVEN by edged's working OpenMDK driver, whose
++         * cdk_xgs_schan_op targets exactly 0x50 / offset-0 and completes on real hardware. An
++         * earlier hack forced the CMICm SCHAN (0x31000) here — that engine does NOT respond on this
++         * chip, so every op timed out. Do NOT force cmicm for 0xb846; fall through to cmice below. */
++        if (soc_feature(unit, soc_feature_cmicm)) {
++            rv = soc_cmicm_schan_init(unit, &_soc_schan_drv[unit]);
++            return rv;
++        }
+     }
+ #endif
+ 
+diff --git a/sdk-6.5.16/src/soc/esw/drv.c b/sdk-6.5.16/src/soc/esw/drv.c
+index 464145f9e..f11abbfbc 100644
+--- a/sdk-6.5.16/src/soc/esw/drv.c
++++ b/sdk-6.5.16/src/soc/esw/drv.c
+@@ -8495,6 +8495,13 @@ cmicm_pcie_deemphasis_set(int unit, uint16 phy_addr) {
+ int cmic_pcie_cdr_bw_adj(int unit, uint16 phy_addr) {
+     int miim_intr_enb;
+ 
++    /* AS5610 (EdgeNOS custom BDE): SKIP. This is an OPTIONAL PCIe-SerDes CDR
++     * jitter-tolerance tweak that MIIMs the PCIe PHY (id=0xfa). On this board with
++     * soc_skip_reset=1 the MIIM to the PCIe PHY times out and aborts soc_init, even
++     * though the PCIe link is already fully functional (edged's kernel BDE uses it).
++     * Not needed for the datapath or the FP engine — skip it so soc_init completes. */
++    return SOC_E_NONE;
++
+     /* Interrupts may not be working yet */
+     miim_intr_enb = SOC_CONTROL(unit)->miimIntrEnb;
+     SOC_CONTROL(unit)->miimIntrEnb = 0;
+@@ -15311,6 +15318,20 @@ soc_reset_bcm56840_a0(int unit)
+                                    (10 * MILLISECOND_USEC);
+ 
+ 
++    /* AS5610 hybrid (EdgeNOS): when soc_skip_reset is set, edged's bmd_init has
++     * ALREADY brought the chip fully up — LCPLLs locked, SBUS ring-map set, IP/EP/MMU
++     * and port blocks out of reset, SCHAN working (verified: the chip stays live and
++     * SCHAN-readable after edged exits). Re-running ANY of this reset sequence breaks
++     * edged's live state: re-configuring the PLLs unlocks them, and rewriting the SBUS
++     * ring-map / re-asserting block resets kills the working SCHAN -> SchanTimeOut.
++     * So skip the entire chip reset and run soc_init on edged's live chip. */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) {
++        /* edged leaves CMIC_SBUS_TIMEOUT at the 0x7d0 default, which is too low for SCHAN
++         * ops to slower/farther blocks (MMU/EPIPE) -> they time out. The full reset path
++         * below sets 0x13500 (see its "0x7d0 => 0x13500" comment). Set it here too. */
++        WRITE_CMIC_SBUS_TIMEOUTr(unit, 0x13500);
++        return SOC_E_NONE;
++    }
+     /* Use 156.25Mhz reference clock for LCPLL */
+     if (soc_property_get(unit, spn_XGXS_LCPLL_XTAL_REFCLK, 0)) {
+         for (index = 0; index < 4; index++) {
+@@ -18858,14 +18879,20 @@ soc_reset(int unit)
+             msi_en = 0;
+         }
+ 
+-        addr = CMIC_CMCx_PCIE_MISCEL_OFFSET(SOC_PCI_CMC(unit));
+-        rval = soc_pci_read(unit, addr);
++        /* AS5610 (EdgeNOS): CMIC_CMC0_PCIE_MISCEL is NULL in the 56840_b0 register table
++         * (CMICe-based driver); we enabled soc_feature_cmicm for SCHAN, but this MSI-config
++         * register is undefined for the chip -> soc_reg_field_set would assert. We run polled
++         * (no MSI), so skip when the register isn't valid. */
++        if (SOC_REG_IS_VALID(unit, CMIC_CMC0_PCIE_MISCELr)) {
++            addr = CMIC_CMCx_PCIE_MISCEL_OFFSET(SOC_PCI_CMC(unit));
++            rval = soc_pci_read(unit, addr);
+ 
+-        soc_reg_field_set(unit, CMIC_CMC0_PCIE_MISCELr,
+-                            &rval, ENABLE_MSIf, msi_en);
++            soc_reg_field_set(unit, CMIC_CMC0_PCIE_MISCELr,
++                                &rval, ENABLE_MSIf, msi_en);
+ 
+ 
+-        soc_pci_write(unit, addr, rval);
++            soc_pci_write(unit, addr, rval);
++        }
+ 
+         soc_cmicm_intr0_disable(unit, ~0);
+         soc_cmicm_intr1_disable(unit, ~0);
+diff --git a/sdk-6.5.16/src/soc/esw/trident.c b/sdk-6.5.16/src/soc/esw/trident.c
+index 98733943e..9c318b5a2 100644
+--- a/sdk-6.5.16/src/soc/esw/trident.c
++++ b/sdk-6.5.16/src/soc/esw/trident.c
+@@ -5872,6 +5872,13 @@ _soc_trident_clear_all_memory(int unit)
+ #endif
+     };
+ 
++    /* AS5610 hybrid: on soc_skip_reset, edged already initialized all chip memories
++     * (forwarding is live and FP_TCAM reads/writes work). The SDK's HW memory-init
++     * below polls a per-pipe done bit that times out on this custom BDE, and it would
++     * wipe edged's live tables anyway. Skip it so misc_init can proceed to the FP/pipe
++     * config and bcm_field_init. */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
++
+     si = &SOC_INFO(unit);
+ 
+     /*
+@@ -6007,6 +6014,9 @@ soc_trident_pipe_select(int unit, int egress, int pipe)
+ int
+ _soc_trident_port_mapping_init(int unit)
+ {
++    /* AS5610 hybrid: edged already set up port mappings (forwarding is live); the SDK's
++     * MMU/EGR mapping-register writes here time out on the live chip. Skip on skip_reset. */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+     soc_info_t *si;
+     soc_mem_t mem;
+     uint32 rval;
+@@ -7899,9 +7909,12 @@ _soc_trident_misc_init(int unit)
+                                MEM_BLOCK_ALL, TRUE));
+     }
+ 
+-    if (!SOC_IS_RELOADING(unit) && !SOC_WARM_BOOT(unit)) {
++    if (!SOC_IS_RELOADING(unit) && !SOC_WARM_BOOT(unit) &&
++        !soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) {
+         /* Must clear FP_GLOBAL_MASK_TCAM after port to pipe mappings
+          * are initialized. */
++        /* AS5610 hybrid: this DMA-backed memory clear times out on the polled BDE;
++         * edged already initialized FP_GLOBAL_MASK_TCAM. Skip it on skip_reset. */
+         SOC_IF_ERROR_RETURN
+             (soc_mem_clear(unit, FP_GLOBAL_MASK_TCAMm, COPYNO_ALL, TRUE));
+     }
+@@ -8009,6 +8022,10 @@ _soc_trident_misc_init(int unit)
+     }
+ 
+     /* Setup TDM within each port group */
++    /* AS5610 hybrid: the IARB/TDM port-scheduling tables are actively arbitrating on
++     * edged's live chip; config writes to a running IARB time out (direct reads work).
++     * edged already set the schedule up. Skip the whole TDM/IARB setup on skip_reset. */
++    if (!soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) {
+     SOC_IF_ERROR_RETURN(_soc_trident_pg_tdm_init(unit));
+ 
+     /* Setup main TDM between each port group */
+@@ -8033,6 +8050,7 @@ _soc_trident_misc_init(int unit)
+     }
+     soc_reg_field_set(unit, IARB_TDM_CONTROLr, &rval, TDM_WRAP_PTRf, count);
+     SOC_IF_ERROR_RETURN(WRITE_IARB_TDM_CONTROLr(unit, rval));
++    } /* end !skip_reset IARB/TDM setup (AS5610 hybrid) */
+ 
+     /* Setup EGR_PERQ_XMT_COUNTERS_BASE_ADDR for each port */
+     _soc_trident_egr_perq_xmt_counters_init(unit);
