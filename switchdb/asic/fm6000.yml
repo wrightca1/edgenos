@@ -1,0 +1,21 @@
+# EdgeNOS switch ASIC: Intel/Fulcrum FM6000 ("Alta")
+# Used by: arista-7150s-52 (DCS-7150S-52). First non-Broadcom ASIC in EdgeNOS.
+id: fm6000
+name: Intel/Fulcrum FM6000 (Alta)
+vendor: intel-fulcrum
+family: alta
+sdk: focalpoint            # FocalPoint SDK stack (NOT Broadcom) — new to EdgeNOS
+sdk_chip: fm6000
+cmic: none                 # no CMIC; register access via the SCD 12x12 mgmt crossbar (Phase 7b)
+datapath: edged-fm6000     # M2 target: a FocalPoint-based datapath daemon (not built yet)
+kernel_modules:
+  - scd                    # Arista SCD FPGA driver (PCI 3475:0001, BAR0 256KiB, mmap/UIO)
+  - fpdma                  # FocalPoint DMA — CPU punt/inject (F64/ISL header, Phase 7c)
+on_die_cpu: false          # external AMD host CPU over PCIe; ASIC reached via the SCD crossbar
+reference: arista-reverse-engineering/notes/analysis/   # phase7*/phase3i FM6000+SCD RE + Intel datasheet
+notes: >
+  Programmable pipeline: MAPPER (parser) + microcode/AlgoMatch FFU, GLORT logical ports,
+  watermark-based MMU. Bring-up order = BIST memory init -> load microcode (SPICO SerDes +
+  parser/FFU) -> MA/FFU/hash/ACL tables -> AN/EPL/SerDes -> forwarding (Phase 7e).
+  DATAPLANE NOT YET IMPLEMENTED (M2). The mgmt-plane MVP (M0/M1) does not need it. Register/
+  table access is proven live via 'show platform fm6000 ...' + SCD BAR0 mmap (phase11 captures).

@@ -25,8 +25,9 @@
     "platform_dir": {"type": "string", "description": "Relative path to the board support dir, default platform/<vendor>-<model>."},
     "dts":        {"type": "string", "description": "Device-tree source name under the platform dir."},
 
-    "installer":   {"type": "string", "enum": ["onie-sfx", "onl-swi"], "description": "Installer envelope to emit."},
-    "persistence": {"type": "string", "enum": ["squashfs-overlay", "onl-swi"], "description": "On-disk rootfs/persistence model."},
+    "boot":        {"type": "string", "enum": ["onie", "aboot"], "default": "onie", "description": "Boot/install method: 'onie' (ONIE installer) or 'aboot' (Arista Aboot .swi — Linux-boots-Linux kexec, no ONIE)."},
+    "installer":   {"type": "string", "enum": ["onie-sfx", "onl-swi", "aboot-swi"], "description": "Installer envelope to emit ('aboot-swi' = Arista Aboot .swi zip)."},
+    "persistence": {"type": "string", "enum": ["squashfs-overlay", "onl-swi", "aboot-swi"], "description": "On-disk rootfs/persistence model."},
     "init":        {"type": "string", "enum": ["systemd", "sysvinit"], "default": "systemd"},
 
     "status": {"type": "string", "enum": ["production", "bringup", "experimental", "planned"], "default": "bringup",

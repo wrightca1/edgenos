@@ -1,0 +1,20 @@
+# EdgeNOS CPU architecture: x86_64 (AMD64)
+# Used by: arista-7150s-52 (AMD RS780 + SB700/SB800, Family-10h embedded host CPU)
+id: x86_64
+name: x86-64 (AMD64)
+triple: x86_64-linux-gnu
+endian: little
+bits: 64
+cpu: amdfam10               # AMD Family-10h embedded (RS780 NB / SB700 SB board)
+kernel_arch: x86_64
+kernel_defconfig: arista_7150_defconfig
+cflags: []
+quirks:
+  # First x86 / little-endian / 64-bit target — call out what differs from the PPC/ARM boards.
+  - "Native build: CROSS_COMPILE is empty (build host is x86_64) — no cross toolchain."
+  - "Boot is Aboot (Linux-boots-Linux via kexec), NOT ONIE: image target is an Aboot .swi (zip: boot0 + kernel + initrd + rootfs), or netboot from the Aboot shell."
+  - "Console: ttyS0 @ 9600 8N1 (CONSOLESPEED=9600 console=ttyS0)."
+notes: >
+  Standard AMD x86 platform — a stock kernel boots it; only the SCD FPGA (PCI 3475:0001) and
+  the FM6000 switch ASIC are custom. Full PCI/driver map in the arista RE repo:
+  edgenos/HARDWARE.md (Phase-11 live recon).

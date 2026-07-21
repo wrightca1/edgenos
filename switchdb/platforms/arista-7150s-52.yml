@@ -1,0 +1,38 @@
+# EdgeNOS platform: Arista DCS-7150S-52 (FM6000 "raven"/norcal2)
+# 52x10G SFP+, AMD RS780/Family-10h host CPU, Intel/Fulcrum FM6000 "Alta" switch ASIC.
+#
+# NOTE: Arista boots via Aboot (Linux-boots-Linux kexec), NOT ONIE. `onie_platform` is used here
+# purely as the EdgeNOS switch-DB key (the resolver keys on it) — Arista has no ONIE machine string.
+# The real boot/install method is recorded in `boot: aboot`.
+onie_platform: x86_64-arista_7150s_52-r0
+vendor: arista
+model: 7150s-52
+aliases:
+  - dcs-7150s-52
+  - arista-7150s-52-cl-f
+
+arch: x86_64
+asic: fm6000
+kernel: "6.1"                # our own kernel; the board is old-but-standard AMD x86
+
+boot: aboot                  # Aboot .swi (or netboot), not an ONIE installer
+datapath: none               # M2: FM6000 dataplane (edged-fm6000) not built yet
+components:
+  - platform-svc             # SCD-based HAL: LEDs / sensors / SFP / reset (Phase 3i register map)
+  - quagga                   # zebra + ospfd/ospf6d control plane (parity with the 5610 lab link)
+  - edgenos-cli              # on-box CLI (version, platform/HAL, epkg)
+firmware: []                 # M2: FM6000 microcode (SPICO + parser/FFU), extracted from EOS rootfs
+
+platform_dir: platform/arista-7150s-52
+
+installer: aboot-swi
+persistence: aboot-swi
+init: systemd
+
+status: planned
+notes: >
+  M0 = boot our kernel+initramfs via Aboot netboot (tftp from 10.1.1.30) to a serial shell, EOS
+  untouched on flash. M1 = mgmt plane: tg3 mgmt NIC up + SSH, SCD board driver (mmap PCI 3475:0001
+  BAR0; reproduce version/LED/reset/interrupt regs; blink an LED; read temp/PSU/fan via SCD SMBus).
+  M2 = FM6000 dataplane (FocalPoint bring-up). Aboot enforces NO signing (verified live), so an
+  unsigned .swi / netboot boots. Roadmap + hardware profile: arista-reverse-engineering/edgenos/.
