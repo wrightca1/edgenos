@@ -1,0 +1,38 @@
+#!/bin/busybox sh
+# EdgeNOS M1 init — platform bring-up (shell/sysfs only; no python yet).
+# Loads the mgmt/i2c/hwmon/SCD drivers, declares the SCD board blocks, enables
+# SFP lasers, and dumps platform status. EOS is untouched on flash.
+/bin/busybox --install -s /bin
+mount -t proc     none /proc 2>/dev/null
+mount -t sysfs    none /sys  2>/dev/null
+mount -t devtmpfs none /dev  2>/dev/null
+
+echo; echo "=================================================================="
+echo "  EdgeNOS M1 — platform bring-up on the Arista DCS-7150S-52 (FM6000)"
+echo "  $(uname -a)"
+echo "=================================================================="
+
+echo "--- loading drivers (order: i2c/net, then hwmon, then SCD) ---"
+for m in i2c-dev tg3 at24 pmbus_core ucd9000 max31790 lm90 lm75 scd scd-hwmon raven-fan-driver; do
+    if modprobe "$m" 2>/dev/null; then echo "  loaded  $m"; else echo "  skip    $m (absent/dep)"; fi
+done
+
+echo "--- declaring SCD board blocks + enabling SFP TX ---"
+[ -x /usr/lib/edgenos/platform/scd-setup.sh ] && sh /usr/lib/edgenos/platform/scd-setup.sh
+[ -x /usr/lib/edgenos/platform/sfp-enable.sh ] && sh /usr/lib/edgenos/platform/sfp-enable.sh
+
+echo "--- platform status ---"
+echo "  PCI (SCD 3475 / mgmt 14e4 / FM6000 8086):"
+for d in /sys/bus/pci/devices/*/; do
+    v=$(cat "$d/vendor" 2>/dev/null); dv=$(cat "$d/device" 2>/dev/null)
+    echo "    $(basename "$d")  $v:$dv"
+done | grep -iE '0x3475|0x14e4|0x8086|0x1002|0x1022'
+echo "  LEDs:";        ls /sys/class/leds 2>/dev/null | sed 's/^/    /'
+echo "  i2c adapters:"; ls /sys/class/i2c-dev 2>/dev/null | sed 's/^/    /'
+echo "  hwmon:";        for h in /sys/class/hwmon/hwmon*; do [ -e "$h/name" ] && echo "    $(basename "$h") $(cat "$h/name")"; done
+echo "  xcvr cages:";  ls -d /sys/bus/platform/devices/scd-xcvr*/sfp* 2>/dev/null | sed 's/^/    /'
+
+echo
+echo "EdgeNOS M1 shell (sysfs HAL). Try: 'i2cdetect -l', 'cat /sys/class/hwmon/*/name',"
+echo "'echo 1 > /sys/class/leds/status1/brightness'. Type 'reboot' to return to EOS."
+exec setsid cttyhack /bin/busybox sh

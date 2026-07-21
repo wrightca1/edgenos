@@ -13,11 +13,13 @@
 #
 # Usage:
 #   build-aboot-swi.sh --kernel K --initramfs I [--boot0 B] --out O
-#                      [--version V] [--release R]
+#                      [--rootfs S] [--version V] [--release R]
+#   --rootfs adds a squashfs rootfs-i386.sqsh member (M1-python / M2); the
+#   initramfs is then responsible for loop-mounting it + switch_root.
 # SPDX-License-Identifier: GPL-2.0-or-later
 set -eu
 
-KERNEL="" INITRAMFS="" BOOT0="" OUT="" VERSION="0.0.1-m0" RELEASE="edgenos-m0"
+KERNEL="" INITRAMFS="" BOOT0="" OUT="" ROOTFS="" VERSION="0.0.1-m0" RELEASE="edgenos-m0"
 
 usage() { grep '^# ' "$0" | sed 's/^# //'; exit 1; }
 
@@ -27,6 +29,7 @@ while [ $# -gt 0 ]; do
         --initramfs) INITRAMFS="$2"; shift 2;;
         --boot0)     BOOT0="$2";     shift 2;;
         --out)       OUT="$2";       shift 2;;
+        --rootfs)    ROOTFS="$2";    shift 2;;   # optional squashfs (M1-python/M2)
         --version)   VERSION="$2";   shift 2;;
         --release)   RELEASE="$2";   shift 2;;
         -h|--help)   usage;;
@@ -67,6 +70,15 @@ chmod +x "$STAGE/boot0"
 cp "$KERNEL"    "$STAGE/linux-i386"
 cp "$INITRAMFS" "$STAGE/initrd-i386"
 
+# Optional squashfs rootfs member (M1-python / M2). When present, the initramfs is
+# expected to loop-mount rootfs-i386.sqsh from /tmp (tmpfs = RAM) and switch_root.
+MEMBERS="version boot0 linux-i386 initrd-i386"
+if [ -n "$ROOTFS" ]; then
+    [ -f "$ROOTFS" ] || { echo "no rootfs: $ROOTFS" >&2; exit 1; }
+    cp "$ROOTFS" "$STAGE/rootfs-i386.sqsh"
+    MEMBERS="$MEMBERS rootfs-i386.sqsh"
+fi
+
 # version metadata (unsigned; BLESSED=1 lets Aboot boot it without a swi-signature).
 cat > "$STAGE/version" <<EOF
 BLESSED=1
@@ -82,7 +94,8 @@ EOF
 
 OUT_ABS="$(readlink -f "$OUT" 2>/dev/null || echo "$OUT")"
 rm -f "$OUT_ABS"
-( cd "$STAGE" && zip -qX "$OUT_ABS" version boot0 linux-i386 initrd-i386 )
+# shellcheck disable=SC2086
+( cd "$STAGE" && zip -qX "$OUT_ABS" $MEMBERS )
 
 echo "built $OUT_ABS"
 unzip -l "$OUT_ABS"
