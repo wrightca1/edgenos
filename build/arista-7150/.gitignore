@@ -6,3 +6,4 @@ m0/edgenos-initramfs.cpio.gz
 m0/edgenos-m0.swi
 m0/initramfs_root/bin/
 m0/eos-ref/
+m1/kbuild/
