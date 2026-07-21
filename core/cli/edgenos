@@ -6,6 +6,9 @@ dispatcher over the on-box modules under /usr/lib/edgenos.
 
   edgenos version                       show this image's build identity
   edgenos platform name|show|init|hal   resolve / bring up / query the board (sensors, SFPs)
+  edgenos sfp [show] [<port>]           list installed optics by front-panel port (any switch)
+  edgenos interface [<port>]            per-port: link, IPs, routes, optic + light levels, counters
+  edgenos int|show interface [<port>]   (aliases)
   edgenos pkg list                      packages this image is composed of
   edgenos pkg info|verify <file.epk>    inspect a package
   edgenos pkg install <file.epk>        install/upgrade a component on the LIVE switch
@@ -19,6 +22,7 @@ dispatcher over the on-box modules under /usr/lib/edgenos.
   edgenos acl del <name> [<seq>] | acl unapply <name> | acl clear
 """
 import os
+import re
 import sys
 import json
 import subprocess
@@ -189,6 +193,161 @@ def cmd_acl(rest):
     return 0
 
 
+def cmd_sfp(rest):
+    """List installed optics by front-panel port — identical on every switch.
+    Translates to the platform HAL (sfps()); the board maps i2c bus -> swpN."""
+    sys.path.insert(0, os.path.join(LIB, "platform"))
+    try:
+        from current import load_platform
+        optics = load_platform().sfps()
+    except Exception as e:                       # HALUnsupported / no board / no glob
+        print("sfp: hardware inventory unavailable (%s)" % e)
+        return 1
+    args = [a for a in rest if a not in ("show",)]
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+    want = None
+    if args:                                     # optional single-port filter: swp6 or 6
+        want = args[0] if args[0].startswith(("swp", "ge", "xe")) else "swp" + args[0]
+        optics = [o for o in optics if o.get("name") == want]
+    if as_json:
+        print(json.dumps(optics, indent=1))
+        return 0
+    if not optics:
+        print("no optic present%s" % (" in %s" % want if want else ""))
+        return 0
+    print("%-7s %-4s %-7s %-15s %-18s %s" % ("PORT", "BUS", "TYPE", "VENDOR", "PART", "SERIAL"))
+    for o in optics:
+        print("%-7s %-4s %-7s %-15s %-18s %s" % (
+            o.get("name") or ("bus%s" % o.get("bus")), o.get("bus", "?"), o.get("type", "?"),
+            (o.get("vendor") or "-")[:15], (o.get("part") or "-")[:18], o.get("serial") or "-"))
+    return 0
+
+
+def _sysnet(iface, leaf):
+    try:
+        with open("/sys/class/net/%s/%s" % (iface, leaf)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _run(*args):
+    return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode()
+
+
+def _ifaddrs(iface):
+    v4, v6 = [], []
+    for line in _run("ip", "-o", "addr", "show", "dev", iface).splitlines():
+        t = line.split()
+        if "inet" in t:
+            v4.append(t[t.index("inet") + 1])
+        if "inet6" in t:
+            v6.append(t[t.index("inet6") + 1])
+    return v4, v6
+
+
+def _ifroutes(iface):
+    out = []
+    for fam in ([], ["-6"]):
+        out += [l.strip() for l in _run("ip", *fam, "route", "show", "dev", iface).splitlines() if l.strip()]
+    return out
+
+
+def _natkey(n):
+    m = re.search(r"(\d+)", n)
+    return (re.sub(r"\d+", "", n), int(m.group(1)) if m else 0)
+
+
+def _linkstate(p):
+    oper, carrier = _sysnet(p, "operstate") or "?", _sysnet(p, "carrier")
+    if oper == "up":
+        return "up"
+    return "no-carrier" if carrier == "0" else oper
+
+
+def _iface_detail(p, opt, plat):
+    speed = _sysnet(p, "speed")
+    spd = "  %sG" % (int(speed) // 1000) if speed and speed.lstrip("-").isdigit() and int(speed) > 0 else ""
+    print("%s: %s%s  mtu %s  mac %s" % (p, _linkstate(p).upper(), spd,
+                                        _sysnet(p, "mtu") or "?", _sysnet(p, "address") or "?"))
+    v4, v6 = _ifaddrs(p)
+    if v4:
+        print("  ipv4  : " + ", ".join(v4))
+    if v6:
+        print("  ipv6  : " + ", ".join(v6))
+    if opt:
+        print("  optic : %s %s %s (SN %s, bus %s)" % (opt.get("type"), opt.get("vendor"),
+                                                      opt.get("part"), opt.get("serial"), opt.get("bus")))
+        ddm = None
+        try:
+            ddm = plat.sfp_diagnostics(int(opt["bus"]), opt.get("type", "SFP")) if plat else None
+        except Exception:
+            ddm = None
+        if ddm and "lanes" in ddm:
+            print("  light : temp %s°C  vcc %sV" % (ddm.get("temp_c"), ddm.get("vcc_v")))
+            for i, ln in enumerate(ddm["lanes"], 1):
+                print("    lane%d: tx %s dBm  rx %s dBm  bias %s mA"
+                      % (i, ln["tx_power_dbm"], ln["rx_power_dbm"], ln["tx_bias_ma"]))
+        elif ddm:
+            print("  light : temp %s°C  vcc %sV  tx %s dBm  rx %s dBm  bias %s mA"
+                  % (ddm["temp_c"], ddm["vcc_v"], ddm["tx_power_dbm"], ddm["rx_power_dbm"], ddm["tx_bias_ma"]))
+    routes = _ifroutes(p)
+    if routes:
+        print("  routes: " + ("\n          ".join(routes[:8])))
+    g = lambda k: _sysnet(p, "statistics/" + k) or "0"
+    print("  stats : rx %s pkt / %s err    tx %s pkt / %s err" % (g("rx_packets"), g("rx_errors"),
+                                                                  g("tx_packets"), g("tx_errors")))
+
+
+def cmd_interface(rest):
+    """Consolidated per-port view — link, IPs, routes, optic + light levels, counters.
+    Board-agnostic: OS for link/addr/route/counters, the HAL for optic + DDM."""
+    sys.path.insert(0, os.path.join(LIB, "platform"))
+    plat = None
+    try:
+        from current import load_platform
+        plat = load_platform()
+    except Exception:
+        pass
+    args = [a for a in rest if a not in ("show", "interface")]
+    if args:                                                  # detail: lazy — one optic/port
+        for a in args:
+            p = a if a.startswith(("swp", "ge", "xe")) else "swp" + a
+            if not os.path.exists("/sys/class/net/" + p):
+                print("%s: no such interface" % p)
+                continue
+            try:
+                opt = plat.optic_for_port(p) if plat else None
+            except Exception:
+                opt = None
+            _iface_detail(p, opt, plat)
+            print()
+        return 0
+    # summary: one full optic inventory sweep (fast on sysfs boards; slower on raw-i2c)
+    optics = {}
+    try:
+        optics = {o["name"]: o for o in (plat.sfps() if plat else []) if o.get("name")}
+    except Exception:
+        pass
+    ports = sorted([n for n in os.listdir("/sys/class/net") if n.startswith(("swp", "ge", "xe"))],
+                   key=_natkey)
+    print("%-7s %-11s %-5s %-20s %s" % ("PORT", "STATE", "MTU", "IPV4", "OPTIC"))
+    shown = 0
+    for p in ports:
+        v4, _ = _ifaddrs(p)
+        opt = optics.get(p)
+        if _linkstate(p) != "up" and not v4 and not opt:
+            continue
+        optd = "%s %s" % (opt.get("type"), opt.get("part")) if opt else "-"
+        print("%-7s %-11s %-5s %-20s %s" % (p, _linkstate(p), _sysnet(p, "mtu") or "?",
+                                            v4[0] if v4 else "-", optd))
+        shown += 1
+    if not shown:
+        print("(no up/addressed/optic ports)")
+    return 0
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__.strip())
@@ -204,6 +363,12 @@ def main(argv):
         sys.path.insert(0, LIB)                  # epkg.py + epk.py live here on-box
         import epkg
         return epkg.main(["epkg"] + rest)
+    if cmd == "sfp":
+        return cmd_sfp(rest)
+    if cmd in ("interface", "int", "intf"):
+        return cmd_interface(rest)
+    if cmd == "show" and rest and rest[0] == "interface":
+        return cmd_interface(rest[1:])
     if cmd == "l2":
         return cmd_l2(rest)
     if cmd == "acl":

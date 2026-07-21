@@ -29,8 +29,16 @@ class EdgeNOSPlatform_arm_accton_as4610_54_r0(EdgeNOSPlatformBase, PortConfig_48
     # ONLP platform layer for this board comes from ONL (onlp component).
     INIT_SCRIPTS = []                             # bcmd.service runs bcmd-prep.sh at start
 
-    # SFP+/QSFP optics via bound eeprom sysfs (SFF decode in the base HAL).
-    SFP_EEPROMS = "sys/bus/i2c/devices/*-0050/eeprom"
+    # SFP+/QSFP optics. The DTS declares optoe2 (SFP+ xe0-3) / optoe1 (QSFP xe4-5) on
+    # PCA9548@0x70 ch0-5 => i2c buses 2-7 (xeN = bus 2+N; labels port49-54). If the optoe
+    # driver is loaded it binds an `eeprom` sysfs node (SFP_EEPROMS picks it up); it is NOT
+    # built into the current 6.1 image, so we also read the modules directly over i2c
+    # (SMBus i2cdump) via SFP_I2C_PORTS. DDM/light levels come from A2 @0x51 either way.
+    SFP_EEPROMS = "sys/bus/i2c/devices/*-0050/eeprom"       # optoe eeproms, once loaded
+    SFP_I2C_PORTS = {b: "xe%d" % (b - 2) for b in range(2, 8)}   # raw-i2c fallback (no optoe)
+
+    def _sfp_port_for_bus(self, bus):
+        return "xe%d" % (bus - 2) if 2 <= bus <= 7 else None
 
     # Native fan/PSU via the board CPLD over i2c (no kernel driver on 6.1 Buildroot;
     # the 4.14 ONL accton_as4610_cpld.ko isn't loaded). Register map from ONL's

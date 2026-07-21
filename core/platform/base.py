@@ -10,8 +10,17 @@ one image PER SWITCH — so an image has exactly one platform class — but the 
 is identical, which keeps every board uniform and the HAL board-agnostic.
 """
 import os
+import re
 import glob
+import math
 import subprocess
+
+
+def _optic_sortkey(e):
+    """Order optics by front-panel name (swp1<swp2<…, xe0<xe1), else by bus."""
+    name = e.get("name") or ""
+    m = re.search(r"(\d+)$", name)
+    return (re.sub(r"\d+$", "", name) or "~", int(m.group(1)) if m else 0, int(e.get("bus") or 0))
 
 
 class HALUnsupported(NotImplementedError):
@@ -155,19 +164,60 @@ class EdgeNOSPlatformBase(PlatformHAL):
         except Exception:
             return None
 
-    def _i2c_read(self, bus, addr, reg):
-        """Read one byte via the `i2cget` CLI (for CPLDs with no kernel sysfs driver).
-        Returns int or None. Only meaningful on the box; None off-hardware."""
+    def _i2c_read(self, bus, addr, reg, force=False):
+        """Read one byte via the `i2cget` CLI (for CPLDs / optic DDM with no eeprom
+        sysfs). force=True adds -f to read past a no-op `dummy` driver that merely
+        reserves the address (e.g. the SFP A2 diagnostics page @0x51). Returns int or
+        None. Only meaningful on the box; None off-hardware."""
+        cmd = ["i2cget"] + (["-f"] if force else []) + ["-y", str(bus), hex(addr), hex(reg)]
         try:
-            out = subprocess.run(["i2cget", "-y", str(bus), hex(addr), hex(reg)],
-                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                  timeout=5).stdout.decode().strip()
             return int(out, 16) if out else None
         except Exception:
             return None
 
-    # SFP/QSFP optic decode (SFF-8472 / SFF-8636) from bound i2c `eeprom` sysfs nodes.
-    SFP_EEPROMS = None      # board sets a glob (root-relative), e.g. "sys/bus/i2c/devices/*-0050/eeprom"
+    @staticmethod
+    def _dbm(u):
+        """SFF power word (unit 0.1 uW) -> dBm, or None for no light (<=0)."""
+        return round(10 * math.log10(u * 0.1 / 1000.0), 2) if u and u > 0 else None
+
+    def sfp_diagnostics(self, bus, kind="SFP"):
+        """Live optic DDM/DOM (light levels + temp/vcc/bias).
+        SFP  : SFF-8472 A2 real-time @0x51 bytes 96..105 — forced past the `dummy`
+               driver that reserves 0x51 (no eeprom sysfs there).
+        QSFP : SFF-8636 monitor fields live in the 0x50 image (lower page 22..57),
+               reported per-lane (x4).
+        Returns {temp_c, vcc_v, tx_bias_ma, tx_power_dbm, rx_power_dbm} for SFP,
+        {temp_c, vcc_v, lanes:[{tx_power_dbm, rx_power_dbm, tx_bias_ma}]} for QSFP,
+        or None if unreadable / DDM not populated."""
+        if kind and kind.startswith("QSFP"):
+            data = self._optic_a0_image(bus, 128) or b""
+            if len(data) < 58:
+                return None
+            w = lambda i: (data[i] << 8) | data[i + 1]
+            t = w(22); t = t - 65536 if t > 32767 else t
+            lanes = [{"rx_power_dbm": self._dbm(w(34 + 2 * n)),
+                      "tx_bias_ma": round(w(42 + 2 * n) * 0.002, 2),
+                      "tx_power_dbm": self._dbm(w(50 + 2 * n))} for n in range(4)]
+            if t == 0 and w(26) == 0 and all(l["rx_power_dbm"] is None for l in lanes):
+                return None                                   # module doesn't populate DDM
+            return {"temp_c": round(t / 256.0, 1), "vcc_v": round(w(26) * 0.0001, 2), "lanes": lanes}
+        raw = [self._i2c_read(bus, 0x51, 96 + i, force=True) for i in range(10)]
+        if any(v is None for v in raw):
+            return None
+        w = lambda i: (raw[i] << 8) | raw[i + 1]
+        t = w(0); t = t - 65536 if t > 32767 else t
+        return {"temp_c": round(t / 256.0, 1), "vcc_v": round(w(2) * 0.0001, 2),
+                "tx_bias_ma": round(w(4) * 0.002, 2),
+                "tx_power_dbm": self._dbm(w(6)), "rx_power_dbm": self._dbm(w(8))}
+
+    # SFP/QSFP optic decode (SFF-8472 / SFF-8636). Two board-provided sources:
+    #  - SFP_EEPROMS: glob of bound `eeprom` sysfs nodes (at24/optoe drivers). Present-only.
+    #  - SFP_I2C_PORTS: {bus:int -> name:str} read via raw i2c, for boards whose optic
+    #    driver isn't loaded (e.g. 4610 optoe absent) so no eeprom sysfs exists.
+    SFP_EEPROMS = None      # e.g. "sys/bus/i2c/devices/*-0050/eeprom"
+    SFP_I2C_PORTS = None    # e.g. {2: "xe0", 3: "xe1", ...}
     _SFF_ID = {0x03: "SFP", 0x0b: "DWDM-SFP", 0x0c: "QSFP", 0x0d: "QSFP+",
                0x11: "QSFP28", 0x18: "QSFP-DD"}
 
@@ -192,24 +242,113 @@ class EdgeNOSPlatformBase(PlatformHAL):
         return {"type": kind, "vendor": self._sff_str(data, *v),
                 "part": self._sff_str(data, *p), "serial": self._sff_str(data, *s)}
 
+    def _sfp_port_for_bus(self, bus):
+        """Board hook: map an i2c bus -> front-panel interface name (e.g. 'swp6' on the
+        5610, 'xe0' on the 4610), or None if the board doesn't know its mux topology.
+        Used for the SFP_EEPROMS sysfs path; the SFP_I2C_PORTS path carries names
+        directly. Default: unlabeled (the i2c bus is still a stable per-port handle)."""
+        return None
+
+    def _i2c_dump(self, bus, addr, first, last, force=False):
+        """Block-read absolute bytes [first..last] from an i2c/SMBus device via the
+        `i2cdump` CLI (ONE process — works on SMBus adapters where i2ctransfer's raw
+        mode is unsupported, and ~4x faster than per-byte i2cget which re-spawns and
+        re-selects the mux each byte). For optic EEPROMs with no bound eeprom sysfs.
+        Returns a bytes buffer indexed 0..last (bytes below `first` are 0), or None."""
+        cmd = ["i2cdump"] + (["-f"] if force else []) + \
+            ["-y", "-r", "%d-%d" % (first, last), str(bus), hex(addr), "b"]
+        try:
+            out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 timeout=30).stdout.decode()
+        except Exception:
+            return None
+        vals = {}
+        for line in out.splitlines():
+            m = re.match(r"^([0-9a-f]+):\s+(.*)", line)
+            if not m:
+                continue
+            base = int(m.group(1), 16)
+            for i, tok in enumerate(m.group(2).split()[:16]):
+                if re.fullmatch(r"[0-9a-fA-F]{2}", tok):
+                    vals[base + i] = int(tok, 16)
+        return bytes(vals.get(i, 0) for i in range(last + 1)) if vals else None
+
+    def _optic_a0_image(self, bus, n=128):
+        """The optic A0 (0x50) image — from the bound eeprom sysfs node if present,
+        else raw i2c (i2cdump). Returns bytes (indexed from 0) or None."""
+        rel = "sys/bus/i2c/devices/%d-0050/eeprom" % int(bus)
+        if os.path.exists(os.path.join(self.root, rel)):
+            return self._read_bytes(rel, n)
+        return self._i2c_dump(bus, 0x50, 0, n - 1)
+
+    def _i2c_optic_read(self, bus):
+        """Read an optic's identity over raw i2c. A single-byte i2cget of byte 0 is a
+        fast presence probe (empty bus NAKs in ~50ms) that also tells SFP from QSFP;
+        only then do we pay for the (slow, per-byte) block read — and only as far as the
+        identity fields reach (SFP serial ends @84, QSFP @212). Returns bytes or None."""
+        id0 = self._i2c_read(bus, 0x50, 0)
+        if id0 is None:
+            return None                                  # no module / NAK
+        last = 211 if id0 in (0x0c, 0x0d, 0x11, 0x18) else 83
+        return self._i2c_dump(bus, 0x50, 0, last)
+
     def sfps(self):
-        """Inventory present optics by reading bound eeprom sysfs nodes + SFF decode.
-        Keyed by i2c bus (a real per-port handle; bus->front-port labeling is future)."""
-        if not self.SFP_EEPROMS:
+        """Inventory present optics -> [{bus, name, type, vendor, part, serial}].
+        Sources: bound eeprom sysfs nodes (SFP_EEPROMS, at24/optoe) and/or raw-i2c
+        buses (SFP_I2C_PORTS, driver-absent boards). A module is reported only if its
+        EEPROM decodes as an SFF optic; `name` is the front-panel port when the board
+        maps it. Same output shape regardless of how the bytes were obtained."""
+        if not (self.SFP_EEPROMS or self.SFP_I2C_PORTS):
             raise HALUnsupported
-        out = []
-        for path in sorted(glob.glob(os.path.join(self.root, self.SFP_EEPROMS)),
+        out, seen = [], set()
+        for path in sorted(glob.glob(os.path.join(self.root, self.SFP_EEPROMS or "\0")),
                            key=lambda p: int((p.split("/")[-2].split("-")[0]) or 0)
                            if p.split("/")[-2].split("-")[0].isdigit() else 0):
-            rel = "/" + os.path.relpath(path, self.root)
-            data = self._read_bytes(rel, 256)   # bounded: broken i2c mux bus skips fast
-            if not data:
-                continue                        # absent module / NAK / timeout -> skip
-            opt = self._decode_optic(data)
+            bus = path.split("/")[-2].split("-")[0]
+            data = self._read_bytes("/" + os.path.relpath(path, self.root), 256)
+            opt = self._decode_optic(data) if data else None
+            if not opt:
+                continue
+            seen.add(bus)
+            entry = {"bus": bus, "present": True, **opt}
+            name = self._sfp_port_for_bus(int(bus)) if bus.isdigit() else None
+            if name:
+                entry["name"] = name
+            out.append(entry)
+        for bus, name in sorted((self.SFP_I2C_PORTS or {}).items()):
+            if str(bus) in seen:
+                continue
+            opt = self._decode_optic(self._i2c_optic_read(bus))
             if opt:
-                bus = path.split("/")[-2].split("-")[0]
-                out.append({"bus": bus, "present": True, **opt})
-        return out
+                out.append({"bus": str(bus), "name": name, "present": True, **opt})
+        return sorted(out, key=_optic_sortkey)
+
+    def _bus_for_name(self, name):
+        """Front-panel port name -> i2c bus, or None. Inverse of the board's map."""
+        for b, n in (self.SFP_I2C_PORTS or {}).items():
+            if n == name:
+                return b
+        for path in glob.glob(os.path.join(self.root, self.SFP_EEPROMS or "\0")):
+            b = path.split("/")[-2].split("-")[0]
+            if b.isdigit() and self._sfp_port_for_bus(int(b)) == name:
+                return int(b)
+        return None
+
+    def optic_for_port(self, name):
+        """One optic by front-panel port name -> dict (bus/name/type/vendor/…) or None.
+        The cheap path for a single-port query: reads at most one module (vs sfps()
+        which sweeps every bus). Returns None for a copper/empty/unmapped port."""
+        bus = self._bus_for_name(name)
+        if bus is None:
+            return None
+        rel = "sys/bus/i2c/devices/%d-0050/eeprom" % int(bus)
+        if os.path.exists(os.path.join(self.root, rel)):
+            opt = self._decode_optic(self._read_bytes(rel, 256))
+        else:
+            opt = self._decode_optic(self._i2c_optic_read(bus))
+        if not opt:
+            return None
+        return {"bus": str(bus), "name": name, "present": True, **opt}
 
     def thermals(self):
         """Generic: every hwmon temp*_input under /sys/class/hwmon (milli-C -> C)."""
