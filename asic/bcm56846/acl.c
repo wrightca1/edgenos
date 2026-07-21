@@ -109,6 +109,11 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
     FP_GLOBAL_MASK_TCAMm_t g;
     FP_POLICY_TABLEm_t p;
     int sec = idx + 256;                        /* paired secondary in physical slice 7 */
+    /* DIAGNOSTIC: if /etc/edged/acl_gmask_any exists, program the global mask as match-ANY
+     * (VALID=1, IPBM_MASK=0 = don't-care all ports) to split "gate bug" from "IFP-arming
+     * wall": if the counter fires with match-any, the port gate was the blocker; if it
+     * still stays 0, the IFP lookup engine isn't armed regardless of entry/gate. */
+    int gmask_any = (access("/etc/edged/acl_gmask_any", F_OK) == 0);
 
     /* ── PRIMARY entry (physical slice 6) — verbatim field layout from the Cumulus
      * capture FP_TCAM[1536]: DstIp lives in the TOP 32 bits of the 128-bit F2
@@ -140,13 +145,20 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
     }
     (void)WRITE_FP_TCAMm(unit, sec, t);
 
-    /* ── FP_GM_FIELDS overlay — the memory edged never wrote (double-wide requires it).
-     * Primary: VALID=1, MASK=0x1ffffffffe (37-bit), KEY=0.  Secondary: VALID=1 only.
-     * Values verbatim from Cumulus FP_GM_FIELDS[531]/[787]. ── */
+    /* ── FP_GM_FIELDS — the first-stage field gate. This is a GENUINE ternary field-TCAM
+     * (confirmed by distinct _X/_Y raw halves in the live-Cumulus capture 2026-07-16), not a
+     * plain mask register. Live Cumulus FP_GM_FIELDS[1536] = MASK/MASK_X=0x1fffffffff,
+     * KEY/KEY_X=0x1fffffffe1. edged previously set ONLY MASK (and to 0x1ffffffffe), leaving
+     * KEY=0 — so the field-TCAM could never match, the slice lookup was gated OFF, and
+     * FP_COUNTER stayed 0. Set all four halves verbatim. Secondary [sec] = VALID=1 only. ── */
     FP_GM_FIELDSm_CLR(gf);
     FP_GM_FIELDSm_VALIDf_SET(gf, 1);
-    { uint32_t gm[2] = { 0xfffffffe, 0x0000001f };      /* 0x1ffffffffe (Cumulus value) */
-      FP_GM_FIELDSm_MASKf_SET(gf, gm); }
+    { uint32_t gm[2] = { 0xffffffff, 0x0000001f };      /* MASK/MASK_X = 0x1fffffffff (all 37 bits care) */
+      uint32_t gk[2] = { 0xffffffe1, 0x0000001f };      /* KEY /KEY_X  = 0x1fffffffe1 (Cumulus verbatim)  */
+      FP_GM_FIELDSm_MASKf_SET(gf, gm);
+      FP_GM_FIELDSm_MASK_Xf_SET(gf, gm);
+      FP_GM_FIELDSm_KEYf_SET(gf, gk);
+      FP_GM_FIELDSm_KEY_Xf_SET(gf, gk); }
     (void)WRITE_FP_GM_FIELDSm(unit, idx, gf);
     FP_GM_FIELDSm_CLR(gf);
     FP_GM_FIELDSm_VALIDf_SET(gf, 1);
@@ -159,10 +171,12 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
      * [1792] = VALID=1 only. ── */
     FP_GLOBAL_MASK_TCAMm_CLR(g);
     FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
-    {   /* 3-word arrays — the IPBM field is >64 bits; a 2-word array corrupted it
+    if (!gmask_any) {   /* 3-word arrays — the IPBM field is >64 bits; a 2-word array corrupted it
          * (read back 0x1fffffe00, gating out all ports). */
-        uint32_t ipbm[3]  = { 0xffffffff, 0x001fffff, 0 };   /* bits 0-52          */
-        uint32_t ipbmm[3] = { 0xffffffff, 0x021fffff, 0 };   /* bits 0-52 + bit57  */
+        uint32_t ipbm[3]  = { 0xffffffff, 0x001fffff, 0x00000000 }; /* IPBM=0x1fffffffffffff (bits 0-52) */
+        uint32_t ipbmm[3] = { 0xffffffff, 0x001fffff, 0x00000002 }; /* IPBM_MASK=0x02001fffffffffffff — Cumulus
+                                                                     * FP_GLOBAL_MASK_TCAM[1536]; care bit is bit65
+                                                                     * (word2 bit1), NOT bit57 as before */
         FP_GLOBAL_MASK_TCAMm_IPBMf_SET(g, ipbm);
         FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, ipbmm);
     }
@@ -170,6 +184,41 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
     FP_GLOBAL_MASK_TCAMm_CLR(g);
     FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
     (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, sec, g);
+
+    /* ── AUTHORITATIVE global-mask write: the X and Y pipe memories. On Trident the SDK
+     * (trx/field.c) programs FP_GLOBAL_MASK_TCAM by writing FP_GLOBAL_MASK_TCAM_X and _Y
+     * SEPARATELY via soc_mem_pbmp_field_set — the combined view above does NOT drive the
+     * X/Y the hardware actually consults, which is why the combined IPBM read back shifted
+     * and never gated our ingress port in. Write X/Y VERBATIM from the live-Cumulus capture
+     * (fpxy.txt idx 1536): X IPBM=IPBM_MASK=0x1fffffffe01; Y IPBM=0x1ffe00000001fe,
+     * IPBM_MASK=0x02001ffe00000001fe. Secondary [sec] = VALID=1 only. ── */
+    {
+        FP_GLOBAL_MASK_TCAM_Xm_t gx;
+        FP_GLOBAL_MASK_TCAM_Ym_t gy;
+        uint32_t x_ipbm[3]  = { 0xfffffe01, 0x000001ff, 0x00000000 }; /* 0x00000001fffffffe01 */
+        uint32_t y_ipbm[3]  = { 0x000001fe, 0x001ffe00, 0x00000000 }; /* 0x00001ffe00000001fe */
+        uint32_t y_ipbmm[3] = { 0x000001fe, 0x001ffe00, 0x00000002 }; /* 0x02001ffe00000001fe */
+        /* primary [idx] */
+        FP_GLOBAL_MASK_TCAM_Xm_CLR(gx);
+        FP_GLOBAL_MASK_TCAM_Xm_VALIDf_SET(gx, 1);
+        FP_GLOBAL_MASK_TCAM_Ym_CLR(gy);
+        FP_GLOBAL_MASK_TCAM_Ym_VALIDf_SET(gy, 1);
+        if (!gmask_any) {
+            FP_GLOBAL_MASK_TCAM_Xm_IPBMf_SET(gx, x_ipbm);
+            FP_GLOBAL_MASK_TCAM_Xm_IPBM_MASKf_SET(gx, x_ipbm);
+            FP_GLOBAL_MASK_TCAM_Ym_IPBMf_SET(gy, y_ipbm);
+            FP_GLOBAL_MASK_TCAM_Ym_IPBM_MASKf_SET(gy, y_ipbmm);
+        }
+        (void)WRITE_FP_GLOBAL_MASK_TCAM_Xm(unit, idx, gx);
+        (void)WRITE_FP_GLOBAL_MASK_TCAM_Ym(unit, idx, gy);
+        /* secondary [sec] = VALID only */
+        FP_GLOBAL_MASK_TCAM_Xm_CLR(gx);
+        FP_GLOBAL_MASK_TCAM_Xm_VALIDf_SET(gx, 1);
+        (void)WRITE_FP_GLOBAL_MASK_TCAM_Xm(unit, sec, gx);
+        FP_GLOBAL_MASK_TCAM_Ym_CLR(gy);
+        FP_GLOBAL_MASK_TCAM_Ym_VALIDf_SET(gy, 1);
+        (void)WRITE_FP_GLOBAL_MASK_TCAM_Ym(unit, sec, gy);
+    }
 
     FP_POLICY_TABLEm_CLR(p);
     if (deny == 1) {                            /* permit = no action, packet proceeds */
@@ -292,8 +341,12 @@ void edged_acl_diag(void)
         FP_COUNTER_TABLEm_CLR(c); pkts = 0xffffffff;
         if (cdk_xgs_mem_read(ACL_UNIT, FP_COUNTER_TABLEm, idx, c.v, 3) >= 0)
             pkts = c.v[0] & 0x1fffffff;
-        acl_log("diag idx=%d valid=%d dstip(f2[2])=0x%08x COUNTER_INDEX=%u MODE=%u "
-                "G_DROP=%u counter[idx]=%u", idx, valid, f2[2], cidx, cmode, gdrop, pkts);
+        /* dst-IP lives in f2[3] (top word of the 128-bit F2) — see acl_program_one, which
+         * writes f2[4]={0,0,0,dstip}. This readback printed f2[2] and so always showed
+         * 0x00000000, which reads as "the key was never programmed" and cost real debugging
+         * time (2026-07-21): the key was in fact correct. Read the same word we write. */
+        acl_log("diag idx=%d valid=%d dstip(f2[3])=0x%08x COUNTER_INDEX=%u MODE=%u "
+                "G_DROP=%u counter[idx]=%u", idx, valid, f2[3], cidx, cmode, gdrop, pkts);
     }
 
     /* Decisive scan: hits may land at a COUNTER_INDEX != our TCAM idx. Sweep the whole
@@ -489,6 +542,46 @@ static void acl_ifp_pipeline_enable(void)
  * cumulus_replicate set up are preserved. Selcodes verbatim from the capture:
  *   slice4 (primary):   F1=5  F2=1  F3=7
  *   slice5 (secondary): F1=0xc F2=5 F3=0xa , SLICE_5_DST_CLASS_ID_SEL=1 */
+/* IFP key-generation qualifier remap tables. The SDK's _bcm_field_trx_tcp_ttl_tos_init
+ * (trident field_init) fills TCP_FN[0-63], TTL_FN[0-255], TOS_FN[0-255] with an identity map
+ * (FN0=FN1=index); OpenMDK never does, leaving them all-zero. These feed the IFP key
+ * generator — a zeroed remap makes it build a key that can't match, so the lookup never fires
+ * (counter=0 even with a correct entry + wide-open gate, observed 2026-07-17). Fill identity,
+ * exactly as the SDK does. */
+/* DIAGNOSTIC (gated on /etc/edged/acl_close_gaps): write the three registers the FPREG diff
+ * found differing from working Cumulus — ING_CONFIG_2=0x1ff, VFP_KEY_CONTROL=0x3, and
+ * ING_CONFIG_64 |= 0x20800000. Their semantics look non-IFP (ARP/VFP/general-ingress), so this
+ * is a last long-shot; the CDK register IDs equal the SOC addresses on this OpenMDK build, so
+ * write by raw address. */
+static void acl_close_reg_gaps(void)
+{
+    uint32_t v;
+    v = 0x00000003; (void)cdk_xgs_reg32_write(ACL_UNIT, 0x04180621, &v); /* VFP_KEY_CONTROL */
+    v = 0x000001ff; (void)cdk_xgs_reg32_write(ACL_UNIT, 0x01180602, &v); /* ING_CONFIG_2    */
+    v = 0; (void)cdk_xgs_reg32_read(ACL_UNIT, 0x01180600, &v);
+    v |= 0x20800000; (void)cdk_xgs_reg32_write(ACL_UNIT, 0x01180600, &v); /* ING_CONFIG_64 lo */
+    acl_log("close_reg_gaps: VFP_KEY_CONTROL=0x3 ING_CONFIG_2=0x1ff ING_CONFIG_64|=0x20800000");
+}
+
+static void acl_init_fn_tables(void)
+{
+    int i;
+    for (i = 0; i <= 63; i++) {
+        TCP_FNm_t e; TCP_FNm_CLR(e);
+        TCP_FNm_FN0f_SET(e, i); TCP_FNm_FN1f_SET(e, i);
+        (void)WRITE_TCP_FNm(ACL_UNIT, i, e);
+    }
+    for (i = 0; i <= 255; i++) {
+        TTL_FNm_t t; TTL_FNm_CLR(t);
+        TTL_FNm_FN0f_SET(t, i); TTL_FNm_FN1f_SET(t, i);
+        (void)WRITE_TTL_FNm(ACL_UNIT, i, t);
+        { TOS_FNm_t o; TOS_FNm_CLR(o);
+          TOS_FNm_FN0f_SET(o, i); TOS_FNm_FN1f_SET(o, i);
+          (void)WRITE_TOS_FNm(ACL_UNIT, i, o); }
+    }
+    acl_log("IFP FN tables inited: TCP_FN[0-63] TTL_FN/TOS_FN[0-255] identity (key-gen arm)");
+}
+
 static void acl_setup_doublewide(void)
 {
     int p, n = 0;
@@ -605,6 +698,10 @@ int edged_acl_load(const char *path)
     if (fp_mode) {
         edged_acl_reset();          /* invalidate any prior FP entries */
         acl_gm_map_init();          /* IFP global-mask logical->phys port map */
+        acl_init_fn_tables();       /* TCP_FN/TTL_FN/TOS_FN identity — IFP key-gen tables the
+                                     * SDK field_init fills but OpenMDK skips (key-gen arm) */
+        if (access("/etc/edged/acl_close_gaps", F_OK) == 0)
+            acl_close_reg_gaps();   /* diagnostic: replicate the 3 FPREG-diff register gaps */
         acl_init_gmask_only();      /* init FP_GLOBAL_MASK_TCAM (the SDK "operation"
                                      * without which no FP rule matches) — but NOT
                                      * FP_TCAM/POLICY, so forwarding + traps survive */
