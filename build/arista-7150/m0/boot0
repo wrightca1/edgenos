@@ -1,0 +1,14 @@
+#!/bin/sh
+# EdgeNOS M0 stage-0 boot -- copy our kernel+initramfs from the SWI and kexec it.
+# Aboot exports $swipath (path to this SWI) and provides busybox unzip + kexec.
+kernel=linux-i386
+arch=i386
+: "${swipath:=$0}"
+if [ -d "${swipath}" ]; then
+   cp "${swipath}/${kernel}" "${swipath}/initrd-${arch}" /tmp/
+else
+   unzip -oq "${swipath}" "${kernel}" "initrd-${arch}" -d /tmp
+fi
+echo "console=ttyS0,9600 earlyprintk=serial,ttyS0,9600 rdinit=/init panic=10" > /tmp/append
+kexec --load --initrd="/tmp/initrd-${arch}" --append="$(cat /tmp/append)" "/tmp/${kernel}"
+kexec --exec

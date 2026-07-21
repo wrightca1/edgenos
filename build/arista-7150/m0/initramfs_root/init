@@ -1,0 +1,13 @@
+#!/bin/busybox sh
+/bin/busybox --install -s /bin
+mount -t proc none /proc 2>/dev/null
+mount -t sysfs none /sys 2>/dev/null
+mount -t devtmpfs none /dev 2>/dev/null
+echo; echo "=================================================================="
+echo "  EdgeNOS M0 — OUR kernel is ALIVE on the Arista DCS-7150S-52 (FM6000)"
+echo "  $(uname -a)"
+echo "=================================================================="
+echo "--- PCI devices we can see (SCD=3475, mgmt=14e4, cpu=1022/1002) ---"
+for d in /sys/bus/pci/devices/*/; do v=$(cat $d/vendor 2>/dev/null); dv=$(cat $d/device 2>/dev/null); echo "  $(basename $d)  $v:$dv"; done | grep -iE '0x3475|0x14e4|0x8086|0x1002|0x1022' | head
+echo; echo "EdgeNOS M0 shell (EOS is untouched on flash). Type 'reboot' to return."
+exec setsid cttyhack /bin/busybox sh

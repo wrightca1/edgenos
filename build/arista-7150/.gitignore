@@ -1,0 +1,8 @@
+# M0 build artifacts — large binaries, regenerable via build/build-aboot-swi.sh
+# from a kernel bzImage + initramfs. Track only the small recipe/source files.
+m0/linux-i386
+m0/initrd-i386
+m0/edgenos-initramfs.cpio.gz
+m0/edgenos-m0.swi
+m0/initramfs_root/bin/
+m0/eos-ref/
