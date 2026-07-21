@@ -15,13 +15,19 @@ FM6000_SRCS := \
   $(FM6000_DIR)fm6000_hw.c \
   $(FM6000_DIR)fm6000_ucode.c \
   $(FM6000_DIR)fm6000_boot.c \
-  $(FM6000_DIR)fpdma.c
+  $(FM6000_DIR)fpdma.c \
+  $(FM6000_DIR)fpdma_vfio.c
 
 FM6000_CFLAGS := -I$(FM6000_DIR) -std=gnu11 -D_GNU_SOURCE
 # No vendor SDK, no special endianness flags (x86_64 LE, native MMIO).
+# DMA backing is VFIO (fpdma_vfio.c) — needs kernel uapi headers (linux/vfio.h).
 
 FM6000_OBJS := $(FM6000_SRCS:.c=.o)
 
 # Consumed by the edged link for the x86_64/fm6000 target.
 ASIC_SRCS   += $(FM6000_SRCS)
 ASIC_CFLAGS += $(FM6000_CFLAGS)
+
+# Standalone bring-up/punt diagnostic (not linked into edged).
+$(FM6000_DIR)fm6000_bringup: $(FM6000_SRCS) $(FM6000_DIR)fm6000_bringup.c
+	$(CC) $(FM6000_CFLAGS) -Wall -Wextra $^ -o $@

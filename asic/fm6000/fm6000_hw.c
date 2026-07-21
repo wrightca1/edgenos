@@ -126,6 +126,7 @@ int fm6000_hw_open(struct fm6000_dev *dev)
         goto err;
     }
 
+    dev->owns_map = 1;
     fprintf(stderr, "fm6000: bound %s, BAR0 %zu KiB @ %p\n",
             dev->pci_slot, dev->bar0_size / 1024, (void *)dev->bar0);
     return 0;
@@ -136,9 +137,21 @@ err:
     return -1;
 }
 
+void fm6000_hw_attach(struct fm6000_dev *dev, volatile void *bar0,
+                      size_t size, const char *slot)
+{
+    memset(dev, 0, sizeof(*dev));
+    dev->resource_fd = -1;
+    dev->bar0        = bar0;
+    dev->bar0_size   = size;
+    dev->owns_map    = 0;             /* VFIO owns the mapping */
+    if (slot)
+        snprintf(dev->pci_slot, sizeof(dev->pci_slot), "%s", slot);
+}
+
 void fm6000_hw_close(struct fm6000_dev *dev)
 {
-    if (dev->bar0 && dev->bar0 != MAP_FAILED)
+    if (dev->owns_map && dev->bar0 && dev->bar0 != MAP_FAILED)
         munmap((void *)dev->bar0, dev->bar0_size);
     if (dev->resource_fd >= 0)
         close(dev->resource_fd);

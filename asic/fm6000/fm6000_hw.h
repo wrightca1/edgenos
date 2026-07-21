@@ -29,12 +29,21 @@ struct fm6000_dev {
     volatile uint8_t *bar0;        /* mmap'd BAR0                             */
     size_t           bar0_size;
     char             pci_slot[32]; /* e.g. "0000:02:00.0"                     */
+    int              owns_map;     /* 1: we mmap'd BAR0 (open); 0: attached    */
 };
 
 /* ---- lifecycle --------------------------------------------------------- */
-/* Find the FM6000 (Intel 8086:155b / Fulcrum 1823:1770), mmap BAR0. Returns 0
- * on success. On x86 this needs CAP_SYS_RAWIO (or root) to open resource0. */
+/* Find the FM6000 (Intel 8086:155b / Fulcrum 1823:1770), mmap BAR0 via sysfs.
+ * Returns 0 on success. Needs CAP_SYS_RAWIO (or root) to open resource0. Use
+ * this for register-only work (diagnostics/bring-up) when the device is NOT
+ * bound to vfio-pci. For DMA, bind vfio-pci and use fm6000_hw_attach instead. */
 int  fm6000_hw_open(struct fm6000_dev *dev);
+
+/* Attach to a BAR0 mapping owned elsewhere (the VFIO device region mmap). The
+ * caller keeps ownership of the mapping; fm6000_hw_close will not unmap it. */
+void fm6000_hw_attach(struct fm6000_dev *dev, volatile void *bar0,
+                      size_t size, const char *slot);
+
 void fm6000_hw_close(struct fm6000_dev *dev);
 
 /* ---- switch CSR access (word-indexed; the SDK convention) -------------- */

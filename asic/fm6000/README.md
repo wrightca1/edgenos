@@ -24,7 +24,16 @@ own BAR0. It is **not** hidden behind the SCD FPGA (`3475:0001`, which is separa
 | `fm6000_ucode.{c,h}` | Microcode load: parser/FFU **text CSR replay** + SerDes **SPICO SBus** upload | phase7g §c/d |
 | `fm6000_boot.{c,h}` | `fm6000BootSwitch` ordering + BIST/memory-init skeleton | phase7g §b |
 | `fpdma.{c,h}` | Packet-DMA ring engine (0x5000 block, TX/RX rings, punt/inject) | FPDMA.md |
+| `fpdma_vfio.{c,h}` | DMA backing via **VFIO** — BAR0 map, bus-master, IOMMU pool (<4GiB IOVA), MSI | — |
+| `fm6000_bringup.c` | Standalone end-to-end bring-up/punt diagnostic (`make fm6000_bringup`) | — |
 | `fm6000.mk` | Build fragment (no vendor SDK) | — |
+
+## DMA backing (offline-buildable, no proprietary kmod)
+`fpdma` needs coherent low-4GiB memory + MSI. Rather than a kernel module, `fpdma_vfio` binds the device
+through **vfio-pci** (IOMMU on): it maps BAR0 (fed to `fm6000_hw_attach`), enables bus-master, stands up an
+IOMMU-mapped DMA pool with IOVAs pinned below 4 GiB (the FM6000 is a 32-bit master), and wires an MSI
+eventfd. Host prep: `intel_iommu=on`, unbind `fpdma`/`igb`, `echo 8086 155b > .../vfio-pci/new_id`. The whole
+set links into `fm6000_bringup` and runs the full path: `vfio → boot_switch → fpdma_init → inject/punt`.
 
 ## Clean-room boundary (important)
 The **procedures** are reimplemented from behavioral RE. The **payloads** are Arista/Intel proprietary and
