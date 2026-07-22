@@ -24,16 +24,25 @@ own BAR0. It is **not** hidden behind the SCD FPGA (`3475:0001`, which is separa
 | `fm6000_ucode.{c,h}` | Microcode load: parser/FFU **text CSR replay** + SerDes **SPICO SBus** upload | phase7g §c/d |
 | `fm6000_boot.{c,h}` | `fm6000BootSwitch` ordering + BIST/memory-init skeleton | phase7g §b |
 | `fpdma.{c,h}` | Packet-DMA ring engine (0x5000 block, TX/RX rings, punt/inject) | FPDMA.md |
-| `fpdma_vfio.{c,h}` | DMA backing via **VFIO** — BAR0 map, bus-master, IOMMU pool (<4GiB IOVA), MSI | — |
+| `kmod/fm6000dma.c` | **Clean-room DMA/MSI kernel module** (default backing) — BAR0 + coherent low-4GiB pool + MSI | phase13 |
+| `fpdma_kmod.{c,h}` | Userspace side of the kmod (mmap BAR0 + pool, MSI fd) — same seam as VFIO | phase13 |
+| `fpdma_vfio.{c,h}` | Alt DMA backing via **VFIO** (IOMMU-capable boxes only) | — |
 | `fm6000_bringup.c` | Standalone end-to-end bring-up/punt diagnostic (`make fm6000_bringup`) | — |
 | `fm6000.mk` | Build fragment (no vendor SDK) | — |
 
-## DMA backing (offline-buildable, no proprietary kmod)
-`fpdma` needs coherent low-4GiB memory + MSI. Rather than a kernel module, `fpdma_vfio` binds the device
-through **vfio-pci** (IOMMU on): it maps BAR0 (fed to `fm6000_hw_attach`), enables bus-master, stands up an
-IOMMU-mapped DMA pool with IOVAs pinned below 4 GiB (the FM6000 is a 32-bit master), and wires an MSI
-eventfd. Host prep: `intel_iommu=on`, unbind `fpdma`/`igb`, `echo 8086 155b > .../vfio-pci/new_id`. The whole
-set links into `fm6000_bringup` and runs the full path: `vfio → boot_switch → fpdma_init → inject/punt`.
+## DMA backing — kmod (default here) or VFIO (portable alt)
+`fpdma` needs coherent low-4GiB memory + MSI. `fm6000_edged` tries two backings, in order:
+
+1. **kmod (`kmod/fm6000dma.ko`) — the default, required on the 7150.** The 7150's AMD RS780 has **no usable
+   IOMMU** (0 iommu_groups, GART fallback — see phase13 live probe), so VFIO can't work. This tiny GPL module
+   binds the FM6000 (`8086:155b`), exposes BAR0 + a `dma_alloc_coherent` pool (`pool_mb`, default 4) pinned
+   below 4 GiB (32-bit master) + an MSI eventfd, all via `/dev/fm6000dma`. `fpdma_kmod.c` mmaps them.
+   Build: `make -C kmod KDIR=<kernel>`; load: `insmod fm6000dma.ko`. All packet-ring logic stays in `fpdma.c`.
+2. **VFIO (`fpdma_vfio`) — only on IOMMU-capable boxes.** `intel_iommu=on`, bind `vfio-pci`. Kept for
+   portability; unused on the 7150.
+
+Either way `fpdma.c` + the rings are identical — only the `struct fpdma_backing` differs. The whole set links
+into `fm6000_bringup` / `edged-7150` and runs `backend → boot_switch → fpdma_init → inject/punt`.
 
 ## Clean-room boundary (important)
 The **procedures** are reimplemented from behavioral RE. The **payloads** are Arista/Intel proprietary and

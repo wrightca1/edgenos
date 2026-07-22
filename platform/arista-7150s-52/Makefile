@@ -19,7 +19,7 @@ include $(EDGENOS_ROOT)/arch/x86_64/toolchain.mk
 INCLUDES := -I$(CORE_DIR) -I$(ASIC_DIR) -I$(PLAT_DIR)
 VPATH    := $(ASIC_DIR):$(PLAT_DIR)
 
-ASIC_SRCS := fm6000_hw.c fm6000_ucode.c fm6000_boot.c fpdma.c fpdma_vfio.c fm6000_edged.c
+ASIC_SRCS := fm6000_hw.c fm6000_ucode.c fm6000_boot.c fpdma.c fpdma_kmod.c fpdma_vfio.c fm6000_edged.c
 PLAT_SRCS := edged.c
 SRCS := $(ASIC_SRCS) $(PLAT_SRCS)
 OBJS := $(SRCS:.c=.o)

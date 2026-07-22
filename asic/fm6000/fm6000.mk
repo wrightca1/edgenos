@@ -16,6 +16,7 @@ FM6000_SRCS := \
   $(FM6000_DIR)fm6000_ucode.c \
   $(FM6000_DIR)fm6000_boot.c \
   $(FM6000_DIR)fpdma.c \
+  $(FM6000_DIR)fpdma_kmod.c \
   $(FM6000_DIR)fpdma_vfio.c
 
 FM6000_CFLAGS := -I$(FM6000_DIR) -std=gnu11 -D_GNU_SOURCE

@@ -1,0 +1,2 @@
+# Kbuild for the FM6000 DMA/MSI kmod.
+obj-m += fm6000dma.o

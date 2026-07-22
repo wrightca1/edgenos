@@ -20,6 +20,7 @@
 #include "fm6000_edged.h"
 #include "fm6000_boot.h"
 #include "fpdma.h"
+#include "fpdma_kmod.h"
 #include "fpdma_vfio.h"
 
 #define FM6000_DEFAULT_SLOT   "0000:02:00.0"
@@ -27,37 +28,66 @@
 #define FM6000_TX_RING        256
 #define FM6000_RX_RING        256
 
+enum backend { BE_NONE, BE_KMOD, BE_VFIO };
+
 /* Single ASIC per box: file-static context. */
 static struct {
+    enum backend       be;
+    struct fpdma_kmod *kmod;
     struct fpdma_vfio *vfio;
     struct fm6000_dev  dev;
     struct fpdma       fp;
     int                up;
 } g;
 
-static int fm6000_be_init(void)
+/* Bring up a DMA backend + attach BAR0, filling *back. Prefers the clean-room
+ * kmod (works without an IOMMU — the 7150's case); falls back to VFIO on
+ * IOMMU-capable boxes. */
+static int backend_open(struct fpdma_backing *back)
 {
     const char *slot = getenv("EDGENOS_FM6000_SLOT");
-    struct fpdma_backing back;
     volatile void *bar0;
     size_t bar0_size = 0;
 
     if (!slot || !*slot)
         slot = FM6000_DEFAULT_SLOT;
 
-    if (fpdma_vfio_open(&g.vfio, slot, FM6000_DMA_POOL) < 0) {
-        fprintf(stderr, "fm6000: VFIO open failed (%s bound to vfio-pci?)\n", slot);
+    if (fpdma_kmod_open(&g.kmod) == 0) {
+        g.be  = BE_KMOD;
+        bar0  = fpdma_kmod_bar0(g.kmod, &bar0_size);
+        *back = fpdma_kmod_backing(g.kmod);
+        fprintf(stderr, "fm6000: DMA backend = kmod (/dev/fm6000dma)\n");
+    } else if (fpdma_vfio_open(&g.vfio, slot, FM6000_DMA_POOL) == 0) {
+        g.be  = BE_VFIO;
+        bar0  = fpdma_vfio_bar0(g.vfio, &bar0_size);
+        *back = fpdma_vfio_backing(g.vfio);
+        fprintf(stderr, "fm6000: DMA backend = vfio (%s)\n", slot);
+    } else {
+        fprintf(stderr, "fm6000: no DMA backend (load fm6000dma.ko, or bind vfio-pci)\n");
         return -1;
     }
-    bar0 = fpdma_vfio_bar0(g.vfio, &bar0_size);
     fm6000_hw_attach(&g.dev, bar0, bar0_size, slot);
+    return 0;
+}
+
+static void backend_close(void)
+{
+    if (g.be == BE_KMOD) { fpdma_kmod_close(g.kmod); g.kmod = NULL; }
+    else if (g.be == BE_VFIO) { fpdma_vfio_close(g.vfio); g.vfio = NULL; }
+    g.be = BE_NONE;
+}
+
+static int fm6000_be_init(void)
+{
+    struct fpdma_backing back;
+
+    if (backend_open(&back) < 0)
+        return -1;
 
     if (fm6000_boot_switch(&g.dev) != 0) {
         fprintf(stderr, "fm6000: bring-up failed\n");
         goto fail;
     }
-
-    back = fpdma_vfio_backing(g.vfio);
     if (fpdma_init(&g.fp, &g.dev, &back, FM6000_TX_RING, FM6000_RX_RING) != 0) {
         fprintf(stderr, "fm6000: fpdma_init failed\n");
         goto fail;
@@ -68,8 +98,7 @@ static int fm6000_be_init(void)
 
 fail:
     fm6000_hw_close(&g.dev);
-    fpdma_vfio_close(g.vfio);
-    g.vfio = NULL;
+    backend_close();
     return -1;
 }
 
@@ -103,7 +132,9 @@ static int fm6000_be_rx_poll(int budget, asic_rx_cb cb, void *ctx)
 
 static int fm6000_be_intr_fd(void)
 {
-    return g.vfio ? fpdma_vfio_eventfd(g.vfio) : -1;
+    if (g.be == BE_KMOD) return fpdma_kmod_eventfd(g.kmod);
+    if (g.be == BE_VFIO) return fpdma_vfio_eventfd(g.vfio);
+    return -1;
 }
 
 static void fm6000_be_shutdown(void)
@@ -112,10 +143,9 @@ static void fm6000_be_shutdown(void)
         fpdma_shutdown(&g.fp);
         g.up = 0;
     }
-    if (g.vfio) {
+    if (g.be != BE_NONE) {
         fm6000_hw_close(&g.dev);
-        fpdma_vfio_close(g.vfio);
-        g.vfio = NULL;
+        backend_close();
     }
 }
 
