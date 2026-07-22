@@ -81,6 +81,23 @@ cp "$EROOT/platform/arista-7150s-52/platform.py" "$R/usr/lib/edgenos/platform/" 
 cp "$EROOT/core/platform/base.py"                "$R/usr/lib/edgenos/platform/" 2>/dev/null || true
 chmod +x "$R/usr/lib/edgenos/platform/"*.sh 2>/dev/null || true
 
+# 3b. SSH (dropbear) + on-box firmware (regmap) + nc-shell. Staged in m1/ssh/
+#     (gitignored; dropbear+libs from the Fedora rpm, regmap = board data).
+SSHD="$HERE/ssh"
+if [ -d "$SSHD" ]; then
+    mkdir -p "$R/usr/sbin" "$R/usr/bin" "$R/lib64" "$R/etc/dropbear" "$R/root/.ssh" \
+             "$R/usr/share/firmware"
+    cp "$SSHD/dropbear"     "$R/usr/sbin/" 2>/dev/null && chmod +x "$R/usr/sbin/dropbear"
+    cp "$SSHD/dropbearkey"  "$R/usr/bin/"  2>/dev/null && chmod +x "$R/usr/bin/dropbearkey"
+    cp "$SSHD/lib/"*.so.* "$R/lib64/" 2>/dev/null
+    cp "$SSHD/passwd" "$R/etc/passwd" 2>/dev/null
+    cp "$SSHD/shadow" "$R/etc/shadow" 2>/dev/null; chmod 600 "$R/etc/shadow" 2>/dev/null
+    cp "$SSHD/ncsh.sh" "$R/usr/bin/ncsh.sh" 2>/dev/null && chmod +x "$R/usr/bin/ncsh.sh"
+    cp "$SSHD/"*.si5338 "$R/usr/share/firmware/" 2>/dev/null   # Si5338 regmap (on-box only)
+    echo "root:x:0:0:root:/root:/bin/sh" >> "$R/etc/group" 2>/dev/null || true
+    echo "bundled dropbear SSH + regmap + nc-shell"
+fi
+
 # 4. init.
 cp "$HERE/init-m1" "$R/init"; chmod +x "$R/init"
 

@@ -38,13 +38,34 @@ echo "  hwmon:";        for h in /sys/class/hwmon/hwmon*; do [ -e "$h/name" ] &&
 echo "  xcvr cages:";  ls -d /sys/bus/platform/devices/scd-xcvr*/sfp* 2>/dev/null | sed 's/^/    /'
 
 # --- mgmt NIC diagnostic (tg3 RX / RGMII-PHY fix) ---
-echo "--- mgmt NIC (eth0) ---"
+echo "--- mgmt NIC (eth0) + network access ---"
 if [ -d /sys/class/net/eth0 ]; then
     ip link set eth0 up 2>/dev/null
-    echo "    PHY: $(readlink -f /sys/class/net/eth0/phydev/driver 2>/dev/null | sed 's#.*/##') (want Broadcom, not Generic)"
-    echo "    dma_mask: $(dmesg | sed -n 's/.*dma_mask\[\(.*\)\]/\1/p' | tail -1)"
+    ip addr add "${MGMT_IP:-10.1.1.77}/24" dev eth0 2>/dev/null
+    echo "    eth0 up, ${MGMT_IP:-10.1.1.77}/24  PHY: $(readlink -f /sys/class/net/eth0/phydev/driver 2>/dev/null | sed 's#.*/##')"
+    sleep 2
+    # real SSH (dropbear, root pw 'arista') + telnet + scripted nc-shell (2323)
+    if [ -x /usr/sbin/dropbear ]; then
+        [ -f /etc/dropbear/dropbear_ed25519_host_key ] || \
+            dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1
+        [ -f /etc/dropbear/dropbear_rsa_host_key ] || \
+            dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key >/dev/null 2>&1
+        /usr/sbin/dropbear -p 22 -R >/dev/null 2>&1 && echo "    dropbear SSH up (root, pw arista)"
+    fi
+    telnetd -l /bin/sh -p 23 2>/dev/null && echo "    telnetd up (:23)"
+    [ -x /usr/bin/ncsh.sh ] && { setsid /usr/bin/ncsh.sh >/dev/null 2>&1 & echo "    nc-shell up (:2323)"; }
 else
     echo "    eth0 absent (tg3 bind failed)"
+fi
+
+# --- M2: auto FM6000 bring-up in the CORRECT order (clock -> reset-release) ---
+# Runs while the FM6000 is still held in reset (0x4000=0x106) from power-on, so it
+# comes out of reset WITH the Si5338 refclk present. Full log in /var/log/fm6000.
+if [ -x /usr/lib/edgenos/platform/fm6000-up.sh ]; then
+    echo "--- M2 FM6000 auto bring-up (full log: /var/log/fm6000) ---"
+    mkdir -p /var/log
+    sh /usr/lib/edgenos/platform/fm6000-up.sh > /var/log/fm6000 2>&1
+    grep -iE 'ENUMERATED|still absent|PLL_LOL|Si5338 found|smbus_master @|clock RC' /var/log/fm6000 | sed 's/^/    /'
 fi
 
 # --- reboot staging diagnostic (answers the netboot question) ---

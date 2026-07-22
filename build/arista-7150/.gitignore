@@ -15,3 +15,7 @@ m1/payload/resettool
 m1/payload/scdreg
 m1/payload/fm6000_bringup
 m1/payload/si5338
+m1/ssh/dropbear
+m1/ssh/dropbearkey
+m1/ssh/lib/
+m1/ssh/*.si5338
