@@ -7,13 +7,19 @@ mount -t proc     none /proc 2>/dev/null
 mount -t sysfs    none /sys  2>/dev/null
 mount -t devtmpfs none /dev  2>/dev/null
 
+# Enable ALL sysrq so `echo b > /proc/sysrq-trigger` can reboot: it does an
+# emergency_restart that BYPASSES device_shutdown (which hangs this box's reboot
+# from our minimal kernel — phase15) and goes straight to the reboot=p reset EOS
+# uses. Use that to return to EOS, NOT `reboot -f`.
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null
+
 echo; echo "=================================================================="
 echo "  EdgeNOS M1 — platform bring-up on the Arista DCS-7150S-52 (FM6000)"
 echo "  $(uname -a)"
 echo "=================================================================="
 
 echo "--- loading drivers (order: i2c/net, then hwmon, then SCD) ---"
-for m in i2c-dev tg3 at24 pmbus_core ucd9000 max31790 lm90 lm75 scd scd-hwmon raven-fan-driver; do
+for m in i2c-dev broadcom tg3 at24 pmbus_core ucd9000 max31790 lm90 lm75 scd scd-hwmon raven-fan-driver; do
     if modprobe "$m" 2>/dev/null; then echo "  loaded  $m"; else echo "  skip    $m (absent/dep)"; fi
 done
 
@@ -34,5 +40,6 @@ echo "  xcvr cages:";  ls -d /sys/bus/platform/devices/scd-xcvr*/sfp* 2>/dev/nul
 
 echo
 echo "EdgeNOS M1 shell (sysfs HAL). Try: 'i2cdetect -l', 'cat /sys/class/hwmon/*/name',"
-echo "'echo 1 > /sys/class/leds/status1/brightness'. Type 'reboot' to return to EOS."
+echo "'echo 1 > /sys/class/leds/status1/brightness'."
+echo "To return to EOS: 'echo b > /proc/sysrq-trigger' (NOT reboot -f — that hangs this box)."
 exec setsid cttyhack /bin/busybox sh
