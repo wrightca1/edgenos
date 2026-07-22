@@ -60,7 +60,8 @@ if [ -d "${swipath}" ]; then
 else
    unzip -oq "${swipath}" "${kernel}" "initrd-${arch}" -d /tmp
 fi
-echo "console=ttyS0,9600 earlyprintk=serial,ttyS0,9600 rdinit=/init panic=10" > /tmp/append
+# reboot=p (PCI reset) REQUIRED on AMD RS780 or `reboot` hangs the box.
+echo "console=ttyS0,9600 earlyprintk=serial,ttyS0,9600 rdinit=/init panic=10 reboot=p" > /tmp/append
 kexec --load --initrd="/tmp/initrd-${arch}" --append="$(cat /tmp/append)" "/tmp/${kernel}"
 kexec --exec
 EOF

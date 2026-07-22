@@ -7,3 +7,6 @@ m0/edgenos-m0.swi
 m0/initramfs_root/bin/
 m0/eos-ref/
 m1/kbuild/
+m1/edgenos-m1.swi
+m1/edgenos-m1-initramfs.cpio.gz
+m1/edgenos-m1-rootfs.sqsh
