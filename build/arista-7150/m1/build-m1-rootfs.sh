@@ -53,10 +53,29 @@ if [ -f "$SRC/scd.ko" ]; then
 else
     echo "warn: no scd.ko in $SRC — run build-scd-modules.sh first" >&2
 fi
+# M2 DMA kmod (clean-room FM6000 DMA/MSI backing)
+FM6000DMA_KO="$EROOT/asic/fm6000/kmod/fm6000dma.ko"
+[ -f "$FM6000DMA_KO" ] && { mkdir -p "$R/lib/modules/$KREL/extra"; cp "$FM6000DMA_KO" "$R/lib/modules/$KREL/extra/"; }
 [ -d "$R/lib/modules/$KREL" ] && depmod -b "$R" "$KREL" 2>/dev/null || true
+
+# 2b. payload: test binaries (kexec-reboot, reset tester, scd reg, fm6000 bring-up)
+# + their glibc (busybox is static; these few tools are dynamic).
+PAY="$HERE/payload"
+if [ -d "$PAY" ]; then
+    mkdir -p "$R/usr/bin" "$R/lib64" "$R/lib/x86_64-linux-gnu"
+    for b in kexec resettool scdreg fm6000_bringup; do
+        [ -f "$PAY/$b" ] && { cp "$PAY/$b" "$R/usr/bin/"; chmod +x "$R/usr/bin/$b"; }
+    done
+    # bundle the dynamic loader + libc for the (non-static) tools
+    cp /lib64/ld-linux-x86-64.so.2 "$R/lib64/" 2>/dev/null || true
+    for L in /lib64/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6 /usr/lib64/libc.so.6; do
+        [ -f "$L" ] && cp "$L" "$R/lib64/" && cp "$L" "$R/lib/x86_64-linux-gnu/" && break
+    done
+fi
 
 # 3. platform assets: board scripts (+ HAL python for the later stage; harmless now).
 mkdir -p "$R/usr/lib/edgenos/platform"
+[ -d "$PAY" ] && cp "$PAY/"*.sh "$R/usr/lib/edgenos/platform/" 2>/dev/null || true   # to-eos.sh, fm6000-up.sh
 cp "$EROOT/platform/arista-7150s-52/services/"*.sh "$R/usr/lib/edgenos/platform/" 2>/dev/null || true
 cp "$EROOT/platform/arista-7150s-52/platform.py" "$R/usr/lib/edgenos/platform/" 2>/dev/null || true
 cp "$EROOT/core/platform/base.py"                "$R/usr/lib/edgenos/platform/" 2>/dev/null || true

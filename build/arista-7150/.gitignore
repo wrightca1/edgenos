@@ -10,3 +10,7 @@ m1/kbuild/
 m1/edgenos-m1.swi
 m1/edgenos-m1-initramfs.cpio.gz
 m1/edgenos-m1-rootfs.sqsh
+m1/payload/kexec
+m1/payload/resettool
+m1/payload/scdreg
+m1/payload/fm6000_bringup

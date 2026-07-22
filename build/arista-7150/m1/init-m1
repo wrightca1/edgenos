@@ -37,18 +37,29 @@ echo "  i2c adapters:"; ls /sys/class/i2c-dev 2>/dev/null | sed 's/^/    /'
 echo "  hwmon:";        for h in /sys/class/hwmon/hwmon*; do [ -e "$h/name" ] && echo "    $(basename "$h") $(cat "$h/name")"; done
 echo "  xcvr cages:";  ls -d /sys/bus/platform/devices/scd-xcvr*/sfp* 2>/dev/null | sed 's/^/    /'
 
-# --- mgmt NIC diagnostic (tg3 RX / RGMII-PHY fix verification) ---
+# --- mgmt NIC diagnostic (tg3 RX / RGMII-PHY fix) ---
 echo "--- mgmt NIC (eth0) ---"
 if [ -d /sys/class/net/eth0 ]; then
     ip link set eth0 up 2>/dev/null
-    echo "    PHY driver: $(readlink -f /sys/class/net/eth0/phydev/driver 2>/dev/null | sed 's#.*/##')"
-    echo "    (should read a Broadcom driver, NOT 'Generic PHY')"
+    echo "    PHY: $(readlink -f /sys/class/net/eth0/phydev/driver 2>/dev/null | sed 's#.*/##') (want Broadcom, not Generic)"
+    echo "    dma_mask: $(dmesg | sed -n 's/.*dma_mask\[\(.*\)\]/\1/p' | tail -1)"
 else
     echo "    eth0 absent (tg3 bind failed)"
 fi
 
+# --- reboot staging diagnostic (answers the netboot question) ---
+echo "--- reboot: kexec pre-staged by Aboot? ---"
+echo "    /sys/kernel/kexec_loaded = $(cat /sys/kernel/kexec_loaded 2>/dev/null) (1 = Aboot staged one; 0 = we must stage)"
+
 echo
-echo "EdgeNOS M1 shell (sysfs HAL). Net test: 'ip addr add 10.1.1.78/24 dev eth0; ping 10.1.1.30',"
-echo "then 'cat /sys/class/net/eth0/statistics/rx_packets rx_errors' (RX should climb, errors flat)."
-echo "LED: 'echo 1 > /sys/class/leds/status1/brightness'. Return to EOS: 'reboot -f'."
+echo "=================================================================="
+echo "  COMPREHENSIVE TEST MENU (one boot):"
+echo "  1) mgmt net : ip addr add 10.1.1.78/24 dev eth0; ping 10.1.1.30"
+echo "                cat /sys/class/net/eth0/statistics/rx_packets rx_errors"
+echo "  2) SCD LED  : echo 1 > /sys/class/leds/status1/brightness   (declare via scd-setup.sh)"
+echo "  3) M2 fm6000: sh /usr/lib/edgenos/platform/fm6000-up.sh"
+echo "  4) reboot   : sh /usr/lib/edgenos/platform/to-eos.sh   (kexec back to EOS)"
+echo "     hw reset : resettool kbd | cf9 | cf9cold   (try each; may hang)"
+echo "  Do the network + M2 + LED tests BEFORE reboot (reboot ends the session)."
+echo "=================================================================="
 exec setsid cttyhack /bin/busybox sh
