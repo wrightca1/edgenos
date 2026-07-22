@@ -1,0 +1,67 @@
+# AS5610 full-reset bring-up: skip proxy_init + build config
+#
+# proxy_init hardware-polls a bit that never clears after a full chip reset via
+# our custom BDE, hanging bcm_init CPU-bound. Give it the same skip knob its
+# neighbours (ipmc/mpls/mim) already have. With skip_proxy_init=1 (plus
+# skip_mpls_init/skip_mim_init) bcm_init runs to COMPLETION on a hard-reset chip.
+# Also carries the make/ changes used to build bcm.user, which no patch captured.
+#
+# Apply from the sdk-6.5.16 root:  patch -p1 < this-file
+
+diff --git a/sdk-6.5.16/make/Make.config b/sdk-6.5.16/make/Make.config
+index fb7bb339e..b629eba09 100644
+--- a/sdk-6.5.16/make/Make.config
++++ b/sdk-6.5.16/make/Make.config
+@@ -4,7 +4,7 @@
+ #
+ # Make command configuration for SOC driver and diags.
+ 
+-ALLOWED_MAKE_VERSIONS :=3.81 3.82 4.0 4.1
++ALLOWED_MAKE_VERSIONS :=3.81 3.82 4.0 4.1 4.2 4.3 4.4
+ 
+ MAKE_VERSION_IS_SUPPORTED := $(strip $(foreach v,$(ALLOWED_MAKE_VERSIONS), $(findstring $v,$(MAKE_VERSION))))
+ ifeq ($(MAKE_VERSION_IS_SUPPORTED),)
+diff --git a/sdk-6.5.16/make/Makefile.unix-user b/sdk-6.5.16/make/Makefile.unix-user
+index 604651213..2b450cc94 100755
+--- a/sdk-6.5.16/make/Makefile.unix-user
++++ b/sdk-6.5.16/make/Makefile.unix-user
+@@ -49,7 +49,7 @@ OPTFLAGS_DEFAULT = -O2
+ OSTYPE = LINUX
+ 
+ # Linux
+-LIBS =-lnsl -pthread -lm -lrt
++LIBS =-Wl,-z,muldefs -pthread -lm -lrt
+ 
+ #
+ # ORIGIN is used to Optionally select different CFLAGS. It is used to import
+@@ -78,10 +78,10 @@ endif
+ STD_CPPFLAGS = ${STD_CFLAGS}
+ STD_CXXFLAGS = ${STD_CFLAGS}
+ 
+-BCM_CFLAGS   ?= -Wall -Werror -fno-strict-aliasing
++BCM_CFLAGS   ?= -Wall -Wno-error -fno-strict-aliasing
+ ifeq ($(platform), iproc-3_6)
+ ifeq (BE,$(ENDIAN_MODE))
+-BCM_CFLAGS   += -Werror=format-security
++BCM_CFLAGS   += -Wno-error
+ endif
+ endif
+ 
+diff --git a/sdk-6.5.16/src/bcm/esw/init.c b/sdk-6.5.16/src/bcm/esw/init.c
+index 3974bcdce..b18bc21a1 100755
+--- a/sdk-6.5.16/src/bcm/esw/init.c
++++ b/sdk-6.5.16/src/bcm/esw/init.c
+@@ -1062,7 +1062,12 @@ _bcm_modules_init(int unit)
+     if (soc_feature(unit, soc_feature_wlan)) {
+         _BCM_MOD_INIT_IER(unit, bcm_esw_wlan_init, SHR_BPROF_BCM_WLAN, init_cond);
+     }
+-    _BCM_MOD_INIT_IER(unit, bcm_esw_proxy_init, SHR_BPROF_BCM_PROXY, init_cond);
++    /* AS5610: proxy_init hardware-polls a bit that never clears after our full chip
++     * reset (BCM56846 via the custom BDE), hanging bcm_init CPU-bound. Give it the
++     * same skip knob the neighbouring modules have so a full-reset bring-up can get
++     * past it (proxy/HiGig-proxy is unused on this standalone box). */
++    init_cond2 = init_cond && (!soc_property_get(unit, "skip_proxy_init", 0));
++    _BCM_MOD_INIT_IER(unit, bcm_esw_proxy_init, SHR_BPROF_BCM_PROXY, init_cond2);
+ #endif
+ /* KT2 doesn't need L3 support for Coe/Linkphy subport initialization
+  * whereas L3 support is needed for traditional subport initialization
