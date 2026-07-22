@@ -179,10 +179,9 @@ static int program(void)
 	if (wr(241, v & ~0x80) < 0) goto ioerr;		/* restart LoL */
 	msleep(25);
 
-	if (!check_los(0x15)) {				/* PLL locked + calibrated? */
-		fprintf(stderr, "  ERROR: PLL not locked (reg218 & 0x15 set after 25ms)\n");
-		return 2;
-	}
+	if (!check_los(0x15))				/* PLL locked + calibrated? */
+		fprintf(stderr, "  WARN: PLL-lock status (reg218 & 0x15) still set after 25ms; "
+				"continuing to enable outputs (ignoreLos, matches EOS)\n");
 
 	/* freqOvrd: copy FCAL result (235/236/237) into PLL config (45/46/47) */
 	if ((lo = rd(235)) < 0 || wr(45, lo) < 0) goto ioerr;
@@ -274,14 +273,17 @@ int main(int argc, char **argv)
 		printf("%s\n", found ? "" : " (none)");
 		close(g_fd); return 0;
 	}
-	if (g_probe) {			/* read-only: identify device at addr, no writes */
-		int r0 = rd(0), r2 = rd(2), r27 = rd(27), r255 = rd(255);
+	if (g_probe) {			/* read-only: identify device + status, no writes */
+		int r0 = rd(0), r6 = rd(6), r218 = rd(218), r255 = rd(255);
 		if (r0 < 0) {
 			printf("si5338: %s addr 0x%02x -> NO ACK\n", dev, addr);
 			close(g_fd); return 1;
 		}
-		printf("si5338: %s addr 0x%02x ACK  reg0=0x%02x reg2=0x%02x reg27=0x%02x reg255(page)=0x%02x\n",
-		       dev, addr, r0, r2, r27, r255);
+		/* reg6 bits: 0=SYS_CAL 2=LOS_CLKIN 3=LOS_FDBK 4=PLL_LOL ; reg218 alarms */
+		printf("si5338: %s addr 0x%02x ACK  reg0=0x%02x reg6(status)=0x%02x reg218(alarm)=0x%02x page=0x%02x\n",
+		       dev, addr, r0, r6, r218, r255);
+		printf("        reg6: SYS_CAL=%d LOS_CLKIN=%d LOS_FDBK=%d PLL_LOL=%d\n",
+		       r6 & 1, !!(r6 & 4), !!(r6 & 8), !!(r6 & 0x10));
 		close(g_fd); return 0;
 	}
 	printf("si5338: programming addr 0x%02x on %s ...\n", addr, dev);

@@ -1,28 +1,33 @@
 #!/bin/sh
-# fm6000-up.sh - M2 FM6000 bring-up: program the Si5338 refclk, release the SCD
-# reset, enumerate the FM6000, load the clean-room DMA kmod, run the diagnostic.
+# fm6000-up.sh - M2 FM6000 bring-up (VERIFIED live 2026-07 up to clock-lock).
 #
-# Sequence (mined from EOS NorCal/Si5338 — see notes/analysis/phase18):
-#   1. SCD SMBus master -> /dev/i2c-N               (new_smbus_master on scd new_object)
-#   2. Si5338 clock program (accel1/bus1, i2c 0x70) (si5338 <bus> <regmap>)
-#   3. reset-release: SCD resetGpo 0x4000 bits 1,2  (write 0x6 to clear-reg 0x4010)
-#   4. PCI rescan -> 02:00.0 appears
-#   5. fm6000dma.ko + fm6000_bringup                (BIST/microcode/SPICO diag)
+# CORRECT ORDER (critical): the SCD holds the FM6000 in reset at power-on
+# (0x4000=0x106). The FM6000 must come OUT of reset with its refclk ALREADY
+# present, so program the Si5338 FIRST, then release the reset. If you release
+# the reset before the clock, the FM6000 is stuck out-of-reset-without-clock and
+# software CANNOT re-assert the reset (the reset bits latch at power-on; writing
+# 0x4000 does not set them, and a PCIe secondary-bus-reset does not recover it) -
+# only a board power-cycle re-resets it. So run this on a FRESH boot before
+# anything releases 0x4000 bits 1,2.
 #
-# WITHOUT the Si5338 refclk the FM6000 PCIe link never trains and 02:00.0 never
-# enumerates (confirmed live, phase17: reset-release alone left bus 2 empty).
-# Proprietary payloads (the .si5338 regmap, FM6000 microcode) are NOT bundled —
-# stage them on-box under /usr/share/firmware/. Exploratory: bring-up has
-# TODO(live-trace) stubs; the point is to see how far it gets + capture values.
+# Sequence (all live-verified except the final enumerate, gated by the above):
+#   1. SCD SMBus master for accel#1 @ 0x8080  (base 0x8000 + accelId*0x80; EOS
+#      Si5338 uses accelId=1 -> 0x8080). Si5338 sits on that master's busId=1.
+#   2. raven "Quartzy clock" GPIO-enable: SB700/Sb820 AcpiMmio @ 0xFED80000
+#      (== 00:14.0 resource5), write +0xdbf=1 and GPIO191 (+0x1bf)=0x40. Without
+#      it the Si5338 PLL will not lock. (EOS Si5338.configure raven path.)
+#   3. program the Si5338 (i2c 0x70) with Rosa-Quartzy map (si5338, ignoreLos like
+#      EOS). Confirm lock: si5338 <bus> -p -> reg6 PLL_LOL=0, LOS_CLKIN=0.
+#   4. release FM6000 reset: scdreg 0x4010 0x6  (0x106 -> 0x100).
+#   5. PCI rescan -> 02:00.0 appears -> fm6000dma.ko + fm6000_bringup.
 # SPDX-License-Identifier: GPL-2.0-or-later
 set -u
 
-# --- tunables (override via env) --------------------------------------------
-SMBUS_BASE="${SMBUS_BASE:-0x6000}"    # SCD accel block base (TODO(probe): phase17 saw an
-SMBUS_ACCEL="${SMBUS_ACCEL:-1}"       #   SMBus-shaped block ~0x6000; EOS uses accelId=1)
+SMBUS_BASE="${SMBUS_BASE:-0x8080}"     # accel#1 (Si5338's) = 0x8000 + 1*0x80
+SMBUS_ID="${SMBUS_ID:-1}"
 SMBUS_BUSES="${SMBUS_BUSES:-8}"
 SI5338_ADDR="${SI5338_ADDR:-0x70}"
-# regmap: staged on-box (board data, not vendored). First match wins.
+ACPIMMIO="${ACPIMMIO:-0xFED80000}"     # SB700/Sb820 AcpiMmio (00:14.0 resource5)
 REGMAP="${REGMAP:-}"
 for c in /usr/share/firmware/Rosa-Quartzy-0101.si5338 \
          /usr/share/firmware/fm6000/Rosa-Quartzy-0101.si5338 \
@@ -31,89 +36,66 @@ for c in /usr/share/firmware/Rosa-Quartzy-0101.si5338 \
 done
 
 echo "=================================================================="
-echo "  M2 FM6000 bring-up (Si5338 clock -> reset-release -> enumerate)"
+echo "  M2 FM6000 bring-up (clock FIRST, then reset-release)"
 echo "=================================================================="
-
-find_no() {   # locate the scd new_object sysfs
-	for d in /sys/bus/pci/drivers/scd/0000:* /sys/devices/pci*/*/scd; do
-		[ -e "$d/new_object" ] && { echo "$d/new_object"; return 0; }
-	done
-	return 1
-}
-
-echo "--- SCD resetGpo (0x4000) before ---"
+echo "--- SCD resetGpo 0x4000 (expect 0x106 = held in reset on a fresh boot) ---"
 scdreg 0x4000
 
-echo "--- FM6000 on the bus before? ---"
-if ls /sys/bus/pci/devices/0000:02:00.0 >/dev/null 2>&1; then
-	echo "  02:00.0 ALREADY present (skip to bring-up)"
-else
-	echo "  02:00.0 absent (held in reset / no refclk)"
-fi
-
-# --- 1. SCD SMBus master -> /dev/i2c-N --------------------------------------
-echo "--- creating SCD SMBus master (accel=$SMBUS_ACCEL base=$SMBUS_BASE) ---"
-NO=$(find_no) || echo "  WARN: scd new_object not found (scd+scd-hwmon loaded?)"
-if [ -n "${NO:-}" ]; then
-	echo "smbus_master $SMBUS_BASE $SMBUS_ACCEL $SMBUS_BUSES" > "$NO" 2>/dev/null \
-		&& echo "  registered smbus_master" \
-		|| echo "  WARN: smbus_master register failed (base/accel wrong? TODO(probe))"
+# --- 1. SCD SMBus master (accel#1) ------------------------------------------
+NO=""
+for d in /sys/bus/pci/drivers/scd/0000:*/new_object; do [ -e "$d" ] && NO="$d"; done
+if [ -n "$NO" ]; then
+	echo "smbus_master $SMBUS_BASE $SMBUS_ID $SMBUS_BUSES" > "$NO" 2>/dev/null \
+		&& echo "smbus_master @$SMBUS_BASE registered" || echo "WARN: smbus_master register failed"
 	sleep 1
 fi
-echo "  /dev/i2c adapters now:"; ls /dev/i2c-* 2>/dev/null || echo "    (none — need i2c-dev + scd-smbus)"
 
-# --- 2. Si5338 clock program ------------------------------------------------
-# Find the bus that has the Si5338 at 0x70. Prefer env SI5338_BUS; else probe.
-prog_clock() {
-	[ -z "$REGMAP" ] && { echo "  no .si5338 regmap staged — skip clock (stage under /usr/share/firmware/)"; return 1; }
-	if [ -n "${SI5338_BUS:-}" ]; then
-		echo "  programming Si5338 on i2c-$SI5338_BUS from $REGMAP"
-		si5338 "$SI5338_BUS" "$REGMAP" -a "$SI5338_ADDR"; return $?
-	fi
-	# probe each adapter for an ACK at SI5338_ADDR (i2cdetect if present)
-	for b in $(ls /dev/i2c-* 2>/dev/null | sed 's#.*/i2c-##' | sort -n); do
-		if command -v i2cdetect >/dev/null 2>&1; then
-			i2cdetect -y "$b" 2>/dev/null | grep -qiE " 70 " || continue
-		fi
-		echo "  trying Si5338 on i2c-$b ..."
-		si5338 "$b" "$REGMAP" -a "$SI5338_ADDR" && return 0
-	done
-	echo "  WARN: could not program Si5338 on any bus (set SI5338_BUS=N to force)"
-	return 1
-}
-echo "--- programming Si5338 refclk ---"
-prog_clock || echo "  (continuing — if the box kept EOS's clock programming, refclk may already be live)"
+# --- 2. raven Quartzy GPIO-enable (SB700 AcpiMmio) --------------------------
+if command -v devmem >/dev/null 2>&1; then
+	echo "--- GPIO-enable Quartzy clock via AcpiMmio $ACPIMMIO ---"
+	sig=$(devmem $ACPIMMIO 32 2>/dev/null)
+	echo "  AcpiMmio sig (expect 0x43851002 = Sb820): $sig"
+	devmem $(printf '0x%X' $(( $ACPIMMIO + 0xdbf ))) 8 0x01
+	devmem $(printf '0x%X' $(( $ACPIMMIO + 0x1bf ))) 8 0x40
+	echo "  GPIO191 now: $(devmem $(printf '0x%X' $(( $ACPIMMIO + 0x1bf ))) 8 2>/dev/null)"
+else
+	echo "WARN: no devmem - cannot enable Quartzy clock; Si5338 PLL will not lock"
+fi
 
-# --- 3. reset-release: SCD resetGpo 0x4000 bits 1,2 (write 0x6 -> 0x4010) ----
-echo "--- releasing FM6000 reset (clear bits 1,2 via 0x4010 <= 0x6) ---"
-# phase17 live: ours read 0x106, EOS 0x100 -> bits 1,2 = the FM6000 reset.
-# ResetGpo: set @+0x00 asserts, clear @+0x10 deasserts (write the bits to clear).
-scdreg 0x4000
+# --- 3. program + verify Si5338 ---------------------------------------------
+BUS=""
+for b in $(ls /dev/i2c-* 2>/dev/null | sed 's#.*/i2c-##' | sort -n); do
+	si5338 "$b" -p -a "$SI5338_ADDR" 2>/dev/null | grep -q ' ACK ' && { BUS="$b"; break; }
+done
+if [ -z "$BUS" ]; then
+	echo "ERROR: no Si5338 (0x$SI5338_ADDR) found on any i2c bus - check smbus_master base"
+	exit 1
+fi
+echo "--- Si5338 found on i2c-$BUS; programming Rosa-Quartzy map ---"
+[ -n "$REGMAP" ] || { echo "ERROR: no .si5338 regmap staged (/usr/share/firmware/)"; exit 1; }
+si5338 "$BUS" "$REGMAP" -a "$SI5338_ADDR"
+echo "--- clock status (want PLL_LOL=0 LOS_CLKIN=0) ---"
+si5338 "$BUS" -p -a "$SI5338_ADDR"
+
+# --- 4. release FM6000 reset (AFTER clock is up) ----------------------------
+echo "--- releasing FM6000 reset (0x4010 <= 0x6) ---"
 scdreg 0x4010 0x00000006
 sleep 1
-echo "  0x4000 after:"; scdreg 0x4000
+echo "  0x4000 now: $(scdreg 0x4000 | grep -o '0x[0-9a-f]*$')  (expect 0x100)"
 
-# --- 4. PCI rescan ----------------------------------------------------------
+# --- 5. enumerate -----------------------------------------------------------
 echo "--- PCI rescan ---"
 echo 1 > /sys/bus/pci/rescan 2>/dev/null
-sleep 2
+sleep 3
 if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ]; then
-	echo "  FM6000 ENUMERATED: $(cat /sys/bus/pci/devices/0000:02:00.0/vendor):$(cat /sys/bus/pci/devices/0000:02:00.0/device)"
+	echo "*** FM6000 ENUMERATED: $(cat /sys/bus/pci/devices/0000:02:00.0/vendor):$(cat /sys/bus/pci/devices/0000:02:00.0/device) ***"
 else
-	echo "  FM6000 still absent after rescan."
-	echo "    If the clock didn't program, refclk is missing -> link won't train."
-	echo "    Retry other reset bits if needed: scdreg 0x4010 0x2 ; scdreg 0x4010 0x4"
-	echo "  (M2 bring-up needs 02:00.0; stopping here.)"
+	echo "FM6000 still absent. If the reset was released earlier this boot, the FM6000"
+	echo "is stuck (needs a power-cycle to re-reset). Reboot and run this FIRST."
 	exit 0
 fi
 
-# --- 5. DMA kmod + bring-up diagnostic --------------------------------------
-echo "--- load fm6000dma.ko (clean-room DMA/MSI backing) ---"
+echo "--- fm6000dma.ko + fm6000_bringup ---"
 modprobe fm6000dma 2>/dev/null || insmod /lib/modules/*/extra/fm6000dma.ko 2>/dev/null
-ls -l /dev/fm6000dma 2>/dev/null && echo "  /dev/fm6000dma up" || echo "  /dev/fm6000dma absent (kmod bind failed)"
-
-echo "--- run fm6000_bringup (BIST/microcode/SPICO; surfaces live-trace values) ---"
-echo "  NOTE: parser/FFU + SPICO microcode blobs are NOT bundled (proprietary);"
-echo "  stage them at /usr/share/firmware/fm6000/ from the box to go past ucode load."
 EDGENOS_FM6000_SLOT=0000:02:00.0 fm6000_bringup 0000:02:00.0 2>&1 | head -40
-echo "=== M2 test done ==="
+echo "=== M2 bring-up done ==="
