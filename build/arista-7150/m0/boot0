@@ -9,8 +9,10 @@ if [ -d "${swipath}" ]; then
 else
    unzip -oq "${swipath}" "${kernel}" "initrd-${arch}" -d /tmp
 fi
-# reboot=p (PCI reset) is REQUIRED on the AMD RS780 — without it `reboot` HANGS
-# the box instead of resetting (EOS uses reboot=p). panic=10 auto-reboots on panic.
-echo "console=ttyS0,9600 earlyprintk=serial,ttyS0,9600 rdinit=/init panic=10 reboot=p" > /tmp/append
+# REBOOT: reboot=p (CF9 PCI reset, what EOS uses) HANGS this box from our kernel —
+# the box freezes at "sysrq: Resetting" (machine reset never fires). reboot=t
+# (triple fault) forces a CPU-level reset the chipset always honors. panic=10
+# auto-reboots on panic. (Live-diagnosed M1 v2, phase15/16.)
+echo "console=ttyS0,9600 earlyprintk=serial,ttyS0,9600 rdinit=/init panic=10 reboot=t" > /tmp/append
 kexec --load --initrd="/tmp/initrd-${arch}" --append="$(cat /tmp/append)" "/tmp/${kernel}"
 kexec --exec
