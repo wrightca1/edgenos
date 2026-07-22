@@ -60,8 +60,9 @@ if [ -d "${swipath}" ]; then
 else
    unzip -oq "${swipath}" "${kernel}" "initrd-${arch}" -d /tmp
 fi
-# reboot=t (triple fault) — reboot=p/CF9 hangs this box's reset from our kernel.
-echo "console=ttyS0,9600 earlyprintk=serial,ttyS0,9600 rdinit=/init panic=10 reboot=t" > /tmp/append
+# nosmp reboot=p,force — the reboot hang is the post-kexec SMP state, not the reset
+# method; single-core + skip-teardown lets the CF9 reset (EOS's method) fire.
+echo "console=ttyS0,9600 earlyprintk=serial,ttyS0,9600 rdinit=/init panic=10 nosmp reboot=p,force" > /tmp/append
 kexec --load --initrd="/tmp/initrd-${arch}" --append="$(cat /tmp/append)" "/tmp/${kernel}"
 kexec --exec
 EOF

@@ -7,10 +7,9 @@ mount -t proc     none /proc 2>/dev/null
 mount -t sysfs    none /sys  2>/dev/null
 mount -t devtmpfs none /dev  2>/dev/null
 
-# Enable ALL sysrq so `echo b > /proc/sysrq-trigger` can reboot: it does an
-# emergency_restart that BYPASSES device_shutdown (which hangs this box's reboot
-# from our minimal kernel — phase15) and goes straight to the reboot=p reset EOS
-# uses. Use that to return to EOS, NOT `reboot -f`.
+# Reboot: cmdline has `nosmp reboot=p,force`, so `reboot -f` now works (no APs to
+# hang stopping; ,force skips the teardown -> straight to CF9). sysrq stays on as
+# a backup. (Root-caused M1 v3: the hang was the SMP-state, not the reset method.)
 echo 1 > /proc/sys/kernel/sysrq 2>/dev/null
 
 echo; echo "=================================================================="
@@ -38,8 +37,18 @@ echo "  i2c adapters:"; ls /sys/class/i2c-dev 2>/dev/null | sed 's/^/    /'
 echo "  hwmon:";        for h in /sys/class/hwmon/hwmon*; do [ -e "$h/name" ] && echo "    $(basename "$h") $(cat "$h/name")"; done
 echo "  xcvr cages:";  ls -d /sys/bus/platform/devices/scd-xcvr*/sfp* 2>/dev/null | sed 's/^/    /'
 
+# --- mgmt NIC diagnostic (tg3 RX / RGMII-PHY fix verification) ---
+echo "--- mgmt NIC (eth0) ---"
+if [ -d /sys/class/net/eth0 ]; then
+    ip link set eth0 up 2>/dev/null
+    echo "    PHY driver: $(readlink -f /sys/class/net/eth0/phydev/driver 2>/dev/null | sed 's#.*/##')"
+    echo "    (should read a Broadcom driver, NOT 'Generic PHY')"
+else
+    echo "    eth0 absent (tg3 bind failed)"
+fi
+
 echo
-echo "EdgeNOS M1 shell (sysfs HAL). Try: 'i2cdetect -l', 'cat /sys/class/hwmon/*/name',"
-echo "'echo 1 > /sys/class/leds/status1/brightness'."
-echo "To return to EOS: 'echo b > /proc/sysrq-trigger' (NOT reboot -f — that hangs this box)."
+echo "EdgeNOS M1 shell (sysfs HAL). Net test: 'ip addr add 10.1.1.78/24 dev eth0; ping 10.1.1.30',"
+echo "then 'cat /sys/class/net/eth0/statistics/rx_packets rx_errors' (RX should climb, errors flat)."
+echo "LED: 'echo 1 > /sys/class/leds/status1/brightness'. Return to EOS: 'reboot -f'."
 exec setsid cttyhack /bin/busybox sh
