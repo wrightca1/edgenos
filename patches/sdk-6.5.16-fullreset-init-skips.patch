@@ -1,10 +1,24 @@
-# AS5610 full-reset bring-up: skip proxy_init + build config
+# AS5610 full-reset bring-up: skip the two init steps that need packet DMA
 #
-# proxy_init hardware-polls a bit that never clears after a full chip reset via
-# our custom BDE, hanging bcm_init CPU-bound. Give it the same skip knob its
-# neighbours (ipmc/mpls/mim) already have. With skip_proxy_init=1 (plus
-# skip_mpls_init/skip_mim_init) bcm_init runs to COMPLETION on a hard-reset chip.
-# Also carries the make/ changes used to build bcm.user, which no patch captured.
+# With soc_skip_reset=0 the SDK now completes a HARD-RESET bring-up of the
+# BCM56846 through our custom (register-access-only) BDE. Two steps had to be
+# made skippable, both because they require a working packet TX path we don't
+# have:
+#   skip_proxy_init    - proxy_init HW-polls a bit that never clears post-reset
+#   skip_wred_mem_war  - _bcm_td_wred_mem_war (trident/cosq.c) flushes the WRED
+#                        memories by bcm_pkt_alloc + per-port bcm_tx through
+#                        looped-back ports; the sync send never completes.
+# Neither is needed here (no HiGig proxy, no WRED/QoS).
+#
+# Verified config (config.bcm):
+#   soc_skip_reset=0 skip_mpls_init=1 skip_mim_init=1 skip_proxy_init=1
+#   skip_wred_mem_war=1 phy_null=1
+# => init soc AND init bcm both run to completion (all modules: qos, trill,
+#    niv, multicast, auth, time, failover...). This retires the M4 wall.
+#
+# STILL OPEN: phy_null=0 (real PHY/MIIM init) hangs inside init soc before any
+# output, so no links come up -> front-panel forwarding and the FP cannot be
+# exercised yet. That, and BDE packet DMA, are the remaining work.
 #
 # Apply from the sdk-6.5.16 root:  patch -p1 < this-file
 
@@ -48,7 +62,7 @@ index 604651213..2b450cc94 100755
  endif
  
 diff --git a/sdk-6.5.16/src/bcm/esw/init.c b/sdk-6.5.16/src/bcm/esw/init.c
-index 3974bcdce..b18bc21a1 100755
+index 3974bcdce..b2096906d 100755
 --- a/sdk-6.5.16/src/bcm/esw/init.c
 +++ b/sdk-6.5.16/src/bcm/esw/init.c
 @@ -1062,7 +1062,12 @@ _bcm_modules_init(int unit)
@@ -65,3 +79,23 @@ index 3974bcdce..b18bc21a1 100755
  #endif
  /* KT2 doesn't need L3 support for Coe/Linkphy subport initialization
   * whereas L3 support is needed for traditional subport initialization
+@@ -1383,9 +1388,17 @@ _bcm_esw_init(int unit)
+     BCM_IF_ERROR_RETURN(_bcm_modules_init(unit));
+ 
+ #ifdef BCM_TRIDENT_SUPPORT
+-    /* Workaround to initialize WRED memories to known state. */
++    /* Workaround to initialize WRED memories to known state.
++     *
++     * AS5610: this WAR flushes the WRED memories by TRANSMITTING packets through
++     * looped-back ports (see _bcm_td_wred_mem_war in trident/cosq.c: bcm_pkt_alloc
++     * + per-port bcm_tx). Our custom BDE is register-access only — it has no packet
++     * DMA — so the sync send never completes and bcm_init blocks here forever, at
++     * the very last step after every module has already initialised successfully.
++     * WRED is a congestion/QoS feature we don't use, so allow skipping it. */
+     if ((SOC_IS_TRIDENT(unit) || SOC_IS_TITAN(unit)) &&
+-        !SOC_WARM_BOOT(unit)) {
++        !SOC_WARM_BOOT(unit) &&
++        !soc_property_get(unit, "skip_wred_mem_war", 0)) {
+         BCM_IF_ERROR_RETURN(_bcm_td_wred_mem_war(unit));
+     }
+ #endif
