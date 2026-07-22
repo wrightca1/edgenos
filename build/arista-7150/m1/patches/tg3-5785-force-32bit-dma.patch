@@ -1,0 +1,20 @@
+# EdgeNOS: force 32-bit DMA mask for the BCM5785 on the Arista 7150.
+# The 7150 (AMD RS780, no usable IOMMU) breaks tg3 RX with a 64-bit DMA mask
+# (dual-address-cycle) — RCVLPC_IN_ERRORS climbs, rx_packets=0, TX/link fine.
+# EOS runs this NIC at 32-bit; match it. Apply to drivers/net/ethernet/broadcom/tg3.c
+# in tg3_init_one()'s DMA-mask selection. Live-diagnosed M1 v4/v5.
+--- a/drivers/net/ethernet/broadcom/tg3.c
++++ b/drivers/net/ethernet/broadcom/tg3.c
+@@ tg3_init_one DMA mask selection @@
+ 	} else if (tg3_flag(tp, 40BIT_DMA_BUG)) {
+ 		persist_dma_mask = dma_mask = DMA_BIT_MASK(40);
+ #ifdef CONFIG_HIGHMEM
+ 		dma_mask = DMA_BIT_MASK(64);
+ #endif
+-	} else
++	} else if (tg3_asic_rev(tp) == ASIC_REV_5785)
++		/* BCM5785 on Arista 7150 (AMD RS780, no IOMMU): 64-bit DMA
++		 * breaks RX. EOS runs 32-bit; match it. */
++		persist_dma_mask = dma_mask = DMA_BIT_MASK(32);
++	else
+ 		persist_dma_mask = dma_mask = DMA_BIT_MASK(64);
