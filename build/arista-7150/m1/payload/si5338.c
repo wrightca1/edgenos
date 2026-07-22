@@ -37,7 +37,7 @@
 
 /* --- SMBus byte-data primitives via I2C_SMBUS ioctl (no libi2c dependency) --- */
 static int g_fd = -1;
-static int g_dry = 0, g_verbose = 0;
+static int g_dry = 0, g_verbose = 0, g_probe = 0, g_scan = 0;
 
 static int smbus_xfer(uint8_t rw, uint8_t cmd, int size, union i2c_smbus_data *d)
 {
@@ -214,6 +214,10 @@ int main(int argc, char **argv)
 			addr = strtol(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "-n"))
 			g_dry = 1;
+		else if (!strcmp(argv[i], "-p"))
+			g_probe = 1;
+		else if (!strcmp(argv[i], "-s"))
+			g_scan = 1;
 		else if (!strcmp(argv[i], "-v"))
 			g_verbose = 1;
 		else if (!bus)
@@ -221,24 +225,27 @@ int main(int argc, char **argv)
 		else if (!map)
 			map = argv[i];
 	}
-	if (!bus || !map) {
+	if (!bus || (!map && !g_probe && !g_scan)) {
 		fprintf(stderr,
 			"usage: si5338 <i2c-bus> <regmap.si5338> [-a addr] [-n] [-v]\n"
+			"       si5338 <i2c-bus> -p [-a addr]   # read-only probe (no writes)\n"
 			"  <i2c-bus>  number N -> /dev/i2c-N (the SCD accel1/bus1 adapter)\n"
 			"  -a addr    slave address (default 0x70)\n"
 			"  -n         dry-run (parse only, no i2c)\n");
 		return 2;
 	}
 
-	if (parse_map(map) < 0)
-		return 1;
-	printf("si5338: parsed %d registers from %s\n", g_nregs, map);
-	if (g_nregs == 0) { fprintf(stderr, "no registers parsed\n"); return 1; }
+	if (!g_probe && !g_scan) {
+		if (parse_map(map) < 0)
+			return 1;
+		printf("si5338: parsed %d registers from %s\n", g_nregs, map);
+		if (g_nregs == 0) { fprintf(stderr, "no registers parsed\n"); return 1; }
 
-	if (g_dry) {
-		printf("si5338: dry-run (no i2c). Would program addr 0x%02x on %s.\n",
-		       addr, bus);
-		return program();		/* g_dry short-circuits all i2c */
+		if (g_dry) {
+			printf("si5338: dry-run (no i2c). Would program addr 0x%02x on %s.\n",
+			       addr, bus);
+			return program();	/* g_dry short-circuits all i2c */
+		}
 	}
 
 	snprintf(dev, sizeof dev, "/dev/i2c-%s", bus);
@@ -251,6 +258,31 @@ int main(int argc, char **argv)
 	if (ioctl(g_fd, I2C_SLAVE, addr) < 0) {
 		perror("I2C_SLAVE (busy? wrong bus?)");
 		close(g_fd); return 1;
+	}
+	if (g_scan) {			/* read-only i2cdetect: scan 0x03..0x77 for ACKs */
+		int a, found = 0;
+		union i2c_smbus_data d;
+		printf("si5338: scanning %s (0x03-0x77):", dev);
+		for (a = 0x03; a <= 0x77; a++) {
+			if (ioctl(g_fd, I2C_SLAVE, a) < 0)
+				continue;
+			if (smbus_xfer(I2C_SMBUS_READ, 0, I2C_SMBUS_BYTE_DATA, &d) >= 0) {
+				printf(" 0x%02x", a);
+				found++;
+			}
+		}
+		printf("%s\n", found ? "" : " (none)");
+		close(g_fd); return 0;
+	}
+	if (g_probe) {			/* read-only: identify device at addr, no writes */
+		int r0 = rd(0), r2 = rd(2), r27 = rd(27), r255 = rd(255);
+		if (r0 < 0) {
+			printf("si5338: %s addr 0x%02x -> NO ACK\n", dev, addr);
+			close(g_fd); return 1;
+		}
+		printf("si5338: %s addr 0x%02x ACK  reg0=0x%02x reg2=0x%02x reg27=0x%02x reg255(page)=0x%02x\n",
+		       dev, addr, r0, r2, r27, r255);
+		close(g_fd); return 0;
 	}
 	printf("si5338: programming addr 0x%02x on %s ...\n", addr, dev);
 	rc = program();
