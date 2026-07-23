@@ -27,7 +27,12 @@ int main(int argc, char **argv)
 	volatile uint32_t *r = (volatile uint32_t *)(bar + off);
 	if (argc >= 3) {
 		uint32_t v = (uint32_t)strtoul(argv[2], NULL, 0);
-		*r = v; printf("scd[0x%05lx] <= 0x%08x\n", off, v);
+		*r = v;
+		/* flush any write-combining buffer + post the MMIO write to the
+		 * device (munmap does NOT flush WC; only a fence/read-back does). */
+		__asm__ __volatile__("mfence" ::: "memory");
+		{ volatile uint32_t rb = *r; (void)rb; }
+		printf("scd[0x%05lx] <= 0x%08x\n", off, v);
 	} else {
 		printf("scd[0x%05lx] = 0x%08x\n", off, *r);
 	}
