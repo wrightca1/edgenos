@@ -3,6 +3,8 @@
  *   pcicfg <BDF> <off>          # read dword  (e.g. pcicfg 0000:00:04.0 0x68)
  *   pcicfg <BDF> <off> <val>    # write dword
  *   pcicfg <BDF> linkctl        # find PCIe cap, print Link Control offset+value+LinkDisable bit
+ *   pcicfg <BDF> link           # decode Link Cap/Ctl/Status incl. DLLLA (bit13) + speed/width
+ *   pcicfg <BDF> retrain        # set Link Control Retrain-Link (bit5) to kick LTSSM
  * Build like scdreg:  gcc -O2 -o pcicfg pcicfg.c
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -44,6 +46,41 @@ int main(int argc, char **argv) {
         uint16_t v = rw(fd, lc);
         printf("%s PCIe cap@0x%02x LinkControl@0x%02x = 0x%04x  LinkDisable(bit4)=%d\n",
                argv[1], cap, lc, v, (v >> 4) & 1);
+        close(fd); return 0;
+    }
+    if (!strcmp(argv[2], "link")) {
+        int fd = cfgopen(argv[1], 0);
+        if (fd < 0) { perror("open"); return 1; }
+        unsigned cap = find_pcie_cap(fd);
+        if (!cap) { fprintf(stderr, "no PCIe cap\n"); return 1; }
+        uint32_t lcap = rl(fd, cap + 0x0c);   /* Link Capabilities */
+        uint16_t lctl = rw(fd, cap + 0x10);   /* Link Control */
+        uint16_t lsta = rw(fd, cap + 0x12);   /* Link Status  */
+        int dllla   = (lsta >> 13) & 1;       /* Data Link Layer Link Active - THE decisive bit */
+        int lt      = (lsta >> 11) & 1;       /* Link Training */
+        int cspeed  =  lsta & 0xf;            /* current link speed (1=2.5 2=5 3=8 GT/s) */
+        int cwidth  = (lsta >> 4) & 0x3f;     /* negotiated width */
+        printf("%s PCIe cap@0x%02x\n", argv[1], cap);
+        printf("  LinkCap   @0x%02x = 0x%08x  maxSpeed=%u maxWidth=x%u\n",
+               cap + 0x0c, lcap, lcap & 0xf, (lcap >> 4) & 0x3f);
+        printf("  LinkCtrl  @0x%02x = 0x%04x    LinkDisable(b4)=%d Retrain(b5)=%d\n",
+               cap + 0x10, lctl, (lctl >> 4) & 1, (lctl >> 5) & 1);
+        printf("  LinkStat  @0x%02x = 0x%04x    DLLLA(b13)=%d LinkTraining(b11)=%d curSpeed=%d curWidth=x%d\n",
+               cap + 0x12, lsta, dllla, lt, cspeed, cwidth);
+        printf("  VERDICT: DLLLA=%d -> %s\n", dllla,
+               dllla ? "LINK UP (FM6000 driving PCIe; enum gap is PCI-resource: resize bridge window / pci=realloc)"
+                     : "LINK DOWN (FM6000 not driving PCIe; chip-boot problem, not enumeration)");
+        close(fd); return 0;
+    }
+    if (!strcmp(argv[2], "retrain")) {
+        int fd = cfgopen(argv[1], 1);
+        if (fd < 0) { perror("open"); return 1; }
+        unsigned cap = find_pcie_cap(fd);
+        if (!cap) { fprintf(stderr, "no PCIe cap\n"); return 1; }
+        unsigned lc = cap + 0x10;
+        uint16_t v = rw(fd, lc), nv = v | (1u << 5);   /* Retrain Link */
+        if (pwrite(fd, &nv, 2, lc) != 2) { perror("pwrite"); return 1; }
+        printf("%s LinkControl@0x%02x 0x%04x -> 0x%04x (Retrain bit5 set)\n", argv[1], lc, v, nv);
         close(fd); return 0;
     }
     unsigned long off = strtoul(argv[2], 0, 0);

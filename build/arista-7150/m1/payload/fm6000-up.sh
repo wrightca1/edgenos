@@ -87,11 +87,20 @@ echo "  0x4000 now: $(scdreg 0x4000 | grep -o '0x[0-9a-f]*$')  (expect 0x100)"
 echo "--- PCI rescan ---"
 echo 1 > /sys/bus/pci/rescan 2>/dev/null
 sleep 3
+# phase31: report DLLLA on the root port regardless of outcome (EOS enumerates via
+# the kernel `pcielw` driver on DLLLA=Link-Active; M1 has none, so we read it by hand).
+echo "--- root-port 00:04.0 link (DLLLA bit13 = is the FM6000 driving PCIe?) ---"
+pcicfg 0000:00:04.0 link 2>/dev/null
 if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ]; then
 	echo "*** FM6000 ENUMERATED: $(cat /sys/bus/pci/devices/0000:02:00.0/vendor):$(cat /sys/bus/pci/devices/0000:02:00.0/device) ***"
 else
-	echo "FM6000 still absent. If the reset was released earlier this boot, the FM6000"
-	echo "is stuck (needs a power-cycle to re-reset). Reboot and run this FIRST."
+	echo "FM6000 still absent - running DLLLA diagnosis (phase31) to say WHY:"
+	DIR=$(cd "$(dirname "$0")" && pwd)
+	sh "$DIR/dllla-check.sh" 2>/dev/null || dllla-check.sh 2>/dev/null
+	echo "  -> DLLLA=1: link is up, enum gap is PCI-resource. Try: dllla-check.sh fix"
+	echo "             (widen 00:04.0 window + rescan) or boot with 'pci=realloc pci=hpmemsize=32M'."
+	echo "  -> DLLLA=0: chip not driving PCIe. If reset was released earlier this boot the FM6000 is"
+	echo "             stuck (needs power-cycle); else it's a chip-boot problem (clock/voltage/reset)."
 	exit 0
 fi
 
