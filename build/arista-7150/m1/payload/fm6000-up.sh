@@ -98,26 +98,37 @@ si5338 "$BUS" -p -a "$SI5338_ADDR"
 # write loop1Vid (0x8F=1.2V to selects 1/2/3, 0x69=0.96V min to select 0) THEN
 # enable VID mode (gpuDvid 0xCE bit0=1); the regulator slews 1.057->1.2V.
 if [ "${FM6000_MARGIN:-1}" = "1" ]; then
-	echo "--- margin FM6000 core -> 1.2V (Chl822X VID; chip still in reset) ---"
-	echo "smbus_master 0x8000 0 8" > "$NO" 2>/dev/null; sleep 1   # register accel#0 (VRM)
-	VBUS=""
-	for a in /sys/class/i2c-dev/i2c-*; do n=$(cat "$a/name" 2>/dev/null)
-		case "$n" in *"master 0 bus 3") VBUS=$(basename "$a"|sed s/i2c-//);; esac
+	echo "--- margin FM6000 core -> 1.2V (UCD parked + Chl822X VID; chip in reset) ---"
+	echo "smbus_master 0x8000 0 8" > "$NO" 2>/dev/null; sleep 1   # register accel#0 (VRM+UCD)
+	CHLB=""; UCDB=""
+	for a in /sys/class/i2c-dev/i2c-*; do n=$(cat "$a/name" 2>/dev/null); b=$(basename "$a"|sed s/i2c-//)
+		case "$n" in *"master 0 bus 3") CHLB=$b;; *"master 0 bus 5") UCDB=$b;; esac
 	done
-	if [ -n "$VBUS" ]; then
-		echo "$VBUS 0x70 3 3 3 0" > "$(dirname "$NO")/smbus_tweaks" 2>/dev/null; sleep 1
-		echo "  VRM i2c-$VBUS VOUT before = $(i2cget -y $VBUS 0x70 0x8b w 2>/dev/null)  (0x0875=1.057V)"
-		echo "  gpuDvid before = $(i2cset -y $VBUS 0x70 0xD3 0xCE 2>/dev/null; i2cget -y $VBUS 0x70 0xD4 2>/dev/null) (expect 0x00=VID off)"
-		i2cset -y $VBUS 0x70 0xD5 0x69C6 w 2>/dev/null; sleep 0.2   # loop1Vid[0] = 0.96V (min/OT floor)
-		i2cset -y $VBUS 0x70 0xD5 0x8FC7 w 2>/dev/null; sleep 0.2   # loop1Vid[1] = 1.2V
-		i2cset -y $VBUS 0x70 0xD5 0x8FC8 w 2>/dev/null; sleep 0.2   # loop1Vid[2] = 1.2V
-		i2cset -y $VBUS 0x70 0xD5 0x8FC9 w 2>/dev/null; sleep 0.2   # loop1Vid[3] = 1.2V
-		echo "  loop1Vid set (0x8F nominal, 0x69 min); enabling VID mode..."
-		i2cset -y $VBUS 0x70 0xD5 0x01CE w 2>/dev/null; sleep 1     # gpuDvid startDvid=1 -> slew to 1.2V
-		echo "  core VOUT after  = $(i2cget -y $VBUS 0x70 0x8b w 2>/dev/null)  (target ~0x099A=1.2V)"
-		echo "  STATUS_WORD = $(i2cget -y $VBUS 0x70 0x79 w 2>/dev/null) (0x0000=clean)"
+	if [ -n "$CHLB" ] && [ -n "$UCDB" ]; then
+		echo "$CHLB 0x70 3 3 3 0" > "$(dirname "$NO")/smbus_tweaks" 2>/dev/null
+		echo "$UCDB 0x4e 3 3 3 0" > "$(dirname "$NO")/smbus_tweaks" 2>/dev/null; sleep 1
+		echo "  Chl822X=i2c-$CHLB UCD=i2c-$UCDB; core VOUT before=$(i2cget -y $CHLB 0x70 0x8b w 2>/dev/null) (0x0875=1.057V)"
+		# phase35/RE: the naive VID write trips the UCD90160 power-good -> board power-cycle.
+		# EOS parks the UCD Alta rails first (Chl822XConfigTool.py:528-536 disableUcdPowerRails):
+		# page8=rail9, page9=rail10, OPERATION(0x01)=0x40 (sequenced off) so the UCD stops
+		# enforcing power-good on VDD_ALTA during the VID change. Restore (0x80) after.
+		echo "  parking UCD Alta rails (OPERATION=0x40 pages 8,9)..."
+		i2cset -y $UCDB 0x4e 0x00 0x08 2>/dev/null; sleep 0.15; i2cset -y $UCDB 0x4e 0x01 0x40 2>/dev/null; sleep 0.15
+		i2cset -y $UCDB 0x4e 0x00 0x09 2>/dev/null; sleep 0.15; i2cset -y $UCDB 0x4e 0x01 0x40 2>/dev/null; sleep 0.6
+		# set Chl822X VID to 1.2V (EOS initialize() order: loop1Vid then enable gpuDvid)
+		i2cset -y $CHLB 0x70 0xD5 0x69C6 w 2>/dev/null; sleep 0.2   # loop1Vid[0]=0.96V min/OT
+		i2cset -y $CHLB 0x70 0xD5 0x8FC7 w 2>/dev/null; sleep 0.2   # loop1Vid[1]=1.2V
+		i2cset -y $CHLB 0x70 0xD5 0x8FC8 w 2>/dev/null; sleep 0.2   # loop1Vid[2]=1.2V
+		i2cset -y $CHLB 0x70 0xD5 0x8FC9 w 2>/dev/null; sleep 0.2   # loop1Vid[3]=1.2V
+		echo "  loop1Vid=0x8F set; enabling VID (gpuDvid)..."
+		i2cset -y $CHLB 0x70 0xD5 0x01CE w 2>/dev/null; sleep 0.6   # gpuDvid startDvid=1
+		# restore UCD Alta rails (OPERATION=0x80 on) -> UCD resumes at the new 1.2V setpoint
+		echo "  restoring UCD Alta rails (OPERATION=0x80)..."
+		i2cset -y $UCDB 0x4e 0x00 0x08 2>/dev/null; sleep 0.15; i2cset -y $UCDB 0x4e 0x01 0x80 2>/dev/null; sleep 0.15
+		i2cset -y $UCDB 0x4e 0x00 0x09 2>/dev/null; sleep 0.15; i2cset -y $UCDB 0x4e 0x01 0x80 2>/dev/null; sleep 0.6
+		echo "  core VOUT after = $(i2cget -y $CHLB 0x70 0x8b w 2>/dev/null) (target ~0x099A=1.2V)"
 	else
-		echo "  WARN: VRM bus (accel#0 'master 0 bus 3') not found - FM6000 stays at 1.057V (won't enumerate)"
+		echo "  WARN: Chl822X(bus3)/UCD(bus5) not both found (CHLB=$CHLB UCDB=$UCDB) - skip margin, FM6000 stays 1.057V"
 	fi
 fi
 
