@@ -16,8 +16,13 @@
 #   2. raven "Quartzy clock" GPIO-enable: SB700/Sb820 AcpiMmio @ 0xFED80000
 #      (== 00:14.0 resource5), write +0xdbf=1 and GPIO191 (+0x1bf)=0x40. Without
 #      it the Si5338 PLL will not lock. (EOS Si5338.configure raven path.)
-#   3. program the Si5338 (i2c 0x70) with Rosa-Quartzy map (si5338, ignoreLos like
+#   3. program the Si5338 (i2c 0x70) with the CORRECT map (si5338, ignoreLos like
 #      EOS). Confirm lock: si5338 <bus> -p -> reg6 PLL_LOL=0, LOS_CLKIN=0.
+#      *** MAP: our SID=SantaRosaClock -> EOS Si5338.py uses Cotati-Clock-0010
+#      (10MHz input), NOT Rosa-Quartzy-0101 (156.25MHz). phase35: the wrong Rosa
+#      map still "locks" (LOL=0) but leaves the switch-side domain UNCLOCKED
+#      (0x160=0, accel#0 dead) and the FM6000 without a valid refclk. Cotati wakes
+#      the domain (0x160=0x2a0000, accel#0=0x10002400) and lets the PCIe link train.
 #   4. release FM6000 reset: scdreg 0x4010 0x6  (0x106 -> 0x100).
 #   5. PCI rescan -> 02:00.0 appears -> fm6000dma.ko + fm6000_bringup.
 # SPDX-License-Identifier: GPL-2.0-or-later
@@ -28,12 +33,18 @@ SMBUS_ID="${SMBUS_ID:-1}"
 SMBUS_BUSES="${SMBUS_BUSES:-8}"
 SI5338_ADDR="${SI5338_ADDR:-0x70}"
 ACPIMMIO="${ACPIMMIO:-0xFED80000}"     # SB700/Sb820 AcpiMmio (00:14.0 resource5)
+# phase35: SantaRosaClock -> Cotati-Clock-0010 (correct). Rosa-Quartzy-0101 is the
+# WRONG map for this SKU (it's for SID "Rosa*Quartzy"); prefer Cotati, fall back only
+# if Cotati isn't staged. Override with REGMAP=... if a future SID needs Rosa.
 REGMAP="${REGMAP:-}"
-for c in /usr/share/firmware/Rosa-Quartzy-0101.si5338 \
-         /usr/share/firmware/fm6000/Rosa-Quartzy-0101.si5338 \
+for c in /usr/share/firmware/Cotati-Clock-0010.si5338 \
+         /usr/share/firmware/fm6000/Cotati-Clock-0010.si5338 \
+         /mnt/flash/Cotati-Clock-0010.si5338 \
+         /usr/share/firmware/Rosa-Quartzy-0101.si5338 \
          /mnt/flash/Rosa-Quartzy-0101.si5338; do
 	[ -z "$REGMAP" ] && [ -f "$c" ] && REGMAP="$c"
 done
+case "$REGMAP" in *Rosa-Quartzy*) echo "WARN: falling back to Rosa-Quartzy map - Cotati-Clock-0010 not staged (wrong clock tree for SantaRosaClock!)";; esac
 
 echo "=================================================================="
 echo "  M2 FM6000 bring-up (clock FIRST, then reset-release)"
