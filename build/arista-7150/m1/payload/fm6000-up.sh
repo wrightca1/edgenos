@@ -88,6 +88,39 @@ si5338 "$BUS" "$REGMAP" -a "$SI5338_ADDR"
 echo "--- clock status (want PLL_LOL=0 LOS_CLKIN=0) ---"
 si5338 "$BUS" -p -a "$SI5338_ADDR"
 
+# --- 3.5. margin FM6000 core VDD_ALTA 1.057V -> 1.2V (phase35, chip IN RESET) --
+# The FM6000 boots undervolted (Chl822X NVM default = 1.057V); at 1.057V the PCIe
+# link trains but never completes (DLLLA stays 0). EOS margins to AltaVdd=1.2V via
+# the Chl822X VID registers AT BOOT with the chip held in reset. Doing it on a live
+# (out-of-reset) rail power-cycles the board (phase35), so it MUST be here, before
+# the reset release. The Cotati clock above woke the switch-side domain, so accel#0
+# (the VRM) is reachable now. EOS-exact order (Chl822x.py:1729-1744 initialize()):
+# write loop1Vid (0x8F=1.2V to selects 1/2/3, 0x69=0.96V min to select 0) THEN
+# enable VID mode (gpuDvid 0xCE bit0=1); the regulator slews 1.057->1.2V.
+if [ "${FM6000_MARGIN:-1}" = "1" ]; then
+	echo "--- margin FM6000 core -> 1.2V (Chl822X VID; chip still in reset) ---"
+	echo "smbus_master 0x8000 0 8" > "$NO" 2>/dev/null; sleep 1   # register accel#0 (VRM)
+	VBUS=""
+	for a in /sys/class/i2c-dev/i2c-*; do n=$(cat "$a/name" 2>/dev/null)
+		case "$n" in *"master 0 bus 3") VBUS=$(basename "$a"|sed s/i2c-//);; esac
+	done
+	if [ -n "$VBUS" ]; then
+		echo "$VBUS 0x70 3 3 3 0" > "$(dirname "$NO")/smbus_tweaks" 2>/dev/null; sleep 1
+		echo "  VRM i2c-$VBUS VOUT before = $(i2cget -y $VBUS 0x70 0x8b w 2>/dev/null)  (0x0875=1.057V)"
+		echo "  gpuDvid before = $(i2cset -y $VBUS 0x70 0xD3 0xCE 2>/dev/null; i2cget -y $VBUS 0x70 0xD4 2>/dev/null) (expect 0x00=VID off)"
+		i2cset -y $VBUS 0x70 0xD5 0x69C6 w 2>/dev/null; sleep 0.2   # loop1Vid[0] = 0.96V (min/OT floor)
+		i2cset -y $VBUS 0x70 0xD5 0x8FC7 w 2>/dev/null; sleep 0.2   # loop1Vid[1] = 1.2V
+		i2cset -y $VBUS 0x70 0xD5 0x8FC8 w 2>/dev/null; sleep 0.2   # loop1Vid[2] = 1.2V
+		i2cset -y $VBUS 0x70 0xD5 0x8FC9 w 2>/dev/null; sleep 0.2   # loop1Vid[3] = 1.2V
+		echo "  loop1Vid set (0x8F nominal, 0x69 min); enabling VID mode..."
+		i2cset -y $VBUS 0x70 0xD5 0x01CE w 2>/dev/null; sleep 1     # gpuDvid startDvid=1 -> slew to 1.2V
+		echo "  core VOUT after  = $(i2cget -y $VBUS 0x70 0x8b w 2>/dev/null)  (target ~0x099A=1.2V)"
+		echo "  STATUS_WORD = $(i2cget -y $VBUS 0x70 0x79 w 2>/dev/null) (0x0000=clean)"
+	else
+		echo "  WARN: VRM bus (accel#0 'master 0 bus 3') not found - FM6000 stays at 1.057V (won't enumerate)"
+	fi
+fi
+
 # --- 4. release FM6000 reset (AFTER clock is up) ----------------------------
 echo "--- releasing FM6000 reset (0x4010 <= 0x6) ---"
 scdreg 0x4010 0x00000006
