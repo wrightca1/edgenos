@@ -143,30 +143,22 @@ scdreg 0x4010 0x00000006
 sleep 1
 echo "  0x4000 now: $(scdreg 0x4000 | grep -o '0x[0-9a-f]*$')  (expect 0x100)"
 
-# --- 5. enumerate + LINK RE-ESTABLISHMENT experiment (phase36) --------------
-# REFRAME (phase35/36): undervolt was a detour - EOS runs VDD_ALTA at the same
-# 1.057V (skips adjustRosaVoltageRails for SantaRosa) and still enumerates. The
-# real blocker: with the Cotati clock, M1's link TRAINS (LinkTraining=1) but never
-# COMPLETES (DLLLA=0), while EOS completes it (root port DLActive+, 5GT/s x4, same
-# LnkCap/LnkCtl2/CommClk). EOS's `pcielw` re-establishes the link (fast_reset =
-# bridge-control write); our plain retrain doesn't. Try each trick, report DLLLA:
-D() { pcicfg 0000:00:04.0 link 2>/dev/null | grep -o 'DLLLA(b13)=[01] LinkTraining(b11)=[01] curSpeed=[0-9] curWidth=x[0-9]*'; }
-echo "--- PCI rescan ---"
-echo 1 > /sys/bus/pci/rescan 2>/dev/null; sleep 2
-cm "EXP0 baseline    $(D)"
-pcicfg 0000:00:04.0 retrain 2>/dev/null >/dev/null; sleep 1
-cm "EXP1 retrain     $(D)"
-pcicfg 0000:00:04.0 gen1 2>/dev/null >/dev/null; sleep 1
-cm "EXP2 gen1+retrain $(D)"
-# EXP3/4 (secondary-bus/hot reset) REMOVED - phase36 live: it REBOOTS the board on this FM6000
-# (M1 booted, ran EXP, box cold-reset back to EOS). The FM6000/root-port PCIe reset is coupled to
-# a board reset here, so SBR is NOT a stay-up enumeration path. Test in isolation only if needed.
-cm "EXPDONE retrain+gen1 done (if DLLLA still 0, root-port kicks are insufficient)"
-sleep 5; cm "EXPDONE2 (repeat) $(D)"
+# --- 5. FM6000 PCIe bring-up (phase38 - THE sequence that ENUMERATES it) -----
+# The SPI-ROM boot loads config + locks the main PLL but stops short of normal
+# operating mode + PCIe SerDes setup. fm6000-pcie-init.sh replicates EOS's
+# fmPlatformSetupPCIe over the FM6000 mgmt I2C slave (needs accel#0 = "master 0
+# bus 2"). Live-proven: 02:00.0 = 8086:155b, DLLLA=1, Gen1 x4, BAR0 32M @ e2000000.
+cm "sec5: register accel#0 (FM6000 mgmt I2C slave bus)"
+NO2=""; for d in /sys/bus/pci/drivers/scd/0000:*/new_object; do [ -e "$d" ] && NO2="$d"; done
+echo "smbus_master 0x8000 0 8" > "$NO2" 2>/dev/null; sleep 1
+cm "sec5: starting fm6000-pcie-init (watch for where it stops if it reboots)"
+DIR=$(cd "$(dirname "$0")" && pwd)
+sh "$DIR/fm6000-pcie-init.sh" > /dev/console 2>&1
+cm "sec5: fm6000-pcie-init returned (did NOT reboot)"
 echo "--- root-port 00:04.0 link (final) ---"
 pcicfg 0000:00:04.0 link 2>/dev/null
 if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ]; then
-	echo "*** FM6000 ENUMERATED: $(cat /sys/bus/pci/devices/0000:02:00.0/vendor):$(cat /sys/bus/pci/devices/0000:02:00.0/device) ***"
+	cm "*** FM6000 ENUMERATED: $(cat /sys/bus/pci/devices/0000:02:00.0/vendor):$(cat /sys/bus/pci/devices/0000:02:00.0/device) BAR0=$(cat /sys/bus/pci/devices/0000:02:00.0/resource 2>/dev/null | head -1) ***"
 else
 	echo "FM6000 still absent - running DLLLA diagnosis (phase31) to say WHY:"
 	DIR=$(cd "$(dirname "$0")" && pwd)
@@ -178,7 +170,13 @@ else
 	exit 0
 fi
 
-echo "--- fm6000dma.ko + fm6000_bringup ---"
-modprobe fm6000dma 2>/dev/null || insmod /lib/modules/*/extra/fm6000dma.ko 2>/dev/null
-EDGENOS_FM6000_SLOT=0000:02:00.0 fm6000_bringup 0000:02:00.0 2>&1 | head -40
-echo "=== M2 bring-up done ==="
+# M2 (fm6000dma.ko + fm6000_bringup) is experimental and can crash the kernel -> gated OFF by default so a
+# boot proves PCIe enumeration and stays up for inspection. Enable with FM6000_M2=1 once M2 is ready.
+if [ "${FM6000_M2:-0}" = "1" ]; then
+	echo "--- fm6000dma.ko + fm6000_bringup ---"
+	modprobe fm6000dma 2>/dev/null || insmod /lib/modules/*/extra/fm6000dma.ko 2>/dev/null
+	EDGENOS_FM6000_SLOT=0000:02:00.0 fm6000_bringup 0000:02:00.0 2>&1 | head -40
+	echo "=== M2 bring-up done ==="
+else
+	cm "M2 skipped (FM6000_M2=0) - FM6000 enumerated + left up for inspection"
+fi

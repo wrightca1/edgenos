@@ -13,11 +13,23 @@
 # Result (live-proven): 02:00.0 appears as 8086:155b, DLLLA=1, Gen1 x4, BAR0=32M @ 0xe2000000 (== EOS).
 # SPDX-License-Identifier: GPL-2.0-or-later
 set -u
-BUS=10; A=0x40
+A=0x40
+# FM6000 mgmt I2C slave is on SCD "master 0 bus 2" (accel#0 must be registered: smbus_master 0x8000 0 8).
+BUS=""
+for d in /sys/class/i2c-dev/i2c-*; do
+	case "$(cat "$d/name" 2>/dev/null)" in *"master 0 bus 2") BUS=$(basename "$d"|sed s/i2c-//);; esac
+done
+[ -n "$BUS" ] || { echo "[pcie-init] ERROR: FM6000 slave bus 'master 0 bus 2' not found - register accel#0 (smbus_master 0x8000 0 8)"; exit 1; }
+echo "[pcie-init] FM6000 mgmt slave on i2c-$BUS addr $A"
 hx(){ printf '0x%02x' $1; }
 WR(){ a=$1; d=$2
   i2ctransfer -y $BUS w7@$A $(hx $(((a>>16)&255))) $(hx $(((a>>8)&255))) $(hx $((a&255))) \
     $(hx $(((d>>24)&255))) $(hx $(((d>>16)&255))) $(hx $(((d>>8)&255))) $(hx $((d&255))) >/dev/null 2>&1; }
+RD(){ i2ctransfer -y $BUS w3@$A $(hx $((($1>>16)&255))) $(hx $((($1>>8)&255))) $(hx $(($1&255))) r4@$A 2>/dev/null | tr -d ' ' | sed 's/0x//g'; }
+
+# wait for the FM6000 SPI-ROM boot to finish (BOOT_CTRL 0x1C022 bit5 = EepromLoadDone) before touching it
+n=0; while [ $n -lt 20 ]; do v=$(RD 0x1C022); v=${v:-0}; [ $(( 0x$v & 0x20 )) -ne 0 ] && break; sleep 1; n=$((n+1)); done
+echo "[pcie-init] boot complete after ${n}s (BOOT_CTRL=0x$v; want bit5 EepromLoadDone set)"
 
 echo "[pcie-init] normal operating mode (scan chain)"
 WR 0x1C022 0x0                    # BOOT_CTRL clear
