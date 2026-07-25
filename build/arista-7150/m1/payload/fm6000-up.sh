@@ -102,7 +102,7 @@ si5338 "$BUS" -p -a "$SI5338_ADDR"
 # write loop1Vid (0x8F=1.2V to selects 1/2/3, 0x69=0.96V min to select 0) THEN
 # enable VID mode (gpuDvid 0xCE bit0=1); the regulator slews 1.057->1.2V.
 if [ "${FM6000_MARGIN:-1}" = "1" ]; then
-	echo "--- margin FM6000 core -> 1.2V (Chl822X VID, agent i2c-discipline; chip in reset) ---"
+	echo "--- margin FM6000 core -> 1.2V (Chl822X VOLATILE config 0x1A; NO DVID; power-cycle reverts) ---"
 	echo "smbus_master 0x8000 0 8" > "$NO" 2>/dev/null; sleep 1   # register accel#0 (VRM)
 	CHLB=""
 	for a in /sys/class/i2c-dev/i2c-*; do n=$(cat "$a/name" 2>/dev/null)
@@ -110,31 +110,28 @@ if [ "${FM6000_MARGIN:-1}" = "1" ]; then
 	done
 	if [ -n "$CHLB" ]; then
 		echo "$CHLB 0x70 3 3 3 0" > "$(dirname "$NO")/smbus_tweaks" 2>/dev/null; sleep 1
-		# The 0xD3/D5 CHL8228G MPA (config-access) window leaves i2cControl(internal 0xD4) set, so the
-		# chip NAKs normal PMBus (READ_VOUT 0x8b) until cleared. EOS agent's disableI2CBus writes
-		# i2cControl 0xD4=0x00 after window ops (libChl822XAgent 3b5da/3b756). We MUST clear it before
-		# EVERY PMBus read, else the chip stays wedged + half-configured -> rail collapses at reset-release.
-		xc() { i2cset -y $CHLB 0x70 0xD5 0x00D4 w 2>/dev/null; }        # exit MPA/config-access
-		vw() { i2cset -y $CHLB 0x70 0xD5 "0x$1$2" w 2>/dev/null; }      # write VID $1 to loop1Vid reg $2
+		# RE: EOS does NOT use DVID for VDD_ALTA (gpuDvid/loop1Vid=0 on a running box). The setpoint is
+		# the chip's VOLATILE config file (internal 0x08-0x3F), loaded from NVM at boot. Boot-VID byte =
+		# internal 0x1A (chlFwSantaRosaCotati 0x1A=0x78=1.057V, Chl822XConfigTool.py:347). Writing 0x1A
+		# LIVE via the 0xD5 window changes the setpoint immediately, NO DVID (no wedge), REVERSIBLE by
+		# power-cycle (NVM untouched, restores 0x78). Clear config-access (0x00D4) before every PMBus read.
+		xc() { i2cset -y $CHLB 0x70 0xD5 0x00D4 w 2>/dev/null; }
+		rw() { i2cset -y $CHLB 0x70 0xD3 0x$1 2>/dev/null; i2cget -y $CHLB 0x70 0xD4 2>/dev/null; }  # window read reg $1
+		ww() { i2cset -y $CHLB 0x70 0xD5 "0x$1$2" w 2>/dev/null; }                                    # window write reg $2=$1
+		A1A=$(rw 1A); A40=$(rw 40); xc
+		cm "S0 VOUT=$(i2cget -y $CHLB 0x70 0x8b w 2>/dev/null) VOUTcmd=$(i2cget -y $CHLB 0x70 0x21 w 2>/dev/null) cfg1A=$A1A vId1=$A40"
+		# unlock volatile config writes (ConfigTool.py:478-487): disablePopulatedCheck, unlockAddress, unlockGamer
+		ww 1F AE
+		i2cset -y $CHLB 0x70 0xD3 0xC1 2>/dev/null; L=$(i2cget -y $CHLB 0x70 0xD4 2>/dev/null); ww $(printf '%02x' $(( ${L:-0} & 254 )) 2>/dev/null) C1
+		i2cset -y $CHLB 0x70 0xD3 0xC0 2>/dev/null; G=$(i2cget -y $CHLB 0x70 0xD4 2>/dev/null); ww $(printf '%02x' $(( ${G:-0} & 254 )) 2>/dev/null) C0
+		cm "S1 unlock C1=$L C0=$G"
+		# bump test: cfg 0x1A 0x78 -> 0x7C (+~25mV); does VOUT rise? (proves 0x1A is the live setpoint)
+		ww 7C 1A; xc; sleep 0.3
+		cm "S2 bump cfg1A=0x7C VOUT=$(i2cget -y $CHLB 0x70 0x8b w 2>/dev/null) (want ~0x0895 rose)"
+		# ramp cfg 0x1A -> 0x8F (1.2V), verify each step (small steps stay in UCD window)
+		for V in 80 84 88 8c 8f; do ww $V 1A; xc; sleep 0.2; cm "S3 cfg1A=0x$V VOUT=$(i2cget -y $CHLB 0x70 0x8b w 2>/dev/null)"; done
 		xc
-		cm "S0 start Chl=i2c-$CHLB VOUT=$(i2cget -y $CHLB 0x70 0x8b w 2>/dev/null) (0x0875=1.057V)"
-		# seed ALL four loop1Vid selects = current 0x78 (strap-agnostic; NO 0x69 on C6 - that would
-		# drop the rail to 0.96V if the active strap-select is index 0 -> UCD UV trip).
-		cm "S1 seed loop1Vid=0x78 all4"; for R in C6 C7 C8 C9; do vw 78 $R; done
-		# enable VID (gpuDvid 0xCE bit0), RMW-preserving
-		i2cset -y $CHLB 0x70 0xD3 0xCE 2>/dev/null; G=$(i2cget -y $CHLB 0x70 0xD4 2>/dev/null)
-		NV=$(printf '%02x' $(( (${G:-0}) | 1 )) 2>/dev/null); [ -z "$NV" ] && NV=01
-		cm "S2 enableVID gpuDvid $G -> 0x$NV"; i2cset -y $CHLB 0x70 0xD5 0x${NV}CE w 2>/dev/null
-		xc; sleep 0.3
-		cm "S3 postEnable VOUT=$(i2cget -y $CHLB 0x70 0x8b w 2>/dev/null) (MUST answer ~0x0875 now)"
-		# ramp ALL four 0x78 -> 0x8F (~25mV/step), clearing config-access before each read
-		for V in 7c 80 84 88 8c 8f; do
-			for R in C6 C7 C8 C9; do vw $V $R; done
-			xc; sleep 0.2
-			cm "S4 ramp 0x$V VOUT=$(i2cget -y $CHLB 0x70 0x8b w 2>/dev/null)"
-		done
-		xc
-		cm "S5 final VOUT=$(i2cget -y $CHLB 0x70 0x8b w 2>/dev/null) STATUS=$(i2cget -y $CHLB 0x70 0x79 w 2>/dev/null) (target ~0x099A=1.2V)"
+		cm "S4 final VOUT=$(i2cget -y $CHLB 0x70 0x8b w 2>/dev/null) STATUS=$(i2cget -y $CHLB 0x70 0x79 w 2>/dev/null) (target 0x099A=1.2V; power-cycle reverts)"
 	else
 		echo "  WARN: Chl822X bus (master 0 bus 3) not found - FM6000 stays 1.057V"
 	fi
