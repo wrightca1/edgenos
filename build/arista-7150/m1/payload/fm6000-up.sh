@@ -159,6 +159,11 @@ echo "--- root-port 00:04.0 link (final) ---"
 pcicfg 0000:00:04.0 link 2>/dev/null
 if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ]; then
 	cm "*** FM6000 ENUMERATED: $(cat /sys/bus/pci/devices/0000:02:00.0/vendor):$(cat /sys/bus/pci/devices/0000:02:00.0/device) BAR0=$(cat /sys/bus/pci/devices/0000:02:00.0/resource 2>/dev/null | head -1) ***"
+	# No driver binds 02:00.0, so enable BAR0 MMIO ourselves (PCI Command bit1=MemSpaceEn, bit2=BusMaster)
+	# - required for any software register access (fm6000reg / the M2 microcode+table loader) over BAR0.
+	CMD=$(pcicfg 0000:02:00.0 0x04 2>/dev/null | grep -o '0x[0-9a-f]*$')
+	pcicfg 0000:02:00.0 0x04 $(printf '0x%x' $(( ${CMD:-0} | 0x6 ))) >/dev/null 2>&1
+	cm "BAR0 MMIO enabled (Command=$(pcicfg 0000:02:00.0 0x04 2>/dev/null | grep -o '0x[0-9a-f]*$')); fm6000reg <bdf> <word> [val] reads/writes CSRs"
 else
 	echo "FM6000 still absent - running DLLLA diagnosis (phase31) to say WHY:"
 	DIR=$(cd "$(dirname "$0")" && pwd)
