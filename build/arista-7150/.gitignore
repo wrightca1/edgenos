@@ -33,7 +33,3 @@ m1/payload/scddump
 m1/payload/scdmbload
 m1/payload/scdreg2
 m1/payload/scdwr/
-
-# --- credentials: do not expose in a public repo ---
-m1/ssh/passwd
-m1/ssh/shadow
