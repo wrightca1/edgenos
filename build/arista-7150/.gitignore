@@ -19,3 +19,21 @@ m1/ssh/dropbear
 m1/ssh/dropbearkey
 m1/ssh/lib/
 m1/ssh/*.si5338
+
+# --- PROPRIETARY FIRMWARE: NEVER commit (open-source model = bring-your-own from a licensed EOS) ---
+*.srec
+*.raw
+*spico*
+*[Mm]icrocode*
+saguaro.*
+# --- compiled binary artifacts: keep the .c/.sh sources, drop the ELF binaries ---
+*.m1
+m1/payload/pcicfg
+m1/payload/scddump
+m1/payload/scdmbload
+m1/payload/scdreg2
+m1/payload/scdwr/
+
+# --- credentials: do not expose in a public repo ---
+m1/ssh/passwd
+m1/ssh/shadow
