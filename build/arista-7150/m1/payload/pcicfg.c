@@ -5,6 +5,8 @@
  *   pcicfg <BDF> linkctl        # find PCIe cap, print Link Control offset+value+LinkDisable bit
  *   pcicfg <BDF> link           # decode Link Cap/Ctl/Status incl. DLLLA (bit13) + speed/width
  *   pcicfg <BDF> retrain        # set Link Control Retrain-Link (bit5) to kick LTSSM
+ *   pcicfg <BDF> hotreset       # secondary-bus (hot) reset of the downstream link, then re-train
+ *   pcicfg <BDF> gen1           # pin target link speed to Gen1 (2.5GT/s) + retrain (skip Gen2 EQ)
  * Build like scdreg:  gcc -O2 -o pcicfg pcicfg.c
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -81,6 +83,32 @@ int main(int argc, char **argv) {
         uint16_t v = rw(fd, lc), nv = v | (1u << 5);   /* Retrain Link */
         if (pwrite(fd, &nv, 2, lc) != 2) { perror("pwrite"); return 1; }
         printf("%s LinkControl@0x%02x 0x%04x -> 0x%04x (Retrain bit5 set)\n", argv[1], lc, v, nv);
+        close(fd); return 0;
+    }
+    if (!strcmp(argv[2], "hotreset")) {          /* secondary-bus (hot) reset of the downstream link */
+        int fd = cfgopen(argv[1], 1);
+        if (fd < 0) { perror("open"); return 1; }
+        uint16_t bc = rw(fd, 0x3e);              /* Bridge Control (type-1 header) */
+        uint16_t on = bc | (1u << 6);            /* Secondary Bus Reset (bit6) */
+        if (pwrite(fd, &on, 2, 0x3e) != 2) { perror("pwrite"); return 1; }
+        usleep(100000);                          /* hold >=1ms; 100ms generous */
+        pwrite(fd, &bc, 2, 0x3e);                /* deassert -> link re-trains */
+        usleep(100000);
+        printf("%s BridgeCtrl@0x3e 0x%04x -> SBR -> 0x%04x (hot reset done)\n", argv[1], bc, bc);
+        close(fd); return 0;
+    }
+    if (!strcmp(argv[2], "gen1")) {              /* pin target link speed to Gen1 (2.5GT/s) + retrain */
+        int fd = cfgopen(argv[1], 1);
+        if (fd < 0) { perror("open"); return 1; }
+        unsigned cap = find_pcie_cap(fd);
+        if (!cap) { fprintf(stderr, "no PCIe cap\n"); return 1; }
+        unsigned l2 = cap + 0x30;                /* Link Control 2 */
+        uint16_t v = rw(fd, l2), nv = (uint16_t)((v & ~0xf) | 1);
+        pwrite(fd, &nv, 2, l2);
+        unsigned lc = cap + 0x10;                /* Link Control: kick Retrain */
+        uint16_t r = rw(fd, lc), nr = (uint16_t)(r | (1u << 5));
+        pwrite(fd, &nr, 2, lc);
+        printf("%s LnkCtl2@0x%02x 0x%04x -> 0x%04x (TargetSpeed=Gen1) + retrain\n", argv[1], l2, v, nv);
         close(fd); return 0;
     }
     unsigned long off = strtoul(argv[2], 0, 0);

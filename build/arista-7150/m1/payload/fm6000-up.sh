@@ -101,7 +101,7 @@ si5338 "$BUS" -p -a "$SI5338_ADDR"
 # (the VRM) is reachable now. EOS-exact order (Chl822x.py:1729-1744 initialize()):
 # write loop1Vid (0x8F=1.2V to selects 1/2/3, 0x69=0.96V min to select 0) THEN
 # enable VID mode (gpuDvid 0xCE bit0=1); the regulator slews 1.057->1.2V.
-if [ "${FM6000_MARGIN:-1}" = "1" ]; then
+if [ "${FM6000_MARGIN:-0}" = "1" ]; then   # phase36: DISABLED by default - VOUT is fixed 1.057V (non-cause); set FM6000_MARGIN=1 to re-test
 	echo "--- margin FM6000 core -> 1.2V (Chl822X VOLATILE config 0x1A; NO DVID; power-cycle reverts) ---"
 	echo "smbus_master 0x8000 0 8" > "$NO" 2>/dev/null; sleep 1   # register accel#0 (VRM)
 	CHLB=""
@@ -143,13 +143,27 @@ scdreg 0x4010 0x00000006
 sleep 1
 echo "  0x4000 now: $(scdreg 0x4000 | grep -o '0x[0-9a-f]*$')  (expect 0x100)"
 
-# --- 5. enumerate -----------------------------------------------------------
+# --- 5. enumerate + LINK RE-ESTABLISHMENT experiment (phase36) --------------
+# REFRAME (phase35/36): undervolt was a detour - EOS runs VDD_ALTA at the same
+# 1.057V (skips adjustRosaVoltageRails for SantaRosa) and still enumerates. The
+# real blocker: with the Cotati clock, M1's link TRAINS (LinkTraining=1) but never
+# COMPLETES (DLLLA=0), while EOS completes it (root port DLActive+, 5GT/s x4, same
+# LnkCap/LnkCtl2/CommClk). EOS's `pcielw` re-establishes the link (fast_reset =
+# bridge-control write); our plain retrain doesn't. Try each trick, report DLLLA:
+D() { pcicfg 0000:00:04.0 link 2>/dev/null | grep -o 'DLLLA(b13)=[01] LinkTraining(b11)=[01] curSpeed=[0-9] curWidth=x[0-9]*'; }
 echo "--- PCI rescan ---"
-echo 1 > /sys/bus/pci/rescan 2>/dev/null
-sleep 3
-# phase31: report DLLLA on the root port regardless of outcome (EOS enumerates via
-# the kernel `pcielw` driver on DLLLA=Link-Active; M1 has none, so we read it by hand).
-echo "--- root-port 00:04.0 link (DLLLA bit13 = is the FM6000 driving PCIe?) ---"
+echo 1 > /sys/bus/pci/rescan 2>/dev/null; sleep 2
+cm "EXP0 baseline    $(D)"
+pcicfg 0000:00:04.0 retrain 2>/dev/null >/dev/null; sleep 1
+cm "EXP1 retrain     $(D)"
+pcicfg 0000:00:04.0 gen1 2>/dev/null >/dev/null; sleep 1
+cm "EXP2 gen1+retrain $(D)"
+# EXP3/4 (secondary-bus/hot reset) REMOVED - phase36 live: it REBOOTS the board on this FM6000
+# (M1 booted, ran EXP, box cold-reset back to EOS). The FM6000/root-port PCIe reset is coupled to
+# a board reset here, so SBR is NOT a stay-up enumeration path. Test in isolation only if needed.
+cm "EXPDONE retrain+gen1 done (if DLLLA still 0, root-port kicks are insufficient)"
+sleep 5; cm "EXPDONE2 (repeat) $(D)"
+echo "--- root-port 00:04.0 link (final) ---"
 pcicfg 0000:00:04.0 link 2>/dev/null
 if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ]; then
 	echo "*** FM6000 ENUMERATED: $(cat /sys/bus/pci/devices/0000:02:00.0/vendor):$(cat /sys/bus/pci/devices/0000:02:00.0/device) ***"
