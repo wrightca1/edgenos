@@ -12,6 +12,11 @@ full L2/L3 forwarding — no vendor SDK linked, no proprietary blobs in the repo
 The FM6000 is EdgeNOS's **first non-Broadcom, first clean-room datapath**: instead of linking a vendor SDK it
 reimplements the procedures behind `asic_ops`. Our job is to **finish + live-validate** that existing skeleton.
 
+Where an open GPL building block exists we reuse it as a **source** — e.g. the SCD kernel driver comes from the
+SONiC tree, and SONiC's driver source informed how we reach the SCD/board. But EdgeNOS is its own NOS: the 7150
+is **not** a SONiC-supported platform and none of SONiC runs here — that lack of support is part of why this
+port is clean-room.
+
 Status: ✅ done · 🔨 in progress · ⬜ todo · ⏸ deferred · ❓ decision
 
 ---
@@ -41,7 +46,7 @@ So the remaining work is: **fold the live-validated sequences + a few captured r
 | Part | Status | Where |
 |---|---|---|
 | M1 Linux boots (x86_64), serial + SSH | ✅ | `build/arista-7150/m1` |
-| SCD/CPLD driver (`scd` + `scd-hwmon`, GPL) + 7150 `new_<object>` set | ✅ | in-kernel; SMBus masters, resetGpo, GPIO |
+| SCD/CPLD driver (`scd` + `scd-hwmon`, GPL — reused from the SONiC kernel tree) + 7150 `new_<object>` set | ✅ | in-kernel; SMBus masters, resetGpo, GPIO |
 | Si5338 clock (Cotati map) — the enumeration root-cause | ✅ | `fm6000-up.sh` §3 |
 | Power/VRMs (Chl822X, UCD90160) characterized | ✅ | undervolt refuted; no margining |
 | Remote reboot / recovery (SCD power-cycle) | ✅ | `scdreg 0x7000 0xdead` |
