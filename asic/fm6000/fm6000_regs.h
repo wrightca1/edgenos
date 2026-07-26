@@ -157,19 +157,23 @@
 #define FM6000_DMA_CFG2          0x505Cu    /* engine cfg; fpdma_init writes 0x30f */
 #define FM6000_DMA_CFG2_INIT     0x30Fu
 #define FM6000_DMA_UNK68         0x5068u    /* fpdma_init writes 0 here          */
-#define FM6000_DMA_CMD_TX        0x1u       /* command bit0 = enable/kick TX     */
-#define FM6000_DMA_CMD_RX        0x2u       /* command bit1 = enable/kick RX     */
+/* PCIe DMA Command codes (datasheet Table 7-2, §7.10.2.1). The command register
+ * takes a COMMAND CODE, not a bitmask — the old "0x3 = enable both" was wrong
+ * (0x3 = TX_STOP!). STATUS[2:0]=TxState (0=Stopped 1=Running 2=Idle 3=Draining),
+ * STATUS[4:3]=RxState. */
+#define FM6000_DMA_CMD_TX        0x1u       /* PCI_TX_START — begin TX descriptors */
+#define FM6000_DMA_CMD_RX        0x2u       /* PCI_RX_START — begin RX descriptors */
+#define FM6000_DMA_CMD_TX_STOP   0x3u       /* PCI_TX_STOP                        */
+#define FM6000_DMA_CMD_RX_STOP   0x4u       /* PCI_RX_STOP                        */
+#define FM6000_DMA_CMD_TX_POST   0x5u       /* PCI_TX_POST — new TX BDs posted    */
+#define FM6000_DMA_CMD_RX_POST   0x6u       /* PCI_RX_POST — new RX BDs posted    */
 #define FM6000_DMA_CFG           0x5060u    /* dma_cfg (w0x1418); reset 0x35    */
 #define FM6000_DMA_CFG_ENABLE    0x2u       /* bit1: engine enable — golden EOS
                                              * runs 0x37 (=reset 0x35 | 0x2);
                                              * 7150 live-captured 2026-07-26     */
 #define FM6000_DMA_IM_RUN        0x3u       /* golden EOS im (tx/rx-done unmasked)*/
-#define FM6000_DMA_CMD_ENABLE    0x3u       /* command value fpdma_reset writes to
-                                             * enable+kick TX&RX (vendor .ko disasm;
-                                             * NOT 0x1). Re-armed each NAPI poll.   */
-#define FM6000_DMA_STATUS_BUSY   0x7u       /* fpdma_reset polls status until
-#define FM6000_DMA_STATUS_READY  0x10u     /* bit4 set = engine running (golden 0x12) */
-                                             * (status & 0x7)==0 = engine ready     */
+#define FM6000_DMA_STATUS_BUSY   0x7u       /* TxState[2:0]; fpdma_reset waits ==0 */
+#define FM6000_DMA_STATUS_READY  0x10u      /* RxState bit; golden running=0x12    */
 
 /* ---- Descriptor ring geometry (FPDMA.md "Descriptor ring model") -------- */
 #define FM6000_RING_MAX         1024u      /* MAX_RING_SIZE 0x400, power-of-2  */

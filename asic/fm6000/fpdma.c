@@ -215,7 +215,7 @@ int fpdma_tx(struct fpdma *fp, const void *frame, uint16_t len)
     desc_write(desc_ptr(r, slot), FM6000_DESC_HANDOFF, len, r->buf_dma[slot]);
     r->head++;
 
-    fm6000_dma_write(fp->dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_ENABLE);        /* kick           */
+    fm6000_dma_write(fp->dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_TX_POST);        /* TX_POST: new BD ready */
     return 0;
 }
 
@@ -269,6 +269,6 @@ int fpdma_rx_poll(struct fpdma *fp, int budget,
         n++;
     }
     if (n)
-        fm6000_dma_write(fp->dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_ENABLE);   /* re-arm RX      */
+        fm6000_dma_write(fp->dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_RX_POST);   /* RX_POST: refilled */
     return n;
 }
