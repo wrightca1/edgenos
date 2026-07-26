@@ -61,7 +61,7 @@ Existing skeleton is cited per-line from the RE (phase7g, FPDMA.md). Status refl
 | BAR0 bind + CSR read/write/poll | `fm6000_hw.c` | ✅ **live-validated** | access model proven; our `fm6000reg` is the standalone check |
 | Pre-enum PCIe/SerDes bring-up (make it enumerate) | (new) `fm6000-pcie-init.sh` | ✅ **live** | fold into the board bring-up / `fm6000_boot.c` preboot |
 | `fm6000_boot_switch` ordering (preboot → BIST → sbus → caches → microcode → SPICO) | `fm6000_boot.c` | 🔨 | order recovered; **live-trace** BIST march data + SBus `0x0B0500` framing |
-| Microcode/table load (parser/FFU CSR replay) | `fm6000_ucode.c` | 🔨 | procedure recovered; our `fm6000load` is the standalone check; needs pipeline pre-state (RE in flight) |
+| Microcode/table load (parser/FFU CSR replay) | `fm6000_ucode.c` | ✅ **live — 90%** | **35,641 / 39,461 lines of the vendor image load & M1 stays alive** (2026-07-26): L2 pipeline MAPPER+PARSER+L2AR (lines 1–30321) loads fast; the L3AR/table-commit region (5,320 lines) loads clean **when paced line-by-line** (blasting wedges = HW table-commit backpressure → real fix is a commit done-poll). **Only MOD (`0x150000` egress-modify TCAM, 3,820 lines) still wedges even paced** after ~5 entries — a distinct egress/EPL-enable or MOD-commit done-poll dependency, deeper RE, **not on the byte-mover path**. |
 | SerDes SPICO upload (SBus IMEM) | `fm6000_ucode.c` | ⏸ | blob located; **not needed for first link** (PCIe SerDes came up without it) |
 | Packet DMA BD-rings (PCIE block, word `0x1400–0x141D` = byte `0x5000`; 32B BDs, TX/RX, F64 tag) | `fpdma.c` | 🔨 | **recipe now recovered** from `fpdma.ko` RE: BD 32B format (READY/DONE/EOP/ERR), `PCI_COMMAND`(0x1401) values, ring base/end regs, `PCI_DMA_CFG`(0x1418) DMAEn, F64 tag layout. NB this is the CPU datapath — **not** FIBM (0x5000 *word* = in-band-mgmt mailbox only) |
 | DMA/MSI kernel module (BAR0 + low-4GiB coherent pool + MSI) | `kmod/fm6000dma.c` | 🔨 | 7150 RS780 has no IOMMU → kmod is required (not VFIO) |
@@ -80,10 +80,13 @@ Existing skeleton is cited per-line from the RE (phase7g, FPDMA.md). Status refl
 
 ## Proof-of-life milestones (the order we chase)
 1. **BAR0 register access** ✅
-2. **CPU inject → pipeline → CPU receive** 🔨 *(next — full register recipe recovered)* — release MSB
-   (`SOFT_RESET(0x9)=0x00`, required for the pipeline **and** for the microcode load), load microcode, add one
-   `GLORT_CAM`→`GLORT_RAM`→`DMASK` CPU-loopback entry, program the `fpdma` DMA BD-rings, and inject an F64
-   special-delivery frame (tag word0=`0x1000`, DGLORT=CPU port 0) → punt it back. No EPL/SerDes/FIBM/ports. "Moves a byte."
+2. **CPU inject → pipeline → CPU receive** 🔨 *(the frontier — microcode prerequisite now DONE)* — release MSB
+   (`SOFT_RESET(0x9)=0x00`, required for the pipeline **and** for the microcode load) ✅, load the L2-pipeline
+   microcode (lines 1–30321) ✅ **proven loadable + M1 alive**, then: add one `GLORT_CAM`→`GLORT_RAM`→`DMASK`
+   CPU-loopback entry, program the `fpdma` DMA BD-rings (kmod `fm6000dma.ko` already built for the 6.12 M1 kernel;
+   resolve the `TODO(live-trace)` DMA COMMAND enable bits), and inject an F64 special-delivery frame
+   (tag word0=`0x1000`, DGLORT=CPU port 0) → punt it back. No EPL/SerDes/FIBM/ports/MOD. "Moves a byte."
+   Needs a small standalone inject harness (fpdma.c + fpdma_kmod.c + a `main()`) — `edged` has the logic but no CLI.
 3. **One front-panel port links (10G)** ⬜ — EPL + SerDes + MAC.
 4. **Two-port L2 forward** ⬜ — VLAN + MAC flood/learn.
 5. **An L3 route** ⬜.
