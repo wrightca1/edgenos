@@ -35,11 +35,19 @@
 /* ---- BIST / built-in memory init [skeleton] ---------------------------- */
 int fm6000_bist_memory_init(struct fm6000_dev *dev)
 {
-    /* Soft reset + PLL settle (phase7g §b: 0x1C03A/0x1C03C + fmDelay). */
-    fm6000_csr_write(dev, FM6000_REG_SOFT_RESET, 1);
-    fm6000_delay_us(640);
-    fm6000_csr_write(dev, FM6000_REG_PLL_CTRL, 1);
-    fm6000_delay_us(1640);
+    /* Normal operating mode (scan chain) + DLL enable — VALIDATED LIVE 2026-07.
+     * Replaces the phase7g soft-reset/PLL pokes, which used mislabeled registers
+     * (0x1C03A is SCAN_CONFIG_DATA_IN, not SOFT_RESET). On the 7150 the board
+     * bring-up already did this pre-enum via the mgmt I2C slave, so these are
+     * idempotent when edged runs; required on a from-scratch CPU-driven bring-up. */
+    fm6000_csr_write(dev, FM6000_REG_SCAN_CONFIG_IN, 0x88800000u); fm6000_delay_us(1000);
+    fm6000_csr_write(dev, FM6000_REG_SCAN_CONFIG_IN, 0x88008000u); fm6000_delay_us(1000);
+    fm6000_csr_write(dev, FM6000_REG_SCAN_CONFIG_IN, 0x80000040u);
+    fm6000_csr_write(dev, FM6000_REG_SCAN_CHAIN_IN,  0xFFFFFFFFu);  /* -> normal mode */
+    fm6000_csr_write(dev, FM6000_REG_DLL_CTRL_HI,    0x3u);         /* enable core DLLs */
+    fm6000_delay_us(1000);
+    if (fm6000_csr_poll(dev, FM6000_REG_PLL_STAT, 0x0F, 0x0F, 100000) < 0)
+        fprintf(stderr, "fm6000: PLL/DLL not fully locked (PLL_STAT != 0x0F)\n");
 
     /* Kick the built-in-memory (BM) engine and wait for it to accept. */
     fm6000_csr_write(dev, FM6000_REG_BM_ENGINE_STATUS, 1);
@@ -91,18 +99,51 @@ static int fm6000_init_trapcode_table(struct fm6000_dev *dev) { (void)dev; retur
 static int fm6000_forwarding_tables(struct fm6000_dev *dev)   { (void)dev; return 0; } /* L2L/FFU/router/... */
 static int fm6000_enable_forwarding(struct fm6000_dev *dev)   { (void)dev; return 0; }
 
+/* Boot-controller command (datasheet Table 4-1 steps 8-10): write the command
+ * into BOOT_CTRL:Command, then poll CommandDone. Our chip boots from ROM, which
+ * runs these itself, so re-issuing is belt-and-suspenders.
+ * TODO(live-verify): CommandDone may live in a separate BOOT_STATUS register
+ * rather than BOOT_CTRL bit4 (datasheet says "BOOT_STATUS:CommandDone"). */
+static int fm6000_boot_cmd(struct fm6000_dev *dev, uint32_t cmd)
+{
+    fm6000_csr_write(dev, FM6000_REG_BOOT_CTRL, cmd);
+    if (fm6000_csr_poll(dev, FM6000_REG_BOOT_CTRL, FM6000_BOOT_STATUS_CMD_DONE,
+                        FM6000_BOOT_STATUS_CMD_DONE, 1000000) < 0) {
+        fprintf(stderr, "fm6000: BOOT_CTRL cmd %u CommandDone timeout\n", cmd);
+        return -1;
+    }
+    return 0;
+}
+
 /* ---- Top-level bring-up (phase7g §b order) ----------------------------- */
 int fm6000_boot_switch(struct fm6000_dev *dev)
 {
     fprintf(stderr, "fm6000: bring-up start (unit %d, %s)\n", dev->unit, dev->pci_slot);
 
-    STEP(fm6000_preboot(dev));                 /* chip/PLL + BIST            */
+    STEP(fm6000_preboot(dev));                 /* normal mode + DLL + BIST   */
+
+    /* Boot-controller sequence (datasheet Table 4-1 steps 8-10, SDK order):
+     * bank-repair -> InitSBus -> FFU-slices -> freelists. */
+    STEP(fm6000_boot_cmd(dev, FM6000_BOOT_CMD_BANK_REPAIR));
     STEP(fm6000_init_sbus(dev));               /* SBus controller online     */
+    STEP(fm6000_boot_cmd(dev, FM6000_BOOT_CMD_FFU_SLICES));
+    STEP(fm6000_boot_cmd(dev, FM6000_BOOT_CMD_FREELISTS));
     STEP(fm6000_validate_sched_token(dev));
     STEP(fm6000_init_register_cache(dev));
     STEP(fm6000_get_switch_info(dev));         /* sizes/geometry tables      */
 
-    /* Microcode: parser/FFU text image BEFORE SerDes SPICO (phase7g order). */
+    /* Release the core fabric (MSB) + FIBM + EPL. MUST come after the bank-repair/
+     * freelist commands above, and a board WATCHDOG MUST already be armed: a bare
+     * MSB release into an unconfigured fabric hangs the CPU (2026-07 incident -
+     * board wedged, needed a physical power-cycle). See ROADMAP.md / GAPS.md. */
+    {
+        uint32_t sr = fm6000_csr_read(dev, FM6000_REG_SOFT_RESET);
+        sr &= ~(FM6000_SOFT_RESET_MSB | FM6000_SOFT_RESET_FIBM | FM6000_SOFT_RESET_EPL);
+        fm6000_csr_write(dev, FM6000_REG_SOFT_RESET, sr);
+        fm6000_delay_us(1000);
+    }
+
+    /* Microcode: parser/FFU table image (requires MSB out of reset) before SPICO. */
     if (fm6000_load_csr_image(dev, FM6000_FW_PARSER_FFU, 1) < 0)
         return -1;
     STEP(fm6000_load_spico(dev, FM6000_FW_SPICO));

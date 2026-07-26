@@ -52,9 +52,56 @@
 #define FM6000_BLK_MAPPER       0x120000u   /* MAPPER microcode target        */
 #define FM6000_BLK_FFU          0x300000u   /* FFU / AlgoMatch (TCAM)         */
 
-/* ---- MGMT2: soft-reset / PLL (phase7g §b BIST skeleton) ----------------- */
-#define FM6000_REG_SOFT_RESET   0x1C03Au    /* +fmDelay 640us                 */
-#define FM6000_REG_PLL_CTRL     0x1C03Cu    /* +fmDelay 1640us                */
+/* ---- MGMT1: SOFT_RESET (word 0x00009) — VALIDATED LIVE 2026-07 ---------- */
+/* CORRECTION: the phase7g skeleton mislabeled 0x1C03A as SOFT_RESET. 0x1C03A is
+ * actually SCAN_CONFIG_DATA_IN (normal-operating-mode scan chain, below). The
+ * real reset register is MGMT1 word 0x00009. A SET bit = that block HELD in
+ * reset. Releasing MSB (core fabric) requires the microcode/tables loaded next,
+ * and must be done AFTER the boot-controller bank-repair/freelist commands — a
+ * bare MSB release into an unconfigured fabric hangs the CPU (learned the hard way). */
+#define FM6000_REG_SOFT_RESET        0x00009u
+#define FM6000_SOFT_RESET_PCIE       (1u << 0)  /* PCIe controller              */
+#define FM6000_SOFT_RESET_MSB        (1u << 1)  /* core fabric (parser/FFU/L2AR)*/
+#define FM6000_SOFT_RESET_FIBM       (1u << 2)  /* in-band-mgmt mailbox (NOT DMA)*/
+#define FM6000_SOFT_RESET_JSS        (1u << 3)  /* JTAG/scan/SBus               */
+#define FM6000_SOFT_RESET_EPL        (1u << 4)  /* Ethernet Port Logic (ports)  */
+
+/* ---- MGMT2: normal operating mode (scan chain) — VALIDATED LIVE --------- */
+/* Table 4-1 step 5. Stage SCAN_CONFIG_IN then write SCAN_CHAIN_IN=0xFFFFFFFF.
+ * Our board bring-up does this pre-enum over the mgmt I2C slave; kept for a
+ * from-scratch/edged path. */
+#define FM6000_REG_SCAN_CONFIG_IN    0x1C03Au  /* stage 0x88800000/0x88008000/0x80000040 */
+#define FM6000_REG_SCAN_CHAIN_IN     0x1C03Bu  /* =0xFFFFFFFF -> normal mode    */
+#define FM6000_REG_SCAN_DATA_OUT     0x1C03Cu
+
+/* ---- MGMT2: PLL/DLL status + DLL enable — VALIDATED LIVE ---------------- */
+#define FM6000_REG_DLL_CTRL_HI       0x1C045u  /* enable bits [1:0] -> write 0x3 */
+#define FM6000_REG_PLL_STAT          0x1C046u  /* Locked1/2[1:0]+DllLocked1/2[3:2]; 0x0F=all locked */
+
+/* ---- MGMT2: boot controller — VALIDATED LIVE + datasheet Table 4-1 ------ */
+#define FM6000_REG_PIN_STRAP_STAT    0x1C021u  /* BOOT_MODE straps (reads 0x208)*/
+#define FM6000_REG_BOOT_CTRL         0x1C022u  /* Command field + status       */
+#define FM6000_BOOT_STATUS_CMD_DONE  (1u << 4) /* CommandDone (poll after cmd) */
+#define FM6000_BOOT_CTRL_EEPROM_DONE (1u << 5) /* EepromLoadDone               */
+/* BOOT_CTRL:Command codes (datasheet §4 line 1202): */
+#define FM6000_BOOT_CMD_FFU_SLICES   1u        /* Initialize FFU slice numbers */
+#define FM6000_BOOT_CMD_BANK_REPAIR  2u        /* Apply bank memory repairs    */
+#define FM6000_BOOT_CMD_FREELISTS    3u        /* Initialize all sched freelists*/
+
+/* ---- PCIe controller + SerDes bring-up (word idx) — VALIDATED LIVE ------ */
+/* fmPlatformSetupPCIe: the sequence that makes the FM6000 enumerate (done by
+ * the board bring-up pre-enum). Offsets kept for reference. NB word 0x1400 ==
+ * byte 0x5000 == the packet-DMA block below (two conventions, one block). */
+#define FM6000_REG_PCI_CFG_1         0x01002u
+#define FM6000_REG_PCI_ENDIANISM     0x01400u
+#define FM6000_REG_PCI_TX_FRAME_LEN  0x01416u  /* MaxLen[15:0] MinLen[22:16]   */
+#define FM6000_REG_PCI_DMA_CFG       0x01418u  /* DMAEn[5:4]                    */
+#define FM6000_REG_PCI_CORE_CTRL_1   0x0141Du  /* CoreEnable[16]               */
+#define FM6000_REG_PCI_SERDES_CTRL_1 0x01435u  /* TxOutputEn[20]+RefSel; 0xF121F34 = lanes on */
+#define FM6000_REG_SBUS_CFG          0x0F000u  /* SBus controller out of reset */
+#define FM6000_REG_SBUS_COMMAND      0x0F001u
+#define FM6000_REG_SBUS_REQUEST      0x0F002u
+#define FM6000_REG_SBUS_RESPONSE     0x0F003u
 
 /* ---- MGMT2: BIST / built-in memory repair (BM engine) ------------------- */
 #define FM6000_REG_BM_MAX_REPAIRS   0x1D08Au
