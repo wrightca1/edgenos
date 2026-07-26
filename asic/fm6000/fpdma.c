@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "fpdma.h"
 
@@ -127,12 +128,32 @@ static void program_rings(struct fpdma *fp)
 
     fm6000_dma_write(dev, FM6000_DMA_IP, 0xFFFFFFFFu);         /* clear pending  */
 
-    /* TODO(live-trace, FPDMA.md needs-a-read #4): the exact COMMAND enable
-     * bits and DMA_CFG value are written as computed constants in fpdma_init.
-     * Enable both directions with a conservative "engine enable" for now. */
-    fm6000_dma_write(dev, FM6000_DMA_COMMAND, 0x1);
-    if (fm6000_dma_read(dev, FM6000_DMA_STATUS) == 0xFFFFFFFFu)
-        fprintf(stderr, "fpdma: STATUS reads all-ones (engine not responding?)\n");
+    /* Enable the engine. Pinned by a golden register capture off a running EOS
+     * (2026-07-26): the enable is DMA_CFG bit1 (EOS runs 0x37 = reset 0x35 | 0x2)
+     * — program_rings previously left DMA_CFG untouched, so the engine never
+     * advanced a descriptor. Then unmask tx/rx-done (EOS im=0x3) and kick COMMAND
+     * (write-only: reads back 0 on EOS too, so its readback isn't a health check). */
+    {
+        uint32_t cfg = fm6000_dma_read(dev, FM6000_DMA_CFG);
+        fm6000_dma_write(dev, FM6000_DMA_CFG, cfg | FM6000_DMA_CFG_ENABLE);
+    }
+    fm6000_dma_write(dev, FM6000_DMA_IM, FM6000_DMA_IM_RUN);
+
+    /* Enable+kick TX&RX and wait for ready. The vendor fpdma_reset writes
+     * COMMAND=0x3 (not 0x1) then polls STATUS until (STATUS & 0x7)==0. */
+    fm6000_dma_write(dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_ENABLE);
+    {
+        int i;
+        uint32_t st = 0;
+        for (i = 0; i < 1000; i++) {
+            st = fm6000_dma_read(dev, FM6000_DMA_STATUS);
+            if (st == 0xFFFFFFFFu || (st & FM6000_DMA_STATUS_BUSY) == 0)
+                break;
+            usleep(10);
+        }
+        if (st == 0xFFFFFFFFu || (st & FM6000_DMA_STATUS_BUSY) != 0)
+            fprintf(stderr, "fpdma: TX/RX DMA failed to enable (status=0x%08x)\n", st);
+    }
 }
 
 /* ---- public API -------------------------------------------------------- */
@@ -195,7 +216,7 @@ int fpdma_tx(struct fpdma *fp, const void *frame, uint16_t len)
     desc_write(desc_ptr(r, slot), FM6000_DESC_HANDOFF, len, r->buf_dma[slot]);
     r->head++;
 
-    fm6000_dma_write(fp->dev, FM6000_DMA_COMMAND, 0x1);        /* kick           */
+    fm6000_dma_write(fp->dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_ENABLE);        /* kick           */
     return 0;
 }
 
@@ -204,11 +225,11 @@ int fpdma_tx_reclaim(struct fpdma *fp)
     struct fpdma_ring *r = &fp->tx;
     int n = 0;
 
-    /* HW clears the ownership byte on completion (exact done-bit TBD by trace).
-     * Reclaim slots whose status no longer shows the SW-owned handoff value. */
+    /* HW sets status bit2 (FM6000_DESC_DONE) on completion — confirmed from the
+     * vendor fpr_reclaim disasm (`testb $0x4,(desc)`). Reclaim while done. */
     while (r->tail != r->head) {
         volatile uint8_t *d = desc_ptr(r, r->tail);
-        if (*(volatile uint8_t *)(d + FM6000_DESC_STATUS) == FM6000_DESC_HANDOFF)
+        if (!(*(volatile uint8_t *)(d + FM6000_DESC_STATUS) & FM6000_DESC_DONE))
             break;                       /* still owned by HW                  */
         r->tail++;
         n++;
@@ -230,10 +251,10 @@ int fpdma_rx_poll(struct fpdma *fp, int budget,
         uint8_t  status = *(volatile uint8_t *)(d + FM6000_DESC_STATUS);
         uint16_t len;
 
-        /* HW has filled a descriptor when it clears our handoff ownership byte.
-         * TODO(live-trace): exact RX OWN/SOP/EOP/error bit semantics + multi-
-         * descriptor reassembly (rx_skb_reass, max 0x7ff) — FPDMA.md #1. */
-        if (status == FM6000_DESC_HANDOFF)
+        /* HW sets status bit2 (FM6000_DESC_DONE) when it fills a descriptor
+         * (same done-bit as TX, per fpr_reclaim). TODO(live-trace): SOP/EOP/error
+         * bits + multi-descriptor reassembly (rx_skb_reass, max 0x7ff). */
+        if (!(status & FM6000_DESC_DONE))
             break;                       /* still owned by HW / empty          */
 
         len = *(volatile uint16_t *)(d + FM6000_DESC_LEN);
@@ -249,6 +270,6 @@ int fpdma_rx_poll(struct fpdma *fp, int budget,
         n++;
     }
     if (n)
-        fm6000_dma_write(fp->dev, FM6000_DMA_COMMAND, 0x1);   /* re-arm RX      */
+        fm6000_dma_write(fp->dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_ENABLE);   /* re-arm RX      */
     return n;
 }

@@ -154,6 +154,16 @@
 #define FM6000_DMA_IM            0x5034u    /* interrupt mask                   */
 /* 0x5038+ : cur_tx/rx_data_ptr, cur_bd_ptr, tx_frame_len, dma_cfg,
  * frame_timeout, stat counters, core_ctrl[2], core_debug[3] (fab_dump). */
+#define FM6000_DMA_CFG           0x5060u    /* dma_cfg (w0x1418); reset 0x35    */
+#define FM6000_DMA_CFG_ENABLE    0x2u       /* bit1: engine enable — golden EOS
+                                             * runs 0x37 (=reset 0x35 | 0x2);
+                                             * 7150 live-captured 2026-07-26     */
+#define FM6000_DMA_IM_RUN        0x3u       /* golden EOS im (tx/rx-done unmasked)*/
+#define FM6000_DMA_CMD_ENABLE    0x3u       /* command value fpdma_reset writes to
+                                             * enable+kick TX&RX (vendor .ko disasm;
+                                             * NOT 0x1). Re-armed each NAPI poll.   */
+#define FM6000_DMA_STATUS_BUSY   0x7u       /* fpdma_reset polls status until
+                                             * (status & 0x7)==0 = engine ready     */
 
 /* ---- Descriptor ring geometry (FPDMA.md "Descriptor ring model") -------- */
 #define FM6000_RING_MAX         1024u      /* MAX_RING_SIZE 0x400, power-of-2  */
@@ -163,6 +173,9 @@
 
 /* Descriptor field byte offsets within the 32-byte stride. */
 #define FM6000_DESC_STATUS      0x00u      /* u8 ownership/status              */
+#define FM6000_DESC_DONE        0x04u      /* status bit2 = HW completed the BD
+                                            * (vendor fpr_reclaim: testb $0x4;
+                                            * 0x09 handoff -> 0x0D on done)     */
 #define FM6000_DESC_LEN         0x02u      /* u16 length                       */
 #define FM6000_DESC_ADDR_LO     0x04u      /* u32 buffer DMA addr lo           */
 #define FM6000_DESC_ADDR_HI     0x08u      /* u32 buffer DMA addr hi           */
