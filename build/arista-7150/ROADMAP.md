@@ -1,105 +1,108 @@
 # EdgeNOS on Arista DCS-7150S-52-CL (Intel/Fulcrum FM6000 "Alta") — Port Roadmap
 
-Goal: an **open-source, clean-room** NOS that boots our own Linux on the 7150 and drives the FM6000
-to full L2/L3 packet forwarding — no Arista/Fulcrum SDK, no proprietary blobs in the repo.
+Goal: an **open-source, clean-room** port that boots our own Linux on the 7150 and drives the FM6000 to
+full L2/L3 forwarding — no vendor SDK linked, no proprietary blobs in the repo.
 
-Status: ✅ done · 🔨 in progress · ⬜ todo · ⏸ deferred/optional · ❓ needs decision
+**This builds on existing EdgeNOS work, not a rewrite.** EdgeNOS already has:
+- the ASIC **backend seam** `core/datapath/asic_ops.h` (`init / port_set / tx / rx_poll / intr_fd / shutdown`),
+- proven ASIC ports in `asic/bcm56340`, `asic/bcm56846` (Broadcom, via OpenMDK) as the reference pattern,
+- a substantial **clean-room FM6000 skeleton** in `asic/fm6000/` written from the RE writeups, and
+- the `core/datapath/` daemon (`l2/l3/vlan/packet_io/netlink`) + `core/control-plane` (quagga) + `core/cli`.
 
-This is laid out the way a switch stack actually layers (the structure anyone who's brought up an
-EdgeCore/SONiC box knows): **platform HAL → ASIC access → ASIC datapath bring-up → forwarding
-primitives (the SAI surface) → NOS integration**. Each layer depends on the one below.
+The FM6000 is EdgeNOS's **first non-Broadcom, first clean-room datapath**: instead of linking a vendor SDK it
+reimplements the procedures behind `asic_ops`. Our job is to **finish + live-validate** that existing skeleton.
 
----
-
-## Layer 0 — Board / boot (the "platform" foundation)
-| Part | Status | Notes |
-|---|---|---|
-| Boot chain: Aboot → M0/M1 Linux (x86_64) | ✅ | serial-catch boot (`aboot-catch3.sh`); boot-config stays EOS for recovery |
-| SCD/CPLD access (BAR0, resetGpo, SMBus masters) | ✅ | `scdreg`, in-kernel scd driver `new_object` |
-| System clocks — Si5338 (Cotati map) | ✅ | THE root-cause fix; `fm6000-up.sh` §3 |
-| Power / VRMs (Chl822X, UCD90160) | ✅ | characterized; undervolt refuted — no margining needed |
-| Remote reboot / recovery (SCD power-cycle) | ✅ | `scdreg 0x7000 0xdead`; also works in-situ Si5338-glitch reset |
-| prefdl / idprom (MAC base, serial, board vars) | ⬜ | read the board EEPROM; needed for per-port MAC + SerDes tuning vars |
-| SFP+ cages ×52: presence, EEPROM/DOM, TX-disable, rate-sel, LED | ⬜ | SCD GPIO + SMBus; the optics HAL |
-| Fans (Raven controller), temp/voltage sensors, PSU status | 🔨 | `raven-fan-driver.ko` present; sensors/PSU TODO |
-| Front-panel + system LEDs | ⬜ | SCD LED registers |
-
-## Layer 1 — ASIC access (the SDK/SAI foundation)
-| Part | Status | Notes |
-|---|---|---|
-| PCIe enumeration of the FM6000 (02:00.0) | ✅ | `fm6000-pcie-init.sh` — auto on boot, Gen2 x4 |
-| BAR0 CSR read/write from software | ✅ | `fm6000reg` (sysfs resource0 mmap; word addr → byte off<<2); MSE/BME set on boot |
-| Bulk CSR-image loader | ✅ | `fm6000load` — replays `<addr> <val>` images (microcode/tables). Open tool, BYO image |
-| I²C-slave sideband (pre-enum debug r/w) | ✅ | i2c-10/0x40; invaluable for bring-up before/without BAR0 |
-| CPU packet DMA interface (FIBM + rings) | 🔨 | RE in flight — the inject/receive mechanism |
-| Interrupts / MSI(-X) | ⬜ | for RX/link/error events; poll-mode first is fine |
-| Kernel driver `fm6000dma.ko` (ioremap BAR, DMA, MSI) | 🔨 | clean-room stub exists; grows into the real access layer |
-
-## Layer 2 — ASIC datapath bring-up (the `fm6000BootSwitch` equivalent)
-| Part | Status | Notes |
-|---|---|---|
-| Chip reset → normal operating mode (scan chain) | ✅ | `SCAN_CHAIN_DATA_IN=0xFFFFFFFF` |
-| Core PLL/DLL lock | ✅ | `PLL_STAT=0x0F` |
-| PCIe SerDes up (JSS/SBus/`PCI_SERDES_CTRL_1`) | ✅ | in `fm6000-pcie-init.sh` |
-| Block reset release order (MSB/FIBM/EPL) | 🔨 | RE in flight — which `SOFT_RESET` bit when |
-| **Pipeline personality / "microcode"** (parser, L2AR, L3AR, modifier) | ⬜ | *the* content question — see clean-room note below |
-| FFU / TCAM init (table-driven, not microcode) | ⬜ | fully documented (datasheet §5.6–5.7) — clean-room |
-| Scheduler / traffic manager | ⬜ | egress; documented |
-| GloRT → DMASK / logical-port map | ⬜ | fixed-function table; central to forwarding + CPU delivery |
-| Front-panel SerDes (EPL) bring-up + per-lane tune | ⬜ | same pattern as PCIe SerDes, ×N lanes |
-| SerDes SPICO (adaptive DFE) | ⏸ | not needed for a first link (PCIe came up without it); defer |
-| Port / MAC config (10G, autoneg, flow control) | ⬜ | per front-panel port |
-| External memory init (if the board uses it) | ❓ | verify whether Alta needs external DRAM here |
-
-## Layer 3 — Forwarding primitives (the SAI API surface)
-| Part | Status | Notes |
-|---|---|---|
-| L2: MAC/MA table (learn/age), VLAN, FID, flood/mcast domains | ⬜ | table-driven (datasheet §5.17) — clean-room |
-| Port state / STP | ⬜ | |
-| L3: LPM route table, next-hop, ARP/ND, router MAC | ⬜ | L3AR |
-| ACL / FFU classification rules | ⬜ | TCAM + action RAM |
-| Trap / CPU-copy (LLDP, ARP, STP, DHCP punt to CPU) | ⬜ | depends on FIBM/DMA (Layer 1) |
-| Counters / statistics (per-port, per-queue) | ⬜ | |
-| QoS / scheduling / shaping / mirror(SPAN) | ⬜ | later |
-
-## Layer 4 — NOS integration (EdgeNOS proper)
-| Part | Status | Notes |
-|---|---|---|
-| ASIC abstraction (SAI-like driver / lib over Layers 1–3) | ⬜ | the clean-room "SDK" |
-| Port / interface management | ⬜ | |
-| L2/L3 forwarding agents (bridge, FIB sync) | ⬜ | Linux switchdev/netdev vs custom — ❓ decision |
-| Control plane (BGP/OSPF/LLDP/…) | ⬜ | EdgeNOS existing stack |
-| Management (CLI, config store, telemetry/SNMP) | ⬜ | EdgeNOS existing stack |
+Status: ✅ done · 🔨 in progress · ⬜ todo · ⏸ deferred · ❓ decision
 
 ---
 
-## Proof-of-life milestones (the order we actually chase)
-1. **M-A — BAR0 register access** ✅
-2. **M-B — CPU inject → pipeline → CPU receive** 🔨 *(next)* — "the datapath moves a byte"; needs FIBM/DMA + one GloRT loopback entry + microcode. Lowest content, no SerDes/ports.
-3. **M-C — one front-panel port links at 10G** ⬜ — EPL + SerDes + MAC bring-up.
-4. **M-D — two-port L2 forward** ⬜ — VLAN + MAC table flood/learn.
-5. **M-E — an L3 route** ⬜.
-6. **M-F — all 52 ports + the NOS forwarding agents** ⬜.
+## The story so far (what changed this session)
+EdgeNOS's FM6000 dataplane was **statically RE-complete but never live-validated** — the chip wouldn't even
+enumerate, so none of `asic/fm6000/` had run. This session unblocked exactly that:
+- the FM6000 now **enumerates** (auto on boot) and we have **live BAR0 CSR read/write** — validating the
+  `fm6000_hw.c` access model (userspace `resource0` mmap, word-addressed `bar0[word]`) end to end;
+- we discovered + proved the **pre-enum PCIe/SerDes bring-up** (`fmPlatformSetupPCIe`: JSS release + SBus init
+  + `PCI_SERDES_CTRL_1`) that the chip needs to come up at all — a piece the skeleton didn't have;
+- the box is powered and the chip is up, so the **`GAPS.md` live-probe queue is now closeable.**
 
-## The one big content decision — ❓ the pipeline "microcode"
-RE-confirmed: `fm6000Microcode.raw` is **not** a secret ISA — it's 39,461 lines of documented
-`<word-addr> <value>` CSR/SRAM/TCAM writes (parser 17.6k, L2AR 12.5k, L3AR 5k, modifier 3.8k; FFU=0,
-configured separately). Two paths, both open-source-clean because our loader ships no firmware:
-- **BYO-firmware (fast):** user replays their OWN licensed `fm6000Microcode.raw` (extracted from an EOS
-  they own) via `fm6000load` → a full working pipeline immediately. Zero Arista IP in the tree.
-- **Blob-free (authored, 2nd milestone):** hand-write a minimal FlexPipe personality from the documented
-  encodings (small parser image + VLAN/MAC/GloRT tables + a few L2AR DMASK rules + trivial modifier).
-Plan: validate Layers 1–3 infrastructure (all our own code) with BYO-firmware, then swap in our own
-minimal personality.
+So the remaining work is: **fold the live-validated sequences + a few captured runtime values into the existing
+`asic/fm6000/` C, then build up the datapath.**
 
-## Clean-room / open-source discipline (applies to every layer)
-- Register maps + values are **hardware facts** (datasheet) → reimplement freely as our own code.
-- Never paste SDK disassembly; document behavior, then write our own.
-- **No proprietary blobs in the repo** — microcode/SPICO/`.si5338`/`.srec` are `.gitignore`'d; users
-  bring their own from a licensed EOS. RE notes stay on the private GitLab, code on public GitHub.
+## EdgeNOS milestone framing (M0 / M1 / M2)
+| Milestone | Meaning | State |
+|---|---|---|
+| **M0** — netboot our kernel to a serial shell | boot chain | ✅ proven (Aboot-catch boot; `aboot-catch3.sh`) |
+| **M1** — platform HAL | board/board-control bring-up | 🔨 M1 Linux boots; SCD/clocks/power ✅; optics/sensors/LED HAL ⬜ |
+| **M2** — dataplane | FM6000 driver + forwarding | 🔨 **the frontier** — chip enumerates + BAR0 live; datapath next |
 
-## Open questions to resolve
-- ❓ Microcode: BYO vs authored-minimal for the first forwarding demo.
-- ❓ NOS dataplane control model: Linux switchdev/netdev vs a custom EdgeNOS abstraction.
-- ❓ Does this board wire external DRAM to the FM6000 (Layer 2 memory init)?
-- ❓ Interrupt vs poll for RX/link events (poll first).
+---
+
+## M1 — platform HAL (`platform/arista-7150s-52`, `core/platform`)
+| Part | Status | Where |
+|---|---|---|
+| M1 Linux boots (x86_64), serial + SSH | ✅ | `build/arista-7150/m1` |
+| SCD/CPLD driver (`scd` + `scd-hwmon` from the sonic-kernel fork) + `new_<object>` set | ✅ | in-kernel; SMBus masters, resetGpo, GPIO |
+| Si5338 clock (Cotati map) — the enumeration root-cause | ✅ | `fm6000-up.sh` §3 |
+| Power/VRMs (Chl822X, UCD90160) characterized | ✅ | undervolt refuted; no margining |
+| Remote reboot / recovery (SCD power-cycle) | ✅ | `scdreg 0x7000 0xdead` |
+| `platform.py` HAL: LEDs / reset / SFP-txdisable / DOM / sensors / PSU | ⬜ | `GAPS.md §C`; SFP/sensor i2c addrs are one `i2cdetect` (`GAPS.md §A`) |
+| prefdl/idprom (MAC base, per-port SerDes tuning vars) | ⬜ | board EEPROM |
+
+## M2 — FM6000 dataplane (`asic/fm6000/`, behind `asic_ops`)
+Existing skeleton is cited per-line from the RE (phase7g, FPDMA.md). Status reflects **live** validation.
+
+| Part | File | Status | Notes |
+|---|---|---|---|
+| BAR0 bind + CSR read/write/poll | `fm6000_hw.c` | ✅ **live-validated** | access model proven; our `fm6000reg` is the standalone check |
+| Pre-enum PCIe/SerDes bring-up (make it enumerate) | (new) `fm6000-pcie-init.sh` | ✅ **live** | fold into the board bring-up / `fm6000_boot.c` preboot |
+| `fm6000_boot_switch` ordering (preboot → BIST → sbus → caches → microcode → SPICO) | `fm6000_boot.c` | 🔨 | order recovered; **live-trace** BIST march data + SBus `0x0B0500` framing |
+| Microcode/table load (parser/FFU CSR replay) | `fm6000_ucode.c` | 🔨 | procedure recovered; our `fm6000load` is the standalone check; needs pipeline pre-state (RE in flight) |
+| SerDes SPICO upload (SBus IMEM) | `fm6000_ucode.c` | ⏸ | blob located; **not needed for first link** (PCIe SerDes came up without it) |
+| Packet DMA BD-rings (PCIE block, word `0x1400–0x141D` = byte `0x5000`; 32B BDs, TX/RX, F64 tag) | `fpdma.c` | 🔨 | **recipe now recovered** from `fpdma.ko` RE: BD 32B format (READY/DONE/EOP/ERR), `PCI_COMMAND`(0x1401) values, ring base/end regs, `PCI_DMA_CFG`(0x1418) DMAEn, F64 tag layout. NB this is the CPU datapath — **not** FIBM (0x5000 *word* = in-band-mgmt mailbox only) |
+| DMA/MSI kernel module (BAR0 + low-4GiB coherent pool + MSI) | `kmod/fm6000dma.c` | 🔨 | 7150 RS780 has no IOMMU → kmod is required (not VFIO) |
+| `struct asic_ops` binding (`init/port_set/tx/rx_poll/intr_fd/shutdown`) | `fm6000_edged.c` | 🔨 | the seam the daemon drives |
+
+### Forwarding primitives (built on the above, table/register-driven — clean-room)
+| Part | Status | Notes |
+|---|---|---|
+| L2: MAC/MA table (learn/age), VLAN, FID, flood/mcast, GloRT→DMASK | ⬜ | datasheet §5.17; the `core/datapath/l2.c`+`vlan.c` backend |
+| L3: LPM routes, next-hop, ARP/ND, router MAC | ⬜ | L3AR; `core/datapath/l3.c` backend |
+| ACL/FFU classification | ⬜ | TCAM + action RAM (documented, no microcode) |
+| CPU trap/copy (LLDP/ARP/STP punt) | ⬜ | rides `fpdma` rx |
+| Counters / QoS / scheduler / mirror | ⬜ | later |
+
+---
+
+## Proof-of-life milestones (the order we chase)
+1. **BAR0 register access** ✅
+2. **CPU inject → pipeline → CPU receive** 🔨 *(next — full register recipe recovered)* — release MSB
+   (`SOFT_RESET(0x9)=0x00`, required for the pipeline **and** for the microcode load), load microcode, add one
+   `GLORT_CAM`→`GLORT_RAM`→`DMASK` CPU-loopback entry, program the `fpdma` DMA BD-rings, and inject an F64
+   special-delivery frame (tag word0=`0x1000`, DGLORT=CPU port 0) → punt it back. No EPL/SerDes/FIBM/ports. "Moves a byte."
+3. **One front-panel port links (10G)** ⬜ — EPL + SerDes + MAC.
+4. **Two-port L2 forward** ⬜ — VLAN + MAC flood/learn.
+5. **An L3 route** ⬜.
+6. **All 52 ports + the `core/datapath` agents driving `asic_ops`** ⬜.
+
+## Remaining FM6000 gaps (current — the box has been up + SCD working for a while)
+Structure was already recovered; this session the **CPU-datapath recipe is now RE-recovered too** (from
+`fpdma.ko`: BD 32B format, DMA-ring regs, `PCI_COMMAND` values, F64 tag) — no longer a live-trace unknown.
+Genuinely open items, all live-verifiable now, none blocking the M-B milestone:
+- SBus-controller CSR framing at `0x0B0500` (`fm6000_sbus_write`) — for front-panel SerDes/SPICO only; the
+  *PCIe* SBus (`0xF000–0xF003`) is already proven live.
+- BIST MARCH/fusebox data values (only if a cold BIST path is exercised).
+- SPICO CRC-verify interrupt encoding (deferred with SPICO).
+- 7150 SFP/sensor/PSU per-cage i2c addresses — an M1 platform-HAL detail (`i2cdetect` with `scd-hwmon` loaded).
+
+## ❓ Decisions
+- **Microcode: BYO vs authored.** `fm6000_ucode.c` loads a `<addr> <val>` image. Path 1: operator supplies
+  their OWN licensed `fm6000Microcode.raw` (extracted from an EOS they own) → full pipeline immediately, zero
+  vendor IP in-tree. Path 2 (2nd milestone): hand-author a minimal FlexPipe personality from the documented
+  encodings. Plan: validate M2 infra with BYO, then author our own minimal personality.
+- **Later cleanup:** retrofit `bcm56846` behind the same `asic_ops` seam to unify the two daemons.
+
+## Clean-room / open-source discipline
+- Procedures reimplemented from behavioral RE; **payloads are never vendored** — microcode/SPICO/`.si5338`/`.srec`
+  are `.gitignore`'d and operator-supplied from a licensed EOS (`FM6000_FW_*` load-by-path in `fm6000_ucode.h`).
+- Register offsets are recovered/cited facts, not the copied vendor header.
+- Code on public GitHub; the arista RE writeups stay on the private GitLab.
