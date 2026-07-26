@@ -28,15 +28,32 @@ void fm6000_l2_cpu_cfg_default(struct fm6000_l2_cpu_cfg *cfg)
     cfg->cpu_glort      = FM6000_CPU_GLORT;    /* 0xFF00 */
     cfg->cam_idx        = 8;                    /* a free GLORT slot            */
     cfg->dmask_gid      = 16;                   /* a free MCAST_DEST slot       */
-    cfg->src_port_first = 0;                    /* admit CPU-port dest for all  */
-    cfg->src_port_last  = 75;                   /* source ports (76 total)      */
+    /* MINIMAL by design: a CPU-injected frame's ingress source port IS the CPU
+     * port, and L2F is indexed by source port — so we only need the CPU port's
+     * one membership entry, NOT all 76. Blasting all 76 unpaced wedged the chip
+     * (table-commit backpressure); see arista memory fm6000-bringup-safety. */
+    cfg->src_port_first = FM6000_CPU_PORT;
+    cfg->src_port_last  = FM6000_CPU_PORT;
 }
 
-static void csr_set(struct fm6000_dev *dev, uint32_t word, uint32_t val,
-                    const char *what)
+/* Pace table writes (separate ~us spacing) — unpaced bursts to the L2F/MCAST
+ * commit logic wedge the switch core. Read back and abort if the region goes
+ * 0xffffffff (chip fell off / wedged) so we never keep blasting a dead chip. */
+static int csr_set(struct fm6000_dev *dev, uint32_t word, uint32_t val,
+                   const char *what)
 {
+    uint32_t rb;
     fprintf(stderr, "fm6000_l2: [%-10s] CSR[0x%05x] <= 0x%08x\n", what, word, val);
     fm6000_csr_write(dev, word, val);
+    fm6000_delay_us(200);                      /* commit pacing                */
+    rb = fm6000_csr_read(dev, word);
+    if (rb == 0xFFFFFFFFu) {
+        fprintf(stderr, "fm6000_l2: *** CSR[0x%05x] reads 0xffffffff after write "
+                        "— chip wedged/off-bus, ABORTING (recover: rearm WD + "
+                        "pcie-init) ***\n", word);
+        return -1;
+    }
+    return 0;
 }
 
 int fm6000_l2_configure_cpu_loopback(struct fm6000_dev *dev,
@@ -55,32 +72,35 @@ int fm6000_l2_configure_cpu_loopback(struct fm6000_dev *dev,
     cpu_bit_word = FM6000_DEST_WORD((unsigned)cfg->cpu_port);
     cpu_bit_mask = FM6000_DEST_BIT((unsigned)cfg->cpu_port);
 
+#define SET(w, v, tag) do { if (csr_set(dev, (w), (v), (tag)) < 0) return -1; } while (0)
+
     /* Program deepest table first so the result is consistent before the GLORT
-     * points at it (pipeline resolve order: GLORT -> DMASK -> L2F). */
+     * points at it (pipeline resolve order: GLORT -> DMASK -> L2F). Each write is
+     * paced + read-back-verified; on a wedge we abort immediately (SET macro). */
 
-    /* 1) DMASK: MCAST_DEST_TABLE[gid] = a 76-bit mask with only the CPU-port bit.
-     *    4 words: word0..2 = DestMask[0:75], word3 pad. */
+    /* 1) DMASK: MCAST_DEST_TABLE[gid] = a 76-bit mask with only the CPU-port bit. */
     for (dw = 0; dw < 4; dw++)
-        csr_set(dev, FM6000_MCAST_DEST(cfg->dmask_gid, dw),
-                (dw == cpu_bit_word) ? cpu_bit_mask : 0u, "dmask");
+        SET(FM6000_MCAST_DEST(cfg->dmask_gid, dw),
+            (dw == cpu_bit_word) ? cpu_bit_mask : 0u, "dmask");
 
-    /* 2) GLORT: CAM entry matches the CPU DGLORT exactly (KeyInvert=0); RAM points
-     *    at the DMASK group (HashCmd=0 single-dest, DMaskRange=0). */
-    csr_set(dev, FM6000_GLORT_CAM(cfg->cam_idx),
-            FM6000_GLORT_CAM_ENC(cfg->cpu_glort, 0x0000), "glort_cam");
-    csr_set(dev, FM6000_GLORT_RAM(cfg->cam_idx, 0),
-            FM6000_GLORT_RAM_W0(0u, cfg->dmask_gid), "glort_ram0");
-    csr_set(dev, FM6000_GLORT_RAM(cfg->cam_idx, 1), 0u, "glort_ram1");
+    /* 2) GLORT: CAM matches the CPU DGLORT exactly (KeyInvert=0); RAM points at
+     *    the DMASK group (HashCmd=0 single-dest, DMaskRange=0). */
+    SET(FM6000_GLORT_CAM(cfg->cam_idx),
+        FM6000_GLORT_CAM_ENC(cfg->cpu_glort, 0x0000), "glort_cam");
+    SET(FM6000_GLORT_RAM(cfg->cam_idx, 0),
+        FM6000_GLORT_RAM_W0(0u, cfg->dmask_gid), "glort_ram0");
+    SET(FM6000_GLORT_RAM(cfg->cam_idx, 1), 0u, "glort_ram1");
 
-    /* 3) L2F: admit the CPU-port bit in the per-source-port membership masks, and
-     *    set a pass-through profile so the stage doesn't drop the frame. The mask
-     *    value carries only the CPU-port bit (dest we allow); indexed by src port. */
+    /* 3) L2F: admit the CPU-port bit for the CPU source port only (a CPU-injected
+     *    frame ingresses on the CPU port), + a pass-through profile. Minimal by
+     *    design — writing all 76 source ports unpaced wedged the chip. */
     for (sp = cfg->src_port_first; sp <= cfg->src_port_last; sp++) {
         for (dw = 0; dw < 3; dw++)
-            csr_set(dev, FM6000_L2F_TABLE_256(sp, dw),    /* i0 = source port */
-                    (dw == cpu_bit_word) ? cpu_bit_mask : 0u, "l2f_memb");
-        csr_set(dev, FM6000_L2F_PROFILE(sp), FM6000_L2F_PROFILE_PASS, "l2f_prof");
+            SET(FM6000_L2F_TABLE_256(sp, dw),          /* i0 = source port */
+                (dw == cpu_bit_word) ? cpu_bit_mask : 0u, "l2f_memb");
+        SET(FM6000_L2F_PROFILE(sp), FM6000_L2F_PROFILE_PASS, "l2f_prof");
     }
+#undef SET
 
     fprintf(stderr,
         "fm6000_l2: CPU loopback programmed — cpu_port=%d glort=0x%04x "
