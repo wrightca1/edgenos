@@ -54,16 +54,22 @@ class EdgeNOSPlatform_x86_64_arista_7150s_52_r0(EdgeNOSPlatformBase, PortConfig_
         f"{_SVC}/sfp-enable.sh",
     ]
 
-    # --- confirmed SCD register blocks (Phase-3i / Bodega.py; edgenos/SCD.md) ---
-    SCD_LED_BLOCK = (0x5010, 0x5340, 0x10)     # port LEDs, step 0x10
-    SCD_LED_SYS   = 0x6940
-    SCD_RESET_GPO = 0x4000                     # set +0x00 / clear +0x10
-    SCD_INTR      = (0x3000, 0x3030, 0x3060)   # maskSet+0 / maskClear+0x10 / status+0x20
+    # --- confirmed SCD register blocks (Arista SantaRosaP4.fdl + live scd dump) --
+    # NB: 0x5010..0x5340 is the SFP XCVR cage block (not LEDs). Port LEDs live at
+    # 0x60D0 (FDL line 111: ledAddr = 0x60D0 + 0x10*(portId-1)); status LED 0x6050.
+    SCD_XCVR_BLOCK = (0x5010, 0x5340, 0x10)    # 52 SFP+ cages, step 0x10
+    SCD_LED_BLOCK  = (0x60D0, 0x6400, 0x10)    # per-port LEDs, step 0x10
+    SCD_LED_SYS    = 0x6050                     # Status LED
+    SCD_RESET_GPO  = 0x4000                     # FM6000=bit1, security=bit2
+    SCD_PHY_TX_EN  = 0x4100                     # per-port dataplane TX enable (EPL bring-up)
+    SCD_INTR       = (0x3000, 0x3030, 0x3060, 0x3090)  # maskSet+0/maskClear+0x10/status+0x20
 
-    # scd-led registers standard Linux LED-class devices; scd-xcvr exposes per-cage
-    # {present,txdisable,rxlos,txfault} nodes; at24 gives the SFF eeprom at 0x50.
+    # scd-led registers standard Linux LED-class devices; scd-xcvr creates FLAT
+    # "sfp<id>_{present,rxlos,txfault,txdisable}" attrs on the scd PCI device kobj
+    # (scd-xcvr.c: name "%s%u_%s"), NOT a per-cage subdir. at24 gives the SFF eeprom.
     LED_DIR      = "sys/class/leds"                       # <name>/brightness
-    XCVR_GLOB    = "sys/bus/platform/devices/scd-xcvr*/sfp*"   # per-cage dir (confirm on bring-up)
+    SCD_DRV_GLOB = "sys/bus/pci/drivers/scd/0000:*"       # the scd PCI device dir
+    XCVR_ATTR    = "sfp%d_%s"                             # sfp<id>_txdisable etc.
     SFP_EEPROMS  = "sys/bus/i2c/devices/*-0050/eeprom"    # 52 SFP EEPROMs on scd i2c muxes
 
     def fan_count(self):
@@ -84,32 +90,39 @@ class EdgeNOSPlatform_x86_64_arista_7150s_52_r0(EdgeNOSPlatformBase, PortConfig_
         return self._write(os.path.join(self.LED_DIR, name, "brightness"), int(state))
 
     # ---- SFP: present + tx-disable via scd-xcvr (base gives EEPROM/DOM) ----
-    def _xcvr_node(self, port):
-        """Return the scd-xcvr sysfs dir for front-panel Ethernet<port> (1..52).
-        Exact node naming is confirmed on first bring-up; degrade to None."""
-        hits = sorted(glob.glob(os.path.join(self.root, self.XCVR_GLOB)))
-        idx = port - 1
-        return hits[idx] if 0 <= idx < len(hits) else None
+    def _scd_dir(self):
+        """Return the scd PCI device sysfs dir (relative to root), or None. The
+        scd-xcvr GPIO attrs are flat files here, named sfp<id>_<gpio>."""
+        hits = sorted(glob.glob(os.path.join(self.root, self.SCD_DRV_GLOB)))
+        if not hits:
+            return None
+        return os.path.relpath(hits[0], self.root)
+
+    def _xcvr_attr(self, port, gpio):
+        """Relative path to the scd-xcvr attr for Ethernet<port> (1..52), e.g.
+        sfp7_txdisable. Front-panel Ethernet<N> == scd sfp id N (FDL). None if no scd."""
+        scd = self._scd_dir()
+        if not scd:
+            return None
+        return os.path.join(scd, self.XCVR_ATTR % (port, gpio))
 
     def sfps(self):
         """Per-port presence + tx state from scd-xcvr, merged with base optics."""
         out = []
         for port in range(1, self.port_count() + 1):
-            node = self._xcvr_node(port)
-            present = txdis = None
-            if node:
-                present = self._read_int(os.path.relpath(os.path.join(node, "present"), self.root))
-                txdis   = self._read_int(os.path.relpath(os.path.join(node, "txdisable"), self.root))
+            pres = self._xcvr_attr(port, "present")
+            txd  = self._xcvr_attr(port, "txdisable")
+            present = self._read_int(pres) if pres else None
+            txdis   = self._read_int(txd) if txd else None
             out.append({"port": port, "present": present, "txdisable": txdis})
         return out
 
     def sfp_set_tx(self, port, on):
         """Enable/disable a laser. No unsupported-transceiver gate under our own
         scd-xcvr — any SFP's TX turns on (the whole enable3px saga was EOS policy)."""
-        node = self._xcvr_node(port)
-        if not node:
+        rel = self._xcvr_attr(port, "txdisable")
+        if not rel:
             return False
-        rel = os.path.relpath(os.path.join(node, "txdisable"), self.root)
         return self._write(rel, 0 if on else 1)   # txdisable=0 => laser on
 
     # ---- PSU / fans: mainline hwmon (ucd9000 / max31790) ------------------

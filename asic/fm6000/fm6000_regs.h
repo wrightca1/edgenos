@@ -135,6 +135,60 @@
 #define FM6000_SBUS_SPICO_DATA_LO   0xFD07u
 
 /* ======================================================================== */
+/* L2 forwarding blocks (word indices) — the CPU-punt RX path.               */
+/* Bases + field encodings are RE'd facts (fm6000_api_regs_int, cited) cross- */
+/* checked against the running-EOS golden capture (eos-golden-2026-07-26-l2)  */
+/* + the FocalPoint SDK/diag decode (notes/analysis/phase39-cpu-punt-l2-decode.*/
+/* md). A CPU-injected special-delivery frame resolves:                       */
+/*   F64 DGLORT -> GLORT_CAM -> GLORT_RAM(DMaskBaseIdx) -> MCAST_DEST_TABLE    */
+/*                 (76b physical-port DestMask) -> (L2F membership AND) -> port*/
+/* CPU port = physical/logical 0 (PCIe/DMA); CPU GLORT = 0xFF00. All these are */
+/* unconfigured on M1; fm6000_l2.c programs the minimal subset.               */
+/* ======================================================================== */
+#define FM6000_BLK_GLORT        0x0E000u    /* GLORT destination resolution   */
+#define FM6000_BLK_L2L          0x30000u    /* L2 MAC-table lookup            */
+#define FM6000_BLK_L2AR         0x140000u   /* L2 action resolution           */
+#define FM6000_BLK_MOD          0x150000u   /* egress modify                  */
+#define FM6000_BLK_L2F          0x180000u   /* L2 filtering (13-stage)        */
+#define FM6000_BLK_MCAST_MID    0x240000u   /* MCAST_DEST_TABLE (the DMASK)    */
+
+/* CPU (PCIe/DMA) port + its GLORT — fmSetCpuPort(sw,0)/busType=pcie->0. */
+#define FM6000_CPU_PORT             0u          /* physical/logical CPU port   */
+#define FM6000_CPU_GLORT            0xFF00u     /* AltaLib GLORT_CPU           */
+
+/* GLORT (base 0x0E000): CAM = 1024-entry TCAM, 1 word/entry: KeyInvert[0:15]
+ * (per-bit don't-care), Key[16:31] (16-bit DGLORT match). RAM = 2 words/entry:
+ * HashCmd[0:1], DMaskBaseIdx[2:17], DMaskRange[34:40]. */
+#define FM6000_GLORT_CAM(i)         (FM6000_BLK_GLORT + 0x000 + (i))
+#define FM6000_GLORT_RAM(i, w)      (FM6000_BLK_GLORT + 0x800 + 2u*(i) + (w))
+#define FM6000_GLORT_CAM_ENC(key, keyinv)   (((uint32_t)(key) << 16) | ((keyinv) & 0xFFFFu))
+#define FM6000_GLORT_RAM_W0(hashcmd, dmaskbaseidx) \
+        (((hashcmd) & 0x3u) | (((uint32_t)(dmaskbaseidx) & 0xFFFFu) << 2))
+
+/* MCAST_DEST_TABLE (base 0x240000): 4096 entries x 4 words. DestMask[0:75] is a
+ * PHYSICAL-port bitmask (word0=ports0-31, word1=32-63, word2 bits0-11=64-75),
+ * MulticastIndex[76:91]=word2 bits>=12. addr = base + 4*groupId + word. Verified
+ * live: golden group 4112 = word0 0x00003fff = ports 0-13. */
+#define FM6000_MCAST_DEST(gid, w)   (FM6000_BLK_MCAST_MID + 4u*(gid) + (w))
+#define FM6000_DEST_WORD(phys_port) ((phys_port) >> 5)          /* which of the 3 words */
+#define FM6000_DEST_BIT(phys_port)  (1u << ((phys_port) & 31))  /* bit within that word */
+
+/* L2AR (base 0x140000): action result written when a frame resolves. */
+#define FM6000_L2AR_CAM_DMASK(i, w) (FM6000_BLK_L2AR + 0x4000 + 8u*(i) + (w))
+#define FM6000_L2AR_ACTION_CPU_CODE(i)  (FM6000_BLK_L2AR + 0x6200 + (i)) /* trap-to-CPU code */
+#define FM6000_L2AR_ACTION_DGLORT(i)    (FM6000_BLK_L2AR + 0x6700 + (i))
+#define FM6000_L2AR_ACTION_DMASK_IDX(i) (FM6000_BLK_L2AR + 0x6A00 + (i))
+
+/* L2F (base 0x180000): 13-stage filter. TABLE_256/_4K hold 76-bit PHYSICAL-port
+ * membership masks (field M[0:75]) indexed by source physical port; the DMASK is
+ * ANDed against them. Must admit the CPU port (bit 0). PROFILE gates the stages. */
+#define FM6000_L2F_TABLE_4K(i0, w)   (FM6000_BLK_L2F + 0x00000 + 4u*(i0) + (w))
+#define FM6000_L2F_TABLE_256(i0, w)  (FM6000_BLK_L2F + 0x20000 + 4u*(i0) + (w))
+#define FM6000_L2F_PROFILE(i0)       (FM6000_BLK_L2F + 0x21000 + (i0))
+/* Diag "pass-through" profile: TableSelect=7, CmdLookup=1, CmdA[0]=1, CmdB[0]=1. */
+#define FM6000_L2F_PROFILE_PASS      (112u | 2048u | 4096u | 65536u)
+
+/* ======================================================================== */
 /* Packet-DMA engine block - RAW BYTE offsets from BAR0 (edgenos/FPDMA.md).  */
 /* ======================================================================== */
 #define FM6000_DMA_BASE         0x5000u

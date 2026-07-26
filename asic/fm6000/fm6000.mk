@@ -15,6 +15,7 @@ FM6000_SRCS := \
   $(FM6000_DIR)fm6000_hw.c \
   $(FM6000_DIR)fm6000_ucode.c \
   $(FM6000_DIR)fm6000_boot.c \
+  $(FM6000_DIR)fm6000_l2.c \
   $(FM6000_DIR)fpdma.c \
   $(FM6000_DIR)fpdma_kmod.c \
   $(FM6000_DIR)fpdma_vfio.c
@@ -31,4 +32,9 @@ ASIC_CFLAGS += $(FM6000_CFLAGS)
 
 # Standalone bring-up/punt diagnostic (not linked into edged).
 $(FM6000_DIR)fm6000_bringup: $(FM6000_SRCS) $(FM6000_DIR)fm6000_bringup.c
+	$(CC) $(FM6000_CFLAGS) -Wall -Wextra $^ -o $@
+
+# Standalone CPU-punt L2 programmer (register-only; run before fpdma_probe tx).
+$(FM6000_DIR)fm6000_l2_probe: $(FM6000_DIR)fm6000_hw.c $(FM6000_DIR)fm6000_l2.c \
+                              $(FM6000_DIR)fm6000_l2_probe.c
 	$(CC) $(FM6000_CFLAGS) -Wall -Wextra $^ -o $@
