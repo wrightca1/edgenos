@@ -41,7 +41,7 @@ So the remaining work is: **fold the live-validated sequences + a few captured r
 | Part | Status | Where |
 |---|---|---|
 | M1 Linux boots (x86_64), serial + SSH | ✅ | `build/arista-7150/m1` |
-| SCD/CPLD driver (`scd` + `scd-hwmon` from the sonic-kernel fork) + `new_<object>` set | ✅ | in-kernel; SMBus masters, resetGpo, GPIO |
+| SCD/CPLD driver (`scd` + `scd-hwmon`, GPL) + 7150 `new_<object>` set | ✅ | in-kernel; SMBus masters, resetGpo, GPIO |
 | Si5338 clock (Cotati map) — the enumeration root-cause | ✅ | `fm6000-up.sh` §3 |
 | Power/VRMs (Chl822X, UCD90160) characterized | ✅ | undervolt refuted; no margining |
 | Remote reboot / recovery (SCD power-cycle) | ✅ | `scdreg 0x7000 0xdead` |
