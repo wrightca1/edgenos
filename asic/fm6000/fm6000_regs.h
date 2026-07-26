@@ -154,6 +154,11 @@
 #define FM6000_DMA_IM            0x5034u    /* interrupt mask                   */
 /* 0x5038+ : cur_tx/rx_data_ptr, cur_bd_ptr, tx_frame_len, dma_cfg,
  * frame_timeout, stat counters, core_ctrl[2], core_debug[3] (fab_dump). */
+#define FM6000_DMA_CFG2          0x505Cu    /* engine cfg; fpdma_init writes 0x30f */
+#define FM6000_DMA_CFG2_INIT     0x30Fu
+#define FM6000_DMA_UNK68         0x5068u    /* fpdma_init writes 0 here          */
+#define FM6000_DMA_CMD_TX        0x1u       /* command bit0 = enable/kick TX     */
+#define FM6000_DMA_CMD_RX        0x2u       /* command bit1 = enable/kick RX     */
 #define FM6000_DMA_CFG           0x5060u    /* dma_cfg (w0x1418); reset 0x35    */
 #define FM6000_DMA_CFG_ENABLE    0x2u       /* bit1: engine enable — golden EOS
                                              * runs 0x37 (=reset 0x35 | 0x2);
@@ -163,6 +168,7 @@
                                              * enable+kick TX&RX (vendor .ko disasm;
                                              * NOT 0x1). Re-armed each NAPI poll.   */
 #define FM6000_DMA_STATUS_BUSY   0x7u       /* fpdma_reset polls status until
+#define FM6000_DMA_STATUS_READY  0x10u     /* bit4 set = engine running (golden 0x12) */
                                              * (status & 0x7)==0 = engine ready     */
 
 /* ---- Descriptor ring geometry (FPDMA.md "Descriptor ring model") -------- */

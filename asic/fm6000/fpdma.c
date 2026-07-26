@@ -105,6 +105,20 @@ static void ring_free(struct fpdma *fp, struct fpdma_ring *r)
     memset(r, 0, sizeof(*r));
 }
 
+/* Brief settle after a COMMAND write (vendor fpdma_init pauses between the TX and
+ * RX enables). The running STATUS legitimately keeps bit1 set (golden EOS reads
+ * 0x12), so we don't wait for it to clear — just let the engine latch. */
+static void dma_settle(struct fm6000_dev *dev)
+{
+    int i;
+    for (i = 0; i < 50; i++) {
+        uint32_t st = fm6000_dma_read(dev, FM6000_DMA_STATUS);
+        if (st == 0xFFFFFFFFu || (st & FM6000_DMA_STATUS_READY))
+            break;
+        usleep(10);
+    }
+}
+
 /* ---- program the 0x5000 register block --------------------------------- */
 static void program_rings(struct fpdma *fp)
 {
@@ -114,46 +128,31 @@ static void program_rings(struct fpdma *fp)
     uint64_t tx_base = fp->tx.desc_dma;
     uint64_t tx_end  = tx_base + (uint64_t)fp->tx.size * FM6000_DESC_STRIDE;
 
-    fm6000_dma_write(dev, FM6000_DMA_IM, 0xFFFFFFFFu);          /* mask IRQs     */
-
-    fm6000_dma_write(dev, FM6000_DMA_RX_BD_BASE_LO, (uint32_t)rx_base);
-    fm6000_dma_write(dev, FM6000_DMA_RX_BD_BASE_HI, (uint32_t)(rx_base >> 32));
-    fm6000_dma_write(dev, FM6000_DMA_RX_BD_END_LO,  (uint32_t)rx_end);
-    fm6000_dma_write(dev, FM6000_DMA_RX_BD_END_HI,  (uint32_t)(rx_end >> 32));
+    /* Exact fpdma_init sequence, recovered from the vendor fpdma.ko disasm
+     * (2026-07-26). The earlier version wrote only rings + a single COMMAND=0x3;
+     * the engine never advanced a TX BD because it was missing DMA_CFG2=0x30f and
+     * the split TX-then-RX enable. Order matters: config, then TX ring + COMMAND=1
+     * (enable/kick TX) + status-settle, then RX ring + COMMAND=2 (RX), then unmask. */
+    fm6000_dma_write(dev, FM6000_DMA_IP,   0xFFFFFFFFu);        /* clear pending  */
+    fm6000_dma_write(dev, FM6000_DMA_UNK68, 0);
+    fm6000_dma_write(dev, FM6000_DMA_CFG,  0x37u);              /* dma_cfg enable */
+    fm6000_dma_write(dev, FM6000_DMA_CFG2, FM6000_DMA_CFG2_INIT);/* 0x30f — was missing */
 
     fm6000_dma_write(dev, FM6000_DMA_TX_BD_BASE_LO, (uint32_t)tx_base);
     fm6000_dma_write(dev, FM6000_DMA_TX_BD_BASE_HI, (uint32_t)(tx_base >> 32));
     fm6000_dma_write(dev, FM6000_DMA_TX_BD_END_LO,  (uint32_t)tx_end);
     fm6000_dma_write(dev, FM6000_DMA_TX_BD_END_HI,  (uint32_t)(tx_end >> 32));
+    fm6000_dma_write(dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_TX);   /* enable TX  */
+    dma_settle(dev);
 
-    fm6000_dma_write(dev, FM6000_DMA_IP, 0xFFFFFFFFu);         /* clear pending  */
+    fm6000_dma_write(dev, FM6000_DMA_RX_BD_BASE_LO, (uint32_t)rx_base);
+    fm6000_dma_write(dev, FM6000_DMA_RX_BD_BASE_HI, (uint32_t)(rx_base >> 32));
+    fm6000_dma_write(dev, FM6000_DMA_RX_BD_END_LO,  (uint32_t)rx_end);
+    fm6000_dma_write(dev, FM6000_DMA_RX_BD_END_HI,  (uint32_t)(rx_end >> 32));
+    fm6000_dma_write(dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_RX);   /* enable RX  */
+    dma_settle(dev);
 
-    /* Enable the engine. Pinned by a golden register capture off a running EOS
-     * (2026-07-26): the enable is DMA_CFG bit1 (EOS runs 0x37 = reset 0x35 | 0x2)
-     * — program_rings previously left DMA_CFG untouched, so the engine never
-     * advanced a descriptor. Then unmask tx/rx-done (EOS im=0x3) and kick COMMAND
-     * (write-only: reads back 0 on EOS too, so its readback isn't a health check). */
-    {
-        uint32_t cfg = fm6000_dma_read(dev, FM6000_DMA_CFG);
-        fm6000_dma_write(dev, FM6000_DMA_CFG, cfg | FM6000_DMA_CFG_ENABLE);
-    }
     fm6000_dma_write(dev, FM6000_DMA_IM, FM6000_DMA_IM_RUN);
-
-    /* Enable+kick TX&RX and wait for ready. The vendor fpdma_reset writes
-     * COMMAND=0x3 (not 0x1) then polls STATUS until (STATUS & 0x7)==0. */
-    fm6000_dma_write(dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_ENABLE);
-    {
-        int i;
-        uint32_t st = 0;
-        for (i = 0; i < 1000; i++) {
-            st = fm6000_dma_read(dev, FM6000_DMA_STATUS);
-            if (st == 0xFFFFFFFFu || (st & FM6000_DMA_STATUS_BUSY) == 0)
-                break;
-            usleep(10);
-        }
-        if (st == 0xFFFFFFFFu || (st & FM6000_DMA_STATUS_BUSY) != 0)
-            fprintf(stderr, "fpdma: TX/RX DMA failed to enable (status=0x%08x)\n", st);
-    }
 }
 
 /* ---- public API -------------------------------------------------------- */
