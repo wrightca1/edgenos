@@ -63,10 +63,9 @@ Existing skeleton is cited per-line from the RE (phase7g, FPDMA.md). Status refl
 | `fm6000_boot_switch` ordering (preboot → BIST → sbus → caches → microcode → SPICO) | `fm6000_boot.c` | 🔨 | order recovered; **live-trace** BIST march data + SBus `0x0B0500` framing |
 | Microcode/table load (parser/FFU CSR replay) | `fm6000_ucode.c` | ✅ **live — 90%** | **35,641 / 39,461 lines of the vendor image load & M1 stays alive** (2026-07-26): L2 pipeline MAPPER+PARSER+L2AR (lines 1–30321) loads fast; the L3AR/table-commit region (5,320 lines) loads clean **when paced line-by-line** (blasting wedges = HW table-commit backpressure → real fix is a commit done-poll). **Only MOD (`0x150000` egress-modify TCAM, 3,820 lines) still wedges even paced** after ~5 entries — a distinct egress/EPL-enable or MOD-commit done-poll dependency, deeper RE, **not on the byte-mover path**. |
 | SerDes SPICO upload (SBus IMEM) | `fm6000_ucode.c` | ⏸ | blob located; **not needed for first link** (PCIe SerDes came up without it) |
-| Packet DMA BD-rings (PCIE block, word `0x1400–0x141D` = byte `0x5000`; 32B BDs, TX/RX, F64 tag) | `fpdma.c` | ✅ **live-validated** | Rings program + engine reaches ready on the 7150 (2026-07-26). **Protocol fully pinned** from a golden EOS register capture + vendor `fpdma.ko` disasm: enable = **`COMMAND=0x3`** then poll `STATUS & 0x7 → 0`; **`dma_cfg(0x5060)=0x37`**; `im=0x3`; **32B BD, `status@0`=0x09 handoff / bit2(`0x04`)=DONE**, len@2, addr@4. `fpdma_probe.c` is the standalone harness. |
+| Packet DMA BD-rings — **TX transmits** (PCIE block byte `0x5000`; 32B BDs, F64 tag) | `fpdma.c` | ✅ **TX live** | Full `fpdma_init` replicated from vendor disasm + golden EOS capture: `dma_cfg(0x5060)=0x37`, **`0x505c=0x30f`**, split enable `TX_START(0x1)`→settle→`RX_START(0x2)`; engine reaches golden `STATUS=0x12`. **TX BD transmits** (`0x09→0x0c` DONE, reclaim, IRQ) once kicked with **`PCI_TX_POST=0x5`** (Table 7-2; `0x3`=`TX_STOP` was the bug). 32B BD, `status@0`=0x09 handoff/bit2=DONE, len@2, addr@4. Harness `fpdma_probe.c`. RX-ring receive pending L2 forwarding. |
 | DMA/MSI kernel module (BAR0 + low-4GiB coherent pool + MSI) | `kmod/fm6000dma.c` | ✅ **live** | insmods clean, binds FM6000, 4 MiB coherent pool @ `0x7f800000` (<4 GiB) + MSI irq, `/dev/fm6000dma`. 7150 RS780 has no IOMMU → kmod required (not VFIO). |
-| **CPU-port + scheduler bring-up (frame-drain prerequisite)** | `fm6000_boot.c` (`validate_sched_token`/`port_mac_cpu_setup` stubs) | ⬜ **the new frontier** | injected TX BD does not drain (status stays 0x09, ip=0) with only L2 microcode — the CPU-port TX FIFO/fabric needs the scheduler token + CPU-port enable before a frame can leave the ring. **This is the next RE.** |
-| GloRT→DMASK CPU-loopback (so special-delivery DGLORT returns to CPU) | (new) | ⬜ | GLORT_CAM(1024 TCAM)→GLORT_RAM→DMASK(76-bit portmask); datasheet §5.17 / phase7a. |
+| **RX return = L2 forwarding bring-up** (GLORT_TABLE + DMASK + L2F membership) | (new) | ⬜ **the frontier** | No special-delivery bypass; frame needs `GLORT_TABLE[0]`(catch-all)→`DMASK_TABLE`(CPU-port bit)→**L2F 13-stage** (VLAN∧STP∧srcport must include CPU port). All unconfigured on M1. Approach: golden-capture+replicate the DMASK/L2F tables + resolve runtime CPU-port GLORT. **This is the L2-dataplane campaign.** (The earlier "CPU-port ingress drain" theory was wrong — TX drains fine once `TX_POST` is used.) |
 | `struct asic_ops` binding (`init/port_set/tx/rx_poll/intr_fd/shutdown`) | `fm6000_edged.c` | 🔨 | the seam the daemon drives |
 
 ### Forwarding primitives (built on the above, table/register-driven — clean-room)
@@ -82,14 +81,15 @@ Existing skeleton is cited per-line from the RE (phase7g, FPDMA.md). Status refl
 
 ## Proof-of-life milestones (the order we chase)
 1. **BAR0 register access** ✅
-2. **CPU inject → pipeline → CPU receive** 🔨 *(the frontier — microcode prerequisite now DONE)* — release MSB
-   (`SOFT_RESET(0x9)=0x00`, required for the pipeline **and** for the microcode load) ✅, load the L2-pipeline
-   microcode (lines 1–30321) ✅ **proven loadable + M1 alive**, then: add one `GLORT_CAM`→`GLORT_RAM`→`DMASK`
-   CPU-loopback entry, program the `fpdma` DMA BD-rings, and inject an F64 special-delivery frame
-   (tag word0=`0x1000`, DGLORT=CPU port 0) → punt it back. No EPL/SerDes/FIBM/ports/MOD. "Moves a byte."
-   **Status:** ✅ microcode load, ✅ DMA rings + engine enable (`command=0x3`, `dma_cfg=0x37`) live-validated,
-   ✅ inject harness `fpdma_probe.c`. **Blocked on:** the injected BD won't drain until the **CPU-port + scheduler**
-   are brought up (frame has nowhere to go) — then the GLORT→DMASK loopback closes the path back to CPU RX.
+2. **CPU inject → pipeline → CPU receive** 🔨 *(TX half DONE; RX half = L2 forwarding)*
+   **TX ✅ — CPU inject → DMA → switch fabric WORKS (2026-07-26).** MSB released, L2-pipeline microcode loaded,
+   `fpdma` rings + engine golden-exact (`dma_cfg=0x37`, `0x505c=0x30f`, split `TX_START`/`RX_START`), and the
+   injected BD **transmits** (desc `0x09→0x0c` DONE, `tx_reclaim=1`, TX-done IRQ). The blocker was a wrong command
+   code — the kick is **`PCI_TX_POST=0x5`**, not `0x3` (=`TX_STOP`); see datasheet Table 7-2. Harness `fpdma_probe.c`.
+   **RX ⬜ — needs L2 forwarding.** No special-delivery bypass exists; the frame must traverse
+   `GLORT_CAM→GLORT_TABLE→DMaskBaseIdx→DMASK_TABLE(76b)→L2F 13-stage(VLAN∧STP∧srcport)`. A CPU-loopback needs
+   `GLORT_TABLE[0]`(catch-all)→DMASK(CPU-port bit) **and** the L2F membership masks to include the CPU port, plus
+   the runtime CPU-port GLORT. All unconfigured on M1 → this is the L2-dataplane bring-up (its own campaign).
 3. **One front-panel port links (10G)** ⬜ — EPL + SerDes + MAC.
 4. **Two-port L2 forward** ⬜ — VLAN + MAC flood/learn.
 5. **An L3 route** ⬜.
