@@ -54,9 +54,17 @@ int fm6000_crm_memory_set(struct fm6000_dev *dev, unsigned slot,
 
     /* 2. Program the command's REGISTER (target block), PARAM (fill value),
      *    PERIOD (0 = as fast as possible) and COMMAND (Memory Set + count).
-     *    64-bit regs are w0=LSW then w1=MSW. */
+     *    64-bit regs are w0=LSW then w1=MSW.
+     *
+     *    Block/Stride define a 2D address walk: write BlockSize1 contiguous regs,
+     *    then jump Stride1 to the next block, BlockSize2 times, jump Stride2. For a
+     *    CONTIGUOUS linear fill we need ONE block covering the whole count — else a
+     *    block=1/stride=1 walk writes every OTHER register (verified live: odd
+     *    offsets left untouched). So set BlockSize1Shift so (1<<bs1) >= count. */
+    unsigned bs1 = 0;
+    while ((1u << bs1) < count && bs1 < 15u) bs1++;
     fm6000_csr_write(dev, FM6000_CRM_REGISTER(slot, 0),
-                     FM6000_CRM_REGISTER_W0(base, size, 0, 0));
+                     FM6000_CRM_REGISTER_W0(base, size, bs1, 0));
     fm6000_csr_write(dev, FM6000_CRM_REGISTER(slot, 1),
                      FM6000_CRM_REGISTER_W1(0, 0));
     fm6000_csr_write(dev, FM6000_CRM_PARAM(slot), value);
