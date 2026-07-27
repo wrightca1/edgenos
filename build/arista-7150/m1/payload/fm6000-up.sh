@@ -161,8 +161,20 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 # window the slave/BIST need. Run right after reset-release, before anything enumerates.
 if [ "${FM6000_BIST:-0}" = "1" ] && command -v fm6000_i2c_bringup >/dev/null 2>&1; then
 	cm "sec5: FM6000_BIST=1 -> fm6000_i2c_bringup (cold-BIST + SerDes + enum)"
-	fm6000_i2c_bringup -v > /dev/console 2>&1
-	cm "sec5: fm6000_i2c_bringup returned"
+	# pcie-init link-training is a bit flaky; retry up to 3x with a reset toggle +
+	# clock reprogram between tries (the whole thing must re-run from the fresh
+	# reset window each time, so re-hold reset -> reprogram Cotati -> release).
+	bist_try=1
+	while [ $bist_try -le 3 ]; do
+		fm6000_i2c_bringup -v > /dev/console 2>&1
+		[ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && break
+		cm "sec5: BIST/enum attempt $bist_try did not enumerate — reset+retry"
+		scdreg 0x4000 0x00000006 >/dev/null 2>&1; sleep 1     # re-hold FM6000 reset
+		[ -n "$REGMAP" ] && si5338 "$BUS" "$REGMAP" -a "$SI5338_ADDR" >/dev/null 2>&1
+		scdreg 0x4010 0x00000006 >/dev/null 2>&1; sleep 1     # release again
+		bist_try=$((bist_try+1))
+	done
+	cm "sec5: fm6000_i2c_bringup returned (try $bist_try)"
 else
 	cm "sec5: starting fm6000-pcie-init (watch for where it stops if it reboots)"
 	sh "$DIR/fm6000-pcie-init.sh" > /dev/console 2>&1
