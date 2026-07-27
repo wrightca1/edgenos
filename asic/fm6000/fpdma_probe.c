@@ -63,10 +63,13 @@ int main(int argc, char **argv)
     kf = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
     int do_tx = (argc > 1 && !strcmp(argv[1], "tx"));
     unsigned dglort = (argc > 2) ? (unsigned)strtoul(argv[2], NULL, 0) : 0x0000;
-    /* argv[3]=="swap": store the F64 tag words host-endian (byte-swapped) in the
-     * BD, in case the DMA reads the field as words rather than a wire byte stream.
-     * Inject is non-destructive, so sweep dglort + both endians without a rebuild. */
-    int swap = (argc > 3 && !strcmp(argv[3], "swap"));
+    /* argv[3] = SGLORT (source glort in the F64 tag). The L2F LBS stage suppresses
+     * loopback to the *source* port; a CPU-injected frame with SGLORT=0 can be
+     * pruned if 0 maps to the CPU/dest port, so set a non-CPU SGLORT to test punt. */
+    unsigned sglort = (argc > 3) ? (unsigned)strtoul(argv[3], NULL, 0) : 0x0000;
+    /* argv[4]=="swap": store the F64 tag words host-endian (byte-swapped) in the BD,
+     * in case the DMA reads the field as words rather than a wire byte stream. */
+    int swap = (argc > 4 && !strcmp(argv[4], "swap"));
 
     mark("open kmod /dev/fm6000dma");
     struct fpdma_kmod *k = NULL;
@@ -103,16 +106,16 @@ int main(int argc, char **argv)
         f[6]=0x02; f[7]=0; f[8]=0; f[9]=0; f[10]=0; f[11]=0x01;/* SMAC */
         f[12]=0xDE; f[13]=0xAD; f[14]=0xBE; f[15]=0xEF;       /* payload marker */
 
-        uint16_t tw[4] = { 0x1000, 0x0000, 0x0000, (uint16_t)dglort };/* w0 FTYPE spc, w1 VLAN, w2 SGLORT, w3 DGLORT */
+        uint16_t tw[4] = { 0x1000, 0x0000, (uint16_t)sglort, (uint16_t)dglort };/* w0 FTYPE spc, w1 VLAN, w2 SGLORT, w3 DGLORT */
         uint8_t tag[8];
         for (int w = 0; w < 4; w++) {
             if (swap) { tag[2*w] = tw[w] & 0xff; tag[2*w+1] = tw[w] >> 8; }   /* host-endian */
             else      { tag[2*w] = tw[w] >> 8;   tag[2*w+1] = tw[w] & 0xff; } /* wire big-endian */
         }
 
-        char m[112]; snprintf(m, sizeof m,
-            "fpdma_tx_f64 special-delivery DGLORT=0x%04x tag-in-BD endian=%s  <-- RISKY",
-            dglort, swap ? "host" : "wire");
+        char m[128]; snprintf(m, sizeof m,
+            "fpdma_tx_f64 special-delivery DGLORT=0x%04x SGLORT=0x%04x endian=%s  <-- RISKY",
+            dglort, sglort, swap ? "host" : "wire");
         mark(m);
         if (fpdma_tx_f64(&fp, f, 60, tag, sizeof tag) < 0) mark("fpdma_tx_f64 ring full/FAILED");
         else mark("fpdma_tx_f64 queued + engine kicked");

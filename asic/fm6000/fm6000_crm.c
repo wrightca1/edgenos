@@ -86,8 +86,8 @@ int fm6000_crm_memory_set(struct fm6000_dev *dev, unsigned slot,
                      FM6000_CRM_CTRL_LAST(slot));
 
     /* 5. Wait for completion: Run self-clears (once-mode) and IP[slot] sets.
-     *    Memory Set of ~2K words is fast, but poll generously. */
-    for (i = 0; i < 5000; i++) {
+     *    Scale the timeout with count (the 8x4K L2F block is ~128K registers). */
+    for (i = 0; i < 20000; i++) {
         if (!(fm6000_csr_read(dev, FM6000_CRM_CTRL) & FM6000_CRM_CTRL_RUN))
             break;
         fm6000_delay_us(100);
@@ -116,11 +116,15 @@ int fm6000_crm_memory_set(struct fm6000_dev *dev, unsigned slot,
 
 #ifndef FM6000_CRM_NO_MAIN
 static const struct { const char *name; uint32_t base, count; } TABLES[] = {
-    /* The forwarding tables the microcode leaves unconfigured (parity-invalid),
-     * that a GLORT->DMASK->L2F lookup reads. Word-granular linear fills. */
-    { "GLORT_CAM",  0x0E000u, 1024u },   /* 1024 x 1w (Key,KeyInvert)          */
-    { "GLORT_RAM",  0x0E800u, 2048u },   /* 1024 x 2w                          */
-    { "L2F_256",    0x1A0000u, 1024u },  /* 256  x 4w (the DMASK table)        */
+    /* Every forwarding table the microcode leaves unconfigured (parity-invalid)
+     * that a GLORT->DMASK->L2F 13-stage lookup reads. Word-granular linear fills.
+     * The 13-stage reads the 4K tables (VLAN membership / STP / SRC_PORT) AND all
+     * four 256 tables — not just the first — so init the whole L2F region, else a
+     * stage reads uninit'd memory and (best case) AND-s the DMASK to 0 = drop. */
+    { "GLORT_CAM",  0x0E000u,  1024u },     /* 1024 x 1w (Key,KeyInvert)        */
+    { "GLORT_RAM",  0x0E800u,  2048u },     /* 1024 x 2w                        */
+    { "L2F_4K",     0x180000u, 0x20000u },  /* 8 x 4096 x 4w  (membership/STP)  */
+    { "L2F_256",    0x1A0000u, 0x1000u },   /* 4 x 256 x 4w   (DMASK tables)    */
 };
 
 int main(int argc, char **argv)
