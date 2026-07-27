@@ -129,6 +129,9 @@ static const struct { const char *name; uint32_t base, count; } TABLES[] = {
                                              * the DMASK (CPU-punt RX blocker).  */
     { "L2F_4K",     0x180000u, 0x20000u },  /* 8 x 4096 x 4w  (membership/STP)  */
     { "L2F_256",    0x1A0000u, 0x1000u },   /* 4 x 256 x 4w   (DMASK tables)    */
+    /* STATS action-resolution (0x18000) — garbage after BIST; needed so the
+     * DROP_CODE-keyed counters work for RX-drop diagnosis (arista phase48). */
+    { "STATS_AR",   0x18000u,  0x2000u },   /* IDX_CAM/RAM + BANK_CFG + port maps */
 };
 
 int main(int argc, char **argv)
