@@ -151,10 +151,23 @@ echo "  0x4000 now: $(scdreg 0x4000 | grep -o '0x[0-9a-f]*$')  (expect 0x100)"
 cm "sec5: register accel#0 (FM6000 mgmt I2C slave bus)"
 NO2=""; for d in /sys/bus/pci/drivers/scd/0000:*/new_object; do [ -e "$d" ] && NO2="$d"; done
 echo "smbus_master 0x8000 0 8" > "$NO2" 2>/dev/null; sleep 1
-cm "sec5: starting fm6000-pcie-init (watch for where it stops if it reboots)"
 DIR=$(cd "$(dirname "$0")" && pwd)
-sh "$DIR/fm6000-pcie-init.sh" > /dev/console 2>&1
-cm "sec5: fm6000-pcie-init returned (did NOT reboot)"
+# FM6000_BIST=1: run the cold-BIST memory init IN the pre-enum scan window (over the
+# i2c slave) before the normal-mode/PCIe transition, so the forwarding-table RAM comes
+# up parity-valid and CPU writes to MCAST/MOD/L2F don't wedge the chip (phase40/41/42).
+# fm6000_i2c_bringup does BIST -> normal mode -> PCIe SerDes -> rescan itself, REPLACING
+# fm6000-pcie-init.sh. This is the CPU-punt bring-up path; the plain path (no BIST) is
+# fine for enumeration-only. The chip is fresh (just released from reset) here = the
+# window the slave/BIST need. Run right after reset-release, before anything enumerates.
+if [ "${FM6000_BIST:-0}" = "1" ] && command -v fm6000_i2c_bringup >/dev/null 2>&1; then
+	cm "sec5: FM6000_BIST=1 -> fm6000_i2c_bringup (cold-BIST + SerDes + enum)"
+	fm6000_i2c_bringup -v > /dev/console 2>&1
+	cm "sec5: fm6000_i2c_bringup returned"
+else
+	cm "sec5: starting fm6000-pcie-init (watch for where it stops if it reboots)"
+	sh "$DIR/fm6000-pcie-init.sh" > /dev/console 2>&1
+	cm "sec5: fm6000-pcie-init returned (did NOT reboot)"
+fi
 echo "--- root-port 00:04.0 link (final) ---"
 pcicfg 0000:00:04.0 link 2>/dev/null
 if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ]; then
