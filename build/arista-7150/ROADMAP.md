@@ -21,17 +21,26 @@ Status: ✅ done · 🔨 in progress · ⬜ todo · ⏸ deferred · ❓ decision
 
 ---
 
-## The story so far (what changed this session)
-EdgeNOS's FM6000 dataplane was **statically RE-complete but never live-validated** — the chip wouldn't even
-enumerate, so none of `asic/fm6000/` had run. This session unblocked exactly that:
-- the FM6000 now **enumerates** (auto on boot) and we have **live BAR0 CSR read/write** — validating the
-  `fm6000_hw.c` access model (userspace `resource0` mmap, word-addressed `bar0[word]`) end to end;
-- we discovered + proved the **pre-enum PCIe/SerDes bring-up** (`fmPlatformSetupPCIe`: JSS release + SBus init
-  + `PCI_SERDES_CTRL_1`) that the chip needs to come up at all — a piece the skeleton didn't have;
-- the box is powered and the chip is up, so the **`GAPS.md` live-probe queue is now closeable.**
+## The story so far (frontier: CPU-punt byte-mover)
+The FM6000 enumerates on boot and BAR0 CSR access is proven. The dataplane frontier is the CPU-punt
+byte-mover: CPU injects a frame → fabric forwards it to the CPU port → returns on the DMA RX ring.
 
-So the remaining work is: **fold the live-validated sequences + a few captured runtime values into the existing
-`asic/fm6000/` C, then build up the datapath.**
+**Breakthrough this session — the chip is now fully programmable without wedging (2026-07-27).** Every prior
+attempt to program the forwarding tables (GLORT/DMASK/L2F) hard-wedged the chip. Root cause: the tables the
+microcode never writes (GLORT_CAM/RAM, L2F_256, L2F_4K, LBS) are left **parity-invalid** — BIST marches the
+*physical* SRAM but not the *logical* table contents, so any pipeline lookup that reads them faults. The fix is
+the datasheet **step-12 "Initialize Memory" = CRM "Memory Set"** (`fm6000_crm`, CRM regs at MGMT2 0x1C000 from
+EOS `fm6000_api_regs_int`): a HW walk that fills a block with a value **and HW-computed parity**. After
+CRM-initing the whole forwarding path, programming GLORT/DMASK/L2F **no longer wedges**. Also fixed: the F64
+tag must live in the **BD F64 field** (offset 0x0C), not the payload — the DMA inserts it (§7.11.1.4); and the
+microcode tail's **MOD block wedges** → load the noMOD-tail (5326 lines).
+
+**TX works, RX return is the open frontier.** With the config valid, a special-delivery inject **transmits**
+into the fabric (tx desc 0x0c DONE+EOP). The golden EOS L2F 13-stage is replicated correctly (loaded as
+COMPLETE 4-word atomic entries — wide tables §8.3 commit only on the MSW). But the frame **does not return to
+the CPU RX ring** — narrowed (arista phase47) to source-port pruning (CPU is the ingress → pruned from dest),
+VID-membership indexing, an unproven RX-capture path, or CPU-port egress scheduling. Next diagnostic: read the
+**DROP_CODE** via the STATS block to pinpoint which pipeline stage drops the frame (see the RX row below).
 
 ## EdgeNOS milestone framing (M0 / M1 / M2)
 | Milestone | Meaning | State |
@@ -61,11 +70,11 @@ Existing skeleton is cited per-line from the RE (phase7g, FPDMA.md). Status refl
 | BAR0 bind + CSR read/write/poll | `fm6000_hw.c` | ✅ **live-validated** | access model proven; our `fm6000reg` is the standalone check |
 | Pre-enum PCIe/SerDes bring-up (make it enumerate) | (new) `fm6000-pcie-init.sh` | ✅ **live** | fold into the board bring-up / `fm6000_boot.c` preboot |
 | `fm6000_boot_switch` ordering (preboot → BIST → sbus → caches → microcode → SPICO) | `fm6000_boot.c` | 🔨 | order recovered; **live-trace** BIST march data + SBus `0x0B0500` framing |
-| Microcode/table load (parser/FFU CSR replay) | `fm6000_ucode.c` | ✅ **live — 90%** | **35,641 / 39,461 lines of the vendor image load & M1 stays alive** (2026-07-26): L2 pipeline MAPPER+PARSER+L2AR (lines 1–30321) loads fast; the L3AR/table-commit region (5,320 lines) loads clean **when paced line-by-line** (blasting wedges = HW table-commit backpressure → real fix is a commit done-poll). **Only MOD (`0x150000` egress-modify TCAM, 3,820 lines) still wedges even paced** after ~5 entries — a distinct egress/EPL-enable or MOD-commit done-poll dependency, deeper RE, **not on the byte-mover path**. |
+| Microcode/table load (parser/FFU CSR replay) | `fm6000_ucode.c` | ✅ **live** | The vendor image loads & M1 stays alive: L2 pipeline (lines 1–30321) loads fast; the L3AR region loads clean. **The tail's MOD block (`0x150000`, 3,820 lines) wedges** → load the **noMOD-tail (5,326 lines)**; CPU punt is ingress/RX so egress MOD is not needed. NOTE (corrected 2026-07-27): the microcode does **not** set the catch-all GLORT or the L2F_256 DMASK — those are EOS software config, not microcode. |
 | SerDes SPICO upload (SBus IMEM) | `fm6000_ucode.c` | ⏸ | blob located; **not needed for first link** (PCIe SerDes came up without it) |
-| Packet DMA BD-rings — **TX transmits** (PCIE block byte `0x5000`; 32B BDs, F64 tag) | `fpdma.c` | ✅ **TX live** | Full `fpdma_init` replicated from vendor disasm + golden EOS capture: `dma_cfg(0x5060)=0x37`, **`0x505c=0x30f`**, split enable `TX_START(0x1)`→settle→`RX_START(0x2)`; engine reaches golden `STATUS=0x12`. **TX BD transmits** (`0x09→0x0c` DONE, reclaim, IRQ) once kicked with **`PCI_TX_POST=0x5`** (Table 7-2; `0x3`=`TX_STOP` was the bug). 32B BD, `status@0`=0x09 handoff/bit2=DONE, len@2, addr@4. Harness `fpdma_probe.c`. RX-ring receive pending L2 forwarding. |
+| Packet DMA BD-rings — **TX transmits** (PCIE block byte `0x5000`; 32B BDs, F64 tag) | `fpdma.c` | ✅ **TX live** | Full `fpdma_init` replicated: `dma_cfg(0x5060)=0x37`, **`0x505c=0x30f`**, split enable `TX_START(0x1)`→settle→`RX_START(0x2)`. **TX BD transmits** (`0x09→0x0c` DONE, reclaim, IRQ) kicked with **`PCI_TX_POST=0x5`** (Table 7-2). **F64 tag goes in the BD F64 field (offset 0x0C), not the payload** — the DMA inserts it (§7.11.1.4); `fpdma_tx_f64` + `fpdma_probe`. NOTE: repeated `fpdma_init` stalls the engine (desc stuck `0x09`) → one inject per fresh boot. |
 | DMA/MSI kernel module (BAR0 + low-4GiB coherent pool + MSI) | `kmod/fm6000dma.c` | ✅ **live** | insmods clean, binds FM6000, 4 MiB coherent pool @ `0x7f800000` (<4 GiB) + MSI irq, `/dev/fm6000dma`. 7150 RS780 has no IOMMU → kmod required (not VFIO). |
-| **RX return = L2 forwarding bring-up** (GLORT → L2F DMASK) | `fm6000_l2.c` + `fm6000_i2c_bringup.c` | 🔨 **root-caused; recipe complete** | Pathway pinned: `GLORT_CAM`(match DGLORT 0xFF00)→`GLORT_RAM.DMaskBaseIdx`→**`L2F_TABLE_256`** (76-bit DMASK, CPU port = bit0) → L2F membership. CPU port 0 / GLORT 0xFF00 (SDK). **Blocker root-caused:** table RAM has uninitialized ECC → CPU writes wedge the chip; the ONLY fix is the HW cold-BIST (`fm6000BistMemoryInit`) — full sequence + the 27-step `fm6000BootSwitch` order recovered & HW-validated (arista phase40/41/42). Tools: `fm6000_l2_probe` (loopback cfg), `fm6000_i2c_bringup` (observable pre-enum BIST+SerDes). **Last live gap:** i2c mgmt slave is dead after kexec-from-EOS → must **Aboot-boot M1** for a live slave, then run the tool → inject. |
+| **RX return = L2 forwarding bring-up** (GLORT → L2F DMASK) | `fm6000_l2.c`, `fm6000_crm.c`, `fm6000-punt-inject.sh` | 🔨 **config solved; return-path open** | Pathway: `GLORT_CAM`(entry 0 = HW-forced catch-all)→`GLORT_RAM.DMaskBaseIdx=1`→`L2F_TABLE_256[0][1]`={CPU bit0, Et1 bit40}→L2F 13-stage. **Config wedge SOLVED (2026-07-27):** the GLORT/L2F tables are parity-invalid after BIST (microcode never writes them) → **CRM Memory-Set** (`fm6000_crm`) inits GLORT_CAM/RAM + all L2F 4K/256 + LBS with HW parity; then programming them no longer wedges. Golden EOS L2F 13-stage replicated as COMPLETE 4-word atomic entries (`golden_l2f_full.raw`; wide tables §8.3 commit on MSW). **TX injects (desc 0x0c); RX return still 0.** Remaining (arista phase47): source-port pruning (CPU ingress pruned from dest), VID membership (frame VID=0 vs golden VLAN1), unproven RX-capture, CPU-port egress scheduling. **Next diagnostic — DROP_CODE:** not a plain register; each L2F stage sets it (`L2F_PROFILE_TABLE.DropCode[22:19]`+`DropCodeSelect[23]`) when it zeroes DMASK_A; the 8-bit final value keys L2AR (`L2AR_CAM_KEYS.DROP_CODE[343:336]`) + STATS AR (`STATS_AR_CAM_KEYS.RX_KEY_DROP_CODE[52:45]`) → read via the **STATS block** (`STATS_AR` word 0x18000, `STATS_BANK` word 0x200000) to pinpoint the dropping stage instead of guessing. |
 | `struct asic_ops` binding (`init/port_set/tx/rx_poll/intr_fd/shutdown`) | `fm6000_edged.c` | 🔨 | the seam the daemon drives |
 
 ### Forwarding primitives (built on the above, table/register-driven — clean-room)
@@ -81,15 +90,16 @@ Existing skeleton is cited per-line from the RE (phase7g, FPDMA.md). Status refl
 
 ## Proof-of-life milestones (the order we chase)
 1. **BAR0 register access** ✅
-2. **CPU inject → pipeline → CPU receive** 🔨 *(TX half DONE; RX half = L2 forwarding)*
-   **TX ✅ — CPU inject → DMA → switch fabric WORKS (2026-07-26).** MSB released, L2-pipeline microcode loaded,
-   `fpdma` rings + engine golden-exact (`dma_cfg=0x37`, `0x505c=0x30f`, split `TX_START`/`RX_START`), and the
-   injected BD **transmits** (desc `0x09→0x0c` DONE, `tx_reclaim=1`, TX-done IRQ). The blocker was a wrong command
-   code — the kick is **`PCI_TX_POST=0x5`**, not `0x3` (=`TX_STOP`); see datasheet Table 7-2. Harness `fpdma_probe.c`.
-   **RX ⬜ — needs L2 forwarding.** No special-delivery bypass exists; the frame must traverse
-   `GLORT_CAM→GLORT_TABLE→DMaskBaseIdx→DMASK_TABLE(76b)→L2F 13-stage(VLAN∧STP∧srcport)`. A CPU-loopback needs
-   `GLORT_TABLE[0]`(catch-all)→DMASK(CPU-port bit) **and** the L2F membership masks to include the CPU port, plus
-   the runtime CPU-port GLORT. All unconfigured on M1 → this is the L2-dataplane bring-up (its own campaign).
+2. **CPU inject → pipeline → CPU receive** 🔨 *(TX ✅; forwarding config ✅ no-wedge; RX return open)*
+   **TX ✅ — CPU inject → DMA → switch fabric WORKS.** `fpdma` engine golden-exact; injected BD **transmits**
+   (desc `0x09→0x0c` DONE, `tx_reclaim=1`) kicked with **`PCI_TX_POST=0x5`**. F64 tag in the BD F64 field.
+   **Forwarding config ✅ — no longer wedges (2026-07-27 breakthrough).** The GLORT/L2F tables are
+   parity-invalid after BIST → **CRM Memory-Set** (`fm6000_crm`) inits them with HW parity; then GLORT/DMASK/L2F
+   programming + the golden L2F 13-stage replay succeed cleanly (the chip is fully programmable).
+   **RX ⬜ — frame transmits but does not return.** With the whole path configured (GLORT catch-all → DMASK
+   {CPU,Et1} → golden 13-stage membership/STP/LBS/profiles), the byte still doesn't come back. Narrowed (arista
+   phase47) to: source-port pruning (CPU ingress removed from dest), VID membership, RX-capture path, CPU-port
+   scheduling. Next: read **DROP_CODE** via the STATS block to identify the exact dropping stage.
 3. **One front-panel port links (10G)** ⬜ — EPL + SerDes + MAC.
 4. **Two-port L2 forward** ⬜ — VLAN + MAC flood/learn.
 5. **An L3 route** ⬜.
