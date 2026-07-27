@@ -13,7 +13,14 @@ WD(){ scdreg 0x0120 0xC0000BB8 >/dev/null 2>&1; }
 c "=== PACED vendor microcode load ==="
 V=$(pcicfg $B 0x04 | G); pcicfg $B 0x04 $(printf '0x%x' $(( V | 0x6 ))) >/dev/null 2>&1; WD
 c "MSE=$(pcicfg $B 0x04|G) wd=$(scdreg 0x0120|G) SOFT_RESET=0x$(R 0x00009) PIN_STRAP=0x$(R 0x1C021)"
-for cmd in 2 1 3; do fm6000reg $B 0x1C022 $cmd >/dev/null 2>&1; sleep 1; WD; done
+# Boot-controller commands in datasheet Table 4-1 order: 1=FFU slices, 2=bank
+# repairs, 3=freelists. Poll BOOT_STATUS:CommandDone (0x1C022 bit4) after each —
+# NOT a blind sleep (the command holds the next step until done).
+for cmd in 1 2 3; do
+  fm6000reg $B 0x1C022 $cmd >/dev/null 2>&1
+  n=0; while [ $n -lt 50 ] && [ $(( 0x$(R 0x1C022) & 0x10 )) -eq 0 ]; do sleep 0.1 2>/dev/null || sleep 1; n=$((n+1)); done
+  WD
+done
 c "BOOT_CTRL=0x$(R 0x1C022)"
 fm6000reg $B 0x00009 0x0 >/dev/null 2>&1; sleep 1; WD
 c "MSB released SOFT_RESET=0x$(R 0x00009) PLL_STAT=0x$(R 0x1C046)"

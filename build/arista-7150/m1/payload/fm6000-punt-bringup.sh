@@ -39,12 +39,20 @@ si5338 1 /usr/share/firmware/Cotati-Clock-0010.si5338 -a 0x70 >/dev/null 2>&1
 echo "  SCD 0x160 = $(scdreg 0x160 | grep -o '0x[0-9a-f]*$')  (want 0x002a0000)"
 
 echo "== 3. pre-enum PCIe/SerDes init (enumerate FM6000) =="
+# The FM6000 enumerated on the boot (residual) clock; changing to Cotati drops the
+# link. Remove the stale PCI device so pcie-init re-enumerates it fresh on Cotati.
+[ -e /sys/bus/pci/devices/$B/remove ] && { echo 1 > /sys/bus/pci/devices/$B/remove; sleep 1; }
 sh /tmp/fm6000-pcie-init.sh 2>&1 | tail -2
 [ -e /sys/bus/pci/devices/$B/vendor ] || { echo "FM6000 not enumerated - abort"; exit 1; }
 
 echo "== 4. boot-ctrl + MSB release + L2 pipeline microcode =="
 V=$(pcicfg $B 0x04 | grep -o '0x[0-9a-f]*$'); pcicfg $B 0x04 $(printf '0x%x' $(( V | 0x6 ))) >/dev/null 2>&1
-for c in 2 1 3; do fm6000reg $B 0x1C022 $c >/dev/null 2>&1; sleep 1; done
+# boot-ctrl: datasheet Table 4-1 order 1(FFU slices) 2(bank repair) 3(freelists),
+# poll BOOT_STATUS:CommandDone (0x1C022 bit4) after each (not a blind sleep).
+for c in 1 2 3; do
+  fm6000reg $B 0x1C022 $c >/dev/null 2>&1
+  n=0; while [ $n -lt 50 ] && [ $(( 0x$(R 0x1C022) & 0x10 )) -eq 0 ]; do sleep 0.1 2>/dev/null || sleep 1; n=$((n+1)); done
+done
 fm6000reg $B 0x00009 0x0 >/dev/null 2>&1; sleep 1
 echo "  SOFT_RESET=0x$(R 0x00009) PLL_STAT=0x$(R 0x1C046)"
 fm6000load $B /tmp/ucode_l2.raw
