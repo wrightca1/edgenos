@@ -124,6 +124,53 @@
 #define FM6000_REG_MARCH_LO         0x1D400u
 #define FM6000_REG_MARCH_HI         0x1D600u
 
+/* ---- MGMT2: CRM (Counter Rate Monitor) — memory-init engine (§9) ---------
+ * Addresses + field bit-positions from EOS FocalPoint fm6000_api_regs_int.
+ * The CRM "Memory Set" command (cmd 0) fills a register/table block with a
+ * value AND HW-computed parity — the datasheet step-12 "Initialize Memory"
+ * that makes the microcode-untouched forwarding tables (GLORT_CAM/RAM,
+ * L2F_256, 13-stage assoc) parity-valid so a lookup that reads them doesn't
+ * fault. Register indices are word offsets into BAR0 (byte = idx<<2).
+ * CRM_COMMAND/REGISTER/PERIOD are 64-bit (2 words, w0=LSW w1=MSW); PARAM/DATA
+ * are 32-bit. 64 command slots. */
+#define FM6000_CRM_DATA(i1, i0)     (FM6000_BLK_MGMT2 + 0x2000u + 2u*(i1) + (i0))
+#define FM6000_CRM_CTRL             (FM6000_BLK_MGMT2 + 0x3000u)  /* Run[0] First[6:1] Last[12:7] Cont[13] Presc[18:14] */
+#define FM6000_CRM_STATUS           (FM6000_BLK_MGMT2 + 0x3001u)  /* Running[0] CommandIndex[6:1] */
+#define FM6000_CRM_TIME             (FM6000_BLK_MGMT2 + 0x3002u)
+#define FM6000_CRM_IP(w)            (FM6000_BLK_MGMT2 + 0x3004u + (w))  /* per-command interrupt-pending (64b) */
+#define FM6000_CRM_IM(w)            (FM6000_BLK_MGMT2 + 0x3006u + (w))
+#define FM6000_CRM_COMMAND(i, w)    (FM6000_BLK_MGMT2 + 0x3080u + 2u*(i) + (w))
+#define FM6000_CRM_REGISTER(i, w)   (FM6000_BLK_MGMT2 + 0x3100u + 2u*(i) + (w))
+#define FM6000_CRM_PERIOD(i, w)     (FM6000_BLK_MGMT2 + 0x3180u + 2u*(i) + (w))
+#define FM6000_CRM_PARAM(i)         (FM6000_BLK_MGMT2 + 0x3200u + (i))
+#define FM6000_CRM_COMMAND_ENTRIES  64u
+/* CRM_CTRL fields */
+#define FM6000_CRM_CTRL_RUN         (1u << 0)
+#define FM6000_CRM_CTRL_FIRST(i)    (((uint32_t)(i) & 0x3Fu) << 1)
+#define FM6000_CRM_CTRL_LAST(i)     (((uint32_t)(i) & 0x3Fu) << 7)
+#define FM6000_CRM_CTRL_CONTINUOUS  (1u << 13)
+#define FM6000_CRM_STATUS_RUNNING   (1u << 0)
+/* CRM_COMMAND[63:0]: Command[2:0] DataIndex[13:3] Count[33:14].  Count spans the
+ * word0/word1 boundary (bit32,33 land in word1). Memory Set = command 0. */
+#define FM6000_CRM_CMD_MEMORY_SET   0u
+#define FM6000_CRM_COMMAND_W0(cmd, dataidx, count) \
+    (((uint32_t)(cmd) & 0x7u) | (((uint32_t)(dataidx) & 0x7FFu) << 3) | \
+     (((uint32_t)(count) & 0x3FFFFu) << 14))              /* count bits[17:0] -> [31:14] */
+#define FM6000_CRM_COMMAND_W1(count) (((uint32_t)(count) >> 18) & 0x3u) /* count bits[19:18] -> w1[1:0] */
+/* CRM_REGISTER[63:0]: BaseAddress[21:0] Size[23:22] BlockSize1Shift[27:24]
+ * Stride1Shift[31:28] BlockSize2Shift[35:32] Stride2Shift[39:36]. Size:0=32b
+ * 1=64b 2=96b 3=128b. For a contiguous linear fill use all shifts=0 (block=1,
+ * stride=1 -> consecutive words) and let Count bound the walk. */
+#define FM6000_CRM_REG_SIZE_32      0u
+#define FM6000_CRM_REG_SIZE_64      1u
+#define FM6000_CRM_REG_SIZE_96      2u
+#define FM6000_CRM_REG_SIZE_128     3u
+#define FM6000_CRM_REGISTER_W0(base, size, bs1, st1) \
+    (((uint32_t)(base) & 0x3FFFFFu) | (((uint32_t)(size) & 0x3u) << 22) | \
+     (((uint32_t)(bs1) & 0xFu) << 24) | (((uint32_t)(st1) & 0xFu) << 28))
+#define FM6000_CRM_REGISTER_W1(bs2, st2) \
+    (((uint32_t)(bs2) & 0xFu) | (((uint32_t)(st2) & 0xFu) << 4))
+
 /* ---- SBus slave registers for the SerDes SPICO uc (phase7g §c/2) -------- */
 /* Driven through the SBus controller CSR window (FM6000_BLK_SERDES_WR). The
  * slave-register addresses below are fully recovered; the controller *framing*

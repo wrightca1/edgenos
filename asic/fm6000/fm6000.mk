@@ -49,3 +49,10 @@ $(FM6000_DIR)fm6000_i2c_bringup: $(FM6000_DIR)fm6000_i2c_bringup.c
 $(FM6000_DIR)fpdma_probe: $(FM6000_DIR)fm6000_hw.c $(FM6000_DIR)fpdma.c \
                           $(FM6000_DIR)fpdma_kmod.c $(FM6000_DIR)fpdma_probe.c
 	$(CC) $(FM6000_CFLAGS) -Wall -Wextra $^ -o $@
+
+# Standalone CRM "Memory Set" table initializer (datasheet step-12): fills the
+# forwarding tables the microcode leaves unconfigured (GLORT_CAM/RAM, L2F_256)
+# with valid parity so a GLORT->DMASK->L2F lookup does not fault. Run after the
+# microcode load, before programming specific GLORT/DMASK entries.
+$(FM6000_DIR)fm6000_crm: $(FM6000_DIR)fm6000_hw.c $(FM6000_DIR)fm6000_crm.c
+	$(CC) $(FM6000_CFLAGS) -Wall -Wextra $^ -o $@
