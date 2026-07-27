@@ -64,8 +64,12 @@ fi
 if [ -x /usr/lib/edgenos/platform/fm6000-up.sh ]; then
     echo "--- M2 FM6000 auto bring-up (full log: /var/log/fm6000) ---"
     mkdir -p /var/log
-    sh /usr/lib/edgenos/platform/fm6000-up.sh > /var/log/fm6000 2>&1
-    grep -iE 'ENUMERATED|still absent|PLL_LOL|Si5338 found|smbus_master @|clock RC' /var/log/fm6000 | sed 's/^/    /'
+    # FM6000_BIST=1: run the cold-BIST memory init in the pre-enum scan window (over
+    # the i2c slave) so forwarding-table RAM is parity-valid → CPU-punt table writes
+    # don't wedge the chip. This is the ONLY window it's reachable (fresh reset).
+    # Watch the serial console — if BIST hangs the CPU there's no watchdog yet.
+    FM6000_BIST="${FM6000_BIST:-1}" sh /usr/lib/edgenos/platform/fm6000-up.sh > /var/log/fm6000 2>&1
+    grep -iE 'ENUMERATED|still absent|PLL_LOL|Si5338 found|smbus_master @|clock RC|BIST|i2c-bringup' /var/log/fm6000 | sed 's/^/    /'
 fi
 
 # --- reboot staging diagnostic (answers the netboot question) ---
