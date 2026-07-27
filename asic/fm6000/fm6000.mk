@@ -42,3 +42,10 @@ $(FM6000_DIR)fm6000_l2_probe: $(FM6000_DIR)fm6000_hw.c $(FM6000_DIR)fm6000_l2.c 
 # Standalone deterministic pre-enum bring-up over the mgmt i2c slave (BIST + SerDes).
 $(FM6000_DIR)fm6000_i2c_bringup: $(FM6000_DIR)fm6000_i2c_bringup.c
 	$(CC) -O2 -Wall -std=gnu11 $^ -o $@
+
+# Standalone byte-mover: opens the fm6000dma kmod, brings up the rings, injects one
+# F64 special-delivery frame (tag in the BD F64 field) and polls RX. Run after the
+# L2 config (or against the microcode catch-all GLORT). Injection is non-destructive.
+$(FM6000_DIR)fpdma_probe: $(FM6000_DIR)fm6000_hw.c $(FM6000_DIR)fpdma.c \
+                          $(FM6000_DIR)fpdma_kmod.c $(FM6000_DIR)fpdma_probe.c
+	$(CC) $(FM6000_CFLAGS) -Wall -Wextra $^ -o $@

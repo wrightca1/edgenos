@@ -243,6 +243,13 @@
 #define FM6000_DESC_LEN         0x02u      /* u16 length                       */
 #define FM6000_DESC_ADDR_LO     0x04u      /* u32 buffer DMA addr lo           */
 #define FM6000_DESC_ADDR_HI     0x08u      /* u32 buffer DMA addr hi           */
+/* F64 tag field (datasheet §7.11.1.4): follows the 64-bit buffer address, so it
+ * lands at offset 0x0C of the 32-byte BD. On CPU->fabric TX the DMA reads the
+ * F64 tag from THIS field of the packet's first BD and INSERTS it into the frame
+ * at packet offset 12 (it does NOT read a tag from the payload). 64-bit tag = 8
+ * bytes; 96-bit = 12. Location/size are selected by PCI_DMA_CFG (0x37 golden). */
+#define FM6000_DESC_F64         0x0Cu      /* F64/ISL tag, 8 or 12 bytes       */
+#define FM6000_DESC_F64_LEN64   8u         /* 64-bit tag (DMA_CFG size bit=0)  */
 
 /* ---- Address helpers ---------------------------------------------------- */
 /* Switch CSR word index -> BAR0 byte offset. */

@@ -187,17 +187,21 @@ void fpdma_shutdown(struct fpdma *fp)
     ring_free(fp, &fp->rx);
 }
 
-int fpdma_tx(struct fpdma *fp, const void *frame, uint16_t len)
+int fpdma_tx_f64(struct fpdma *fp, const void *frame, uint16_t len,
+                 const void *f64, uint8_t f64len)
 {
     struct fpdma_ring *r = &fp->tx;
     uint32_t slot = r->head & r->mask;
     uint64_t bdma = 0;
+    volatile uint8_t *d;
     void *buf;
 
     if (((r->head + 1) & r->mask) == (r->tail & r->mask))
         return -1;                       /* ring full                          */
     if (len > 2048)
         return -1;
+    if (f64 && f64len > FM6000_DESC_STRIDE - FM6000_DESC_F64)
+        return -1;                       /* tag would overrun the BD           */
 
     /* One bounce buffer per slot; alloc lazily, reuse thereafter. */
     if (!r->buf_va[slot]) {
@@ -209,14 +213,26 @@ int fpdma_tx(struct fpdma *fp, const void *frame, uint16_t len)
     }
     memcpy(r->buf_va[slot], frame, len);
 
-    /* NOTE: caller is responsible for having prepended the F64/ISL CPU tag
-     * (DGLORT/SGLORT/FTYPE/SWPRI/VLAN at L2 offset 12) — see fpdma_f64 in
-     * FPDMA.md. The raw ring just DMAs bytes. */
-    desc_write(desc_ptr(r, slot), FM6000_DESC_HANDOFF, len, r->buf_dma[slot]);
+    /* The F64/ISL CPU tag does NOT go in the payload — the DMA reads it from the
+     * BD's F64 field (offset 0x0C) and inserts it into the frame at offset 12 on
+     * the way to the fabric (datasheet §7.11.1.4). `frame` is DMAC+SMAC+body only.
+     * Write the tag body BEFORE desc_write so the sfence in desc_write orders it
+     * ahead of the ownership handoff. Zero the field first for a clean tag. */
+    d = desc_ptr(r, slot);
+    memset((void *)(d + FM6000_DESC_F64), 0, FM6000_DESC_STRIDE - FM6000_DESC_F64);
+    if (f64 && f64len)
+        memcpy((void *)(d + FM6000_DESC_F64), f64, f64len);
+
+    desc_write(d, FM6000_DESC_HANDOFF, len, r->buf_dma[slot]);
     r->head++;
 
     fm6000_dma_write(fp->dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_TX_POST);        /* TX_POST: new BD ready */
     return 0;
+}
+
+int fpdma_tx(struct fpdma *fp, const void *frame, uint16_t len)
+{
+    return fpdma_tx_f64(fp, frame, len, NULL, 0);
 }
 
 int fpdma_tx_reclaim(struct fpdma *fp)
