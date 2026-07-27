@@ -78,28 +78,27 @@ int fm6000_l2_configure_cpu_loopback(struct fm6000_dev *dev,
      * points at it (pipeline resolve order: GLORT -> DMASK -> L2F). Each write is
      * paced + read-back-verified; on a wedge we abort immediately (SET macro). */
 
-    /* 1) DMASK: MCAST_DEST_TABLE[gid] = a 76-bit mask with only the CPU-port bit. */
-    for (dw = 0; dw < 4; dw++)
-        SET(FM6000_MCAST_DEST(cfg->dmask_gid, dw),
+    (void)sp;
+    /* 1) DMASK: L2F_TABLE_256[gid] = the 76-bit dest mask (only the CPU-port bit).
+     *    GLORT_RAM.DMaskBaseIdx indexes THIS table — confirmed from the golden
+     *    capture (DMaskBaseIdx=1 -> L2F_TABLE_256[1]={CPU bit0, Et1 bit40}). NOT
+     *    MCAST_DEST (that's the multicast-group path; writing it wedges the chip
+     *    even post-BIST — live-confirmed 2026-07-27). 3 words = 76 bits. */
+    for (dw = 0; dw < 3; dw++)
+        SET(FM6000_L2F_TABLE_256(cfg->dmask_gid, dw),
             (dw == cpu_bit_word) ? cpu_bit_mask : 0u, "dmask");
 
     /* 2) GLORT: CAM matches the CPU DGLORT exactly (KeyInvert=0); RAM points at
-     *    the DMASK group (HashCmd=0 single-dest, DMaskRange=0). */
+     *    the DMASK entry (HashCmd=0 single-dest, DMaskRange=0, DMaskBaseIdx=gid). */
     SET(FM6000_GLORT_CAM(cfg->cam_idx),
         FM6000_GLORT_CAM_ENC(cfg->cpu_glort, 0x0000), "glort_cam");
     SET(FM6000_GLORT_RAM(cfg->cam_idx, 0),
         FM6000_GLORT_RAM_W0(0u, cfg->dmask_gid), "glort_ram0");
     SET(FM6000_GLORT_RAM(cfg->cam_idx, 1), 0u, "glort_ram1");
 
-    /* 3) L2F: admit the CPU-port bit for the CPU source port only (a CPU-injected
-     *    frame ingresses on the CPU port), + a pass-through profile. Minimal by
-     *    design — writing all 76 source ports unpaced wedged the chip. */
-    for (sp = cfg->src_port_first; sp <= cfg->src_port_last; sp++) {
-        for (dw = 0; dw < 3; dw++)
-            SET(FM6000_L2F_TABLE_256(sp, dw),          /* i0 = source port */
-                (dw == cpu_bit_word) ? cpu_bit_mask : 0u, "l2f_memb");
-        SET(FM6000_L2F_PROFILE(sp), FM6000_L2F_PROFILE_PASS, "l2f_prof");
-    }
+    /* 3) L2F 13-stage membership/profile intentionally left for a follow-up: test
+     *    first whether the frame punts with just GLORT->DMASK. If the filter prunes
+     *    it, add source-port membership (L2F_TABLE_4K) + a pass-through profile. */
 #undef SET
 
     fprintf(stderr,
