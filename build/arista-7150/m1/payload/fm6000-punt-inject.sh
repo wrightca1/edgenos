@@ -61,8 +61,11 @@ echo "== [l2f] replicate golden L2F 13-stage (membership/STP/256/profiles) =="
 # CRM-zeroed, every frame drops. Load the golden EOS L2F state (sparse, ~324 words:
 # 4K membership + all 256 tables incl [0][1]={CPU,Et1} + profiles) to reproduce a
 # known-working filter. Then a frame on a golden-configured path can reach the CPU.
-[ -f /tmp/golden_l2f.raw ] || { echo "  MISSING /tmp/golden_l2f.raw"; exit 1; }
-n=0; while read a v; do n=$((n+1)); fm6000reg $B 0x$a 0x$v >/dev/null 2>&1; [ $((n%200)) -eq 0 ] && WD; done < /tmp/golden_l2f.raw; WD
+# golden_l2f_full.raw = golden L2F expanded to COMPLETE 4-word entries (LSW->MSW).
+# The L2F 4K/256 tables are wide atomic (§8.3): an entry commits only on its MSW
+# write, so a SPARSE load (non-zero words only) never commits — write full entries.
+[ -f /tmp/golden_l2f_full.raw ] || { echo "  MISSING /tmp/golden_l2f_full.raw"; exit 1; }
+n=0; while read a v; do n=$((n+1)); fm6000reg $B 0x$a 0x$v >/dev/null 2>&1; [ $((n%200)) -eq 0 ] && WD; done < /tmp/golden_l2f_full.raw; WD
 echo "  loaded golden L2F ($n words)  L2F_256[0][1]={0x$(R 0x1A0004),0x$(R 0x1A0005)} (want {0x1,0x100}) PROFILE0=0x$(R 0x1A1000)"
 
 echo "== [cfg] program entry-0 catch-all -> DMaskBaseIdx=1 (golden RAM0) =="
@@ -78,13 +81,10 @@ echo "== [full] DMA rings + inject special-delivery sweep (SGLORT-varied for LBS
 for f in fpdma_probe fm6000dma.ko; do [ -f /tmp/$f ] || { echo "  MISSING /tmp/$f for full"; exit 1; }; done
 chmod +x /tmp/fpdma_probe
 lsmod 2>/dev/null | grep -q fm6000dma || insmod /tmp/fm6000dma.ko 2>/dev/null || modprobe fm6000dma 2>/dev/null
-# dglort sglort : vary SGLORT so LBS suppresses a non-CPU source (Et1=bit40 dest, so
-# source Et1 -> LBS removes Et1, CPU survives). One inject per line (repeated
-# fpdma_init stalls the TX engine); reset engine by reloading kmod between shots.
-for spec in "0xff00 0x0028" "0xff00 0x0000" "0x0001 0x0028"; do
-    echo "--- fpdma_probe tx $spec ---"
-    rmmod fm6000dma 2>/dev/null; insmod /tmp/fm6000dma.ko 2>/dev/null
-    /tmp/fpdma_probe tx $spec 2>&1 | grep -iE 'tx desc|tx_reclaim|total RX frames|\*\*\* RX|FAILED|SGLORT'
-    WD
-done
+# SINGLE inject on a fresh DMA engine (repeated fpdma_init stalls TX -> desc 0x09).
+# SGLORT=0x0028 (Et1) so LBS suppresses a non-CPU source; DGLORT any non-zero ->
+# entry-0 catch-all -> DMaskBaseIdx=1 -> L2F_256[0][1]={CPU,Et1} -> 13-stage -> CPU.
+echo "--- fpdma_probe tx 0xff00 0x0028 (single) ---"
+/tmp/fpdma_probe tx 0xff00 0x0028 2>&1 | grep -iE 'tx desc|tx_reclaim|total RX frames|\*\*\* RX|FAILED|SGLORT|queued'
+WD
 echo "== DONE (mode=full). Stop the external WD re-armer + disarm when finished. =="
