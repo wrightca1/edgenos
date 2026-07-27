@@ -123,6 +123,10 @@ static const struct { const char *name; uint32_t base, count; } TABLES[] = {
      * stage reads uninit'd memory and (best case) AND-s the DMASK to 0 = drop. */
     { "GLORT_CAM",  0x0E000u,  1024u },     /* 1024 x 1w (Key,KeyInvert)        */
     { "GLORT_RAM",  0x0E800u,  2048u },     /* 1024 x 2w                        */
+    { "LBS",        0x14000u,  0x1000u },   /* loopback-suppress CAM(76)+profile
+                                             * — BIST leaves it GARBAGE; the LBS
+                                             * 13-stage stage reads it and mangles
+                                             * the DMASK (CPU-punt RX blocker).  */
     { "L2F_4K",     0x180000u, 0x20000u },  /* 8 x 4096 x 4w  (membership/STP)  */
     { "L2F_256",    0x1A0000u, 0x1000u },   /* 4 x 256 x 4w   (DMASK tables)    */
 };
