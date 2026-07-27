@@ -38,3 +38,7 @@ $(FM6000_DIR)fm6000_bringup: $(FM6000_SRCS) $(FM6000_DIR)fm6000_bringup.c
 $(FM6000_DIR)fm6000_l2_probe: $(FM6000_DIR)fm6000_hw.c $(FM6000_DIR)fm6000_l2.c \
                               $(FM6000_DIR)fm6000_l2_probe.c
 	$(CC) $(FM6000_CFLAGS) -Wall -Wextra $^ -o $@
+
+# Standalone deterministic pre-enum bring-up over the mgmt i2c slave (BIST + SerDes).
+$(FM6000_DIR)fm6000_i2c_bringup: $(FM6000_DIR)fm6000_i2c_bringup.c
+	$(CC) -O2 -Wall -std=gnu11 $^ -o $@
