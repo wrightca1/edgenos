@@ -119,24 +119,61 @@ static int bist(void)
     static const uint32_t march[4] = { 0x6529EDA9, 0x9B8ED9B1, 0xEFCA952B, 0x000FCA99 };
     for (int w = 0; w < 4; w++) { i2c_wr(0x1D080 + w, march[w]); i2c_wr(0x1D708 + w, march[w]); }
 
-    fprintf(stderr, "[i2c-bringup] BIST: per-block enables + per-memory config\n");
-    wr_run(0x1D210, 0x80, 4, 0x00200000);
-    i2c_wr(0x1D400, 0x200000); i2c_wr(0x1D480, 0x200000); i2c_wr(0x1D500, 0x200000);
-    i2c_wr(0x1D580, 0x200000); i2c_wr(0x1D600, 0x200000);
-    wr_run(0x1D218, 0x80, 4, 0x000000B4);
-    /* fusebox/repair enables */
-    i2c_wr(0x1D241, 4); i2c_wr(0x1D2C1, 4); i2c_wr(0x1D261, 4); i2c_wr(0x1D281, 4); i2c_wr(0x1D2A1, 4);
-    /* march per-memory config */
-    wr_run(0x1D404, 0x80, 4, 0x0000000C);
-    i2c_wr(0x1D604, 0x4);
-    i2c_wr(0x1D440, 1); i2c_wr(0x1D4C0, 1); i2c_wr(0x1D4E0, 1); i2c_wr(0x1D540, 1);
-    i2c_wr(0x1D5C0, 1); i2c_wr(0x1D5E0, 1); i2c_wr(0x1D640, 1); i2c_wr(0x1D660, 1);
-    i2c_wr(0x1D409, 0x0FFF); i2c_wr(0x1D489, 0x7FFF); i2c_wr(0x1D509, 0x3FFF);
-    i2c_wr(0x1D589, 0x0FFF); i2c_wr(0x1D609, 0x03FF);
-    i2c_wr(0x1D441, 4); i2c_wr(0x1D4C1, 4); i2c_wr(0x1D4E1, 4); i2c_wr(0x1D541, 4);
-    i2c_wr(0x1D5C1, 6); i2c_wr(0x1D5E1, 6); i2c_wr(0x1D641, 0xA); i2c_wr(0x1D661, 0xA);
-    wr_run(0x1D220, 0x80, 4, 0x3);
-    i2c_wr(0x1D40B, 0x0); i2c_wr(0x1D48B, 0x2); i2c_wr(0x1D50B, 0x2); i2c_wr(0x1D58B, 0x2); i2c_wr(0x1D60B, 0x0);
+    fprintf(stderr, "[i2c-bringup] BIST: per-partition config (golden-EOS match, phase64)\n");
+    /* CORRECTED to exactly match golden EOS BIST march config (arista phase64,
+     * golden-bist-march-config-2026-07-28.txt). The old partial config left the
+     * MCAST_MID (0x240000) and MOD (0x150000) RAM ECC uninitialized -> those
+     * blocks hang on any access (the CPU-punt RX blocker). The missing pieces were
+     * the SPDP per-partition +0x0C upper-address bounds and +0x02 per-memory config,
+     * the full CDP inst0/inst1 depth config (0x1D2A1 must be 0x7F, not 4), and the
+     * SPDP march-seq mirror at 0x1D688. Removed the old erroneous writes
+     * (0x1D220=3, 0x1D48B/50B/58B=2, and the extra CDP instances 0x1D310/390) that
+     * golden leaves at 0. */
+    /* base enables (bit21 = Enabled) */
+    i2c_wr(0x1D210, 0x00200000); i2c_wr(0x1D290, 0x00200000);          /* CDP inst 0,1 */
+    i2c_wr(0x1D400, 0x00200000); i2c_wr(0x1D480, 0x00200000);
+    i2c_wr(0x1D500, 0x00200000); i2c_wr(0x1D580, 0x00200000);
+    i2c_wr(0x1D600, 0x00200000);                                       /* SPDP 0..4 */
+    /* CDP inst0 */
+    i2c_wr(0x1D218, 0x000000B4); i2c_wr(0x1D219, 0x00000100);
+    i2c_wr(0x1D221, 0x0000017F); i2c_wr(0x1D222, 0x0002BFF7); i2c_wr(0x1D223, 0x0003BFE3);
+    i2c_wr(0x1D224, 0x20000000); i2c_wr(0x1D225, 0x000203FF);
+    i2c_wr(0x1D241, 0x4); i2c_wr(0x1D242, 0x300);
+    i2c_wr(0x1D261, 0x4); i2c_wr(0x1D262, 0x300);
+    i2c_wr(0x1D281, 0x4);
+    /* CDP inst1 */
+    i2c_wr(0x1D298, 0x000000B4); i2c_wr(0x1D299, 0x00000100);
+    i2c_wr(0x1D2A1, 0x0000007F); i2c_wr(0x1D2A2, 0x00023FF7); i2c_wr(0x1D2A3, 0x00033FE3);
+    i2c_wr(0x1D2A4, 0x20000000); i2c_wr(0x1D2A5, 0x000203FF);
+    i2c_wr(0x1D2C1, 0x4); i2c_wr(0x1D2C2, 0x300);
+    /* SPDP partition 0 (0x1D400) */
+    i2c_wr(0x1D404, 0xC); i2c_wr(0x1D409, 0x00000FFF); i2c_wr(0x1D40C, 0x00000FFF);
+    i2c_wr(0x1D440, 1); i2c_wr(0x1D441, 4); i2c_wr(0x1D442, 0x300);
+    /* SPDP partition 1 (0x1D480) — two memories (+0x40, +0x60) */
+    i2c_wr(0x1D484, 0xC); i2c_wr(0x1D489, 0x00007FFF); i2c_wr(0x1D48C, 0x00007FFF);
+    i2c_wr(0x1D4C0, 1); i2c_wr(0x1D4C1, 4); i2c_wr(0x1D4C2, 0x3F8);
+    i2c_wr(0x1D4E0, 1); i2c_wr(0x1D4E1, 4); i2c_wr(0x1D4E2, 0x380);
+    /* SPDP partition 2 (0x1D500) */
+    i2c_wr(0x1D504, 0xC); i2c_wr(0x1D509, 0x00003FFF); i2c_wr(0x1D50C, 0x00003FFF);
+    i2c_wr(0x1D540, 1); i2c_wr(0x1D541, 4); i2c_wr(0x1D542, 0x300);
+    /* SPDP partition 3 (0x1D580) — two memories */
+    i2c_wr(0x1D584, 0xC); i2c_wr(0x1D589, 0x00000FFF); i2c_wr(0x1D58C, 0x00000FFF);
+    i2c_wr(0x1D5C0, 1); i2c_wr(0x1D5C1, 6); i2c_wr(0x1D5C2, 0x3A0);
+    i2c_wr(0x1D5E0, 1); i2c_wr(0x1D5E1, 6); i2c_wr(0x1D5E2, 0x3FA);
+    /* SPDP partition 4 (0x1D600) — two memories */
+    i2c_wr(0x1D604, 0x4); i2c_wr(0x1D609, 0x000003FF); i2c_wr(0x1D60C, 0x000003FF);
+    i2c_wr(0x1D640, 1); i2c_wr(0x1D641, 0xA); i2c_wr(0x1D642, 0x300);
+    i2c_wr(0x1D660, 1); i2c_wr(0x1D661, 0xA); i2c_wr(0x1D662, 0x3E0);
+    /* SPDP march-seq mirror + config */
+    i2c_wr(0x1D688, 0x6529EDA9); i2c_wr(0x1D689, 0x9B8ED9B1);
+    i2c_wr(0x1D68A, 0xEFCA952B); i2c_wr(0x1D68B, 0x000FCA99); i2c_wr(0x1D68C, 0x00000200);
+    /* march START triggers — write-and-run, SELF-CLEARING (they read 0 in a post-march
+     * snapshot, like the scheduler INIT strobes), so they MUST be replayed AFTER all
+     * config or the march never fires (symptom: "BIST idle after 0s", RAM ECC stays
+     * uninitialized -> MCAST_MID/MOD hang). CDP 2 inst + SPDP 5 partitions. */
+    i2c_wr(0x1D220, 0x3); i2c_wr(0x1D2A0, 0x3);
+    i2c_wr(0x1D40B, 0x0); i2c_wr(0x1D48B, 0x2); i2c_wr(0x1D50B, 0x2);
+    i2c_wr(0x1D58B, 0x2); i2c_wr(0x1D60B, 0x0);
 
     fprintf(stderr, "[i2c-bringup] BIST: march running; poll BM_ENGINE_STATUS(0x1D08E)==0\n");
     for (int i = 0; i < 20; i++) {
