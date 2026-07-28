@@ -72,6 +72,13 @@
 /* Scheduler tick lives in the JSS block: JSS_BASE(0x0F000)+0x10. Period[7:0].
  * Bare-M1 leaves it 0 (tick off → scheduler engine idle); golden 7150 = 2. */
 #define FM6000_SSCHED_TICK_CFG      (0x0F000u + 0x010u)
+/* SWEEPER_CFG (MGMT2+0x48, 5 words) — the background sweeper that DRIVES the
+ * scheduler/L2-lookup/policer/pause/CM ticks. Off on bare M1 → engine idle even
+ * with the tick set (arista phase58). Fields: L2LookupPeriod0[31:0](w0),
+ * L2LookupPeriod1[63:32](w1), L2LookupWritebackPeriod[95:64](w2),
+ * PolicerPeriod[111:96]+PausePeriod[127:112](w3), SchedPeriod[135:128]+
+ * CmMonitorTickPeriod[143:136](w4). */
+#define FM6000_SWEEPER_CFG(w)       (FM6000_BLK_MGMT2 + 0x048u + (w))
 #define FM6000_BLK_SERDES_WR    0xB0500u    /* SerDes SBus controller (write) */
 #define FM6000_BLK_SERDES_RD    0xC0500u    /* SerDes SBus controller (read)  */
 #define FM6000_BLK_SERDES_PCIE  0xD1100u

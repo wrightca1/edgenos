@@ -102,10 +102,25 @@ int main(int argc, char **argv)
     fm6000_csr_write(&dev, FM6000_BLK_JSS + 0x004, 0x00000002u);
     fm6000_csr_write(&dev, FM6000_BLK_JSS + 0x008, 0x00000001u);
     fm6000_csr_write(&dev, FM6000_SSCHED_TICK_CFG, 0x00000002u);   /* tick period 2 */
-    fprintf(stderr, "fm6000_sched: JSS/tick set, TICK_CFG now=0x%08x\n",
-            fm6000_csr_read(&dev, FM6000_SSCHED_TICK_CFG));
 
-    if (freelist_init(&dev) < 0) { rc = 1; goto out; }
+    /* SWEEPER_CFG (golden 7150) — the sweeper DRIVES the scheduler ticks; without
+     * it the tick alone doesn't advance the engine (phase58). 5 words, LSW->MSW.
+     * w3 PausePeriod=48, w4 CmMonitorTickPeriod=32 / SchedPeriod=0. */
+    fm6000_csr_write(&dev, FM6000_SWEEPER_CFG(0), 0x0008bb2cu);
+    fm6000_csr_write(&dev, FM6000_SWEEPER_CFG(1), 0x00000002u);
+    fm6000_csr_write(&dev, FM6000_SWEEPER_CFG(2), 0x00000000u);
+    fm6000_csr_write(&dev, FM6000_SWEEPER_CFG(3), 0x0030a2c3u);
+    fm6000_csr_write(&dev, FM6000_SWEEPER_CFG(4), 0x00002000u);
+    fprintf(stderr, "fm6000_sched: JSS/tick/sweeper set — TICK_CFG=0x%08x SWEEPER[3]=0x%08x SWEEPER[4]=0x%08x\n",
+            fm6000_csr_read(&dev, FM6000_SSCHED_TICK_CFG),
+            fm6000_csr_read(&dev, FM6000_SWEEPER_CFG(3)),
+            fm6000_csr_read(&dev, FM6000_SWEEPER_CFG(4)));
+
+    /* Freelist init is non-fatal: boot-ctrl cmd3 already inits the scheduler
+     * freelists, so the _DONE handshake here may legitimately not re-fire — don't
+     * block the token init on it (arista phase59). */
+    if (freelist_init(&dev) < 0)
+        fprintf(stderr, "fm6000_sched: freelist DONE didn't set (boot-ctrl already did it?) — continuing\n");
 
     if (argc > 1) {
         for (i = 1; i < argc && rc == 0; i++)
