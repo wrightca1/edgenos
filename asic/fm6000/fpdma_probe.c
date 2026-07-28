@@ -106,16 +106,22 @@ int main(int argc, char **argv)
         f[6]=0x02; f[7]=0; f[8]=0; f[9]=0; f[10]=0; f[11]=0x01;/* SMAC */
         f[12]=0xDE; f[13]=0xAD; f[14]=0xBE; f[15]=0xEF;       /* payload marker */
 
-        uint16_t tw[4] = { 0x1000, 0x0000, (uint16_t)sglort, (uint16_t)dglort };/* w0 FTYPE spc, w1 VLAN, w2 SGLORT, w3 DGLORT */
+        /* FTYPE/VLAN overridable via env (FTYPE=0 = normal delivery vs 0x1000 =
+         * special; VLAN for the membership-tagged path) so we can sweep the punt
+         * frame type without recompiling. */
+        const char *fe = getenv("FTYPE"), *ve = getenv("VLAN");
+        uint16_t ftype = fe ? (uint16_t)strtoul(fe, NULL, 0) : 0x1000;
+        uint16_t vlan  = ve ? (uint16_t)strtoul(ve, NULL, 0) : 0x0000;
+        uint16_t tw[4] = { ftype, vlan, (uint16_t)sglort, (uint16_t)dglort };/* w0 FTYPE, w1 VLAN, w2 SGLORT, w3 DGLORT */
         uint8_t tag[8];
         for (int w = 0; w < 4; w++) {
             if (swap) { tag[2*w] = tw[w] & 0xff; tag[2*w+1] = tw[w] >> 8; }   /* host-endian */
             else      { tag[2*w] = tw[w] >> 8;   tag[2*w+1] = tw[w] & 0xff; } /* wire big-endian */
         }
 
-        char m[128]; snprintf(m, sizeof m,
-            "fpdma_tx_f64 special-delivery DGLORT=0x%04x SGLORT=0x%04x endian=%s  <-- RISKY",
-            dglort, sglort, swap ? "host" : "wire");
+        char m[160]; snprintf(m, sizeof m,
+            "fpdma_tx_f64 FTYPE=0x%04x VLAN=0x%04x DGLORT=0x%04x SGLORT=0x%04x endian=%s",
+            ftype, vlan, dglort, sglort, swap ? "host" : "wire");
         mark(m);
         if (fpdma_tx_f64(&fp, f, 60, tag, sizeof tag) < 0) mark("fpdma_tx_f64 ring full/FAILED");
         else mark("fpdma_tx_f64 queued + engine kicked");
