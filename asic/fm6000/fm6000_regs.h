@@ -45,19 +45,31 @@
 #define FM6000_BLK_JSS          0x0F000u    /* switch/scheduler subsystem     */
 #define FM6000_BLK_MGMT2        0x1C000u    /* mgmt2: reset/PLL/BIST/fusebox  */
 
-/* ---- SSCHED: ingress/egress scheduler token-init API (arista phase57) -----
- * The port service ring is programmed via a TOKEN-INIT hardware API + completion
- * poll — NOT by writing SSCHED_TX_NEXT_PORT (0x8000) directly (that is HW ring
- * STATE; a direct write desyncs the internal linked-list -> fabric hang). Init
- * the freelists (poll _DONE), then insert one token per scheduled port. */
+/* ---- SSCHED: scheduler service-ring init (arista phase61, corrected) -------
+ * CORRECTION to phase57: the real EOS ring-init (fm6000ValidateSchedulerToken /
+ * the static after fmPlatformSetRingMode, libFocalpointSDK.so) is a STRAIGHT-LINE
+ * WRITE sequence with NO polling:
+ *   1. per scheduled port: write RX_INIT_TOKEN(0x8060)+TX_INIT_TOKEN(0x8020)
+ *   2. write the full NEXT_PORT visit table  TX 0x8000+i / RX 0x8040+i  (i=0..19)
+ *   3. write SLOW_PORT  RX 0x8070+i (i=0..4)
+ *   4. COMMIT: write RX_INIT_COMPLETE(0x8061)=1 then TX_INIT_COMPLETE(0x8021)=1
+ * INIT_COMPLETE / FREELIST_DONE are WRITE-1 COMMIT STROBES, *not* status bits —
+ * the driver never polls them (the old poll here hung forever, aborting before
+ * the NEXT_PORT table was ever written -> that was the byte-mover blocker).
+ * Writing NEXT_PORT directly is safe *inside* this complete init (boot-13 wedged
+ * only because it poked one entry of an already-running ring). Golden 7150 ring is
+ * sparse (lab ports down): TX_NEXT_PORT[0]=0x03020100 (ports 0,1,2,3) + [19]=
+ * 0x004e0000 (port 78); all else 0. Port 0 (PCIe DMA) is the first slot. */
 #define FM6000_BLK_SSCHED           0x08000u
-#define FM6000_SSCHED_TX_NEXT_PORT(i) (FM6000_BLK_SSCHED + 0x000u + (i)) /* HW ring STATE (read) */
+#define FM6000_SSCHED_TX_NEXT_PORT(i) (FM6000_BLK_SSCHED + 0x000u + (i)) /* 20 words, 4 ports/word */
 #define FM6000_SSCHED_TX_INIT_TOKEN   (FM6000_BLK_SSCHED + 0x020u)  /* Port[6:0] Locked(9) Sync(10) */
-#define FM6000_SSCHED_TX_INIT_COMPLETE (FM6000_BLK_SSCHED + 0x021u) /* poll Data(bit0)             */
-#define FM6000_SSCHED_TX_REPLACE_TOKEN (FM6000_BLK_SSCHED + 0x022u) /* HW search-replace token     */
+#define FM6000_SSCHED_TX_INIT_COMPLETE (FM6000_BLK_SSCHED + 0x021u) /* WRITE-1 commit strobe (no poll) */
+#define FM6000_SSCHED_TX_REPLACE_TOKEN (FM6000_BLK_SSCHED + 0x022u) /* HW search token (Found=bit30) */
+#define FM6000_SSCHED_RX_NEXT_PORT(i) (FM6000_BLK_SSCHED + 0x040u + (i))
 #define FM6000_SSCHED_RX_INIT_TOKEN   (FM6000_BLK_SSCHED + 0x060u)
-#define FM6000_SSCHED_RX_INIT_COMPLETE (FM6000_BLK_SSCHED + 0x061u)
+#define FM6000_SSCHED_RX_INIT_COMPLETE (FM6000_BLK_SSCHED + 0x061u) /* WRITE-1 commit strobe (no poll) */
 #define FM6000_SSCHED_RX_REPLACE_TOKEN (FM6000_BLK_SSCHED + 0x062u)
+#define FM6000_SSCHED_RX_SLOW_PORT(i) (FM6000_BLK_SSCHED + 0x070u + (i)) /* 5 words used (16 entries) */
 #define FM6000_SSCHED_RXQ_FREELIST_INIT   (FM6000_BLK_SSCHED + 0x0F0u)
 #define FM6000_SSCHED_RXQ_FREELIST_DONE   (FM6000_BLK_SSCHED + 0x0F1u)
 #define FM6000_SSCHED_TXQ_FREELIST_INIT   (FM6000_BLK_SSCHED + 0x0F4u)
