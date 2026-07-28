@@ -129,6 +129,19 @@ int main(int argc, char **argv)
         int got = 0;
         for (int i = 0; i < 10; i++) { got += fpdma_rx_poll(&fp, 4, rxcb, NULL); usleep(100000); }
         fprintf(stderr, "[PROBE] total RX frames=%d\n", got);
+
+        /* RX-capture diagnosis (phase50): dump the raw RX BD status bytes + ring
+         * addr. If HW wrote a non-0x09 status (e.g. DONE/EOP/ERR) that rx_poll's
+         * bit-check missed, the RX status-bit ENCODING is the bug, not forwarding.
+         * Also show the DMA STATUS RxState[5:3] and the RX current-BD pointer. */
+        fprintf(stderr, "[PROBE] rx.desc_dma=%08llx rx.size=%u  RX BD status:",
+                (unsigned long long)fp.rx.desc_dma, fp.rx.size);
+        for (uint32_t i = 0; i < fp.rx.size && i < 8; i++)
+            fprintf(stderr, " bd[%u]=0x%02x", i,
+                    *(volatile uint8_t *)(fp.rx.desc + (size_t)i * FM6000_DESC_STRIDE));
+        fprintf(stderr, "\n[PROBE] DMA STATUS=0x%08x (RxState[5:3], TxState[2:0])  cur_rx_ptr=0x%08x\n",
+                fm6000_dma_read(&dev, FM6000_DMA_STATUS),
+                fm6000_dma_read(&dev, 0x5038));   /* cur_rx/bd ptr region */
     }
     mark("DONE (engine left running)");
     return 0;
