@@ -56,3 +56,9 @@ $(FM6000_DIR)fpdma_probe: $(FM6000_DIR)fm6000_hw.c $(FM6000_DIR)fpdma.c \
 # microcode load, before programming specific GLORT/DMASK entries.
 $(FM6000_DIR)fm6000_crm: $(FM6000_DIR)fm6000_hw.c $(FM6000_DIR)fm6000_crm.c
 	$(CC) $(FM6000_CFLAGS) -Wall -Wextra $^ -o $@
+
+# Standalone SSCHED port-service-ring init via the token-init HW API (phase57):
+# puts port 0 (PCIe DMA) into the egress schedule so punted frames drain to the RX
+# ring. NOT direct SSCHED_TX_NEXT_PORT writes (those hang the fabric).
+$(FM6000_DIR)fm6000_sched: $(FM6000_DIR)fm6000_hw.c $(FM6000_DIR)fm6000_sched.c
+	$(CC) $(FM6000_CFLAGS) -Wall -Wextra $^ -o $@

@@ -44,6 +44,31 @@
 /* ---- Register block bases (word indices; phase7g "The anchor") ---------- */
 #define FM6000_BLK_JSS          0x0F000u    /* switch/scheduler subsystem     */
 #define FM6000_BLK_MGMT2        0x1C000u    /* mgmt2: reset/PLL/BIST/fusebox  */
+
+/* ---- SSCHED: ingress/egress scheduler token-init API (arista phase57) -----
+ * The port service ring is programmed via a TOKEN-INIT hardware API + completion
+ * poll — NOT by writing SSCHED_TX_NEXT_PORT (0x8000) directly (that is HW ring
+ * STATE; a direct write desyncs the internal linked-list -> fabric hang). Init
+ * the freelists (poll _DONE), then insert one token per scheduled port. */
+#define FM6000_BLK_SSCHED           0x08000u
+#define FM6000_SSCHED_TX_NEXT_PORT(i) (FM6000_BLK_SSCHED + 0x000u + (i)) /* HW ring STATE (read) */
+#define FM6000_SSCHED_TX_INIT_TOKEN   (FM6000_BLK_SSCHED + 0x020u)  /* Port[6:0] Locked(9) Sync(10) */
+#define FM6000_SSCHED_TX_INIT_COMPLETE (FM6000_BLK_SSCHED + 0x021u) /* poll Data(bit0)             */
+#define FM6000_SSCHED_TX_REPLACE_TOKEN (FM6000_BLK_SSCHED + 0x022u) /* HW search-replace token     */
+#define FM6000_SSCHED_RX_INIT_TOKEN   (FM6000_BLK_SSCHED + 0x060u)
+#define FM6000_SSCHED_RX_INIT_COMPLETE (FM6000_BLK_SSCHED + 0x061u)
+#define FM6000_SSCHED_RX_REPLACE_TOKEN (FM6000_BLK_SSCHED + 0x062u)
+#define FM6000_SSCHED_RXQ_FREELIST_INIT   (FM6000_BLK_SSCHED + 0x0F0u)
+#define FM6000_SSCHED_RXQ_FREELIST_DONE   (FM6000_BLK_SSCHED + 0x0F1u)
+#define FM6000_SSCHED_TXQ_FREELIST_INIT   (FM6000_BLK_SSCHED + 0x0F4u)
+#define FM6000_SSCHED_TXQ_FREELIST_DONE   (FM6000_BLK_SSCHED + 0x0F5u)
+#define FM6000_SSCHED_HS_FREELIST_INIT    (FM6000_BLK_SSCHED + 0x0F8u)
+#define FM6000_SSCHED_HS_FREELIST_DONE    (FM6000_BLK_SSCHED + 0x0F9u)
+#define FM6000_SSCHED_FREELIST_INIT       (FM6000_BLK_SSCHED + 0x0FCu)
+#define FM6000_SSCHED_FREELIST_DONE       (FM6000_BLK_SSCHED + 0x0FDu)
+/* token encode: Port[6:0] | Locked<<9 | Synchronized<<10 */
+#define FM6000_SSCHED_TOKEN(port, locked, sync) \
+    (((uint32_t)(port) & 0x7Fu) | (((uint32_t)(locked) & 1u) << 9) | (((uint32_t)(sync) & 1u) << 10))
 #define FM6000_BLK_SERDES_WR    0xB0500u    /* SerDes SBus controller (write) */
 #define FM6000_BLK_SERDES_RD    0xC0500u    /* SerDes SBus controller (read)  */
 #define FM6000_BLK_SERDES_PCIE  0xD1100u
