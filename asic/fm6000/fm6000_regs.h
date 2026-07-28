@@ -279,7 +279,13 @@
 /* ---- Descriptor ring geometry (FPDMA.md "Descriptor ring model") -------- */
 #define FM6000_RING_MAX         1024u      /* MAX_RING_SIZE 0x400, power-of-2  */
 #define FM6000_DESC_STRIDE      32u        /* fpr_post uses (i << 5)           */
-#define FM6000_DESC_HANDOFF     0x09u      /* status byte stored to hand to HW */
+#define FM6000_DESC_HANDOFF     0x09u      /* TX handoff: READY(0)+EOP(3) — a
+                                            * single-buffer TX frame is its own
+                                            * last buffer, so software sets EOP  */
+/* RX handoff = READY only (0x01). Table 7-6: EOP(bit3) on RX is "written by
+ * HARDWARE on receive" — software must NOT pre-set it. Handing RX BDs off with
+ * 0x09 (READY+EOP, the TX value) sets a HW-owned bit; use READY-only for RX. */
+#define FM6000_DESC_RX_READY    0x01u
 #define FM6000_RX_MAX_LEN       0x7FFu     /* rx_skb_reass max                 */
 
 /* Descriptor field byte offsets within the 32-byte stride. */

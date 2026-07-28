@@ -82,8 +82,8 @@ static int ring_alloc(struct fpdma *fp, struct fpdma_ring *r,
             if (!r->buf_va[i] || (bdma >> 32))
                 return -1;
             r->buf_dma[i] = bdma;
-            desc_write(desc_ptr(r, i), FM6000_DESC_HANDOFF,
-                       (uint16_t)buf_len, bdma);   /* own -> HW, ready to fill  */
+            desc_write(desc_ptr(r, i), FM6000_DESC_RX_READY,
+                       (uint16_t)buf_len, bdma);   /* READY only (EOP is HW-set) */
         }
         r->head = size;                  /* all RX descriptors handed to HW    */
     }
@@ -278,8 +278,8 @@ int fpdma_rx_poll(struct fpdma *fp, int budget,
         if (cb)
             cb(cb_ctx, r->buf_va[r->tail & r->mask], len);
 
-        /* Recycle: hand the descriptor back to HW. */
-        desc_write(d, FM6000_DESC_HANDOFF, (uint16_t)r->buf_len,
+        /* Recycle: hand the descriptor back to HW (RX = READY only, EOP is HW-set). */
+        desc_write(d, FM6000_DESC_RX_READY, (uint16_t)r->buf_len,
                    r->buf_dma[r->tail & r->mask]);
         r->tail++;
         n++;
