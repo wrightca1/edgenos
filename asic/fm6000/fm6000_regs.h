@@ -69,6 +69,9 @@
 /* token encode: Port[6:0] | Locked<<9 | Synchronized<<10 */
 #define FM6000_SSCHED_TOKEN(port, locked, sync) \
     (((uint32_t)(port) & 0x7Fu) | (((uint32_t)(locked) & 1u) << 9) | (((uint32_t)(sync) & 1u) << 10))
+/* Scheduler tick lives in the JSS block: JSS_BASE(0x0F000)+0x10. Period[7:0].
+ * Bare-M1 leaves it 0 (tick off → scheduler engine idle); golden 7150 = 2. */
+#define FM6000_SSCHED_TICK_CFG      (0x0F000u + 0x010u)
 #define FM6000_BLK_SERDES_WR    0xB0500u    /* SerDes SBus controller (write) */
 #define FM6000_BLK_SERDES_RD    0xC0500u    /* SerDes SBus controller (read)  */
 #define FM6000_BLK_SERDES_PCIE  0xD1100u

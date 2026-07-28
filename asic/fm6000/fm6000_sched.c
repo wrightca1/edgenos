@@ -86,8 +86,24 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    fprintf(stderr, "fm6000_sched: SSCHED before: TX_NEXT_PORT[0]=0x%08x (0=empty ring)\n",
-            fm6000_csr_read(&dev, FM6000_SSCHED_TX_NEXT_PORT(0)));
+    fprintf(stderr, "fm6000_sched: SSCHED before: TX_NEXT_PORT[0]=0x%08x  TICK_CFG=0x%08x (0=tick off)\n",
+            fm6000_csr_read(&dev, FM6000_SSCHED_TX_NEXT_PORT(0)),
+            fm6000_csr_read(&dev, FM6000_SSCHED_TICK_CFG));
+
+    /* Enable the scheduler subsystem (JSS block) to golden — bare-M1 boot-ctrl
+     * leaves the SSCHED tick OFF (TICK_CFG=0) so the scheduler engine never runs
+     * and the token/freelist handshakes never complete. Golden 7150 JSS config
+     * (from eos-golden-regs). NOTE (arista phase57): setting these + the token API
+     * still did not start the freelist/token engine on M1 — the frame-handler
+     * clock/mode enablement is an OPEN remaining piece; see phase58. */
+    fm6000_csr_write(&dev, FM6000_BLK_JSS + 0x001, 0x0521452au);
+    fm6000_csr_write(&dev, FM6000_BLK_JSS + 0x002, 0x00000016u);
+    fm6000_csr_write(&dev, FM6000_BLK_JSS + 0x003, 0x00000014u);
+    fm6000_csr_write(&dev, FM6000_BLK_JSS + 0x004, 0x00000002u);
+    fm6000_csr_write(&dev, FM6000_BLK_JSS + 0x008, 0x00000001u);
+    fm6000_csr_write(&dev, FM6000_SSCHED_TICK_CFG, 0x00000002u);   /* tick period 2 */
+    fprintf(stderr, "fm6000_sched: JSS/tick set, TICK_CFG now=0x%08x\n",
+            fm6000_csr_read(&dev, FM6000_SSCHED_TICK_CFG));
 
     if (freelist_init(&dev) < 0) { rc = 1; goto out; }
 
