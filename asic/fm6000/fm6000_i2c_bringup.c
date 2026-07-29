@@ -256,6 +256,15 @@ int main(int argc, char **argv)
         fprintf(stderr, "[i2c-bringup] Repair Bank Memory (cmd=2): BOOT_CTRL=0x%08x after %d polls\n", bcr, r);
     }
 
+    /* Clear SRAM_UNCORRECTABLE_FATAL (0x1C018, 128-bit) so an uncorrectable ECC error
+     * on an uninitialized bank memory (e.g. MCAST_MID during its CRM fill) does NOT
+     * trigger a fatal chip reset. Golden EOS keeps this = 0 (arista phase65). Without
+     * it, the CRM Memory-Set of 0x240000 fatal-resets the chip on the first uninit-ECC
+     * entry -> wedge. (Also clear the uncorrectable interrupt mask to match golden.) */
+    i2c_wr(0x1C018, 0); i2c_wr(0x1C019, 0); i2c_wr(0x1C01A, 0); i2c_wr(0x1C01B, 0);
+    i2c_wr(0x1C014, 0); i2c_wr(0x1C015, 0); i2c_wr(0x1C016, 0); i2c_wr(0x1C017, 0);
+    fprintf(stderr, "[i2c-bringup] SRAM_UNCORRECTABLE_FATAL cleared (0x1C018=0x%08x)\n", i2c_rd(0x1C018));
+
     bist();
     pcie();
 
