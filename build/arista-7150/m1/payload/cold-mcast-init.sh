@@ -122,12 +122,17 @@ W 0x1f004 0x1                 # clear IP slot0 (W1C)
 W 0x1f000 0x00000001          # TRIGGER / GO (RUN, First=Last=slot0)
 echo "   triggered; polling engine STATUS 0x1f001 bit0 (busy) — NO memory read..."
 fdone=NO; i=0
-while [ $i -lt 3000 ]; do
-    st=$(R 0x1f001); st=$((0x${st:-1}))
-    [ $((st & 1)) -eq 0 ] && { fdone=YES; break; }
+while [ $i -lt 150 ]; do
+    st=$(R 0x1f001)
+    [ "$st" = "ffffffff" ] && { fdone=OFFBUS; break; }   # chip off-bus -> STOP now (do not keep
+                                                          # hammering slow off-bus MMIO -> single-CPU
+                                                          # stall -> RCU panic; bail clean instead)
+    stv=$((0x${st:-1}))
+    [ $((stv & 1)) -eq 0 ] && { fdone=YES; break; }
     i=$((i+1))
 done
 echo "   MCAST_MID fill done=$fdone after $i polls (STATUS 0x1f001=0x$(R 0x1f001) IP=0x$(R 0x1f004))"
+[ "$fdone" = OFFBUS ] && { echo "   *** chip went OFF-BUS on the CRM trigger (bank not accessible) — abort clean ***"; exit 4; }
 [ "$fdone" != YES ] && { echo "   *** engine never cleared busy — abort (WD recovers to EOS) ***"; exit 2; }
 
 echo "== post-DONE verify: reads of FILLED entries are safe now (ECC valid). Fill span = entries 0..4095 =="
