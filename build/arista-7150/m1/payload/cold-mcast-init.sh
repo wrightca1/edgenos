@@ -62,6 +62,19 @@ nsr=$(printf '0x%08x' $(( (0x${sr:-0} & ~0x1F) & 0xFFFFFFFF )))
 W 0x00009 $nsr
 sr2=$(R 0x00009); echo "  SOFT_RESET(0x9) after  = 0x$sr2  (bits0-4 clear; crossbar alive if this printed)"
 
+echo "== disable SRAM-uncorrectable FATAL (0x1C018-1B) across the ECC-establishing fill =="
+# RE (agent, exhaustive): EOS writes NOTHING to the error/fatal block; it survives the blind
+# bank fill only because its bank cells ALREADY hold valid ECC (written by cmd=2 repair's BISR).
+# Our banks still hold power-on INVALID ECC, so the CRM engine's first touch raises
+# SRAM_UNCORRECTABLE -> FM6000 core FATAL RESET (off-bus, link stays up — exactly our symptom).
+# The CRM blind fill IS our ECC-establishing write; mask the fatal ACROSS it so the reset does
+# not fire, then the fill writes valid ECC to every cell. Re-arm happens between i2c_bringup and
+# here, so clear it now over PCIe. Golden warm chip runs with 0x1C018=0, so leave it cleared.
+# Do NOT touch IM 0x1C014 (no ECC ISR on M1; unmasking wedged in bist5).
+echo "  FATAL 0x1C018 before = 0x$(R 0x1C018)"
+W 0x1C018 0x0; W 0x1C019 0x0; W 0x1C01A 0x0; W 0x1C01B 0x0
+echo "  FATAL 0x1C018 after  = 0x$(R 0x1C018) (want 00000000)"
+
 echo "== CRM Memory-Set fill of MCAST_MID (0x240000) — VENDOR-EXACT 128-bit engine writes =="
 # RE (fm6000CrmSetMemoryExt 0x35fc78, literal decode): descriptor for base=0x240000,
 # regSize=3 (128b), count=4096, val=0. Count lives in CRM_COMMAND[33:14]; BlockSize=0xF (max,
