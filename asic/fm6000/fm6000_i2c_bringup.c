@@ -240,6 +240,32 @@ int main(int argc, char **argv)
     for (n = 0; n < 20; n++) { bc = i2c_rd(0x1C022); if (bc & 0x20) break; usleep(1000000); }
     fprintf(stderr, "[i2c-bringup] boot after %ds (BOOT_CTRL=0x%08x)\n", n, bc);
 
+    /* Load the per-chip FUSEBOX repair descriptors (0x1D000-0x1D01F) BEFORE cmd=2 + the BIST
+     * march. fm6000BistMemoryInit does NOT write these; EOS loads them from a fuse readout
+     * (arista phase40). Without them the repairable BANK memories (MCAST_MID 0x240000, MCAST_POST
+     * 0x260000, STATS 0x200000) keep their BAD cells -> the scan-mode march can't remap them ->
+     * the banks never reach valid ECC -> any later access (a CRM fill or a read) gets NO bus
+     * completion and the FM6000 core goes OFF-BUS (config+BAR0=0xffffffff, PCIe link stays up).
+     * Live-confirmed: loading these post-enum + re-running cmd=2 does NOT fix it (the remap
+     * happens DURING the scan-mode march), so they must be here, before it. The 30 values are
+     * cell-repair data specific to THIS silicon, captured live in arista
+     * reference/live-captures/7150-fm6000/eos-bist-2026-07-26/bist-state.txt. */
+    {
+        static const struct { uint32_t a; uint8_t v; } fusebox[] = {
+            {0x1D000,0x76},{0x1D001,0xeb},{0x1D002,0x02},{0x1D003,0xb8},{0x1D004,0x0d},
+            {0x1D005,0x54},{0x1D006,0x49},{0x1D007,0xba},{0x1D008,0x75},{0x1D009,0xc5},
+            {0x1D00a,0x24},{0x1D00b,0xb5},{0x1D00c,0xf7},{0x1D00d,0xbf},{0x1D00f,0x88},
+            {0x1D010,0xf7},{0x1D011,0x3f},{0x1D012,0xff},{0x1D013,0x61},{0x1D014,0xf7},
+            {0x1D015,0xbf},{0x1D016,0x02},{0x1D017,0x80},{0x1D018,0xf7},{0x1D019,0xbf},
+            {0x1D01a,0x2a},{0x1D01b,0x80},{0x1D01c,0x99},{0x1D01d,0x97},{0x1D01f,0x98},
+        };
+        for (size_t k = 0; k < sizeof(fusebox)/sizeof(fusebox[0]); k++)
+            i2c_wr(fusebox[k].a, fusebox[k].v);
+        fprintf(stderr, "[i2c-bringup] fusebox repair descriptors loaded (0x1D000-0x1D01F): "
+                        "0x1D000=0x%08x 0x1D012=0x%08x 0x1D01F=0x%08x\n",
+                i2c_rd(0x1D000), i2c_rd(0x1D012), i2c_rd(0x1D01F));
+    }
+
     /* Repair Bank Memory (BOOT_CTRL cmd=2) BEFORE the BIST march — required so the
      * march pattern-inits + applies the fusebox repairs to the repairable BANK
      * memories (MCAST_MID 0x240000, MCAST_POST 0x260000, STATS_BANK 0x200000).
