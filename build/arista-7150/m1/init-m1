@@ -26,6 +26,12 @@ echo "--- declaring SCD board blocks + enabling SFP TX ---"
 [ -x /usr/lib/edgenos/platform/scd-setup.sh ] && sh /usr/lib/edgenos/platform/scd-setup.sh
 [ -x /usr/lib/edgenos/platform/sfp-enable.sh ] && sh /usr/lib/edgenos/platform/sfp-enable.sh
 
+# WARM-INHERIT safety: on a kexec-from-EOS boot, EOS left the SCD hardware watchdog
+# ARMED. If M1 doesn't pet/disarm it, it fires an NMI + reboots the box ~30s in (seen
+# on the warm boot: "NMI received for unknown reason" -> reboot). Disarm it early.
+# Harmless on a cold Aboot boot (WD not yet armed at power-on).
+[ -f /warm-inherit ] && [ -x /usr/bin/scdreg ] && { scdreg 0x0120 0x0 >/dev/null 2>&1; echo "    SCD watchdog disarmed (warm-inherit; was armed by EOS)"; }
+
 echo "--- platform status ---"
 echo "  PCI (SCD 3475 / mgmt 14e4 / FM6000 8086):"
 for d in /sys/bus/pci/devices/*/; do
