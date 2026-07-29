@@ -100,6 +100,10 @@ fi
 
 # 4. init.
 cp "$HERE/init-m1" "$R/init"; chmod +x "$R/init"
+# warm-inherit variant: marker file makes init-m1 skip FM6000 bring-up and inherit
+# the EOS-configured chip (for kexec-from-EOS). Kernel has CONFIG_CMDLINE_FORCE so a
+# cmdline flag can't be used. Build with: EDGENOS_WARM=1 ./build-m1-rootfs.sh ...
+[ "${EDGENOS_WARM:-0}" = "1" ] && { touch "$R/warm-inherit"; echo "warm-inherit marker added (skips FM6000 reset)"; }
 
 # 5. pack.
 if [ "$MODE" = squashfs ]; then

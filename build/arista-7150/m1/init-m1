@@ -58,10 +58,34 @@ else
     echo "    eth0 absent (tg3 bind failed)"
 fi
 
+# --- WARM-INHERIT (kexec from a running EOS): the FM6000 was fully configured by
+# EOS and is NOT in reset (reset bits latch only at power-on; a kexec is a warm CPU
+# reboot -> the chip keeps EOS's state, incl. initialized MCAST/bank ECC + tables).
+# So do NOT run fm6000-up.sh (it assumes a fresh in-reset chip and would try to
+# re-clock/re-reset). Just re-scan PCI, enable BAR0 MMIO, and inherit. Boot with
+# kernel cmdline containing `fm6000_warm`. ------------------------------------------
+if grep -q fm6000_warm /proc/cmdline 2>/dev/null || [ -f /warm-inherit ]; then
+    # (the M1 kernel has CONFIG_CMDLINE_FORCE so kexec --command-line is ignored;
+    #  the /warm-inherit marker file in the warm initramfs is what selects this path)
+    echo "--- WARM-INHERIT: FM6000 kept from EOS (no reset/bring-up) ---"
+    echo 1 > /sys/bus/pci/rescan 2>/dev/null; sleep 1
+    Bw=0000:02:00.0
+    if [ -e /sys/bus/pci/devices/$Bw/vendor ]; then
+        if [ -x /usr/bin/pcicfg ]; then
+            Vw=$(pcicfg $Bw 0x04 2>/dev/null | grep -o '0x[0-9a-f]*$')
+            pcicfg $Bw 0x04 $(printf '0x%x' $(( ${Vw:-0} | 0x6 ))) >/dev/null 2>&1   # Mem+BusMaster
+        fi
+        echo "    FM6000 inherited: $(cat /sys/bus/pci/devices/$Bw/vendor):$(cat /sys/bus/pci/devices/$Bw/device) Command=$(pcicfg $Bw 0x04 2>/dev/null|grep -o '0x[0-9a-f]*$')"
+        if [ -x /usr/bin/fm6000reg ]; then
+            echo "    inherited state: CAM0=0x$(fm6000reg $Bw 0x0e000 2>/dev/null|grep -o '[0-9a-f]*$') MCAST_DEST[4112]=0x$(fm6000reg $Bw 0x244040 2>/dev/null|grep -o '[0-9a-f]*$') (want 00003fff = EOS config alive)"
+        fi
+    else
+        echo "    *** FM6000 02:00.0 NOT present after warm boot — inherit FAILED ***"
+    fi
 # --- M2: auto FM6000 bring-up in the CORRECT order (clock -> reset-release) ---
 # Runs while the FM6000 is still held in reset (0x4000=0x106) from power-on, so it
 # comes out of reset WITH the Si5338 refclk present. Full log in /var/log/fm6000.
-if [ -x /usr/lib/edgenos/platform/fm6000-up.sh ]; then
+elif [ -x /usr/lib/edgenos/platform/fm6000-up.sh ]; then
     echo "--- M2 FM6000 auto bring-up (full log: /var/log/fm6000) ---"
     mkdir -p /var/log
     # FM6000_BIST=1: run the cold-BIST memory init in the pre-enum scan window (over
