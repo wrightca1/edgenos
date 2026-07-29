@@ -266,6 +266,20 @@ int main(int argc, char **argv)
                 i2c_rd(0x1D000), i2c_rd(0x1D012), i2c_rd(0x1D01F));
     }
 
+    /* Release JSS/SBus (SOFT_RESET bit3) + clear SBus control BEFORE cmd=2, so the
+     * "Apply Bank Memory Repairs" BISR can read the eFUSE redundancy data over the SBus.
+     * EOS releases SOFT_RESET bit3 in fm6000IdentifySwitch (before PrebootSwitch's cmd=2);
+     * our old order ran cmd=2 with ALL modules held in reset (JSS/SBus down) -> the BISR had
+     * NO eFUSE data -> the repairable banks (MCAST/POST/STATS) were never cell-repaired ->
+     * every bank access gets no bus completion and the core goes off-bus. Datasheet Table 4-1
+     * step 7 "take modules out of reset" precedes the boot commands (steps 8-10); we were
+     * doing cmd=2 (step 9) first of all. (arista phase67; datasheet review.)
+     * 0x16 = release JSS(bit3)+PCIe(bit0), leave MSB/FIBM/EPL in reset — matches EOS. */
+    i2c_wr(0x00009, 0x16);
+    i2c_wr(0x0F000, 0x0);           /* SBus/SerDes control clear (fm6000InitSBus step) */
+    usleep(2000);
+    fprintf(stderr, "[i2c-bringup] JSS/SBus released pre-cmd2 (SOFT_RESET=0x%08x) for eFUSE repair\n", i2c_rd(0x00009));
+
     /* Repair Bank Memory (BOOT_CTRL cmd=2) BEFORE the BIST march — required so the
      * march pattern-inits + applies the fusebox repairs to the repairable BANK
      * memories (MCAST_MID 0x240000, MCAST_POST 0x260000, STATS_BANK 0x200000).
