@@ -104,6 +104,10 @@ cp "$HERE/init-m1" "$R/init"; chmod +x "$R/init"
 # the EOS-configured chip (for kexec-from-EOS). Kernel has CONFIG_CMDLINE_FORCE so a
 # cmdline flag can't be used. Build with: EDGENOS_WARM=1 ./build-m1-rootfs.sh ...
 [ "${EDGENOS_WARM:-0}" = "1" ] && { touch "$R/warm-inherit"; echo "warm-inherit marker added (skips FM6000 reset)"; }
+# cold-init-test variant: marker makes init-m1 self-revert boot-config->EOS + arm the
+# SCD watchdog BEFORE FM6000 bring-up, so a MCAST cold-init wedge recovers to EOS.
+# Build with: EDGENOS_COLDTEST=1 ./build-m1-rootfs.sh ...
+[ "${EDGENOS_COLDTEST:-0}" = "1" ] && { touch "$R/cold-init-test"; echo "cold-init-test marker added (self-revert boot-config + arm watchdog)"; }
 
 # 5. pack.
 if [ "$MODE" = squashfs ]; then

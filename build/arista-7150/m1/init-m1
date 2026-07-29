@@ -32,6 +32,31 @@ echo "--- declaring SCD board blocks + enabling SFP TX ---"
 # Harmless on a cold Aboot boot (WD not yet armed at power-on).
 [ -f /warm-inherit ] && [ -x /usr/bin/scdreg ] && { scdreg 0x0120 0x0 >/dev/null 2>&1; echo "    SCD watchdog disarmed (warm-inherit; was armed by EOS)"; }
 
+# COLD-INIT-TEST safety (marker /cold-init-test) — makes a MCAST banked-ECC cold-init
+# experiment REMOTELY RECOVERABLE. Runs BEFORE any FM6000 bring-up / MCAST touch:
+#   1. Self-revert boot-config -> EOS on flash (we can write flash now: USB block drv),
+#      so ANY reboot — a watchdog NMI on a chip wedge, or a manual one — returns to EOS
+#      and never loops this test image.
+#   2. Arm the SCD hardware watchdog + a background re-armer. A hard chip wedge that
+#      stalls the CPU stops the petting -> WD fires -> reboot -> EOS (~30s). A wedge
+#      that leaves the CPU alive keeps petting -> recover with SCD 0xDEAD by hand.
+# This closes the cold-path gap (cold bring-up otherwise arms NO watchdog).
+if [ -f /cold-init-test ]; then
+    echo "--- COLD-INIT-TEST: arming remote-recovery safety BEFORE FM6000 bring-up ---"
+    if [ -b /dev/sda1 ] && { mount -t vfat /dev/sda1 /mnt/flash 2>/dev/null || mkdir -p /mnt/flash && mount /dev/sda1 /mnt/flash 2>/dev/null; }; then
+        printf 'SWI=flash:/EOS-4.16.8M.swi\n' > /mnt/flash/boot-config; sync
+        echo "    boot-config self-reverted -> $(cat /mnt/flash/boot-config) (any reboot = EOS)"
+    else
+        echo "    *** could not mount /dev/sda1 to self-revert boot-config — UNSAFE, dropping to shell ***"
+        exec setsid cttyhack /bin/busybox sh
+    fi
+    if [ -x /usr/bin/scdreg ]; then
+        scdreg 0x0120 0xC0000BB8 >/dev/null 2>&1
+        ( while :; do scdreg 0x0120 0xC0000BB8 >/dev/null 2>&1; sleep 8; done ) &
+        echo "    SCD watchdog ARMED + bg re-armer (pid $!) wd=$(scdreg 0x0120 2>/dev/null | grep -o '0x[0-9a-f]*$')"
+    fi
+fi
+
 echo "--- platform status ---"
 echo "  PCI (SCD 3475 / mgmt 14e4 / FM6000 8086):"
 for d in /sys/bus/pci/devices/*/; do
