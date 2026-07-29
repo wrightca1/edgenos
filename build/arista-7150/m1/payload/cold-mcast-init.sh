@@ -39,8 +39,24 @@ echo "== pre-flight: chip enumerated, BIST done, cmd=2 repaired (BOOT_CTRL likel
 CMD=$(pcicfg $B 0x04 2>/dev/null | grep -o '0x[0-9a-f]*$'); pcicfg $B 0x04 $(printf '0x%x' $(( ${CMD:-0} | 0x6 ))) >/dev/null 2>&1
 echo "  BM_ENGINE_STATUS(0x1D08E)=0x$(R 0x1D08E) (want 0)   BOOT_CTRL(0x1C022)=0x$(R 0x1C022)"
 
+echo "== load per-chip FUSEBOX repair descriptors (0x1D000-0x1D01F) — captured from THIS 7150 =="
+# RE (phase40 + agent): fm6000BistMemoryInit does NOT write these; EOS loads them from a fuse
+# readout. Without the redundancy repairs the repairable banks (MCAST_MID/POST/STATS) keep BAD
+# cells -> a bank access gets NO bus completion -> the FM6000 core goes off-bus (config+BAR0 all
+# 0xffffffff, link stays up) = exactly our fatal. i2c_bringup's BIST march ran WITHOUT these, so
+# the banks were never repaired. Replay the captured values, then re-run cmd=2 so the repair
+# applies them to the banks. Values from reference/.../eos-bist-2026-07-26/bist-state.txt.
+fb(){ W "$1" "$2"; }
+fb 0x1D000 0x76; fb 0x1D001 0xeb; fb 0x1D002 0x02; fb 0x1D003 0xb8; fb 0x1D004 0x0d
+fb 0x1D005 0x54; fb 0x1D006 0x49; fb 0x1D007 0xba; fb 0x1D008 0x75; fb 0x1D009 0xc5
+fb 0x1D00a 0x24; fb 0x1D00b 0xb5; fb 0x1D00c 0xf7; fb 0x1D00d 0xbf; fb 0x1D00f 0x88
+fb 0x1D010 0xf7; fb 0x1D011 0x3f; fb 0x1D012 0xff; fb 0x1D013 0x61; fb 0x1D014 0xf7
+fb 0x1D015 0xbf; fb 0x1D016 0x02; fb 0x1D017 0x80; fb 0x1D018 0xf7; fb 0x1D019 0xbf
+fb 0x1D01a 0x2a; fb 0x1D01b 0x80; fb 0x1D01c 0x99; fb 0x1D01d 0x97; fb 0x1D01f 0x98
+echo "  fusebox loaded; readback 0x1D000=0x$(R 0x1D000) 0x1D012=0x$(R 0x1D012) 0x1D01f=0x$(R 0x1D01f)"
+
 echo "== complete the boot-controller sequence EOS runs: cmd=2 -> cmd=1 -> cmd=3 =="
-echo "-- cmd=2 (Repair Bank Memory; idempotent, re-assert) --"; exec_boot_cmd 0x2
+echo "-- cmd=2 (Repair Bank Memory; now applies the loaded fusebox repairs) --"; exec_boot_cmd 0x2
 echo "-- cmd=1 (FFU slice init) --";                            exec_boot_cmd 0x1
 echo "-- cmd=3 (free-list / segment init) --";                 exec_boot_cmd 0x3
 
