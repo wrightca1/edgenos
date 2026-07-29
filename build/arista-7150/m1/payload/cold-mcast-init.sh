@@ -38,6 +38,7 @@ echo "== pre-flight: chip enumerated, BIST done, cmd=2 repaired (BOOT_CTRL likel
 [ -e /sys/bus/pci/devices/$B/vendor ] || { echo "  FM6000 $B absent — abort"; exit 1; }
 CMD=$(pcicfg $B 0x04 2>/dev/null | grep -o '0x[0-9a-f]*$'); pcicfg $B 0x04 $(printf '0x%x' $(( ${CMD:-0} | 0x6 ))) >/dev/null 2>&1
 echo "  BM_ENGINE_STATUS(0x1D08E)=0x$(R 0x1D08E) (want 0)   BOOT_CTRL(0x1C022)=0x$(R 0x1C022)"
+echo "  REPAIR STATUS 0x1D08C=0x$(R 0x1D08C)  (bit0=repair FAILED, bit11=fusebox parity, bit12=bad summary)"
 
 echo "== load per-chip FUSEBOX repair descriptors (0x1D000-0x1D01F) — captured from THIS 7150 =="
 # RE (phase40 + agent): fm6000BistMemoryInit does NOT write these; EOS loads them from a fuse
@@ -67,6 +68,18 @@ case "$bc" in
     *313) echo "  GATE PASS (0x313) — banks online, proceeding to CRM fill" ;;
     *) echo "  *** GATE FAIL (0x$bc != *313) — cmd=3 did not latch, bank NOT online. Aborting (do NOT fill). ***"; exit 3 ;;
 esac
+
+echo "== bring bank-owning BLOCKS on-bus: post-BIST 0x1C03A staged reset/clock-enable (RE) =="
+# RE (agent): THE missing step. cmd=2 repairs CELLS but does not clock the bank block. EOS runs this
+# staged block soft-reset/clock-enable in PrebootSwitch AFTER the BIST march (0x3c81a2..0x3c84f3).
+# Until it runs, the bank block has no clock -> a bank access gets no bus completion -> core off-bus
+# (config+BAR0=0xffffffff, link up) = our exact symptom. bit31 stays set throughout. 1ms settles via
+# register round-trips (busybox sleep can't do sub-second).
+W 0x1C03A 0x88800000; R 0x1C022 >/dev/null; R 0x1C022 >/dev/null   # stage 1 + ~1ms
+W 0x1C03A 0x88008000; R 0x1C022 >/dev/null; R 0x1C022 >/dev/null   # stage 2 + ~1ms
+W 0x1C03A 0x80000040                                               # stage 3
+W 0x1C03B 0xffffffff                                               # clear error/interrupt latches
+echo "  0x1C03A staged done; PCIe survived? CAM0 0x0e000=0x$(R 0x0e000) (real=OK, ffffffff=link dropped)"
 
 echo "== release module SOFT-RESET (reg 0x9): bring bank-owning modules out of reset =="
 # RE: fm6000BootSwitch @0x3ca434 "Bringing remaining modules out of reset" -> RMW reg 0x9
