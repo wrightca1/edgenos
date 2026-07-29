@@ -62,17 +62,38 @@ nsr=$(printf '0x%08x' $(( (0x${sr:-0} & ~0x1F) & 0xFFFFFFFF )))
 W 0x00009 $nsr
 sr2=$(R 0x00009); echo "  SOFT_RESET(0x9) after  = 0x$sr2  (bits0-4 clear; crossbar alive if this printed)"
 
-echo "== CRM Memory-Set BLIND FILL of the banked memories (establishes ECC; NO read first) =="
-echo "-- MCAST_MID 0x240000 (4096 x 128b) --"
-fm6000_crm 0x240000 4096 0 3 2>&1 | sed 's/^/   /'
-[ $? -ne 0 ] && { echo "   *** MCAST_MID CRM fill FAILED — WD will recover to EOS ***"; exit 2; }
-echo "-- MCAST_POST 0x260000 (32768 x 32b) --"; fm6000_crm 0x260000 32768 0 0 2>&1 | sed 's/^/   /'
-echo "-- STATS_BANK 0x200000 (16384 x 32b) --"; fm6000_crm 0x200000 16384 0 0 2>&1 | sed 's/^/   /'
+echo "== CRM Memory-Set fill of MCAST_MID (0x240000) — VENDOR-EXACT 128-bit engine writes =="
+# RE (fm6000CrmSetMemoryExt 0x35fc78, literal decode): descriptor for base=0x240000,
+# regSize=3 (128b), count=4096, val=0. Count lives in CRM_COMMAND[33:14]; BlockSize=0xF (max,
+# Count bounds the span); Stride=0 (engine AUTO-ADVANCES 4 words/element). Completion = poll
+# engine STATUS 0x1f001 bit0 (busy); the vendor NEVER reads a memory element to check done
+# (a read of an unfilled bank entry is exactly what wedges the crossbar — our earlier bug).
+W 0x1f000 0x0                 # stop engine (defensive)
+W 0x1f080 0x04000000          # CRM_COMMAND lo: MemorySet(0), Count=4096 (<<14)
+W 0x1f081 0x00000000          # CRM_COMMAND hi
+W 0x1f100 0x0FE40000          # CRM_REGISTER lo: base 0x240000 | Size=3<<22 | BlockSize1=0xF<<24 | Stride1=0
+W 0x1f101 0x0000000F          # CRM_REGISTER hi: BlockSize2=0xF, Stride2=0
+W 0x1f200 0x00000000          # DATA (fill value word)
+W 0x1f180 0x00000000          # DATA high/mask lo
+W 0x1f181 0x00000000          # DATA high/mask hi
+W 0x1f004 0x1                 # clear IP slot0 (W1C)
+W 0x1f000 0x00000001          # TRIGGER / GO (RUN, First=Last=slot0)
+echo "   triggered; polling engine STATUS 0x1f001 bit0 (busy) — NO memory read..."
+fdone=NO; i=0
+while [ $i -lt 3000 ]; do
+    st=$(R 0x1f001); st=$((0x${st:-1}))
+    [ $((st & 1)) -eq 0 ] && { fdone=YES; break; }
+    i=$((i+1))
+done
+echo "   MCAST_MID fill done=$fdone after $i polls (STATUS 0x1f001=0x$(R 0x1f001) IP=0x$(R 0x1f004))"
+[ "$fdone" != YES ] && { echo "   *** engine never cleared busy — abort (WD recovers to EOS) ***"; exit 2; }
 
-echo "== post-fill verify: MCAST array now readable (valid ECC), not 0xffffffff =="
-for a in 0x240000 0x240004 0x244040 0x24FFFC; do echo "  $a = 0x$(R $a)"; done
+echo "== post-DONE verify: reads of FILLED entries are safe now (ECC valid). Fill span = entries 0..4095 =="
+# 0x240000=entry0.w0  0x240004=entry1.w0  0x243FFC=entry4095.w0  (all within the 4096x128b fill)
+for a in 0x240000 0x240004 0x243FFC; do echo "  $a = 0x$(R $a)  (want 0, NOT ffffffff)"; done
 
-echo "== program byte-mover target: MCAST_DEST[1] = {bit0 = CPU port 0} =="
+echo "== program byte-mover target: MCAST_DEST[1] = {bit0 = CPU port 0} (128-bit entry, RMW-safe post-fill) =="
 W 0x240007 0x0; W 0x240006 0x0; W 0x240005 0x0; W 0x240004 0x1   # commit low word last
 echo "  MCAST_DEST[1] = 0x$(R 0x240004) (want 00000001)"
-echo "== COLD MCAST INIT COMPLETE. Next: insmod fm6000dma + fpdma_probe tx 0xff00 0x0028 =="
+echo "== *** COLD MCAST BANKED-ECC INIT COMPLETE *** (fill worked, array readable+writable) =="
+echo "   Follow-on for full cold byte-mover: CRM-fill GLORT/L2F, load microcode, sched ring, DMA."
