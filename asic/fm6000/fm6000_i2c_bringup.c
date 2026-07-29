@@ -240,6 +240,22 @@ int main(int argc, char **argv)
     for (n = 0; n < 20; n++) { bc = i2c_rd(0x1C022); if (bc & 0x20) break; usleep(1000000); }
     fprintf(stderr, "[i2c-bringup] boot after %ds (BOOT_CTRL=0x%08x)\n", n, bc);
 
+    /* Repair Bank Memory (BOOT_CTRL cmd=2) BEFORE the BIST march — required so the
+     * march pattern-inits + applies the fusebox repairs to the repairable BANK
+     * memories (MCAST_MID 0x240000, MCAST_POST 0x260000, STATS_BANK 0x200000).
+     * Without it those banks have invalid ECC and ANY access (incl a CRM fill)
+     * hangs the chip — the CPU-punt RX blocker. EOS does this in fm6000PrebootSwitch
+     * right before fm6000BistMemoryInit (arista phase65 / RE of ExecuteBootCommand).
+     * Proper ExecuteBootCommand: idle -> delay -> cmd -> poll CommandDone (bit4). */
+    {
+        int r; uint32_t bcr;
+        i2c_wr(0x1C022, 0x0); usleep(2000);
+        i2c_wr(0x1C022, 0x2);
+        for (r = 0; r < 400; r++) { if (i2c_rd(0x1C022) & 0x10) break; usleep(5000); }
+        bcr = i2c_rd(0x1C022);
+        fprintf(stderr, "[i2c-bringup] Repair Bank Memory (cmd=2): BOOT_CTRL=0x%08x after %d polls\n", bcr, r);
+    }
+
     bist();
     pcie();
 
