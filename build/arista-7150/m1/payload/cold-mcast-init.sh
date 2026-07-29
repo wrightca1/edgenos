@@ -52,6 +52,16 @@ case "$bc" in
     *) echo "  *** GATE FAIL (0x$bc != *313) — cmd=3 did not latch, bank NOT online. Aborting (do NOT fill). ***"; exit 3 ;;
 esac
 
+echo "== release module SOFT-RESET (reg 0x9): bring bank-owning modules out of reset =="
+# RE: fm6000BootSwitch @0x3ca434 "Bringing remaining modules out of reset" -> RMW reg 0x9
+# clearing bits {0,1,2,4}. Until then MCAST-replication/STATS modules are held in reset so
+# their memory ports give no bus completion -> CRM engine write stalls the crossbar (our hang).
+# Use & ~0x1F (also clear bit3 IdentifySwitch clears) to match EOS end-state. Reg 0x9 = SOFT_RESET.
+sr=$(R 0x00009); echo "  SOFT_RESET(0x9) before = 0x$sr"
+nsr=$(printf '0x%08x' $(( (0x${sr:-0} & ~0x1F) & 0xFFFFFFFF )))
+W 0x00009 $nsr
+sr2=$(R 0x00009); echo "  SOFT_RESET(0x9) after  = 0x$sr2  (bits0-4 clear; crossbar alive if this printed)"
+
 echo "== CRM Memory-Set BLIND FILL of the banked memories (establishes ECC; NO read first) =="
 echo "-- MCAST_MID 0x240000 (4096 x 128b) --"
 fm6000_crm 0x240000 4096 0 3 2>&1 | sed 's/^/   /'
