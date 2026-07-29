@@ -40,6 +40,20 @@ CMD=$(pcicfg $B 0x04 2>/dev/null | grep -o '0x[0-9a-f]*$'); pcicfg $B 0x04 $(pri
 echo "  BM_ENGINE_STATUS(0x1D08E)=0x$(R 0x1D08E) (want 0)   BOOT_CTRL(0x1C022)=0x$(R 0x1C022)"
 echo "  REPAIR STATUS 0x1D08C=0x$(R 0x1D08C)  (bit0=repair FAILED, bit11=fusebox parity, bit12=bad summary)"
 
+echo "== Setup PLL (0x1C042/43) + lock — datasheet Table 4-1 step 6; THE memory-domain clock =="
+# CONVERGENT ROOT CAUSE (datasheet step 6 + SDK trace 0x3c90fa + we NEVER write it): the memory/
+# data-path clock domain is a SEPARATE PLL (0x1C042) from the CSR-ring clock. That's why CAM0 and
+# 0x1D08C read fine (CSR-ring up) but a bank DATA access gets no bus completion -> core off-bus. Our
+# bring-up configures 0x1C03A (scan/PLL for BIST) but NEVER 0x1C042 -> the memory PLL never locks ->
+# banks unclocked. Replay the golden 64-bit value captured live from EOS (eos-golden-regs:
+# 1c042=0x20841438 1c043=0x00005560), then wait >=80ms (datasheet max lock time) for lock.
+echo "  0x1C042 before = 0x$(R 0x1C042) / 0x$(R 0x1C043)"
+W 0x1C042 0x20841438
+W 0x1C043 0x00005560
+sleep 1   # datasheet: PLL lock <= 80ms; busybox sleep min is 1s (ample)
+echo "  0x1C042 after  = 0x$(R 0x1C042) / 0x$(R 0x1C043)  (memory PLL configured + locked)"
+echo "  CAM0 0x0e000 (PCIe/CSR sanity after PLL write) = 0x$(R 0x0e000)"
+
 echo "== load per-chip FUSEBOX repair descriptors (0x1D000-0x1D01F) — captured from THIS 7150 =="
 # RE (phase40 + agent): fm6000BistMemoryInit does NOT write these; EOS loads them from a fuse
 # readout. Without the redundancy repairs the repairable banks (MCAST_MID/POST/STATS) keep BAD
