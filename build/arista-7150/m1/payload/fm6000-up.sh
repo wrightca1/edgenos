@@ -216,7 +216,12 @@ fi
 # banks (we skipped BIST), 0x240000 reads a real value; if not, it off-buses (ffffffff). ---
 if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev/null 2>&1; then
     B=0000:02:00.0
-    echo "[SPIBOOT-PROBE] CAM0 0x0e000=0x$(fm6000reg $B 0x0e000 2>/dev/null|grep -o '[0-9a-f]*$')"
-    echo "[SPIBOOT-PROBE] MCAST 0x240000=0x$(fm6000reg $B 0x240000 2>/dev/null|grep -o '[0-9a-f]*$') (real=SPI boot inited banks w/o our BIST; ffffffff=not)"
-    echo "[SPIBOOT-PROBE] CAM0 after=0x$(fm6000reg $B 0x0e000 2>/dev/null|grep -o '[0-9a-f]*$')"
+    echo "[SPIBOOT-PROBE] CAM0=0x$(fm6000reg $B 0x0e000 2>/dev/null|grep -o '[0-9a-f]*$')"
+    echo "[SPIBOOT-PROBE] MCAST entry1 0x240004 pre = 0x$(fm6000reg $B 0x240004 2>/dev/null|grep -o '[0-9a-f]*$') (real=SPI boot inited; ffffffff=not)"
+    if command -v fm6000_wr128 >/dev/null 2>&1; then
+        echo "[SPIBOOT-PROBE] --- atomic 128b write MCAST[1] 0x240004 = {1,0,0,0} ---"
+        fm6000_wr128 0x240004 0x1 0x0 0x0 0x0 2>&1 | sed 's/^/[SPIBOOT-PROBE]   /'
+        echo "[SPIBOOT-PROBE] MCAST entry1 0x240004 post = 0x$(fm6000reg $B 0x240004 2>/dev/null|grep -o '[0-9a-f]*$') (want 00000001 = WRITE HELD)"
+        echo "[SPIBOOT-PROBE] CAM0 after write = 0x$(fm6000reg $B 0x0e000 2>/dev/null|grep -o '[0-9a-f]*$') (real=no off-bus = COLD INIT WORKS)"
+    fi
 fi

@@ -173,6 +173,33 @@ static int bist(void)
 /* ---- normal operating mode + PCIe SerDes (fm6000SetupPCIe, proven values) */
 static int pcie(void)
 {
+    int trust = getenv("FM6000_SPIBOOT_TRUST") != NULL;
+    if (trust) {
+        /* SPIBOOT_TRUST: the SPI boot already put the chip in normal mode + inited the banks.
+         * Do NOT re-run the 0x1C03A block-reset (disturbs the datapath) and do NOT write an
+         * ABSOLUTE SOFT_RESET (0x17/0x16 force MSB — the core fabric owning the banks — back
+         * into reset). Instead RMW SOFT_RESET to release ONLY PCIe(bit0)+JSS(bit3), preserving
+         * the SPI-boot module state; then only the SerDes/SBus/PCIe-core writes to enumerate. */
+        uint32_t sr = i2c_rd(0x00009);
+        fprintf(stderr, "[i2c-bringup] pcie(trust): preserve SPI-boot state; SOFT_RESET was 0x%08x -> clear PCIe+JSS via RMW\n", sr);
+        i2c_wr(0x1C045, 0x3); usleep(1000);
+        i2c_wr(0x00009, sr & ~0x9u);    /* release PCIe(0)+JSS(3), keep MSB/FIBM/EPL as SPI boot left them */
+        i2c_wr(0x0F000, 0x0); usleep(1000);
+        i2c_wr(0x00004, 0x1);
+        i2c_wr(0x0F002, 0x4);
+        i2c_wr(0x0F001, 0x0);
+        i2c_wr(0x0F001, 0x121FE0A);
+        i2c_wr(0x01400, 0x0);
+        i2c_wr(0x01002, 0x2000000);
+        i2c_wr(0x01418, 0x35);
+        i2c_wr(0x0140C, 0xFFFFFFFF);
+        i2c_wr(0x0140D, 0xFFFFFFFF);
+        i2c_wr(0x01435, 0xF121F34);
+        i2c_wr(0x1C002, 0x3FFF);
+        i2c_wr(0x0141D, 0x1C01F);
+        usleep(2000000);
+        return 0;
+    }
     fprintf(stderr, "[i2c-bringup] normal operating mode\n");
     i2c_wr(0x1C03A, 0x88800000); usleep(1000);
     i2c_wr(0x1C03A, 0x88008000); usleep(1000);
