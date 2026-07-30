@@ -1,5 +1,6 @@
 #!/bin/sh
 # fm6000-up.sh - M2 FM6000 bring-up (VERIFIED live 2026-07 up to clock-lock).
+export FM6000_BANKTEST=1   # phase69: probe SPI-boot bank repair before our cmd2/BIST
 #
 # CORRECT ORDER (critical): the SCD holds the FM6000 in reset at power-on
 # (0x4000=0x106). The FM6000 must come OUT of reset with its refclk ALREADY

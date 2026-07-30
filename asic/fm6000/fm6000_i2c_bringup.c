@@ -224,6 +224,19 @@ int main(int argc, char **argv)
     for (n = 0; n < 20; n++) { bc = i2c_rd(0x1C022); if (bc & 0x20) break; usleep(1000000); }
     fprintf(stderr, "[i2c-bringup] boot after %ds (BOOT_CTRL=0x%08x)\n", n, bc);
 
+    /* BANK-TEST (FM6000_BANKTEST=1): right after the SPI-ROM boot (EepromLoadDone), BEFORE any of
+     * our cmd2/BIST/reset, probe whether the SPI boot alone made the repairable bank writable — over
+     * the I2C mgmt slave (no PCIe needed). If the SPI-ROM boot did the fusebox/BISR repair, a
+     * full 128-bit write to MCAST entry 1 (LSW 0x240004 -> MSW 0x240007) should hold on read-back. */
+    if (getenv("FM6000_BANKTEST")) {
+        uint32_t p0 = i2c_rd(0x240000), p4 = i2c_rd(0x240004);
+        fprintf(stderr, "[BANKTEST] post-SPI-boot pre-write: 0x240000=0x%08x 0x240004=0x%08x\n", p0, p4);
+        i2c_wr(0x240004, 0x1); i2c_wr(0x240005, 0x0); i2c_wr(0x240006, 0x0); i2c_wr(0x240007, 0x0);
+        uint32_t q4 = i2c_rd(0x240004), cam = i2c_rd(0x0e000);
+        fprintf(stderr, "[BANKTEST] after 128b write entry1={1,0,0,0}: 0x240004=0x%08x CAM0=0x%08x "
+                        "(0x240004==1 && CAM real = SPI boot REPAIRED the bank!)\n", q4, cam);
+    }
+
     /* Load the per-chip FUSEBOX repair descriptors (0x1D000-0x1D01F) BEFORE cmd=2 + the BIST
      * march. fm6000BistMemoryInit does NOT write these; EOS loads them from a fuse readout
      * (arista phase40). Without them the repairable BANK memories (MCAST_MID 0x240000, MCAST_POST
@@ -271,6 +284,7 @@ int main(int argc, char **argv)
      * hangs the chip — the CPU-punt RX blocker. EOS does this in fm6000PrebootSwitch
      * right before fm6000BistMemoryInit (arista phase65 / RE of ExecuteBootCommand).
      * Proper ExecuteBootCommand: idle -> delay -> cmd -> poll CommandDone (bit4). */
+    if (!getenv("FM6000_SPIBOOT_TRUST"))
     {
         int r; uint32_t bcr;
         i2c_wr(0x1C022, 0x0); usleep(2000);
@@ -287,10 +301,18 @@ int main(int argc, char **argv)
      * handler, so unmasking makes every uninit-ECC READ post an interrupt that wedged
      * the chip (bist5). Leave the IM at its (masked) default so uninit reads just
      * return 0xffffffff and the CRM fill can establish valid ECC. */
-    i2c_wr(0x1C018, 0); i2c_wr(0x1C019, 0); i2c_wr(0x1C01A, 0); i2c_wr(0x1C01B, 0);
-    fprintf(stderr, "[i2c-bringup] SRAM_UNCORRECTABLE_FATAL cleared (0x1C018=0x%08x, IM left masked)\n", i2c_rd(0x1C018));
-
-    bist();
+    if (!getenv("FM6000_SPIBOOT_TRUST")) {
+        i2c_wr(0x1C018, 0); i2c_wr(0x1C019, 0); i2c_wr(0x1C01A, 0); i2c_wr(0x1C01B, 0);
+        fprintf(stderr, "[i2c-bringup] SRAM_UNCORRECTABLE_FATAL cleared (0x1C018=0x%08x, IM left masked)\n", i2c_rd(0x1C018));
+        bist();
+    } else {
+        /* "copy EOS": the SPI boot ROM already ran (EepromLoadDone) and did the fusebox/BISR
+         * bank repair + init at reset-release. Do NOT re-enter scan mode / re-run the BIST march
+         * or cmd=2 (a CPU can't redo the eFUSE repair and only corrupts the SPI-boot state).
+         * Just bring up PCIe on top of the SPI-booted chip, exactly as EOS does with an
+         * eeprom-booted part. (user insight: stop overriding the SPI boot.) */
+        fprintf(stderr, "[i2c-bringup] *** SPIBOOT_TRUST: skipping cmd2/FATAL/BIST — trusting the SPI-ROM boot's bank repair; PCIe bring-up only ***\n");
+    }
     pcie();
 
     if (do_rescan) {
