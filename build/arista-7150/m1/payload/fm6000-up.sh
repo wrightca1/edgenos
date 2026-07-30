@@ -1,6 +1,6 @@
 #!/bin/sh
 # fm6000-up.sh - M2 FM6000 bring-up (VERIFIED live 2026-07 up to clock-lock).
-export FM6000_BANKTEST=1   # phase69: probe SPI-boot bank repair before our cmd2/BIST
+export FM6000_SPIBOOT_TRUST=1   # phase69: trust SPI-boot repair, skip our cmd2/BIST
 #
 # CORRECT ORDER (critical): the SCD holds the FM6000 in reset at power-on
 # (0x4000=0x106). The FM6000 must come OUT of reset with its refclk ALREADY
@@ -210,4 +210,13 @@ if [ "${FM6000_M2:-0}" = "1" ]; then
 	echo "=== M2 bring-up done ==="
 else
 	cm "M2 skipped (FM6000_M2=0) - FM6000 enumerated + left up for inspection"
+fi
+
+# --- SPIBOOT bank probe (phase69): after enum, read MCAST over PCIe. If the SPI boot inited the
+# banks (we skipped BIST), 0x240000 reads a real value; if not, it off-buses (ffffffff). ---
+if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev/null 2>&1; then
+    B=0000:02:00.0
+    echo "[SPIBOOT-PROBE] CAM0 0x0e000=0x$(fm6000reg $B 0x0e000 2>/dev/null|grep -o '[0-9a-f]*$')"
+    echo "[SPIBOOT-PROBE] MCAST 0x240000=0x$(fm6000reg $B 0x240000 2>/dev/null|grep -o '[0-9a-f]*$') (real=SPI boot inited banks w/o our BIST; ffffffff=not)"
+    echo "[SPIBOOT-PROBE] CAM0 after=0x$(fm6000reg $B 0x0e000 2>/dev/null|grep -o '[0-9a-f]*$')"
 fi
