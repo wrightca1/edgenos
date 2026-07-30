@@ -54,6 +54,19 @@ sleep 1   # datasheet: PLL lock <= 80ms; busybox sleep min is 1s (ample)
 echo "  0x1C042 after  = 0x$(R 0x1C042) / 0x$(R 0x1C043)  (memory PLL configured + locked)"
 echo "  CAM0 0x0e000 (PCIe/CSR sanity after PLL write) = 0x$(R 0x0e000)"
 
+echo "== memory-subsystem config cluster (0x1C048/49/4B/4C, 0xF010) — RE: pre-init + BootSwitch step6 =="
+# RE (agent, full driver trace): fmPlatformSwitchPreInitialize RMWs 0x1C04B/0x1C04C (+0xF010) and
+# fm6000BootSwitch step 6 writes 0x1C048 (a BM/memory-subsystem enable, adjacent to the memory PLL
+# 0x1C042) BEFORE the master memory-init runs the CRM bank fills. We NEVER wrote these -> the memory
+# subsystem / bank read path is not enabled -> bank reads off-bus AND the CRM engine trigger off-buses.
+# Replay golden values captured live from EOS (eos-golden-regs-0x1C000-0x1E000.txt).
+W 0x1C048 0x0008bb2c; W 0x1C049 0x00000002
+W 0x1C04B 0x0030a2c3
+W 0x1C04C 0x00002000
+W 0x0F010 0x00000002
+echo "  cluster: 0x1C048=0x$(R 0x1C048) 0x1C049=0x$(R 0x1C049) 0x1C04B=0x$(R 0x1C04B) 0x1C04C=0x$(R 0x1C04C) 0xF010=0x$(R 0x0F010)"
+echo "  CAM0 sanity after cluster = 0x$(R 0x0e000)"
+
 echo "== load per-chip FUSEBOX repair descriptors (0x1D000-0x1D01F) — captured from THIS 7150 =="
 # RE (phase40 + agent): fm6000BistMemoryInit does NOT write these; EOS loads them from a fuse
 # readout. Without the redundancy repairs the repairable banks (MCAST_MID/POST/STATS) keep BAD
