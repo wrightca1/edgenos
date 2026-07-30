@@ -63,7 +63,7 @@ FM6000DMA_KO="$EROOT/asic/fm6000/kmod/fm6000dma.ko"
 PAY="$HERE/payload"
 if [ -d "$PAY" ]; then
     mkdir -p "$R/usr/bin" "$R/lib64" "$R/lib/x86_64-linux-gnu"
-    for b in kexec resettool scdreg fm6000_bringup si5338 pcicfg scddump fm6000reg fm6000load fm6000_i2c_bringup fm6000_l2_probe fpdma_probe fm6000_crm fm6000_sched; do
+    for b in kexec resettool scdreg fm6000_bringup si5338 pcicfg scddump fm6000reg fm6000load fm6000_i2c_bringup fm6000_l2_probe fpdma_probe fm6000_crm fm6000_sched fm6000_wr128; do
         [ -f "$PAY/$b" ] && { cp "$PAY/$b" "$R/usr/bin/"; chmod +x "$R/usr/bin/$b"; }
     done
     # bundle the dynamic loader + libc for the (non-static) tools

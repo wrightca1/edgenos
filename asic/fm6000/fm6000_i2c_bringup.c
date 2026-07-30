@@ -276,10 +276,15 @@ int main(int argc, char **argv)
      * step 7 "take modules out of reset" precedes the boot commands (steps 8-10); we were
      * doing cmd=2 (step 9) first of all. (arista phase67; datasheet review.)
      * 0x16 = release JSS(bit3)+PCIe(bit0), leave MSB/FIBM/EPL in reset — matches EOS. */
-    i2c_wr(0x00009, 0x16);
-    i2c_wr(0x0F000, 0x0);           /* SBus/SerDes control clear (fm6000InitSBus step) */
-    usleep(2000);
-    fprintf(stderr, "[i2c-bringup] JSS/SBus released pre-cmd2 (SOFT_RESET=0x%08x) for eFUSE repair\n", i2c_rd(0x00009));
+    if (!getenv("FM6000_SPIBOOT_TRUST")) {
+        i2c_wr(0x00009, 0x16);      /* absolute SOFT_RESET: forces MSB/FIBM/EPL into reset — WRONG for
+                                     * the trust path (disturbs the SPI-boot-inited banks). */
+        i2c_wr(0x0F000, 0x0);       /* SBus/SerDes control clear (fm6000InitSBus step) */
+        usleep(2000);
+        fprintf(stderr, "[i2c-bringup] JSS/SBus released pre-cmd2 (SOFT_RESET=0x%08x) for eFUSE repair\n", i2c_rd(0x00009));
+    } else {
+        fprintf(stderr, "[i2c-bringup] SPIBOOT_TRUST: leaving SOFT_RESET as the SPI boot set it (no MSB re-reset)\n");
+    }
 
     /* Repair Bank Memory (BOOT_CTRL cmd=2) BEFORE the BIST march — required so the
      * march pattern-inits + applies the fusebox repairs to the repairable BANK
