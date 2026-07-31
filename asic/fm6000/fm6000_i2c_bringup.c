@@ -201,6 +201,43 @@ static int mrl(void)
     return 0;
 }
 
+/* ---- SCHEDULER init over the i2c scan window (phase82: post-enum MMIO off-buses on the ESCHED/DRR
+ * writes — cold83 — so port the full golden scheduler here like the MRL). Faithful port of fm6000_sched:
+ * JSS clocks + SWEEPER + SSCHED ring (tokens/NEXT_PORT/SLOW_PORT/INIT_COMPLETE) + ESCHED_CFG_1/2 + DRR +
+ * replace tokens. Golden ref: reference/scd-dumps/fm6000-golden-scheduler-state-warm.txt. */
+static int sched(void)
+{
+    static const uint32_t tok[]  = { 0x200u, 0x201u, 0x202u, 0x203u, 0x64eu };   /* ports 0,1,2,3,78 */
+    static const uint32_t slow[] = { 0x0000000fu, 0x0000ffe0u, 0x0000feffu, 0x0000fff0u, 0x00000fffu };
+    int p, sv = g_verbose; g_verbose = 0;                    /* silence per-op prints (serial) */
+    fprintf(stderr, "[i2c-bringup] SCHED init (i2c scan window): JSS+sweeper+ring+ESCHED+DRR\n");
+    /* JSS clock domain + scheduler tick */
+    i2c_wr(0x0F001, 0x0521452au); i2c_wr(0x0F002, 0x00000016u); i2c_wr(0x0F003, 0x00000015u);
+    i2c_wr(0x0F004, 0x00000002u); i2c_wr(0x0F008, 0x00000001u); i2c_wr(0x0F010, 0x00000002u);
+    /* SWEEPER_CFG 0x1C048+w (drives the scheduler ticks) */
+    i2c_wr(0x1C048, 0x0008bb2cu); i2c_wr(0x1C049, 0x00000002u); i2c_wr(0x1C04A, 0x00000000u);
+    i2c_wr(0x1C04B, 0x0030a2c3u); i2c_wr(0x1C04C, 0x00002000u);
+    /* SSCHED ring: token per scheduled port (RX then TX) */
+    for (p = 0; p < 5; p++) { i2c_wr(0x08060, tok[p]); i2c_wr(0x08020, tok[p]); }
+    /* NEXT_PORT visit table (20 words RX then TX): [0]=0x03020100, [19]=0x004e0000, rest 0 */
+    for (p = 0; p < 20; p++) {
+        uint32_t v = (p == 0) ? 0x03020100u : (p == 19) ? 0x004e0000u : 0u;
+        i2c_wr(0x08040 + p, v); i2c_wr(0x08000 + p, v);
+    }
+    for (p = 0; p < 5; p++) i2c_wr(0x08070 + p, slow[p]);    /* SLOW_PORT */
+    i2c_wr(0x08061, 1u); i2c_wr(0x08021, 1u);                /* COMMIT strobes RX then TX */
+    /* ESCHED_CFG_1 (0x2000) / CFG_2 (0x2080) + DRR (0x3800), 76 ports; port0 special */
+    for (p = 0; p < 76; p++) {
+        i2c_wr(0x02000 + p, p == 0 ? 0x00fff800u : 0x00ffffffu);
+        i2c_wr(0x02080 + p, p == 0 ? 0x00fff000u : 0x00ffffffu);
+        i2c_wr(0x03800 + p, (p & 1) ? 0x14ffffffu : 0x00ffffffu);
+    }
+    i2c_wr(0x08022, 0xc0300200u); i2c_wr(0x08062, 0x00200200u);   /* replace-token last values */
+    g_verbose = sv;
+    fprintf(stderr, "[i2c-bringup] SCHED done: ring0=0x%08x (want 0x03020100)\n", i2c_rd(0x08000));
+    return 0;
+}
+
 /* ---- normal operating mode + PCIe SerDes (fm6000SetupPCIe, proven values) */
 static int pcie(void)
 {
@@ -349,6 +386,9 @@ int main(int argc, char **argv)
          * before pcie(), in the scan window (mirrors fm6000PrebootSwitch). Gate off with
          * FM6000_NOMRL=1 to A/B test the scan config's effect. */
         if (!getenv("FM6000_NOMRL")) mrl();
+        /* phase82: scheduler init in the same scan window, after MRL (mirrors the boot's
+         * ValidateSchedulerToken phase). Gate off with FM6000_NOSCHED=1. */
+        if (!getenv("FM6000_NOSCHED")) sched();
     } else {
         /* "copy EOS": the SPI boot ROM already ran (EepromLoadDone) and did the fusebox/BISR
          * bank repair + init at reset-release. Do NOT re-enter scan mode / re-run the BIST march
