@@ -40,7 +40,7 @@ set -u
 # LAST step before a reboot is visible even though /var/log/fm6000 is tmpfs (wiped on reboot).
 # cm() also appends to /mnt/flash (persistent across the watchdog reboot -> readable from EOS), solving the
 # flaky-serial + tmpfs-wipe trace loss. /mnt/flash is mounted rw on the cold-init M1 (init self-reverts boot-config).
-cm() { echo "[FM6UP] $*" > /dev/kmsg 2>/dev/null; echo "[FM6UP] $*" > /dev/console 2>/dev/null; echo "[FM6UP] $*"; echo "[FM6UP] $*" >> /mnt/flash/fm6000-cold.log 2>/dev/null; }
+cm() { echo "[FM6UP] $*" > /dev/kmsg 2>/dev/null; echo "[FM6UP] $*" > /dev/console 2>/dev/null; echo "[FM6UP] $*"; { echo "[FM6UP] $*" >> /mnt/flash/fm6000-cold.log; sync; } 2>/dev/null; }
 
 SMBUS_BASE="${SMBUS_BASE:-0x8080}"     # accel#1 (Si5338's) = 0x8000 + 1*0x80
 SMBUS_ID="${SMBUS_ID:-1}"
