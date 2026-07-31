@@ -38,7 +38,9 @@ set -u
 
 # phase35 instrumentation: margining-step markers to the console (serial) + kmsg so the
 # LAST step before a reboot is visible even though /var/log/fm6000 is tmpfs (wiped on reboot).
-cm() { echo "[FM6UP] $*" > /dev/kmsg 2>/dev/null; echo "[FM6UP] $*" > /dev/console 2>/dev/null; echo "[FM6UP] $*"; }
+# cm() also appends to /mnt/flash (persistent across the watchdog reboot -> readable from EOS), solving the
+# flaky-serial + tmpfs-wipe trace loss. /mnt/flash is mounted rw on the cold-init M1 (init self-reverts boot-config).
+cm() { echo "[FM6UP] $*" > /dev/kmsg 2>/dev/null; echo "[FM6UP] $*" > /dev/console 2>/dev/null; echo "[FM6UP] $*"; echo "[FM6UP] $*" >> /mnt/flash/fm6000-cold.log 2>/dev/null; }
 
 SMBUS_BASE="${SMBUS_BASE:-0x8080}"     # accel#1 (Si5338's) = 0x8000 + 1*0x80
 SMBUS_ID="${SMBUS_ID:-1}"
@@ -228,6 +230,7 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     B=0000:02:00.0
     RG(){ fm6000reg $B "$1" 2>/dev/null | grep -o '[0-9a-f]*$'; }
     WG(){ fm6000reg $B "$1" "$2" >/dev/null 2>&1; }
+    : > /mnt/flash/fm6000-cold.log 2>/dev/null   # fresh persistent log this boot
     cm "COLD87 initial: CAM0=0x$(RG 0x0e000) entry1=0x$(RG 0x240004) SOFT_RESET=0x$(RG 0x00009)"
     # phase87 (option 2, the untested piece): RELEASE the switch core (SOFT_RESET=0, MSB out of reset),
     # THEN load the FULL parser/FFU microcode (fm6000_boot.c: "requires MSB out of reset"). We've only ever
@@ -238,8 +241,9 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     cm "COLD87 SOFT_RESET=0x$(RG 0x00009) CAM0=0x$(RG 0x0e000) (MSB released; loading full microcode)"
     UC=/usr/share/firmware/fm6000Microcode.raw
     if [ -f "$UC" ] && command -v fm6000load >/dev/null 2>&1; then
-        fm6000load $B "$UC" 2>&1 | sed 's/^/[COLD87-UCODE] /' > /dev/console 2>&1
+        fm6000load $B "$UC" 2>&1 | sed 's/^/[COLD87-UCODE] /' | tee -a /mnt/flash/fm6000-cold.log > /dev/console 2>&1
         cm "COLD87 post-ucode: CAM0=0x$(RG 0x0e000) ESCHED0=0x$(RG 0x02000) (want CAM0 real = survived load)"
+    sync 2>/dev/null
     else
         cm "COLD87 WARN: microcode $UC or fm6000load missing"
     fi
@@ -250,10 +254,12 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     WG 0x1f000 0x1
     i=0; while [ $i -lt 2000 ]; do s=$(RG 0x1f001); [ "$s" = "ffffffff" ] && break; [ $((0x${s:-1} & 1)) -eq 0 ] && break; i=$((i+1)); done
     cm "COLD87 CRM fill: STATUS 0x1f001=0x$(RG 0x1f001) after $i polls CAM0=0x$(RG 0x0e000) (real=filled; ff=off-bus)"
+    sync 2>/dev/null
     cm "COLD87 litmus MCAST 0x240000=0x$(RG 0x240000) 0x240004=0x$(RG 0x240004) (want 00000000 valid; ff=off-bus)"
     if command -v fm6000_wr128 >/dev/null 2>&1; then
         fm6000_wr128 0x240004 0x1 0x0 0x0 0x0 2>&1 | sed 's/^/[COLD87]   /' > /dev/console 2>&1
         cm "COLD87 entry1 post-write=0x$(RG 0x240004) CAM0=0x$(RG 0x0e000)"
+        sync 2>/dev/null
         cm "COLD87 *** entry1==00000001 && CAM0 real => COLD MCAST WRITE HOLDS (core-released order!) ***"
     fi
 fi
