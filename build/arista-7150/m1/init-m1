@@ -109,6 +109,20 @@ if grep -q fm6000_warm /proc/cmdline 2>/dev/null || [ -f /warm-inherit ]; then
         echo "    FM6000 inherited: $(cat /sys/bus/pci/devices/$Bw/vendor):$(cat /sys/bus/pci/devices/$Bw/device) Command=$(pcicfg $Bw 0x04 2>/dev/null|grep -o '0x[0-9a-f]*$')"
         if [ -x /usr/bin/fm6000reg ]; then
             echo "    inherited state: CAM0=0x$(fm6000reg $Bw 0x0e000 2>/dev/null|grep -o '[0-9a-f]*$') MCAST_DEST[4112]=0x$(fm6000reg $Bw 0x244040 2>/dev/null|grep -o '[0-9a-f]*$') (want 00003fff = EOS config alive)"
+            # --- phase70: capture the SRBM (Shared Repairable Bank Memory) repair table ---
+            # The SPI boot loaded fusebox cell-repairs into SRBM_REPAIR[0..7] (0x1D700+i).
+            # Each: BadAddr[15:0] MemBankID[23:16] MemChain[26:24] RepairValid[27].
+            # SRBM_STATUS 0x1D70D: FirstNewRepair[3:0] FirstEmptyRepair[7:4]=#loaded.
+            echo "    ===== SRBM-CAPTURE (phase70: warm/SPI-booted repair table) ====="
+            echo "    [SRBM] GENERAL_CONFIG 0x1D70C = 0x$(fm6000reg $Bw 0x1D70C 2>/dev/null|grep -o '[0-9a-f]*$')"
+            echo "    [SRBM] STATUS        0x1D70D = 0x$(fm6000reg $Bw 0x1D70D 2>/dev/null|grep -o '[0-9a-f]*$')  (FirstEmptyRepair[7:4]=#loaded)"
+            echo "    [SRBM] LAST_NR_DEF   0x1D713 = 0x$(fm6000reg $Bw 0x1D713 2>/dev/null|grep -o '[0-9a-f]*$')"
+            for off in 0 1 2 3 4 5 6 7; do
+                reg=$(printf 0x%X $((0x1D700 + off)))
+                echo "    [SRBM] REPAIR[$off]  $reg = 0x$(fm6000reg $Bw $reg 2>/dev/null|grep -o '[0-9a-f]*$')"
+            done
+            echo "    [SRBM] BM_GENERAL_CONFIG 0x1D084 = 0x$(fm6000reg $Bw 0x1D084 2>/dev/null|grep -o '[0-9a-f]*$')"
+            echo "    ===== end SRBM-CAPTURE ====="
         fi
     else
         echo "    *** FM6000 02:00.0 NOT present after warm boot — inherit FAILED ***"
@@ -123,7 +137,11 @@ elif [ -x /usr/lib/edgenos/platform/fm6000-up.sh ]; then
     # the i2c slave) so forwarding-table RAM is parity-valid → CPU-punt table writes
     # don't wedge the chip. This is the ONLY window it's reachable (fresh reset).
     # Watch the serial console — if BIST hangs the CPU there's no watchdog yet.
-    FM6000_BIST="${FM6000_BIST:-1}" sh /usr/lib/edgenos/platform/fm6000-up.sh > /var/log/fm6000 2>&1
+    # phase73: FM6000_RUNBIST=1 runs the BM BIST march (not SPIBOOT_TRUST) so we can test whether
+    # the march initializes the FUNCTIONAL-path banks — the corrected cold-init model (BIST, not CRM).
+    # phase75 COLD75: SPIBOOT_TRUST (RUNBIST=0) → clean enum, block-clocks=0xffffffff, then the confirmed
+    # CRM Memory-Set fill runs in the probe block. (RUNBIST=1 would run the defect march instead.)
+    FM6000_RUNBIST="${FM6000_RUNBIST:-0}" FM6000_BIST="${FM6000_BIST:-1}" sh /usr/lib/edgenos/platform/fm6000-up.sh > /var/log/fm6000 2>&1
     grep -iE 'ENUMERATED|still absent|PLL_LOL|Si5338 found|smbus_master @|clock RC|BIST|i2c-bringup' /var/log/fm6000 | sed 's/^/    /'
 fi
 
