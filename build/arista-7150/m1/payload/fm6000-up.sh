@@ -241,9 +241,9 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     cm "COLD87 SOFT_RESET=0x$(RG 0x00009) CAM0=0x$(RG 0x0e000) (MSB released; loading full microcode)"
     UC=/usr/share/firmware/fm6000Microcode.raw
     if [ -f "$UC" ] && command -v fm6000_ucode_dbg >/dev/null 2>&1; then
-        cm "COLD88 loading microcode (checkpointing to /mnt/flash/ucode-ckpt.log)..."
-        fm6000_ucode_dbg $B "$UC" /mnt/flash/ucode-ckpt.log 2>&1 | sed 's/^/[COLD88-UCODE] /' > /dev/console 2>&1
-        cm "COLD88 post-ucode: CAM0=0x$(RG 0x0e000) ESCHED0=0x$(RG 0x02000) ckpt=$(tail -1 /mnt/flash/ucode-ckpt.log 2>/dev/null)"
+        cm "COLD89 loading microcode (SKIP MOD 0x150000-0x15ffff = the off-bus block; checkpoint to flash)..."
+        UCODE_SKIP_MOD=1 fm6000_ucode_dbg $B "$UC" /mnt/flash/ucode-ckpt.log 2>&1 | sed 's/^/[COLD89-UCODE] /' > /dev/console 2>&1
+        cm "COLD89 post-ucode: CAM0=0x$(RG 0x0e000) ESCHED0=0x$(RG 0x02000) ckpt=$(tail -1 /mnt/flash/ucode-ckpt.log 2>/dev/null)"
     sync 2>/dev/null
     else
         cm "COLD87 WARN: microcode $UC or fm6000load missing"

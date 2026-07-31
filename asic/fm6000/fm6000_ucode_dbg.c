@@ -37,11 +37,13 @@ int main(int argc, char **argv)
 
 	unsigned long addr, val, n = 0, skipped = 0, last_addr = 0;
 	char line[128];
+	int skip_mod = (getenv("UCODE_SKIP_MOD") != NULL);   /* skip the MOD block 0x150000-0x15ffff (off-bus) */
 	while (fgets(line, sizeof line, f)) {
 		if (sscanf(line, "%lx %lx", &addr, &val) != 2 || addr >= len / 4) { skipped++; continue; }
+		if (skip_mod && addr >= 0x150000 && addr < 0x160000) { skipped++; continue; }   /* MOD block */
 		m[addr] = (uint32_t)val;
 		last_addr = addr; n++;
-		if ((n % 1000) == 0) {
+		if ((n % 100) == 0) {
 			__sync_synchronize();
 			cam0 = m[0x0E000];
 			CK("[ucode-dbg] n=%lu addr=0x%05lx CAM0=0x%08x", n, addr, cam0);
