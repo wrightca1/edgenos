@@ -229,13 +229,9 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     RG(){ fm6000reg $B "$1" 2>/dev/null | grep -o '[0-9a-f]*$'; }
     WG(){ fm6000reg $B "$1" "$2" >/dev/null 2>&1; }
     cm "COLD79 initial: CAM0=0x$(RG 0x0e000) entry1=0x$(RG 0x240004) SOFT_RESET=0x$(RG 0x00009) BLKCLK_3A=0x$(RG 0x1c03a)"
-    # 1. THE scan-chain memory config (faithful fm6000MrlRegisterFix port; 6287-block handshake).
-    if command -v fm6000_mrl >/dev/null 2>&1; then
-        fm6000_mrl $B 2>&1 | sed 's/^/[COLD79-MRL] /' > /dev/console 2>&1
-    else
-        cm "COLD79 WARN: fm6000_mrl not present — scan config skipped"
-    fi
-    cm "COLD79 post-MRL: CAM0=0x$(RG 0x0e000) BLKCLK_3A=0x$(RG 0x1c03a) (want CAM0 real)"
+    # 1. The scan-chain memory config (fm6000MrlRegisterFix port) ALREADY RAN inside fm6000_i2c_bringup
+    #    over the i2c slave in the pre-enum scan window (post-enum MMIO off-buses — cold79). Here we just
+    #    verify the chip survived it, then do the CRM fill + bank write on the (hopefully) writable memory.
     # 2. golden MGMT2 config + release the functional/ECC write port (golden SOFT_RESET=0)
     WG 0x1c01e 0xfffc0000; WG 0x1c01f 0x0009502f
     WG 0x00009 0x0

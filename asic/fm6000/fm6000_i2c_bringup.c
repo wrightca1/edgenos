@@ -31,6 +31,7 @@
 #include <sys/ioctl.h>
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
+#include "fm6000_mrl_table.h"   /* MRL scan-config table (verbatim from libFocalpointSDK.so) */
 
 #define SLAVE 0x40u
 
@@ -167,6 +168,36 @@ static int bist(void)
     if (i2c_rd(0x1D70E)) ok = 0;
     fprintf(stderr, "[i2c-bringup] BIST done: %s (0x1D08C=0x%08x 0x1D70E=0x%08x)\n",
             ok ? "PASS" : "FAIL", i2c_rd(0x1D08C), i2c_rd(0x1D70E));
+    return 0;
+}
+
+/* ---- MRL scan-chain memory config (fm6000MrlRegisterFix @0x47a4bc) over the i2c slave, in the
+ * pre-enum SCAN window (runs after bist(), before pcie()/normal-mode — mirrors PrebootSwitch:
+ * BistMemoryInit then MrlRegisterFix). This is the bank-WRITABILITY step (phase78/79). Faithful
+ * port of the 6287-block handshake; mrlTable extracted verbatim. Post-enum MMIO off-buses (cold79),
+ * so it MUST run here in scan mode over i2c. */
+static int mrl(void)
+{
+    /* NOTE: do NOT read functional regs (CAM0 0x0E000 etc.) over the i2c slave in the scan window —
+     * they wedge the mgmt slave (err=-5). Only touch scan regs 0x1C039-0x1C03D + BM status 0x1D08E. */
+    fprintf(stderr, "[i2c-bringup] MRL scan-config START: %d blocks (BM_STATUS 0x1D08E=0x%08x)\n",
+            FM6000_MRL_ENTRIES, i2c_rd(0x1D08E));
+    int save_v = g_verbose; g_verbose = 0;                   /* silence 25k per-op prints (serial flood) */
+    i2c_wr(0x1C039, 0x10);                                   /* pre-loop scan select      */
+    for (int i = 0; i < FM6000_MRL_ENTRIES; i++) {
+        uint32_t t1 = fm6000_mrl_table[i][0], t2 = fm6000_mrl_table[i][1];
+        i2c_wr(0x1C039, t1 & 0x1f);                          /* scan select               */
+        if (t1 & 0x80) i2c_wr(0x1C03A, t2);                  /* SCAN_CONFIG_DATA_IN       */
+        else           i2c_wr(0x1C03B, t2);                  /* SCAN_CHAIN_DATA_IN        */
+        uint32_t s = i2c_rd(0x1C03D);                        /* read-back (advances scan) */
+        if ((s & 0x300) != 0x100) s = i2c_rd(0x1C03D);       /* vendor: one optional re-read */
+        (void)i2c_rd(0x1C03C);                               /* read to advance scan      */
+    }
+    i2c_wr(0x1C03A, 0x80000040);                             /* final commit              */
+    usleep(20000);                                            /* 20 ms settle              */
+    g_verbose = save_v;
+    fprintf(stderr, "[i2c-bringup] MRL scan-config DONE (%d blocks; BM_STATUS 0x1D08E=0x%08x)\n",
+            FM6000_MRL_ENTRIES, i2c_rd(0x1D08E));
     return 0;
 }
 
@@ -314,6 +345,10 @@ int main(int argc, char **argv)
         i2c_wr(0x1C018, 0); i2c_wr(0x1C019, 0); i2c_wr(0x1C01A, 0); i2c_wr(0x1C01B, 0);
         fprintf(stderr, "[i2c-bringup] SRAM_UNCORRECTABLE_FATAL cleared (0x1C018=0x%08x, IM left masked)\n", i2c_rd(0x1C018));
         bist();
+        /* phase79: MRL scan-chain memory config (bank writability) — after BistMemoryInit,
+         * before pcie(), in the scan window (mirrors fm6000PrebootSwitch). Gate off with
+         * FM6000_NOMRL=1 to A/B test the scan config's effect. */
+        if (!getenv("FM6000_NOMRL")) mrl();
     } else {
         /* "copy EOS": the SPI boot ROM already ran (EepromLoadDone) and did the fusebox/BISR
          * bank repair + init at reset-release. Do NOT re-enter scan mode / re-run the BIST march

@@ -139,9 +139,10 @@ elif [ -x /usr/lib/edgenos/platform/fm6000-up.sh ]; then
     # Watch the serial console — if BIST hangs the CPU there's no watchdog yet.
     # phase73: FM6000_RUNBIST=1 runs the BM BIST march (not SPIBOOT_TRUST) so we can test whether
     # the march initializes the FUNCTIONAL-path banks — the corrected cold-init model (BIST, not CRM).
-    # phase75 COLD75: SPIBOOT_TRUST (RUNBIST=0) → clean enum, block-clocks=0xffffffff, then the confirmed
-    # CRM Memory-Set fill runs in the probe block. (RUNBIST=1 would run the defect march instead.)
-    FM6000_RUNBIST="${FM6000_RUNBIST:-0}" FM6000_BIST="${FM6000_BIST:-1}" sh /usr/lib/edgenos/platform/fm6000-up.sh > /var/log/fm6000 2>&1
+    # phase79 COLD79: RUNBIST=1 runs fm6000_i2c_bringup's bist() THEN mrl() (the scan-chain memory
+    # config) in the pre-enum i2c scan window — mirrors fm6000PrebootSwitch (BistMemoryInit + MrlRegisterFix)
+    # — then pcie()/enum, then the CRM fill + bank-write test in the probe block.
+    FM6000_RUNBIST="${FM6000_RUNBIST:-1}" FM6000_BIST="${FM6000_BIST:-1}" sh /usr/lib/edgenos/platform/fm6000-up.sh > /var/log/fm6000 2>&1
     grep -iE 'ENUMERATED|still absent|PLL_LOL|Si5338 found|smbus_master @|clock RC|BIST|i2c-bringup' /var/log/fm6000 | sed 's/^/    /'
 fi
 
