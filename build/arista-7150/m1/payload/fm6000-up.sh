@@ -228,26 +228,30 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     B=0000:02:00.0
     RG(){ fm6000reg $B "$1" 2>/dev/null | grep -o '[0-9a-f]*$'; }
     WG(){ fm6000reg $B "$1" "$2" >/dev/null 2>&1; }
-    cm "COLD84 initial: CAM0=0x$(RG 0x0e000) entry1=0x$(RG 0x240004) SOFT_RESET=0x$(RG 0x00009) ring0=0x$(RG 0x08000) (want ring0=0x03020100 from i2c sched)"
-    # 1. bist()->mrl()->sched() ALREADY RAN in the pre-enum i2c scan window (inside fm6000_i2c_bringup).
-    #    ring0 above should read 0x03020100 if the i2c scheduler init took. Now the CRM fill + bank write.
-    # 2. golden MGMT2 config + release the functional/ECC write port (golden SOFT_RESET=0)
+    cm "COLD86 initial: CAM0=0x$(RG 0x0e000) entry1=0x$(RG 0x240004) SOFT_RESET=0x$(RG 0x00009)"
+    # phase86 (option 2, correct ORDER per AltaLib initPcie): RELEASE the switch core FIRST (SOFT_RESET=0),
+    # THEN program the config regions. cold83 wrote ESCHED before release -> off-bus; we never tried
+    # config-after-release. Order: golden MGMT2 cfg -> SOFT_RESET=0 -> full scheduler (MMIO, incl ESCHED/DRR
+    # -> should be writable now the egress block is out of reset) -> CRM fill -> bank write.
     WG 0x1c01e 0xfffc0000; WG 0x1c01f 0x0009502f
-    WG 0x00009 0x0
-    cm "COLD84 SOFT_RESET=0x$(RG 0x00009) CAM0=0x$(RG 0x0e000)"
-    # 3. CRM ECC-fill (confirmed descriptor) — with the scheduler UP this should now complete instead of off-bus
+    WG 0x00009 0x0                                    # <-- release switch core FIRST (the untested ordering)
+    cm "COLD86 SOFT_RESET=0x$(RG 0x00009) CAM0=0x$(RG 0x0e000) (core released; now program config)"
+    # full golden scheduler over MMIO, AFTER release (ESCHED/DRR should be writable now)
+    if command -v fm6000_sched >/dev/null 2>&1; then
+        fm6000_sched 2>&1 | sed 's/^/[COLD86-SCHED] /' > /dev/console 2>&1
+        cm "COLD86 post-sched: ring0=0x$(RG 0x08000) (want 0x03020100) ESCHED0=0x$(RG 0x02000) CAM0=0x$(RG 0x0e000)"
+    fi
+    # CRM ECC-fill (confirmed descriptor)
     WG 0x1f080 0x04000000; WG 0x1f081 0x0
     WG 0x1f100 0x0FE40000; WG 0x1f101 0x0000000F
     WG 0x1f200 0x0; WG 0x1f180 0x0; WG 0x1f181 0x0
     WG 0x1f000 0x1
     i=0; while [ $i -lt 2000 ]; do s=$(RG 0x1f001); [ "$s" = "ffffffff" ] && break; [ $((0x${s:-1} & 1)) -eq 0 ] && break; i=$((i+1)); done
-    cm "COLD84 CRM fill: STATUS 0x1f001=0x$(RG 0x1f001) after $i polls CAM0=0x$(RG 0x0e000) (real=filled; ff=off-bus)"
-    # 4. litmus: a correctly-scheduled+filled bank reads valid ECC-ZERO (golden=0x00000000)
-    cm "COLD84 litmus MCAST 0x240000=0x$(RG 0x240000) 0x240004=0x$(RG 0x240004) (want 00000000 valid; ff=off-bus)"
-    # 5. DIRECT 128-bit entry write, then read back
+    cm "COLD86 CRM fill: STATUS 0x1f001=0x$(RG 0x1f001) after $i polls CAM0=0x$(RG 0x0e000) (real=filled; ff=off-bus)"
+    cm "COLD86 litmus MCAST 0x240000=0x$(RG 0x240000) 0x240004=0x$(RG 0x240004) (want 00000000 valid; ff=off-bus)"
     if command -v fm6000_wr128 >/dev/null 2>&1; then
-        fm6000_wr128 0x240004 0x1 0x0 0x0 0x0 2>&1 | sed 's/^/[COLD84]   /' > /dev/console 2>&1
-        cm "COLD84 entry1 post-write=0x$(RG 0x240004) CAM0=0x$(RG 0x0e000)"
-        cm "COLD84 *** entry1==00000001 && CAM0 real => COLD MCAST WRITE HOLDS (scheduler-up!) ***"
+        fm6000_wr128 0x240004 0x1 0x0 0x0 0x0 2>&1 | sed 's/^/[COLD86]   /' > /dev/console 2>&1
+        cm "COLD86 entry1 post-write=0x$(RG 0x240004) CAM0=0x$(RG 0x0e000)"
+        cm "COLD86 *** entry1==00000001 && CAM0 real => COLD MCAST WRITE HOLDS (core-released order!) ***"
     fi
 fi
