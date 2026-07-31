@@ -228,27 +228,33 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     B=0000:02:00.0
     RG(){ fm6000reg $B "$1" 2>/dev/null | grep -o '[0-9a-f]*$'; }
     WG(){ fm6000reg $B "$1" "$2" >/dev/null 2>&1; }
-    cm "COLD79 initial: CAM0=0x$(RG 0x0e000) entry1=0x$(RG 0x240004) SOFT_RESET=0x$(RG 0x00009) BLKCLK_3A=0x$(RG 0x1c03a)"
-    # 1. The scan-chain memory config (fm6000MrlRegisterFix port) ALREADY RAN inside fm6000_i2c_bringup
-    #    over the i2c slave in the pre-enum scan window (post-enum MMIO off-buses — cold79). Here we just
-    #    verify the chip survived it, then do the CRM fill + bank write on the (hopefully) writable memory.
+    cm "COLD82 initial: CAM0=0x$(RG 0x0e000) entry1=0x$(RG 0x240004) SOFT_RESET=0x$(RG 0x00009) ring0=0x$(RG 0x08000)"
+    # 1. *** SCHEDULER init *** (phase80/81: Arista project-lead — the chip locks up on a bank write / fill
+    #    unless the scheduler port-visit ring is programmed). fm6000_sched replays the golden SSCHED ring
+    #    (0x8000=0x03020100, ports 0,1,2,3,78) + JSS clock-domain + SWEEPER + INIT_COMPLETE strobes, via MMIO.
+    if command -v fm6000_sched >/dev/null 2>&1; then
+        fm6000_sched 2>&1 | sed 's/^/[COLD82-SCHED] /' > /dev/console 2>&1
+        cm "COLD82 post-sched: ring0=0x$(RG 0x08000) (want 0x03020100) TX_REPL 0x8022=0x$(RG 0x08022) CAM0=0x$(RG 0x0e000)"
+    else
+        cm "COLD82 WARN: fm6000_sched not present"
+    fi
     # 2. golden MGMT2 config + release the functional/ECC write port (golden SOFT_RESET=0)
     WG 0x1c01e 0xfffc0000; WG 0x1c01f 0x0009502f
     WG 0x00009 0x0
-    cm "COLD79 SOFT_RESET=0x$(RG 0x00009) CAM0=0x$(RG 0x0e000)"
-    # 3. CRM ECC-fill (confirmed descriptor, disasm fm6000CrmSetMemoryExt): MCAST base 0x240000, fill 0
+    cm "COLD82 SOFT_RESET=0x$(RG 0x00009) CAM0=0x$(RG 0x0e000)"
+    # 3. CRM ECC-fill (confirmed descriptor) — with the scheduler UP this should now complete instead of off-bus
     WG 0x1f080 0x04000000; WG 0x1f081 0x0
     WG 0x1f100 0x0FE40000; WG 0x1f101 0x0000000F
     WG 0x1f200 0x0; WG 0x1f180 0x0; WG 0x1f181 0x0
     WG 0x1f000 0x1
     i=0; while [ $i -lt 2000 ]; do s=$(RG 0x1f001); [ "$s" = "ffffffff" ] && break; [ $((0x${s:-1} & 1)) -eq 0 ] && break; i=$((i+1)); done
-    cm "COLD79 CRM fill: STATUS 0x1f001=0x$(RG 0x1f001) after $i polls CAM0=0x$(RG 0x0e000) (real=filled; ff=off-bus)"
-    # 4. litmus: a correctly-configured+filled bank reads valid ECC-ZERO (golden=0x00000000)
-    cm "COLD79 litmus MCAST 0x240000=0x$(RG 0x240000) 0x240004=0x$(RG 0x240004) (want 00000000 valid; ff=off-bus)"
+    cm "COLD82 CRM fill: STATUS 0x1f001=0x$(RG 0x1f001) after $i polls CAM0=0x$(RG 0x0e000) (real=filled; ff=off-bus)"
+    # 4. litmus: a correctly-scheduled+filled bank reads valid ECC-ZERO (golden=0x00000000)
+    cm "COLD82 litmus MCAST 0x240000=0x$(RG 0x240000) 0x240004=0x$(RG 0x240004) (want 00000000 valid; ff=off-bus)"
     # 5. DIRECT 128-bit entry write, then read back
     if command -v fm6000_wr128 >/dev/null 2>&1; then
-        fm6000_wr128 0x240004 0x1 0x0 0x0 0x0 2>&1 | sed 's/^/[COLD79]   /' > /dev/console 2>&1
-        cm "COLD79 entry1 post-write=0x$(RG 0x240004) CAM0=0x$(RG 0x0e000)"
-        cm "COLD79 *** entry1==00000001 && CAM0 real => COLD MCAST WRITE HOLDS (scan-configured!) ***"
+        fm6000_wr128 0x240004 0x1 0x0 0x0 0x0 2>&1 | sed 's/^/[COLD82]   /' > /dev/console 2>&1
+        cm "COLD82 entry1 post-write=0x$(RG 0x240004) CAM0=0x$(RG 0x0e000)"
+        cm "COLD82 *** entry1==00000001 && CAM0 real => COLD MCAST WRITE HOLDS (scheduler-up!) ***"
     fi
 fi

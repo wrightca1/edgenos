@@ -121,6 +121,26 @@ int main(int argc, char **argv)
     fm6000_csr_write(&dev, FM6000_SSCHED_RX_INIT_COMPLETE, 1u);
     fm6000_csr_write(&dev, FM6000_SSCHED_TX_INIT_COMPLETE, 1u);
 
+    /* 5. phase82: the rest of the GOLDEN scheduler state (live capture from the warm chip,
+     *    reference/scd-dumps/fm6000-golden-scheduler-state-warm.txt). The minimal ring alone
+     *    (cold82) didn't unblock the fill; add the EGRESS scheduler per-port config + DRR + the
+     *    SSCHED replace-token values so the cold scheduler matches golden as closely as possible. */
+    if (!getenv("FM6000_SCHED_MINIMAL")) {
+        unsigned p;
+        /* ESCHED_CFG_1 (0x2000+i) / CFG_2 (0x2080+i), 76 ports: port0 special, rest default 0x00ffffff */
+        for (p = 0; p < 76; p++) {
+            fm6000_csr_write(&dev, 0x2000u + p, p == 0 ? 0x00fff800u : 0x00ffffffu);
+            fm6000_csr_write(&dev, 0x2080u + p, p == 0 ? 0x00fff000u : 0x00ffffffu);
+        }
+        /* ESCHED_DRR_CFG (MONITOR 0x3800+i): golden alternating even=0x00ffffff, odd=0x14ffffff */
+        for (p = 0; p < 76; p++)
+            fm6000_csr_write(&dev, 0x3800u + p, (p & 1) ? 0x14ffffffu : 0x00ffffffu);
+        /* SSCHED replace-token last values (golden) */
+        fm6000_csr_write(&dev, FM6000_SSCHED_TX_REPLACE_TOKEN, 0xc0300200u);
+        fm6000_csr_write(&dev, FM6000_SSCHED_RX_REPLACE_TOKEN, 0x00200200u);
+        fprintf(stderr, "fm6000_sched: full golden scheduler applied (ESCHED CFG_1/2 + DRR + replace tokens)\n");
+    }
+
     fprintf(stderr, "fm6000_sched: after:  TX_NEXT_PORT[0]=0x%08x [19]=0x%08x  RX[0]=0x%08x\n",
             fm6000_csr_read(&dev, FM6000_SSCHED_TX_NEXT_PORT(0)),
             fm6000_csr_read(&dev, FM6000_SSCHED_TX_NEXT_PORT(19)),
