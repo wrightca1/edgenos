@@ -94,6 +94,7 @@ if [ -d "$SSHD" ]; then
     cp "$SSHD/shadow" "$R/etc/shadow" 2>/dev/null; chmod 600 "$R/etc/shadow" 2>/dev/null
     cp "$SSHD/ncsh.sh" "$R/usr/bin/ncsh.sh" 2>/dev/null && chmod +x "$R/usr/bin/ncsh.sh"
     cp "$SSHD/"*.si5338 "$R/usr/share/firmware/" 2>/dev/null   # Si5338 regmap (on-box only)
+    cp "$SSHD/fm6000Microcode.raw" "$R/usr/share/firmware/" 2>/dev/null   # full parser/FFU microcode (phase87)
     echo "root:x:0:0:root:/root:/bin/sh" >> "$R/etc/group" 2>/dev/null || true
     echo "bundled dropbear SSH + regmap + nc-shell"
 fi

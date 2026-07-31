@@ -228,18 +228,20 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     B=0000:02:00.0
     RG(){ fm6000reg $B "$1" 2>/dev/null | grep -o '[0-9a-f]*$'; }
     WG(){ fm6000reg $B "$1" "$2" >/dev/null 2>&1; }
-    cm "COLD86 initial: CAM0=0x$(RG 0x0e000) entry1=0x$(RG 0x240004) SOFT_RESET=0x$(RG 0x00009)"
-    # phase86 (option 2, correct ORDER per AltaLib initPcie): RELEASE the switch core FIRST (SOFT_RESET=0),
-    # THEN program the config regions. cold83 wrote ESCHED before release -> off-bus; we never tried
-    # config-after-release. Order: golden MGMT2 cfg -> SOFT_RESET=0 -> full scheduler (MMIO, incl ESCHED/DRR
-    # -> should be writable now the egress block is out of reset) -> CRM fill -> bank write.
+    cm "COLD87 initial: CAM0=0x$(RG 0x0e000) entry1=0x$(RG 0x240004) SOFT_RESET=0x$(RG 0x00009)"
+    # phase87 (option 2, the untested piece): RELEASE the switch core (SOFT_RESET=0, MSB out of reset),
+    # THEN load the FULL parser/FFU microcode (fm6000_boot.c: "requires MSB out of reset"). We've only ever
+    # loaded the ucode_l2.raw SUBSET; the full 39461-write fm6000Microcode.raw brings the forwarding pipeline
+    # online — the leading suspect for why ESCHED/banks off-bus. Then test if config regions are writable.
     WG 0x1c01e 0xfffc0000; WG 0x1c01f 0x0009502f
-    WG 0x00009 0x0                                    # <-- release switch core FIRST (the untested ordering)
-    cm "COLD86 SOFT_RESET=0x$(RG 0x00009) CAM0=0x$(RG 0x0e000) (core released; now program config)"
-    # full golden scheduler over MMIO, AFTER release (ESCHED/DRR should be writable now)
-    if command -v fm6000_sched >/dev/null 2>&1; then
-        fm6000_sched 2>&1 | sed 's/^/[COLD86-SCHED] /' > /dev/console 2>&1
-        cm "COLD86 post-sched: ring0=0x$(RG 0x08000) (want 0x03020100) ESCHED0=0x$(RG 0x02000) CAM0=0x$(RG 0x0e000)"
+    WG 0x00009 0x0                                    # <-- MSB/FIBM/EPL out of reset
+    cm "COLD87 SOFT_RESET=0x$(RG 0x00009) CAM0=0x$(RG 0x0e000) (MSB released; loading full microcode)"
+    UC=/usr/share/firmware/fm6000Microcode.raw
+    if [ -f "$UC" ] && command -v fm6000load >/dev/null 2>&1; then
+        fm6000load $B "$UC" 2>&1 | sed 's/^/[COLD87-UCODE] /' > /dev/console 2>&1
+        cm "COLD87 post-ucode: CAM0=0x$(RG 0x0e000) ESCHED0=0x$(RG 0x02000) (want CAM0 real = survived load)"
+    else
+        cm "COLD87 WARN: microcode $UC or fm6000load missing"
     fi
     # CRM ECC-fill (confirmed descriptor)
     WG 0x1f080 0x04000000; WG 0x1f081 0x0
@@ -247,11 +249,11 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     WG 0x1f200 0x0; WG 0x1f180 0x0; WG 0x1f181 0x0
     WG 0x1f000 0x1
     i=0; while [ $i -lt 2000 ]; do s=$(RG 0x1f001); [ "$s" = "ffffffff" ] && break; [ $((0x${s:-1} & 1)) -eq 0 ] && break; i=$((i+1)); done
-    cm "COLD86 CRM fill: STATUS 0x1f001=0x$(RG 0x1f001) after $i polls CAM0=0x$(RG 0x0e000) (real=filled; ff=off-bus)"
-    cm "COLD86 litmus MCAST 0x240000=0x$(RG 0x240000) 0x240004=0x$(RG 0x240004) (want 00000000 valid; ff=off-bus)"
+    cm "COLD87 CRM fill: STATUS 0x1f001=0x$(RG 0x1f001) after $i polls CAM0=0x$(RG 0x0e000) (real=filled; ff=off-bus)"
+    cm "COLD87 litmus MCAST 0x240000=0x$(RG 0x240000) 0x240004=0x$(RG 0x240004) (want 00000000 valid; ff=off-bus)"
     if command -v fm6000_wr128 >/dev/null 2>&1; then
-        fm6000_wr128 0x240004 0x1 0x0 0x0 0x0 2>&1 | sed 's/^/[COLD86]   /' > /dev/console 2>&1
-        cm "COLD86 entry1 post-write=0x$(RG 0x240004) CAM0=0x$(RG 0x0e000)"
-        cm "COLD86 *** entry1==00000001 && CAM0 real => COLD MCAST WRITE HOLDS (core-released order!) ***"
+        fm6000_wr128 0x240004 0x1 0x0 0x0 0x0 2>&1 | sed 's/^/[COLD87]   /' > /dev/console 2>&1
+        cm "COLD87 entry1 post-write=0x$(RG 0x240004) CAM0=0x$(RG 0x0e000)"
+        cm "COLD87 *** entry1==00000001 && CAM0 real => COLD MCAST WRITE HOLDS (core-released order!) ***"
     fi
 fi
