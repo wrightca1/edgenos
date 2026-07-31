@@ -226,11 +226,15 @@ static int sched(void)
     }
     for (p = 0; p < 5; p++) i2c_wr(0x08070 + p, slow[p]);    /* SLOW_PORT */
     i2c_wr(0x08061, 1u); i2c_wr(0x08021, 1u);                /* COMMIT strobes RX then TX */
-    /* ESCHED_CFG_1 (0x2000) / CFG_2 (0x2080) + DRR (0x3800), 76 ports; port0 special */
-    for (p = 0; p < 76; p++) {
-        i2c_wr(0x02000 + p, p == 0 ? 0x00fff800u : 0x00ffffffu);
-        i2c_wr(0x02080 + p, p == 0 ? 0x00fff000u : 0x00ffffffu);
-        i2c_wr(0x03800 + p, (p & 1) ? 0x14ffffffu : 0x00ffffffu);
+    /* ESCHED_CFG (0x2000) + DRR (0x3800) are INACCESSIBLE here (cold84: i2c writes time out err=-5;
+     * cold83: MMIO writes off-bus) — the egress-scheduler tables need a boot phase we don't reach.
+     * Skip them (gate FM6000_SCHED_ESCHED=1 to re-try). Keep the SSCHED replace-token values (work). */
+    if (getenv("FM6000_SCHED_ESCHED")) {
+        for (p = 0; p < 76; p++) {
+            i2c_wr(0x02000 + p, p == 0 ? 0x00fff800u : 0x00ffffffu);
+            i2c_wr(0x02080 + p, p == 0 ? 0x00fff000u : 0x00ffffffu);
+            i2c_wr(0x03800 + p, (p & 1) ? 0x14ffffffu : 0x00ffffffu);
+        }
     }
     i2c_wr(0x08022, 0xc0300200u); i2c_wr(0x08062, 0x00200200u);   /* replace-token last values */
     g_verbose = sv;
