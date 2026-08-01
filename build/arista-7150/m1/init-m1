@@ -142,7 +142,9 @@ elif [ -x /usr/lib/edgenos/platform/fm6000-up.sh ]; then
     # phase86 COLD86 (option 2): clean SPIBOOT_TRUST enum (RUNBIST=0), then the probe block RELEASES the
     # switch core (SOFT_RESET=0) FIRST and programs config (full scheduler incl ESCHED/DRR) over MMIO AFTER
     # release — the untested correct ordering (cold83 wrote ESCHED before release -> off-bus).
-    FM6000_RUNBIST="${FM6000_RUNBIST:-0}" FM6000_BIST="${FM6000_BIST:-1}" sh /usr/lib/edgenos/platform/fm6000-up.sh > /var/log/fm6000 2>&1
+    # phase90 PROBE: FM6000_NOFILL=1 loads the microcode (minus MOD) then leaves the chip ALIVE at the M1
+    # shell (no CRM fill) for interactive probing over SSH (root@10.1.1.77). RUNBIST=0 (SPIBOOT_TRUST enum).
+    FM6000_NOFILL="${FM6000_NOFILL:-1}" FM6000_RUNBIST="${FM6000_RUNBIST:-0}" FM6000_BIST="${FM6000_BIST:-1}" sh /usr/lib/edgenos/platform/fm6000-up.sh > /var/log/fm6000 2>&1
     grep -iE 'ENUMERATED|still absent|PLL_LOL|Si5338 found|smbus_master @|clock RC|BIST|i2c-bringup' /var/log/fm6000 | sed 's/^/    /'
 fi
 

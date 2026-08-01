@@ -248,7 +248,12 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     else
         cm "COLD87 WARN: microcode $UC or fm6000load missing"
     fi
-    # CRM ECC-fill (confirmed descriptor)
+    # CRM ECC-fill (off-buses the chip) — GATED so FM6000_NOFILL=1 leaves the chip ALIVE at the M1 shell
+    # for interactive probing (phase90: microcode-loaded, MSB-out, CAM0 alive; SSH root@10.1.1.77).
+    if [ "${FM6000_NOFILL:-0}" = "1" ]; then
+        cm "COLD90 PROBE MODE: chip left ALIVE (microcode loaded, no CRM fill). CAM0=0x$(RG 0x0e000) — SSH in and probe."
+        sync 2>/dev/null
+    else
     WG 0x1f080 0x04000000; WG 0x1f081 0x0
     WG 0x1f100 0x0FE40000; WG 0x1f101 0x0000000F
     WG 0x1f200 0x0; WG 0x1f180 0x0; WG 0x1f181 0x0
@@ -262,5 +267,6 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
         cm "COLD87 entry1 post-write=0x$(RG 0x240004) CAM0=0x$(RG 0x0e000)"
         sync 2>/dev/null
         cm "COLD87 *** entry1==00000001 && CAM0 real => COLD MCAST WRITE HOLDS (core-released order!) ***"
+    fi
     fi
 fi
