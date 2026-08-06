@@ -144,7 +144,7 @@ routing works.
 |---|:--:|---|
 | SFP presence / EEPROM / DOM | ⚠️ | SCD SMBus reachable; topology extracted; no monitoring loop |
 | 3rd-party transceiver unlock | ✅ | key = `MD5(licensee + Arista copyright)[0:4]` BE, must be present at boot |
-| **Thermal loop** | ❌ | **P1 SAFETY.** MAX6658 on SMBus 0:2 @0x4c, FM6000 die crit 100 °C, fans on CPU-card CPLD @0x60. **Nothing reads temperature or drives fans** |
+| **Thermal loop** | ✅ | `thermal-control.sh`, automatic at boot. MAX6658 (board + FM6000 die) → 4× `raven-fan-driver` PWM. Fails safe to 255 on sensor loss or a stopped fan — both paths tested on hardware. PWM 255→102 with the die steady at 37–38 °C |
 | PSU / LED / CPLD status | ❌ | cosmetic, not implemented |
 | Watchdog | ⚠️ | works, but **must be petted every ~10 s or it resets the board**; arming it without a petting loop is a self-inflicted reboot |
 
@@ -162,8 +162,7 @@ routing works.
 
 ## What to fix next, in order
 
-1. **Thermal loop** — the only *safety* item on this list. Everything else is a feature; this one
-   can damage hardware.
+1. ~~Thermal loop~~ — **done** (`thermal-control.sh`). The only safety item on the list is closed.
 2. **Et2 / copper link.** Unblocks every multi-port capability: switching, routing, ECMP, LAG.
    SPICO and the EPL-register theories are both dead (above); the live lead is **CR link training**.
    Trace EOS doing `shutdown`/`no shutdown` on Et2 to capture it.
