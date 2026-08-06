@@ -31,7 +31,11 @@ import sys
 # word-address ranges, from fm6000_api_regs_int.h / docs/ROUTING-FIB.md
 BLOCKS = [
     (0x000000, 0x001000, "MGMT1"),        (0x001000, 0x002000, "PCIE"),
-    (0x002000, 0x003000, "ESCHED"),       (0x008000, 0x00B000, "SSCHED"),
+    (0x002000, 0x003000, "ESCHED"),       (0x003000, 0x004000, "MONITOR"),
+    (0x004000, 0x005000, "MSB"),          (0x005000, 0x006000, "FIBM"),
+    (0x006000, 0x007000, "EACL"),         (0x007000, 0x008000, "LAG"),
+    (0x008000, 0x00B000, "SSCHED"),       (0x00B000, 0x00C000, "HASH"),
+    (0x00C000, 0x00D000, "ALU"),          (0x00D000, 0x00E000, "L2L_SWEEPER"),
     (0x00E000, 0x00F000, "GLORT"),        (0x00F000, 0x010000, "JSS/SBus"),
     (0x010000, 0x014000, "L3AR"),         (0x014000, 0x018000, "LBS"),
     (0x018000, 0x01A000, "STATS_AR"),     (0x01A000, 0x01C000, "STATS_DISCRETE"),
@@ -42,8 +46,9 @@ BLOCKS = [
     (0x120000, 0x130000, "MAPPER"),       (0x130000, 0x140000, "POLICERS"),
     (0x140000, 0x150000, "L2AR"),         (0x150000, 0x160000, "MOD"),
     (0x160000, 0x170000, "NEXTHOP"),      (0x180000, 0x190000, "L2F"),
+    (0x190000, 0x1A0000, "L2F_HI"),       (0x1A0000, 0x1B0000, "MA_TABLE"),
     (0x200000, 0x240000, "STATS"),        (0x240000, 0x280000, "MCAST"),
-    (0x300000, 0x400000, "FFU"),
+    (0x280000, 0x290000, "L2L_MAC"),      (0x300000, 0x400000, "FFU"),
 ]
 
 
@@ -95,6 +100,27 @@ def classify(path, ucode_addrs):
             rows.append((a, v, "ZERO?"))       # resolved below -- see fill detection
         else:
             rows.append((a, v, "CONFIG"))
+
+    # Resolve ZERO?. A write of 0 is only "fill" when it is part of a run of
+    # consecutive addresses being cleared back-to-back; an ISOLATED zero write is
+    # a control register being deliberately set to 0, which is real configuration.
+    #
+    # This distinction is not academic: a replay with ALL zero-writes removed
+    # still trains the link but forwards nothing (+0 vs +60 on the same boot),
+    # because 92% of them turn out to be isolated config, not fill.
+    RUN_MIN = 8
+    zi = [i for i, (a, v, c) in enumerate(rows) if c == "ZERO?"]
+    run_start = 0
+    for k in range(1, len(zi) + 1):
+        end_of_run = (k == len(zi) or
+                      zi[k] != zi[k - 1] + 1 or
+                      rows[zi[k]][0] != rows[zi[k - 1]][0] + 1)
+        if end_of_run:
+            label = "ZEROFILL" if (k - run_start) >= RUN_MIN else "CONFIG"
+            for j in zi[run_start:k]:
+                a, v, _ = rows[j]
+                rows[j] = (a, v, label)
+            run_start = k
 
     # One SBus transaction is three writes: F002 <data>, F001 <- 0 (clear), then
     # F001 <- cmd (Exec set). Only the last carries the receiver/register, so the

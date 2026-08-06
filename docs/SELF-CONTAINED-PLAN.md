@@ -10,40 +10,63 @@ Measured with `asic/fm6000/tools/replay_classify.py`, not estimated.
 
 ## What is actually in the replay
 
-`fwd4.txt` — 389,809 writes:
+`fwd4.txt` — 389,809 writes, classified with the fill-vs-config split described below:
 
 | category | writes | share | replaced by | status |
 |---|---:|---:|---|---|
-| **CONFIG** | 169,538 | 43.5% | generator from a declarative platform description | to build |
+| **CONFIG** | 237,024 | 60.8% | generator from a declarative platform description | to build |
 | **SPICO_FW** | 90,006 | 23.1% | operator-supplied, or dropped | third-party |
-| **ZEROFILL** | 73,440 | 18.8% | *not* covered by `fm6000_memfill` — see below | to build |
 | **MICROCODE** | 53,108 | 13.6% | generator from a protocol description | to build |
+| **ZEROFILL** | 5,954 | 1.5% | `fm6000_memfill` | ✅ done |
 | **SBUS_TUNE** | 3,717 | 1.0% | per-lane board measurement | to build |
 
-23.1% is Intel's firmware; the remaining **76.9% is configuration, microcode and zero-writes** —
-all of them *facts about how to set the chip up*, not somebody else's program.
+**Only 1.5% is already covered by our own code** — not the 18.8% first assumed. 23.1% is Intel's
+firmware. The remaining **75.4% is configuration and microcode**: facts about how to set the chip
+up, not somebody else's program, and therefore generatable.
 
-### ⚠ "ZEROFILL is redundant" was wrong — tested on hardware
+### ⚠ How that 18.8% became 1.5% — an assumption tested and killed
 
 The obvious first win looked like dropping the 73,440 zero-writes, on the assumption that
-`fm6000_memfill` already covers them. **It does not.** Built a replay with every zero-write removed
-and cold-booted it:
+`fm6000_memfill` already covers them. Built exactly that replay and cold-booted it:
 
 | replay | link | packets to the far end |
 |---|---|---|
 | `fwd4` (full), same boot | up `0x8c0` | **+60** |
-| zero-writes removed | up `0x8c0` | **+0 — no forwarding** |
+| all zero-writes removed | up `0x8c0` | **+0 — no forwarding** |
 
-The link still trains, so this is not a SerDes problem: something in the forwarding path depends on
-those writes. The cause is a flaw in the classification, not in the chip — **a write of `0` to a
-*control register* is meaningful configuration, not table fill.** Bucketing purely on `value == 0`
-conflates the two.
+The link still trains, so this is not SerDes: something in the forwarding path depends on those
+writes. The flaw was in the classification, not the chip — **a write of `0` to a *control register*
+is configuration, not table fill.**
 
-Fixing it means distinguishing *table-memory fill* (long runs of consecutive addresses, genuinely
-redundant with `memfill`) from *isolated zero-writes to control registers* (real config that must be
-generated like any other). Until that split is done, treat the 18.8% as **config, not solved**.
+Splitting on run length settles it. A zero-write is fill only if it is part of a run of consecutive
+addresses cleared back-to-back (`RUN_MIN = 8`):
 
-Recorded because it is exactly the kind of assumption that looks free and is not.
+```
+zero writes                          73,440
+  in runs >= 8 (genuine table fill)   5,954   (8%)
+  isolated / short runs (real config) 67,486  (92%)
+  44,682 runs total, longest 448
+```
+
+**92% of the zero-writes are configuration.** They cluster in exactly the blocks you would expect a
+forwarding path to need: MA table, SAF, L2L, FFU, CM. The classifier now resolves them
+automatically, which is why CONFIG is 60.8% rather than 43.5%.
+
+### Where the CONFIG actually lives
+
+| block | writes | notes |
+|---|---:|---|
+| MA_TABLE | 55,803 | L2 MAC table — large but highly regular |
+| CM | 46,110 | congestion watermarks, mostly uniform values |
+| SAF | 34,668 | store-and-forward matrix; 18-bit fields, format known |
+| L2L | 24,620 | L2 lookup |
+| EPL | 22,051 | per-port SerDes/PCS; `EPL_CFG_B` PcsSel decoded |
+| LBS | 18,547 | load balancing |
+| FFU | 14,549 | the FIB — **fully decoded** (`ROUTING-FIB.md`) |
+| MAPPER / L3AR / HASH / CMM | ~14,400 | partly understood |
+
+None of it is a program. The two largest blocks (MA table, CM) are regular table fill with
+structure, which is the easiest kind of thing to generate.
 
 ## The three pieces, hardest last
 
@@ -96,22 +119,15 @@ PARSER_INIT_STATE 0x108000 (76, per logical port) · PARSER_INIT_FIELDS 0x108200
 **Action:** build `fm6000_ucode_gen`. Start with the parser (best understood), then MOD (smallest,
 and the egress tag-strip is the piece we already depend on), then L2AR.
 
-### 3. Configuration — 43.5%, the biggest but the least mysterious
+### 3. Configuration — 60.8%, the biggest but the least mysterious
 
-Where it goes:
+The per-block breakdown is in *Where the CONFIG actually lives* above. Nothing there is a program:
+it is table fill and register setup, much of it repetitive. MA_TABLE and CM alone are 102k writes,
+and both are regular — a MAC table and a set of largely uniform watermark values.
 
-| block | writes | how much we understand |
-|---|---:|---|
-| CM (congestion mgmt) | 43,982 | watermarks/thresholds — mostly uniform values |
-| SAF | 22,273 | store-and-forward matrix; 18-bit fields, format known |
-| EPL | 21,484 | per-port SerDes/PCS. `EPL_CFG_B` PcsSel decoded |
-| LBS | 18,541 | load balancing |
-| L2L | 16,404 | L2 lookup |
-| FFU | 10,162 | the FIB — **fully decoded** (`ROUTING-FIB.md`) |
-| MAPPER / L3AR / CMM / STATS | ~11,500 | partly |
-
-Nothing here is a program. It is table fill and register setup, much of it repetitive: CM alone is
-44k writes of largely uniform watermark values.
+The share is 60.8% rather than the 43.5% first measured because two thirds of the zero-writes turned
+out to belong here (see the ⚠ section). That is a reclassification, not new work appearing: those
+writes were always in the replay, they were merely filed under the wrong heading.
 
 **Action:** build `fm6000_cfg_gen` emitting from a platform description (port map, GLORT
 allocation, MTU, buffer profile). Do it **one block at a time**, replacing that block's writes in
@@ -125,8 +141,8 @@ step that fails leaves the previous working state intact.
 1. **Split the replay by category** — `replay_classify.py --dump CONFIG` already emits a per-category
    file. Rebuild `fwd4` from the parts and confirm the switch still comes up. This proves the
    classification is faithful before anything is generated.
-2. ~~**Drop ZEROFILL from the replay** and let `fm6000_memfill` cover it.~~ **TESTED — IT BREAKS
-   FORWARDING.** See below.
+2. ~~**Drop all zero-writes.**~~ **TESTED — breaks forwarding** (above). What *is* safe to drop is
+   the 5,954 in long runs; the other 67,486 are config and must be generated like anything else.
 3. **Generate one CONFIG block**, starting with FFU (fully decoded) or SAF (simple format).
    Replace, test, keep.
 4. **Generate the parser microcode.** The big RE win.
@@ -181,8 +197,8 @@ from "undecoded" into "documented", which is the difference between slot-reuse a
 
 ## Honest assessment
 
-- **ZEROFILL removal** — hours. Should just work.
-- **CONFIG generation** — the largest, but mostly mechanical. Weeks, incremental, low risk.
+- **ZEROFILL removal** — done as an experiment, and it only buys 1.5%. Not worth revisiting.
+- **CONFIG generation** — the largest at 60.8%, but mostly mechanical. Weeks, incremental, low risk.
 - **Parser microcode** — the genuinely interesting RE. Days to weeks, and the format is published.
 - **L2AR/MOD microcode** — same technique, less documented. Unknown.
 - **SPICO** — not regenerable, only droppable. Depends on the Et2 answer.
