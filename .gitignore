@@ -31,4 +31,5 @@ asic/fm6000/fm6000_wr128
 *_spico_code.bin
 ucode_*.raw
 fwd*.txt
-*mrl_table.h
+# (the MRL *loader* header is ours and IS tracked; only the data file is excluded)
+mrl-table.txt
