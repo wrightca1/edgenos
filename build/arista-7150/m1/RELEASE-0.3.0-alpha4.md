@@ -1,8 +1,9 @@
-# EdgeNOS for the Arista DCS-7150S-52 — 0.3.0-alpha2 (early release)
+# EdgeNOS for the Arista DCS-7150S-52 — 0.3.0-alpha4 (early release)
 
-**Built 2026-08-06.** `edgenos-7150-0.3.0-alpha2.swi`, 18,713,677 bytes.
+**Built 2026-08-06.** `edgenos-7150-0.3.0-alpha4.swi`, 18,712,407 bytes.
 
-**alpha2 adds thermal management** — see below. alpha1 had none and should not be used.
+Use **alpha4**. Earlier alphas shipped Silicon Labs clock register maps extracted from EOS
+(alpha1/2/3) and alpha1 had no thermal management at all.
 
 An early release: a switch that boots itself from cold, brings up an Intel FM6000 ASIC with no
 vendor SDK, forwards in hardware, speaks OSPF, and programs the routes it learns into silicon —
@@ -43,6 +44,12 @@ Third-party works you must supply yourself from a **licensed EOS** on your own s
 |---|---|
 | FM6000 microcode | `/mnt/flash/ucode_l2.raw`, `ucode_tail.raw` |
 | register replay set (contains the SerDes SPICO firmware inline) | `/mnt/flash/fwd4.txt` |
+
+**No clock data is required.** Earlier alphas shipped Arista's `.si5338` register maps (Silicon Labs
+copyright). They turned out to be unnecessary: the Si5338 comes up already configured and locked on
+this board (`SYS_CAL=0 LOS_CLKIN=0 PLL_LOL=0` on a cold boot with nothing staged), so alpha4 checks
+the lock and does not reprogram it. That is also the safer order — reprogramming a good part risks
+unlocking it, which takes the board out until a physical power cycle.
 
 Without them the image still boots, brings up management SSH, and says the dataplane is down. It
 will not forward. See `docs/PROVENANCE.md`.
@@ -114,6 +121,8 @@ Log: `/var/log/thermal`. Tunables are at the top of the script.
 - **The port netdev is a control path, not a data path.** `fm6000_portd` does a
   `TX_STOP → fill → TX_START` per frame (~10 ms), capping near 100 pps. Fine for ARP and OSPF
   hellos. Do not push traffic through it.
+- **Front-panel LEDs work** with no software involvement — the SCD drives them from link state.
+  (`scd-setup.sh` declares 57 sysfs LED objects at wrong, inert addresses; harmless but misleading.)
 - **Thermal control is new and lightly soaked.** It works and fails safe (see below), but it has
   hours of runtime, not weeks. Watch `/var/log/thermal` the first time you leave it alone.
 - **No L2 switching, VLANs, MAC learning, LAG, STP, ACLs, QoS, or IPv6 forwarding.**
