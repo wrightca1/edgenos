@@ -49,6 +49,9 @@ int main(int argc, char **argv)
 	 * chip — the scan shift holds those banks inaccessible → PCIe completion-timeout. The old in-loop CAM0
 	 * "liveness" watchpoint was SELF-INFLICTING the block-1024 off-bus. Only touch scan regs during the loop;
 	 * check CAM0 (banks accessible again) AFTER the post-loop commit + settle. */
+	if (fm6000_mrl_table_load() < 0)
+		return 1;
+
 	fprintf(stderr, "[mrl] start: %d blocks (scan-only; no bank reads mid-loop)\n", FM6000_MRL_ENTRIES);
 
 	/* pre-loop: write32(0x1C039, 0x10) */

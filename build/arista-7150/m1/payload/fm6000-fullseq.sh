@@ -22,9 +22,16 @@ say "STEP1 coldreplay (clocks + BOOT_CTRL + BIST + scheduler)"
 say "  rc=$? PIN=$(R 0x1c021) sched=$(R 0x8062)"
 [ "$(R 0x1c021)" = "00000208" ] || { say "off-bus; abort"; exit 2; }
 
-say "STEP2 initsbus + SPICO (SBus master + serdes microcontroller)"
+say "STEP2 initsbus (JSS SBus master)"
 /tmp/fm6000_initsbus $B >> $LOG 2>&1; say "  initsbus rc=$? PIN=$(R 0x1c021)"
-/tmp/fm6000_spico $B /tmp/fm6000_spico_code.bin >> $LOG 2>&1; say "  spico rc=$? PIN=$(R 0x1c021)"
+# NOTE: the Intel SPICO SerDes firmware is deliberately NOT loaded.
+# Proven unnecessary on this platform (2026-08-06): with all 30,002 SPICO IMEM
+# SBus transactions stripped from the replay, Et1 still trains to 10G
+# (PORT_STATUS=0x8c0, pcsRx=1) and the datapath is fully functional
+# (39 frames TX, 29 RX, ICMP 8/8 0% loss). Dropping it removes a 12,000-byte
+# third-party firmware blob from the runtime. See docs/PROVENANCE.md.
+# Caveat: only validated on a short SR fibre link; the SPICO drives RX
+# adaptation, so longer/lossier media may yet need an equaliser strategy.
 
 say "STEP3 memfill (129 memory fills)"
 /tmp/fm6000_memfill $B 0 >> $LOG 2>&1
@@ -34,8 +41,10 @@ say "STEP4 microcode (parser/FFU/mapper + MOD)"
 fm6000_ucode_dbg $B /mnt/flash/ucode_l2.raw   /mnt/flash/u1.log >/dev/null 2>&1; say "  l2 rc=$? PIN=$(R 0x1c021)"
 fm6000_ucode_dbg $B /mnt/flash/ucode_tail.raw /mnt/flash/u2.log >/dev/null 2>&1; say "  tail rc=$? PIN=$(R 0x1c021)"
 
-say "STEP5 FULL REPLAY of EOS's port+forwarding bring-up (394424 writes (CM/PARSER/L2AR/MAPPER no longer wrongly excluded))"
-/tmp/fm6000_fullreplay /tmp/fwd3.txt $B 0 >> $LOG 2>&1
+say "STEP5 FULL REPLAY of EOS's port+forwarding bring-up (299803 writes: BOTH ports + ECMP)"
+# fwd5.txt = fwd4.txt with the 30,002 SPICO-firmware SBus transactions removed
+# (90,006 register writes). Validated end-to-end 2026-08-06. NOT distributable.
+/tmp/fm6000_fullreplay /tmp/fwd5.txt $B 0 >> $LOG 2>&1
 say "  rc=$? PIN=$(R 0x1c021) PORT_STATUS=$(R 0xe3800) pcsRx=$(R 0xe3826) sched=$(R 0x8062)"
 
 say "STEP6 SFP laser"

@@ -180,6 +180,9 @@ static int mrl(void)
 {
     /* NOTE: do NOT read functional regs (CAM0 0x0E000 etc.) over the i2c slave in the scan window —
      * they wedge the mgmt slave (err=-5). Only touch scan regs 0x1C039-0x1C03D + BM status 0x1D08E. */
+    if (fm6000_mrl_table_load() < 0)
+        return -1;
+
     fprintf(stderr, "[i2c-bringup] MRL scan-config START: %d blocks (BM_STATUS 0x1D08E=0x%08x)\n",
             FM6000_MRL_ENTRIES, i2c_rd(0x1D08E));
     int save_v = g_verbose; g_verbose = 0;                   /* silence 25k per-op prints (serial flood) */

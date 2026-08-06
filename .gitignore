@@ -19,3 +19,16 @@ __pycache__/
 # in-tree build artifacts (Makefile builds objects in CWD)
 *.o
 platform/*/edged
+
+# --- provenance: never commit third-party binaries or SDK-derived data ---
+# Compiled tools (built in-tree; do not track ELF objects)
+asic/fm6000/fm6000_i2c_bringup
+asic/fm6000/fm6000_crm
+asic/fm6000/fm6000_wr128
+# Intel/Arista firmware, microcode and register-trace transcriptions.
+# These are third-party works. They may be used locally for interoperability
+# work but MUST NOT be committed or distributed. See docs/PROVENANCE.md.
+*_spico_code.bin
+ucode_*.raw
+fwd*.txt
+*mrl_table.h
