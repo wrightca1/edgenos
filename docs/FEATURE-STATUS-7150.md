@@ -16,9 +16,9 @@ The **dataplane is up**: cold boot → 10G link → packets both ways → hardwa
 decrement and MAC rewrite. The **control plane is up**: OSPF peers with a neighbouring switch and
 learns a full routing table.
 
-Put plainly: this is a switch that boots itself, forwards in hardware, and speaks a routing
-protocol — with no EOS involved. The remaining gap is FIB sync: OSPF's routes land in the Linux
-kernel but are not yet pushed into the ASIC automatically.
+Put plainly: **this is a working router.** It boots itself from cold, brings up its own ASIC,
+peers with a neighbour over OSPF, learns a routing table, programs that table into silicon, and
+forwards on it — with no EOS involved anywhere.
 
 ---
 
@@ -113,7 +113,7 @@ down→up (`shutdown`/`no shutdown` — the "shut == cold" trick already proven 
 | ECMP | ⚠️ | group present and both NEXTHOP entries exist; **not yet exercised** (needs Et2 up) |
 | **OSPF** | ✅ | **Full adjacency with the AS5610, both sides confirming.** Complete routing table learned incl. a default route. Chain: ASIC → punt → TAP → kernel → ospfd → zebra → kernel FIB |
 | Port as a Linux netdev | ✅ | `fm6000_portd` — `et1` is a real interface; ping answered by the kernel stack |
-| FIB sync (kernel → ASIC) | ❌ | the last link: `fm6000_route` programs the hardware but nothing drives it from the kernel FIB yet |
+| FIB sync (kernel → ASIC) | ✅ | `fm6000_fibd` mirrors the kernel FIB into hardware. OSPF-learned prefixes verified forwarded in silicon (`ttl 40 → 39` on `10.22.1.0/24`) |
 | BGP / other protocols | ❌ | not built (the `quagga` component supports it) |
 | IPv6 | ❌ | parser recognises `0x86dd`, nothing above it |
 
