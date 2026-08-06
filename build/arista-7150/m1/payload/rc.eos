@@ -1,0 +1,7 @@
+#!/bin/sh
+# ONE-SHOT cold-trace arm: capture FocalPointV2's first (cold) fm6000BootSwitch reg-ops.
+# EosInit runs this early (before agents) via subprocess.Popen -> a setsid'd background
+# watcher survives rc.eos exit. Self-renames so it only fires once.
+mv /mnt/flash/rc.eos /mnt/flash/rc.eos.ran 2>/dev/null
+setsid /bin/bash /mnt/flash/fpcoldwatch.sh </dev/null >/dev/null 2>&1 &
+exit 0

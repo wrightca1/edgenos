@@ -243,7 +243,7 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
     if [ -f "$UC" ] && command -v fm6000_ucode_dbg >/dev/null 2>&1; then
         cm "COLD89 loading microcode (SKIP MOD 0x150000-0x15ffff = the off-bus block; checkpoint to flash)..."
         UCODE_SKIP_MOD=1 fm6000_ucode_dbg $B "$UC" /mnt/flash/ucode-ckpt.log 2>&1 | sed 's/^/[COLD89-UCODE] /' > /dev/console 2>&1
-        cm "COLD89 post-ucode: CAM0=0x$(RG 0x0e000) ESCHED0=0x$(RG 0x02000) ckpt=$(tail -1 /mnt/flash/ucode-ckpt.log 2>/dev/null)"
+        cm "COLD89 post-ucode: CAM0=0x$(RG 0x0e000) ckpt=$(tail -1 /mnt/flash/ucode-ckpt.log 2>/dev/null)"   # NOTE: do NOT read ESCHED 0x2000 here — reading it off-buses the chip (phase90)
     sync 2>/dev/null
     else
         cm "COLD87 WARN: microcode $UC or fm6000load missing"

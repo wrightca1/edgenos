@@ -44,13 +44,18 @@ int main(int argc, char **argv)
 	M = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (M == MAP_FAILED) { perror("mmap"); return 1; }
 
-	uint32_t cam0_pre = rd(R_CAM0);
-	fprintf(stderr, "[mrl] start: CAM0=0x%08x  %d blocks\n", cam0_pre, FM6000_MRL_ENTRIES);
-	if (cam0_pre == 0xffffffff) { fprintf(stderr, "[mrl] ABORT: chip already off-bus\n"); return 1; }
+	/* NOTE (phase90, disasm re-verify of 0x47a4bc): fm6000MrlRegisterFix issues ZERO accesses outside
+	 * 0x1C039-0x1C03D for the whole routine. Reading a BANKED memory (CAM0 0x0E000) mid-scan off-buses the
+	 * chip — the scan shift holds those banks inaccessible → PCIe completion-timeout. The old in-loop CAM0
+	 * "liveness" watchpoint was SELF-INFLICTING the block-1024 off-bus. Only touch scan regs during the loop;
+	 * check CAM0 (banks accessible again) AFTER the post-loop commit + settle. */
+	fprintf(stderr, "[mrl] start: %d blocks (scan-only; no bank reads mid-loop)\n", FM6000_MRL_ENTRIES);
 
 	/* pre-loop: write32(0x1C039, 0x10) */
 	wr(R_SCAN_SEL, 0x10);
 
+	int first_ff = -1;               /* first block where SCAN_D reads all-ones (safe off-bus proxy) */
+	uint32_t first_ff_t1 = 0, first_ff_t2 = 0;
 	for (int i = 0; i < FM6000_MRL_ENTRIES; i++) {
 		uint32_t t1 = fm6000_mrl_table[i][0];
 		uint32_t t2 = fm6000_mrl_table[i][1];
@@ -63,23 +68,20 @@ int main(int argc, char **argv)
 		if ((s & 0x300) != 0x100) s = rd(R_SCAN_D);   /* vendor: single optional re-read */
 		(void)rd(R_SCAN_C);                            /* read to advance the scan chain */
 
-		/* liveness watchpoint: bail early if the chip off-buses mid-scan */
-		if ((i & 0x3ff) == 0) {
-			uint32_t c = rd(R_CAM0);
-			if (c == 0xffffffff) {
-				fprintf(stderr, "[mrl] OFF-BUS at block %d (t1=0x%x t2=0x%x)\n", i, t1, t2);
-				return 1;
-			}
-		}
+		if (s == 0xffffffff && first_ff < 0) { first_ff = i; first_ff_t1 = t1; first_ff_t2 = t2; }
 	}
+	fprintf(stderr, "[mrl] scan loop done; first SCAN_D=0xffffffff at block %d (t1=0x%x t2=0x%x)\n",
+		first_ff, first_ff_t1, first_ff_t2);
 
-	/* final commit + 20ms settle */
+	/* final commit + 20ms settle. NOTE: this write sets 0x1C03A=0x80000040 = block clocks OFF. Do NOT read
+	 * any BANKED memory (CAM0/MCAST/...) after this until the caller re-enables block clocks (0x1C03A=
+	 * 0xffffffff) — a bank read with clocks off times out → PCIe off-bus (phase90; the scan itself is clean). */
 	wr(R_CFG_DIN, 0x80000040);
 	usleep(20000);
-
-	uint32_t cam0_post = rd(R_CAM0);
-	fprintf(stderr, "[mrl] done: CAM0=0x%08x (was 0x%08x) %s\n",
-		cam0_post, cam0_pre, cam0_post == 0xffffffff ? "*** OFF-BUS ***" : "alive");
+	uint32_t scan_post_commit = rd(R_SCAN_D);  /* scan reg only — safe liveness */
+	fprintf(stderr, "[mrl] done: scan complete, SCAN_D post-commit=0x%08x %s"
+		" (clocks now OFF via 0x1C03A=0x80000040; caller must re-enable before bank access)\n",
+		scan_post_commit, scan_post_commit == 0xffffffff ? "*** off-bus ***" : "alive");
 	munmap((void *)M, len); close(fd);
-	return cam0_post == 0xffffffff ? 1 : 0;
+	return scan_post_commit == 0xffffffff ? 1 : 0;
 }

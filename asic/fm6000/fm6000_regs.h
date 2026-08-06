@@ -302,8 +302,10 @@
 #define FM6000_DMA_IM            0x5034u    /* interrupt mask                   */
 /* 0x5038+ : cur_tx/rx_data_ptr, cur_bd_ptr, tx_frame_len, dma_cfg,
  * frame_timeout, stat counters, core_ctrl[2], core_debug[3] (fab_dump). */
-#define FM6000_DMA_CFG2          0x505Cu    /* engine cfg; fpdma_init writes 0x30f */
-#define FM6000_DMA_CFG2_INIT     0x30Fu
+#define FM6000_DMA_CFG2          0x505Cu    /* engine cfg (BAR0 BYTE offset, not a word addr) */
+/* 0x71f = read live off a WORKING EOS (2026-08-05, oracle capture). The old 0x30f came from a vendor
+ * disasm and differs in bits 4,6,8,9,10. See fm6000-golden-forwarding-targets memory. */
+#define FM6000_DMA_CFG2_INIT     0x71Fu
 #define FM6000_DMA_UNK68         0x5068u    /* fpdma_init writes 0 here          */
 /* PCIe DMA Command codes (datasheet Table 7-2, §7.10.2.1). The command register
  * takes a COMMAND CODE, not a bitmask — the old "0x3 = enable both" was wrong

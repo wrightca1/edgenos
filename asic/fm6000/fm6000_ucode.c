@@ -88,18 +88,36 @@ long fm6000_load_csr_image(struct fm6000_dev *dev, const char *path, int verify)
  * the SPICO sequence below is complete and reviewable; the trace fills only this
  * function.
  */
-static int fm6000_sbus_write(struct fm6000_dev *dev, uint32_t slave_reg, uint32_t val)
+/* SBus transaction over the JSS SBus master (0xF001/2/3). `reg` = {Address[15:8], Register[7:0]}
+ * (e.g. 0xFD0C = receiver 0xFD, register 0x0C). Op 0x21=write / 0x22=read. Decoded verbatim from
+ * libFocalpointSDK.so (fm6000WriteSBus@0x479e09, executor @0x477c54); LIVE-VALIDATED on the 7150.
+ * NOTE: 0xF004 (SBUS_SPICO Reset/Enable) is a DIRECT CSR, not routed through here. */
+#define FM6000_SBUS_COMMAND_R  0xF001u
+#define FM6000_SBUS_REQUEST_R  0xF002u
+#define FM6000_SBUS_RESPONSE_R 0xF003u
+#define FM6000_SBUS_OP_WRITE   0x21u
+#define FM6000_SBUS_OP_READ    0x22u
+static int fm6000_sbus_xact(struct fm6000_dev *dev, uint32_t op, uint32_t reg, uint32_t *val)
 {
-    /* TODO(live-trace 0xB0500): pack {slave_reg, val, WRITE} into the SBus
-     * controller command/address/data CSRs and poll the done bit. Shape (to be
-     * confirmed against a captured trace):
-     *   csr_write(SERDES_WR + CMD,  (slave_reg << 8) | SBUS_OP_WRITE);
-     *   csr_write(SERDES_WR + DATA, val);
-     *   csr_poll (SERDES_WR + CMD,  SBUS_DONE, SBUS_DONE, 1000);
-     */
-    (void)dev; (void)slave_reg; (void)val;
+    uint32_t cmd, st = 0; int i;
+    fm6000_csr_write(dev, FM6000_SBUS_REQUEST_R, op == FM6000_SBUS_OP_WRITE ? *val : 0);
+    fm6000_csr_write(dev, FM6000_SBUS_COMMAND_R, 0);
+    cmd = (reg & 0xFFFFu) | (op << 16) | (1u << 24);          /* Execute */
+    fm6000_csr_write(dev, FM6000_SBUS_COMMAND_R, cmd);
+    for (i = 0; i < 100000; i++) {                            /* poll Busy(bit25) */
+        st = fm6000_csr_read(dev, FM6000_SBUS_COMMAND_R);
+        if (!(st & (1u << 25))) break;
+    }
+    if (st & (1u << 25)) { fprintf(stderr, "fm6000: SBus busy timeout reg=0x%04x\n", reg); return -1; }
+    if (((st >> 26) & 7u) != (op == FM6000_SBUS_OP_WRITE ? 1u : 4u)) {
+        fprintf(stderr, "fm6000: SBus rc=%u reg=0x%04x\n", (st >> 26) & 7u, reg); return -1; }
+    if (op == FM6000_SBUS_OP_READ) *val = fm6000_csr_read(dev, FM6000_SBUS_RESPONSE_R);
     return 0;
 }
+static int fm6000_sbus_write(struct fm6000_dev *dev, uint32_t slave_reg, uint32_t val)
+{ return fm6000_sbus_xact(dev, FM6000_SBUS_OP_WRITE, slave_reg, &val); }
+static int fm6000_sbus_read(struct fm6000_dev *dev, uint32_t slave_reg, uint32_t *val)
+{ return fm6000_sbus_xact(dev, FM6000_SBUS_OP_READ, slave_reg, val); }
 
 int fm6000_load_spico(struct fm6000_dev *dev, const char *path)
 {
