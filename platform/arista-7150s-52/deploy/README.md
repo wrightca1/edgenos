@@ -14,18 +14,41 @@ tcpdump at the AS5610:
     44:4c:a8:31:5d:ab > 01:00:5e:00:00:05  10.101.101.26 > 224.0.0.5: OSPFv2 Hello
     80:a2:35:81:ca:b4 > 01:00:5e:00:00:05  10.101.101.25 > 224.0.0.5: OSPFv2 Hello
 
-**The adjacency does not form yet.** The remaining gap is the multicast CPU punt:
-the ASIC must trap 224.0.0.0/8 to the CPU so ospfd actually receives the peer's
-hellos. EdgeNOS already documents this for the 5610 (`core/control-plane/build-quagga.sh`):
+**The adjacency does not form yet — but NOT for the reason first assumed.**
 
-  > "edged mirrors the kernel FIB to the chip ... so ANY daemon that installs to
-  >  the kernel gets HW-programmed for free — OSPF needs only this daemon + the
-  >  control-traffic CPU punt (already in edged: FP 224/8 trap + CPU_CONTROL_1
-  >  TTL1 traps + MC copy-replication regs)."
+### The FFU trap is NOT needed — the punt already works
 
-So the FM6000 needs the equivalent: an FFU rule matching 224.0.0.0/8 with a
-CPU-GLORT action. Unicast punt already works (a ping from the peer is answered by
-the kernel stack through `et1`).
+`fm6000_rxdump` shows the peer's OSPF hellos already arriving at the CPU, correctly
+framed, on the cold-booted chip:
+
+```
+01 00 5e 00 00 05 | 80 a2 35 81 ca b4 | 07 01 03 ef 00 01 ff ff | 08 00 45 c0 ... 59
+DMAC (AllSPFRouters) SMAC (peer)         F64 tag                   IPv4, proto 0x59 = OSPF
+```
+
+So the ASIC already traps 224.0.0.5 to the CPU. The `FP 224/8 trap` that the 5610
+needs is either already present in the replayed configuration or unnecessary on
+this part. **No FFU rule was written, and none appears to be required.**
+
+### What is actually still broken
+
+Both directions are proven independently:
+ - our hellos reach the peer (tcpdump at the AS5610)
+ - the peer's hellos reach our CPU (`fm6000_rxdump`)
+ - unicast works end to end (peer's ping answered by the kernel stack, 6/6)
+
+but ospfd does not pair them into an adjacency. Suspects, in order:
+ 1. `portd`'s tag-splice for these frames — the scan matches the ethertype at
+    offset +20 and rewrites the header; worth dumping exactly what lands on the
+    TAP versus what the peer sent.
+ 2. Multicast delivery to ospfd's socket. `et1` reports `multicast=0` even while
+    frames flow (may just be a TAP driver stat, not proof).
+ 3. Stale daemon instances: repeated bring-ups leave unreapable `[zebra]`/`[ospfd]`
+    entries. They look like zombies, but always confirm only ONE live pair.
+
+Next concrete step: sniff the TAP side directly (add a debug dump to `portd`, or
+build a static tcpdump for the image) and compare byte-for-byte against the frame
+the peer transmitted.
 
 ## Running it
 
