@@ -1,0 +1,162 @@
+# DCS-7150S-52 (FM6000 "Alta") — Feature Status
+
+**Updated 2026-08-06.** What works, what doesn't, and what has never been tested — for EdgeNOS
+running cold on the Arista 7150 with **no EOS at runtime**.
+
+Every ✅ below is backed by a specific observation on hardware, quoted in the Evidence column.
+Anything not directly observed is marked ❓ **untested**, not assumed working.
+
+Legend: ✅ working · ⚠️ partial · ❌ not implemented / broken · ❓ untested
+
+---
+
+## Headline
+
+The **dataplane is up on one port**: cold boot → 10G link → packets both directions → our own
+IP stack answering ARP and ICMP. The **control plane is not**: there is no routing, no learned
+switching, and no second port.
+
+Put plainly: this is a working *NIC-through-a-switch-ASIC*, not yet a switch.
+
+---
+
+## 1. Boot and platform
+
+| Feature | Status | Evidence |
+|---|:--:|---|
+| Aboot loads unsigned SWI | ✅ | boots `edgenos-m1-clean2.swi`; no signature/TPM enforcement |
+| M1 kernel + initramfs | ✅ | busybox rootfs, 6.12.0, boots to shell in ~40 s |
+| Self-contained tool image | ✅ | 24 tools staged in `/usr/bin`; no runtime `wget` needed |
+| Mgmt Ethernet (tg3) | ✅ | 10.1.1.77 reachable, SSH via dropbear |
+| Serial console | ✅ | ttyS0 @9600 via 10.22.1.56 |
+| SCD (FPGA) reg access | ✅ | `scdreg`, watchdog `0x0120`, power-cycle `0x7000<-0xdead` |
+| Boot-config self-revert | ✅ | `init-m1` rewrites boot-config → EOS each boot, so any unattended reboot lands on EOS |
+| Recovery when both lifelines die | ✅ | serial → Ctrl-C → `Aboot#` → rewrite boot-config. **Aboot has `wget`** |
+| Kernel build reproducibility | ❌ | the Aug-1 `KDIR` rebuild is **broken** (no NIC IRQ, no block devices). Must use the Jul-30 kernel from `bist17.swi` |
+
+## 2. ASIC bring-up (cold, no EOS)
+
+| Feature | Status | Evidence |
+|---|:--:|---|
+| FM6000 PCIe enumeration | ✅ | `8086:155b` at `02:00.0` after SCD reset release |
+| Clocks / BOOT_CTRL / BIST | ✅ | `fm6000_coldreplay`; `PIN_STRAP=0x208` |
+| Scheduler circulation | ✅ | `0x8062=0x00200200` cold |
+| Memory init (129 fills) | ✅ | `fm6000_memfill` by direct MMIO; broke the MCAST bank wall |
+| JSS SBus master | ✅ | `fm6000_initsbus`; transactions complete, Busy clears |
+| Microcode (parser/L2AR/MOD) | ✅ | loads; **required** — without it the chip forwards nothing |
+| SerDes SPICO firmware | ⚠️ | **not loaded, and not needed for SR fibre** (proven by bisect). May be needed for copper — see §3 |
+| Full config replay | ⚠️ | works, but it is a **299,803-write transcription of EOS**, not our own configuration. This is the core technical debt |
+
+## 3. Ports, SerDes and link
+
+| Feature | Status | Evidence |
+|---|:--:|---|
+| Et1 — 10GBASE-**SR** (fibre) | ✅ | `PORT_STATUS=0x8c0`, `pcsRx=1`, far-end AS5610 swp6 carrier up. Reproduced across many cold boots |
+| Et2 — 10GBASE-**CR** (DAC copper) | ❌ | `PORT_STATUS=0x815`, **`pcsRx=0`** cold. Far end reports "Link detected: yes" — so *our TX is fine, our RX never locks* |
+| Same port under EOS | ✅ | EOS links Et2 at 10G, `0` input errors ⇒ **the DAC and the port are healthy; the gap is our bring-up** |
+| SFP laser / port enable | ✅ | SCD `0x5010` (Et1), `0x5020` (Et2), clear bit 6 |
+| Remaining 50 ports | ❓ | never attempted |
+| Link up/down events, autoneg | ❓ | no link-state monitoring exists |
+
+**Why Et2 fails — best current theory.** `EPL_CFG_B` (`PcsSel=3`) is *identical* on both ports, so
+the PCS type is not the difference. The golden EOS capture shows the delta is in the SerDes tuning
+words, and SPICO — which we deliberately dropped — is exactly what drives **RX equaliser
+adaptation**, which matters far more on copper than on short fibre:
+
+| EPL cfg | Et1 (SR) | Et2 (CR) |
+|---|---|---|
+| `+5` / `+6` | `04` / `03` | `0a` / `0a` |
+| `+7` | `c9` | `96` |
+| `+b` / `+c` | `30` / `30` | `10` / `03` |
+| `+d` | `0a24` | `0eb6` |
+
+Captured in `notes/reference/fm6000-golden-epl-Et1-SR-vs-Et2-CR.txt`. This may be the caveat in
+`PROVENANCE.md §3.1` coming true — *"validated on a short SR fibre link only"*.
+
+## 4. Dataplane (packet DMA)
+
+| Feature | Status | Evidence |
+|---|:--:|---|
+| CPU → wire (inject) | ✅ | 30 frames queued, `DONE=30`, **+39 counted at the far-end AS5610** |
+| Wire → CPU (punt) | ✅ | 28 frames received into the RX ring |
+| F64 tag handling | ✅ | 8-byte tag inline at frame offset 12; stripped at egress (far end parses our frames) |
+| Per-port egress steering | ⚠️ | works via the F64 tag's GLORT word, but **the GLORT↔port mapping is not stable** — it must be read out of the trace, not assumed |
+| DMA kernel module | ✅ | `fm6000dma.ko`, coherent low-4 GiB pool + MSI |
+| RX ring accounting | ⚠️ | `fm6000_rxcount` **double-counts** (re-arms before DMA clears DONE). Don't quote its numbers |
+| Multi-queue / QoS / rate limit | ❌ | not implemented |
+
+## 5. Switching (L2)
+
+| Feature | Status | Evidence |
+|---|:--:|---|
+| GLORT / DMask / L2F steering | ⚠️ | programmed by the replay; works for CPU-injected traffic |
+| **Port-to-port hardware switching** | ❓ | **never tested** — every frame so far has had the CPU as source or destination. Needs a second working port |
+| MAC learning | ❌ | no learning, no aging, no `L2L_SWEEPER` use |
+| VLANs (tagging, PVID, filtering) | ❓ | untested; EOS runs both ports as `routed`, not switched |
+| STP / LACP / LAG | ❌ | not implemented |
+| Broadcast/multicast replication | ❌ | MCAST bank initialises, but replication is untested |
+
+## 6. Routing (L3) — **the direct answer**
+
+| Feature | Status | Evidence |
+|---|:--:|---|
+| L3 **endpoint** (host) | ✅ | our own userspace stack answers ARP who-has and ICMP echo for `10.101.101.26`. **ping 8/8, 0% loss** |
+| **Hardware routing / forwarding** | ❌ | **not implemented.** `NEXTHOP` (`0x160000`) has just **34 writes** in the whole replay — no route entries. `fm6000_l3.c` only *replies*; it contains no forwarding path, no TTL decrement, no MAC rewrite |
+| Route table / FIB programming | ❌ | nothing writes routes into the ASIC |
+| ARP/neighbour table in hardware | ❌ | ARP is answered in software, not resolved into a hardware adjacency |
+| ECMP | ⚠️ | an ECMP *group* is present in the replayed config; **never exercised** |
+| OSPF / BGP / any routing protocol | ❌ | no control plane at all |
+| IPv6 | ❌ | parser recognises `0x86dd`, nothing above it |
+
+> **Is routing working? No.** What works is a *host* — the switch answers pings addressed to it,
+> from its own software stack, on one port. That is genuinely useful (it proves TX, RX, tag
+> handling and the IP path end to end) but it is **not routing**: no packet has ever been
+> *forwarded through* this switch between two networks.
+>
+> Two things block the test, and both are real work, not configuration:
+> 1. **Et2 doesn't link cold**, so there is no second port to route to (§3).
+> 2. **No FIB.** Even with two ports, nothing programs routes into `NEXTHOP`/L3AR, so the ASIC
+>    would have no route to act on.
+
+**The test to run, once Et2 links** (config already exists on the EOS side, so the topology is
+proven): our switch holds `10.101.101.26/29` on Et1 and `10.101.101.34/29` on Et2, peering with the
+AS5610 at `.25` and `.33`. Put swp7 in a network namespace on the AS5610 so its kernel cannot
+short-cut between the two directly-connected subnets, then ping from the `.24/29` side to a host on
+the `.32/29` side. If the frame arrives with **TTL decremented and MACs rewritten**, hardware
+routing works.
+
+## 7. Platform hardware
+
+| Feature | Status | Evidence |
+|---|:--:|---|
+| SFP presence / EEPROM / DOM | ⚠️ | SCD SMBus reachable; topology extracted; no monitoring loop |
+| 3rd-party transceiver unlock | ✅ | key = `MD5(licensee + Arista copyright)[0:4]` BE, must be present at boot |
+| **Thermal loop** | ❌ | **P1 SAFETY.** MAX6658 on SMBus 0:2 @0x4c, FM6000 die crit 100 °C, fans on CPU-card CPLD @0x60. **Nothing reads temperature or drives fans** |
+| PSU / LED / CPLD status | ❌ | cosmetic, not implemented |
+| Watchdog | ⚠️ | works, but **must be petted every ~10 s or it resets the board**; arming it without a petting loop is a self-inflicted reboot |
+
+## 8. Distribution / licensing
+
+| Item | Status |
+|---|:--:|
+| Repo free of third-party blobs (FM6000 side) | ✅ |
+| SerDes SPICO firmware dependency | ✅ removed |
+| FM6000 microcode | ❌ still third-party; replaceable — it is a documented TCAM (see `PROVENANCE.md §4`) |
+| Config replay `fwd5.txt` | ❌ EOS transcription; must be generated |
+| Cumulus-derived tables (AS5610 side) | ⚠️ still in-tree, undecided — `PROVENANCE.md` |
+
+---
+
+## What to fix next, in order
+
+1. **Thermal loop** — the only *safety* item on this list. Everything else is a feature; this one
+   can damage hardware.
+2. **Et2 / copper link.** Unblocks every multi-port capability: switching, routing, ECMP, LAG.
+   Start by re-testing with the SPICO firmware loaded to confirm or kill the RX-adaptation theory;
+   the golden SR-vs-CR register deltas are already captured.
+3. **A real FIB** — program `NEXTHOP`/L3AR from a route table so the ASIC can forward. This is what
+   makes it a router rather than a host.
+4. **Port-to-port switching test** — the cheapest big win once Et2 is up; likely already works,
+   since the replay programs GLORT/DMask/L2F.
+5. **Replace the replay** with generated configuration (`PROVENANCE.md §4`), which also retires the
+   last distribution blocker.
