@@ -51,3 +51,6 @@ asic/fm6000/fm6000_mrl
 asic/fm6000/fpdma_probe
 asic/fm6000/fm6000_i2c_bringup
 build/*/m1/payload/fpdma_probe
+# 7050sx2 build artifacts (kernel + initrd) -- regenerable, never commit
+build/*/m0/linux-i386
+build/*/m0/initrd-i386
