@@ -53,14 +53,22 @@ fm6000_ucode_dbg $B /mnt/flash/ucode_tail.raw /mnt/flash/u2.log >/dev/null 2>&1;
 say "STEP5 FULL REPLAY of EOS's port+forwarding bring-up (299803 writes: BOTH ports + ECMP)"
 # fwd5.txt = fwd4.txt with the 30,002 SPICO-firmware SBus transactions removed
 # (90,006 register writes). Validated end-to-end 2026-08-06. NOT distributable.
-# PACE THE REPLAY. Running unpaced (0) makes the 10GBASE-CR (DAC) link on Et2
-# come up only ~40% of the time; at 2000us per 4k ops it came up 3/3. The SerDes
-# needs settle time between steps and EOS gets it for free (it polls and waits).
-# Et1 (10GBASE-SR fibre) is tolerant and links either way. The failure is LATCHED
-# at bring-up: once Et2 misses lock, replaying EOS's own port-bounce sequence --
-# even 6 times, even the full 2,632-write version with the SBus lane reset --
-# does not recover it. See docs/ET2-COPPER-LINK.md.
-$BIN/fm6000_fullreplay "$FWD" $B ${PACE:-2000} >> $LOG 2>&1
+# PACE THE REPLAY -- and note the units. fm6000_fullreplay sleeps `pace` us once
+# every 16384 ops, so over ~390k writes it fires only ~23 times. PACE=2000 adds
+# 46 ms in total, i.e. effectively nothing; the default below adds ~34 s, which
+# is a real slowdown.
+#
+# Why: the 10GBASE-CR (DAC/copper) link on Et2 comes up only intermittently when
+# the replay is blasted at full speed. Et1 (10GBASE-SR fibre) is tolerant and
+# links either way -- an optical RX needs no equalisation, a copper RX does, and
+# equalisation needs settle time. EOS gets that for free because it polls and
+# waits between steps.
+#
+# EVIDENCE IS THIN -- do not treat this as settled: unpaced 2/5, genuinely paced
+# 1/1. The failure is LATCHED at bring-up: once Et2 misses lock, replaying EOS's
+# own port-bounce -- 6 times, including the full 2,632-write version with the
+# SBus lane reset -- does not recover it. See docs/ET2-COPPER-LINK.md.
+$BIN/fm6000_fullreplay "$FWD" $B ${PACE:-1500000} >> $LOG 2>&1
 say "  rc=$? PIN=$(R 0x1c021) PORT_STATUS=$(R 0xe3800) pcsRx=$(R 0xe3826) sched=$(R 0x8062)"
 
 say "STEP6 SFP laser"

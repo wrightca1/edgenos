@@ -34,15 +34,23 @@ Per-port egress steering works on both ports simultaneously.
 Original note kept for the record — run #1 was the only success at the time of writing** — not by rerunning the same script, and
 not by recreating its apparent precondition (EOS having just had the link up).
 
-## ROOT CAUSE FOUND: the replay was running too fast
+## Leading theory: the replay runs too fast — but the evidence is thin
 
-**Pacing the replay fixes it.** `fm6000_fullreplay` takes a pace argument (µs per 4k ops); we had
-been running it at **0**.
+⚠️ **A previous revision of this file claimed "ROOT CAUSE FOUND". That claim was wrong** and is
+retracted. It rested on a 3/3 result at `PACE=2000`, but `fm6000_fullreplay` sleeps `pace`
+microseconds **once every 16384 ops**, not per op — so over ~390k writes it fires ~23 times and
+`PACE=2000` adds **46 ms in total**. That is effectively no pacing at all, and 3/3 was luck.
 
-| replay pacing | Et2 success rate |
-|---|---|
-| `0` (unpaced, full speed) | **2 / 5** |
-| `2000` µs per 4k ops | **3 / 3** |
+Re-tested with a delay big enough to matter (`PACE=1500000` ≈ **34 s** added):
+
+| replay pacing | real added delay | Et2 success |
+|---|---|---|
+| `0` (unpaced) | 0 | **2 / 5** |
+| `2000` (≈ unpaced) | 46 ms | 3 / 4 |
+| `1500000` | ~34 s | **1 / 1** |
+
+One properly-controlled success is **not** proof. The theory is plausible and now the default, but
+it needs more trials before anyone should believe it.
 
 The mechanism fits every observation:
 
