@@ -5,95 +5,103 @@ x86_64 with `CFLAGS=-fcommon` — modern GCC defaults to `-fno-common` and Quagg
 `lib/prefix.h` has a tentative `__packed` definition that then multiply-defines.
 `--disable-nhrpd` avoids the libcares dependency.
 
-## Status (2026-08-06)
+## Status: OSPF IS UP (2026-08-06)
 
-Both daemons run on the switch, `et1` is a real Linux interface (`fm6000_portd`),
-and **OSPF hellos are exchanged on the wire in both directions** — confirmed by
-tcpdump at the AS5610:
-
-    44:4c:a8:31:5d:ab > 01:00:5e:00:00:05  10.101.101.26 > 224.0.0.5: OSPFv2 Hello
-    80:a2:35:81:ca:b4 > 01:00:5e:00:00:05  10.101.101.25 > 224.0.0.5: OSPFv2 Hello
-
-**The adjacency does not form yet — but NOT for the reason first assumed.**
-
-### The FFU trap is NOT needed — the punt already works
-
-`fm6000_rxdump` shows the peer's OSPF hellos already arriving at the CPU, correctly
-framed, on the cold-booted chip:
+Full adjacency with the AS5610, confirmed from both sides:
 
 ```
-01 00 5e 00 00 05 | 80 a2 35 81 ca b4 | 07 01 03 ef 00 01 ff ff | 08 00 45 c0 ... 59
-DMAC (AllSPFRouters) SMAC (peer)         F64 tag                   IPv4, proto 0x59 = OSPF
+ours:  10.101.101.241   Full/DR       et1:10.101.101.26
+peer:  10.101.255.26    Full/Backup   swp6:10.101.101.25
 ```
 
-So the ASIC already traps 224.0.0.5 to the CPU. The `FP 224/8 trap` that the 5610
-needs is either already present in the replayed configuration or unnecessary on
-this part. **No FFU rule was written, and none appears to be required.**
-
-### Fixed since: FCS + MTU
-
-**1. The ASIC appends the 4-byte Ethernet FCS to punted frames.** portd was passing
-it through, making every frame 4 bytes too long. Verified by hexdumping both sides:
+and a complete OSPF routing table learned from the network, including a default:
 
 ```
-ASIC raw len=90:  01 00 5e 00 00 05 | 80 a2 35 81 ca b4 | 07 01 03 ef 00 01 ff ff | 08 00 45 c0 00 40 ...
-TAP  spliced len=78: 01 00 5e 00 00 05 | 80 a2 35 81 ca b4 | 08 00 | 45 c0 00 40 ...
+default       via 10.101.101.25 dev et1  metric 20
+10.3.1.0/24   via 10.101.101.25 dev et1  metric 20
+10.22.1.0/24  via 10.101.101.25 dev et1  metric 20
+10.101.1.0/29 ... 10.101.1.32/29 ...
 ```
 
-78 bytes with IP total length 0x0040 = 64 -> a clean 44-byte OSPF Hello. The RX
-path is now byte-correct; portd strips both the F64 tag and the FCS.
+The chain works end to end: **ASIC -> punt -> TAP -> kernel -> ospfd -> zebra ->
+kernel FIB.** The remaining link is FIB sync (kernel -> ASIC); `fm6000_route`
+already programs the hardware, it just is not driven automatically yet.
 
-**2. MTU.** The peer's swp6 is **1600** with `MTU mismatch detection: enabled`;
-`et1` defaulted to 1500. That alone would stall the adjacency in ExStart even
-once hellos are clean. `et1` is now set to 1600.
+## The four things that had to be right
 
-### What is actually still broken
-
-Both directions are proven independently:
- - our hellos reach the peer (tcpdump at the AS5610)
- - the peer's hellos reach our CPU (`fm6000_rxdump`)
- - unicast works end to end (peer's ping answered by the kernel stack, 6/6)
-
-but ospfd does not pair them into an adjacency. Suspects, in order:
-**Our ospfd emits a malformed Hello.** The peer sees length **48** where a
-no-neighbour Hello is 44, and the extra 4 bytes decode as a neighbour entry whose
-router-id is **different in every packet**:
+**1. The ASIC expects a 4-byte FCS placeholder on INJECT.** This was the last and
+least obvious bug. The ASIC appends an FCS to frames it punts to us, and it
+*symmetrically expects one on the way back*. Without it the DMA consumed the last
+4 bytes of real payload — so every OSPF Hello lost its final field, which is the
+neighbour entry. The symptom was maddening: everything before the last field was
+pristine, and the corrupted value looked *random* rather than damaged, because it
+was whatever followed in memory.
 
 ```
-Hello Timer 10s, Dead Timer 40s, Mask 255.255.255.248, Priority 1
-Neighbor List:
-  17.186.86.252      <- random, changes per Hello
+Neighbor List:                 Neighbor List:
+  17.186.86.252     ->           10.101.101.241
+  (random each Hello)            (the actual peer)
 ```
 
-The peer therefore never registers us (`Neighbor Count is 0`). Since the RX path
-is now verified byte-correct, this is ospfd's own state, not frame corruption on
-the way in. Ruled out so far:
+`fm6000_portd` now appends the placeholder (`PORTD_TXFCS=1`, on by default in the
+service recipe below). **Anything else that injects frames needs the same.**
 
- - **FFU/multicast trap** — not needed, hellos already reach the CPU.
- - **Config mismatch** — area 0, /29 mask, hello 10 / dead 40 all match the peer.
- - **`-fcommon` packing** — only `struct ethaddr` uses `__packed` (6 chars, no
-   padding), so the no-op is harmless. `__packed` is undefined on glibc and
-   silently declares a variable, which is why the build needed `-fcommon`.
+**2. The ASIC appends an FCS on PUNT** — strip it, or every frame reaches the
+kernel 4 bytes too long. (`FCS_LEN` in portd.)
 
-Remaining suspects, in order:
- 1. Something in the Quagga 1.2.4 + modern-glibc build. Worth trying a distro
-    FRR/Quagga binary, or building with `-D__packed='__attribute__((packed))'`
-    and without `-fcommon`, to see whether the malformed Hello persists.
- 2. Our own multicast being looped back to the CPU and parsed as a peer.
- 3. Stale daemon instances: repeated bring-ups leave unreapable `[zebra]`/`[ospfd]`
-    entries that `killall -9` will not clear. Always confirm exactly ONE live pair
-    before trusting a negative result.
+**3. `lo` is down in the initramfs.** Nothing brings loopback up, so `127.0.0.1`
+is unreachable, Quagga's VTY cannot be reached at all, and daemon state is
+invisible. Bring it up before starting zebra/ospfd — this is what unblocked
+diagnosis and took us from "no visibility" to seeing `Init`.
+
+**4. MTU.** The peer's swp6 is 1600 with `MTU mismatch detection: enabled`; `et1`
+defaults to 1500, which stalls the adjacency in ExStart.
+
+## Building Quagga for x86_64
+
+Quagga 1.2.4, the same component the AS5610 uses. Apply `quagga-packed.patch`
+first: `__packed` is a BSD-ism glibc does not define, so `} __packed;` silently
+declares a *global variable* instead of packing the struct — which is why an
+unpatched build fails with "multiple definition of `__packed`". Patching it is
+correct; reaching for `-fcommon` merely hides it.
+
+```
+patch -p1 < quagga-packed.patch
+./configure --prefix=/usr --sysconfdir=/etc/quagga --localstatedir=/var/run/quagga \
+  --enable-user=root --enable-group=root --enable-vty-group=root \
+  --disable-ripd --disable-ripngd --disable-bgpd --disable-isisd --disable-pimd \
+  --disable-babeld --disable-nhrpd --disable-doc --disable-ospfclient \
+  --disable-ospf6d --disable-watchquagga CFLAGS="-O2"
+make -j8
+```
+Binaries land in `zebra/.libs/zebra` and `ospfd/.libs/ospfd` (the top-level ones
+are libtool wrappers). Ship `libzebra.so.1`, `libospf.so.0` and `libm.so.6` in
+`/usr/lib`. `--disable-nhrpd` avoids the libcares dependency.
 
 ## Running it
 
-    mkdir -p /dev/net && mknod /dev/net/tun c 10 200   # not in the initramfs
-    insmod /lib/modules/6.12.0/kernel/drivers/net/tun.ko
-    fm6000_portd et1 03ef x 0 &
-    ip link set et1 address 44:4c:a8:31:5d:ab; ip link set et1 up
-    ip addr add 10.101.101.26/29 dev et1
-    LD_LIBRARY_PATH=/usr/lib zebra -d -f /etc/quagga/zebra.conf
-    LD_LIBRARY_PATH=/usr/lib ospfd -d -f /etc/quagga/ospfd.conf
+```sh
+insmod /lib/modules/6.12.0/extra/fm6000dma.ko
+insmod /lib/modules/6.12.0/kernel/drivers/net/tun.ko
+mkdir -p /dev/net && mknod /dev/net/tun c 10 200      # not in the initramfs
 
-Needs `libzebra.so.1`, `libospf.so.0`, `libm.so.6` in `/usr/lib`.
+ip link set lo up && ip addr add 127.0.0.1/8 dev lo   # REQUIRED (see #3)
+ip addr add 10.101.255.26/32 dev lo                   # stable router-id
+
+PORTD_TXFCS=1 fm6000_portd et1 03ef x 0 &
+ip link set et1 address 44:4c:a8:31:5d:ab
+ip link set et1 mtu 1600 && ip link set et1 up
+ip addr add 10.101.101.26/29 dev et1
+
+export LD_LIBRARY_PATH=/usr/lib
+zebra -d -f /etc/quagga/zebra.conf
+ospfd -d -f /etc/quagga/ospfd.conf
+```
+
+Check with `telnet 127.0.0.1 2604` (password `zebra`), `show ip ospf neighbor`.
+
 **Never `wget -O` over a library in `/lib64` on the running initramfs** — that is
-how SSH got broken during bring-up.
+how SSH got broken during bring-up. Stage into `/usr/lib` instead.
+
+Throughput caveat: portd's TX does a `TX_STOP -> fill -> TX_START` per frame
+(~10 ms), capping near 100 pps. Fine for a control plane; it is not a data path.

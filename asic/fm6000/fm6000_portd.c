@@ -58,6 +58,7 @@ static uint16_t TAG[4] = { 0x0100, 0x03ef, 0xff00, 0x0000 };
 static volatile sig_atomic_t stop_flag;
 static unsigned long n_rx, n_tx, n_rx_drop;
 static int dbg;                      /* PORTD_DEBUG=N -> hexdump first N frames */
+static int tx_fcs;                   /* PORTD_TXFCS=1 -> append an FCS placeholder */
 
 static void hexdump(const char *tag, const uint8_t *p, int n)
 {
@@ -157,7 +158,18 @@ static void inject(const uint8_t *frame, int len)
         out[12 + 2 * w + 1] = TAG[w] & 0xff;
     }
     memcpy(out + 12 + F64_LEN, frame + 12, len - 12);         /* ethertype ... */
+    if (dbg > 0) { dbg--;
+        hexdump("TAP->portd (from kernel)", frame, len);
+        hexdump("portd->ASIC (tag inserted)", out, len + F64_LEN); }
     tlen = len + F64_LEN;
+    /* The ASIC appends a 4-byte FCS to frames it punts to us. Symmetrically it
+     * may EXPECT a 4-byte FCS placeholder on inject, which it then recomputes.
+     * If so, omitting it makes the DMA consume the last 4 bytes of real payload.
+     * PORTD_TXFCS=1 appends the placeholder so we can test that directly. */
+    if (tx_fcs) {
+        memset(out + tlen, 0, FCS_LEN);
+        tlen += FCS_LEN;
+    }
     if (tlen < 72) tlen = 72;                                 /* min frame     */
 
     /* The TX engine will NOT pick work up on its own: fpdma_tx only queues a
@@ -195,6 +207,8 @@ int main(int argc, char **argv)
 
     if (argc > 2) TAG[1] = (uint16_t)strtoul(argv[2], 0, 16);
     { const char *d = getenv("PORTD_DEBUG"); if (d) dbg = atoi(d); }
+    { const char *d = getenv("PORTD_TXFCS"); if (d) tx_fcs = atoi(d); }
+    printf("portd: tx_fcs=%d\n", tx_fcs);
 
     struct fpdma_kmod *k = NULL;
     size_t bsz = 0;

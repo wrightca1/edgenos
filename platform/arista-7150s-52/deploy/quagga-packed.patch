@@ -1,0 +1,15 @@
+--- /dev/fd/63	2026-08-06 14:48:47.302845849 -0400
++++ /tmp/prefix_patched.h	2026-08-06 14:48:47.302845849 -0400
+@@ -38,6 +38,12 @@
+ #define ETHER_ADDR_LEN  ETHERADDRL
+ #endif
+ 
++/* glibc does not provide the BSD __packed; without this, "} __packed;" declares a
++ * global variable instead of packing the struct (and multiply-defines it). */
++#ifndef __packed
++#define __packed __attribute__((__packed__))
++#endif
++
+ /*
+  * there isn't a portable ethernet address type. We define our
+  * own to simplify internal handling
