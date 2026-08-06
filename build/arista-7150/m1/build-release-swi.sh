@@ -53,14 +53,15 @@ echo "--- building tools from source ---"
 built=0
 # standalone, single-file
 for t in fm6000_coldreplay fm6000_initsbus fm6000_memfill fm6000_fullreplay \
-         fm6000_spico fm6000_mrl fm6000_ucode_dbg fm6000_i2c_bringup fm6000_route; do
+         fm6000_spico fm6000_mrl fm6000_ucode_dbg fm6000_i2c_bringup \
+         fm6000_route fm6000_fibd; do
     [ -f "$A/$t.c" ] || continue
     cc -O2 -I"$A" -o "$P/$t" "$A/$t.c" 2>/dev/null && built=$((built+1)) \
         || echo "    WARN: $t failed to build"
 done
 # multi-object (need the DMA/hw helpers)
 DEPS="$A/fpdma.c $A/fpdma_kmod.c $A/fm6000_hw.c"
-for t in fm6000_txinline fm6000_l3 fm6000_portd; do
+for t in fm6000_txinline fm6000_l3 fm6000_portd fm6000_rxdump; do
     [ -f "$A/$t.c" ] || continue
     cc -O2 -I"$A" -o "$P/$t" "$A/$t.c" $DEPS 2>/dev/null && built=$((built+1)) \
         || echo "    WARN: $t failed to build"
@@ -89,6 +90,25 @@ for b in "$P"/fm6000_* "$P"/scdreg "$P"/resettool "$P"/kexec "$P"/pcicfg "$P"/sc
     [ -f "$b" ] && [ -x "$b" ] && { cp "$b" "$WORK/usr/bin/"; n=$((n+1)); }
 done
 cp "$P"/*.sh "$WORK/usr/lib/edgenos/platform/" 2>/dev/null || true
+
+# ---- control plane: zebra + ospfd (Quagga), if built --------------------------
+# Third-party GPL, built per platform/arista-7150s-52/deploy/README.md. Optional:
+# without them the image still boots and forwards, it just has no routing protocol.
+CP="${CONTROL_PLANE:-}"
+if [ -n "$CP" ] && [ -d "$CP" ]; then
+    for b in zebra ospfd; do
+        [ -f "$CP/$b" ] && { cp "$CP/$b" "$WORK/usr/bin/"; chmod +x "$WORK/usr/bin/$b"; }
+    done
+    for l in libzebra.so.1 libospf.so.0 libm.so.6; do
+        [ -f "$CP/$l" ] && cp "$CP/$l" "$WORK/usr/lib/"
+    done
+    mkdir -p "$WORK/etc/quagga" "$WORK/var/run/quagga"
+    cp "$EROOT/platform/arista-7150s-52/deploy/zebra.conf" "$WORK/etc/quagga/" 2>/dev/null || true
+    cp "$EROOT/platform/arista-7150s-52/deploy/ospfd.conf" "$WORK/etc/quagga/" 2>/dev/null || true
+    echo "    control plane: zebra + ospfd + configs"
+else
+    echo "    control plane: SKIPPED (set CONTROL_PLANE=<dir with zebra/ospfd/libs>)"
+fi
 chmod +x "$WORK/usr/lib/edgenos/platform/"*.sh 2>/dev/null || true
 cp "$HERE/init-m1" "$WORK/init"; chmod +x "$WORK/init"
 echo "    staged $n tools + $(ls "$WORK/usr/lib/edgenos/platform" | wc -l) scripts"
