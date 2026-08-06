@@ -1,6 +1,8 @@
-# EdgeNOS for the Arista DCS-7150S-52 — 0.3.0-alpha1 (early release)
+# EdgeNOS for the Arista DCS-7150S-52 — 0.3.0-alpha2 (early release)
 
-**Built 2026-08-06 from `0a865fa`.** `edgenos-7150-0.3.0-alpha1.swi`, 18,712,557 bytes.
+**Built 2026-08-06.** `edgenos-7150-0.3.0-alpha2.swi`, 18,713,677 bytes.
+
+**alpha2 adds thermal management** — see below. alpha1 had none and should not be used.
 
 An early release: a switch that boots itself from cold, brings up an Intel FM6000 ASIC with no
 vendor SDK, forwards in hardware, speaks OSPF, and programs the routes it learns into silicon —
@@ -14,6 +16,7 @@ This is alpha. Read the limitations before putting it near anything you care abo
 
 ```
 cold boot -> Et1 0x8c0 rx=1, Et2 0xcc0 rx=1        both 10G links up automatically
+thermal   -> sensors found, die 37 C, fans 100%->40%   automatic, no manual steps
 OSPF converged in 48 s                              35 routes learned from the peer
 fibd programmed 13 routes into the hardware FIB
 ttl 50 -> 49 through an OSPF-learned prefix         forwarded by the ASIC
@@ -28,6 +31,7 @@ fibd → ASIC.**
 - **21 FM6000 tools built from source in this repo** — cold bring-up, packet DMA, port netdev,
   route programming, FIB sync, diagnostics
 - **Control plane**: Quagga zebra + ospfd (GPL) with working configs
+- **Thermal control** (`thermal-control.sh`) — starts automatically at boot
 - Automatic dataplane bring-up at boot (`init-m1`)
 - `edgenos-up.sh` — one command for the whole stack
 
@@ -71,6 +75,31 @@ sh /usr/lib/edgenos/platform/edgenos-up.sh
 which loads the modules, brings up loopback, creates `et1`, and starts zebra, ospfd and fibd.
 Edit `/etc/quagga/ospfd.conf` for your topology first.
 
+## Thermal management
+
+Starts automatically at boot; no manual step. Reads the MAX6658 (board + FM6000 die) on SCD SMBus
+master 0 bus 2 and drives the four fans via the `raven-fan-driver` hwmon PWMs.
+
+Measured on this image: fans drop from the hardware default **PWM 255 (~17,900 RPM) to PWM 102
+(~11,700 RPM)** with the die steady at 37–38 °C — much quieter, same temperature.
+
+**It is written to fail loud, not quiet.** In priority order:
+
+| rule | behaviour |
+|---|---|
+| 1 | any sensor read failure, missing hwmon or unparsable value → **PWM 255** |
+| 2 | never commands below `PWM_FLOOR` (40%), so airflow never stops |
+| 3 | die ≥ 85 °C → **PWM 255** and a loud log line (crit is 100 °C) |
+| 4 | ramping *down* needs a full 5 °C hysteresis band, so it cannot oscillate |
+| 5 | a fan present but reading 0 RPM → **PWM 255** and a loud log line |
+| — | on SIGTERM/SIGINT it sets **PWM 255** before exiting |
+
+Both failure paths were tested on hardware, not just reasoned about: with the sensor removed it
+goes to 255 and logs `SENSOR READ FAILED`, and on the next poll it re-instantiates the sensor and
+resumes normal control.
+
+Log: `/var/log/thermal`. Tunables are at the top of the script.
+
 ## Limitations — please read
 
 - **Alpha.** One lab switch, one link partner, one afternoon of soak. Not a product.
@@ -85,8 +114,8 @@ Edit `/etc/quagga/ospfd.conf` for your topology first.
 - **The port netdev is a control path, not a data path.** `fm6000_portd` does a
   `TX_STOP → fill → TX_START` per frame (~10 ms), capping near 100 pps. Fine for ARP and OSPF
   hellos. Do not push traffic through it.
-- **No thermal management.** This is the one that can hurt hardware: FM6000 die crit is 100 °C and
-  nothing reads temperature or drives fans. **Do not leave it running unattended.**
+- **Thermal control is new and lightly soaked.** It works and fails safe (see below), but it has
+  hours of runtime, not weeks. Watch `/var/log/thermal` the first time you leave it alone.
 - **No L2 switching, VLANs, MAC learning, LAG, STP, ACLs, QoS, or IPv6 forwarding.**
 - **The config is not persistent** — the initramfs is rebuilt from the SWI on every boot.
 - Restarting `fm6000_portd` repeatedly without a chip reset can wedge the DMA rings (RX silently

@@ -149,6 +149,21 @@ elif [ -x /usr/lib/edgenos/platform/fm6000-up.sh ]; then
 fi
 
 
+
+# --- thermal control (SAFETY) -----------------------------------------------
+# Fans default to PWM 255 in hardware, which is safe but very loud, and nothing
+# watches temperature -- so a failed fan would go unnoticed. Start the controller
+# before anything else so the box is never running unattended without it.
+if [ -x /usr/lib/edgenos/platform/thermal-control.sh ]; then
+    echo "--- thermal control (log: /var/log/thermal) ---"
+    setsid /usr/lib/edgenos/platform/thermal-control.sh -i 5 \
+        </dev/null >/var/log/thermal 2>&1 &
+    sleep 2
+    sed -n '1,3p' /var/log/thermal | sed 's/^/    /'
+else
+    echo "--- thermal control MISSING -- fans stay at hardware default (full speed) ---"
+fi
+
 # --- dataplane auto bring-up ------------------------------------------------
 # Bring the FM6000 all the way to a forwarding switch at boot, so the box comes
 # up as a router with no manual steps. Gated on the replay set being present:
