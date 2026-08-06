@@ -47,9 +47,15 @@ needs. Files whose *behaviour* was recovered that way:
 | `fm6000_mrl.c` | `fm6000MrlRegisterFix @0x47a4bc` |
 | `fm6000_boot.c`, `fm6000_sched.c`, `fm6000_serdes_enable.c`, `fm6000_regs.h` | various |
 
-**One tool does load the SDK:** `tools/fpdshim/` `dlopen`s `libFocalpointSDK.so`. It is a
-diagnostic oracle for comparing our bring-up against the vendor's on live silicon — it is not part
-of EdgeNOS and is not on any runtime path.
+**Nothing in this repository loads the SDK.** `tools/fpdshim/` used to — it `dlopen`ed
+`libFocalpointSDK.so` to drive the vendor SDK from our own userspace, as an alternative to
+hand-replaying the forwarding plane. **It has been removed (2026-08-06).** It was never on a
+runtime path, never referenced by any Makefile, and never actually worked: it stalls at
+`fmPlatformConfig`, a 6,708-byte zero-filled `.bss` object, so `numSwitches=0` and the CSR
+accessors fault. The replay route solved the problem instead, and EdgeNOS's direction is now to
+*generate* its own configuration rather than delegate to the vendor SDK — so the SDK-delegation
+route is a dead end by choice as well as by outcome. Its RE findings are preserved privately in
+`arista/notes/analysis/fm6000-fpdshim-sdk-route-ABANDONED.md`.
 
 **Terminology.** These files previously described themselves as "clean-room". That was inaccurate
 and has been corrected throughout. Clean-room implies a two-team separation in which the
@@ -75,25 +81,43 @@ tree and are blocked by `.gitignore`.
 |---|---:|---:|---|
 | config, non-zero values | 184,005 | 47.2% | yes — facts about how to configure the chip |
 | config, zero-fill (memory clear) | 84,999 | 21.8% | yes — we already generate this (`fm6000_memfill`) |
-| **microcode: parser + L2AR + MOD** | **27,080** | **6.9%** | **no — Intel's program** |
+| **microcode: parser + L2AR + MOD** | **53,108** | **13.6%** | **no — Intel's program** |
 | ~~SerDes SPICO firmware~~ | ~~90,006~~ | ~~23.1%~~ | **removed — see §3.1** |
 
-So after removing the SPICO firmware, **only 6.9% of the replay is genuinely somebody else's
-code.** The other 93% is configuration, and configuration we can generate ourselves.
+So after removing the SPICO firmware, **17.7% of what remains (`fwd5.txt`, 299,803 writes) is
+genuinely somebody else's code**; the other 82% is configuration we can generate ourselves.
+
+Measured against `fwd5.txt` directly:
+
+| content | writes | % |
+|---|---:|---:|
+| configuration, non-zero values | 169,537 | 56.5% |
+| zero-fill (clearing uninitialised SRAM) | 73,439 | 24.5% |
+| **microcode (parser/L2AR/MOD)** | **53,108** | **17.7%** |
+| SBus SerDes tuning (firmware stripped) | 3,719 | 1.2% |
+
+*(An earlier revision of this document put the microcode at 6.9%. That figure came from a
+range-based filter that missed the L2AR block: `ucode_l2.raw` spans `0x100000`–`0x147100`, so L2AR
+is part of the microcode load. Classifying by the exact address set of the microcode files gives
+the correct figure above.)*
 
 ### 2.2 Removed from this repository (2026-08-06)
 
 | File | Why |
 |---|---|
 | `asic/fm6000/fm6000_mrl_table.h` | 6,287-entry table lifted verbatim from `libFocalpointSDK.so`. Replaced with our own runtime loader (below); **not used by the working sequence at all.** |
-| `asic/fm6000/fm6000_i2c_bringup`, `fm6000_crm`, `fm6000_wr128` | compiled ELF binaries committed by accident |
+| `asic/fm6000/fm6000_i2c_bringup`, `fm6000_crm`, `fm6000_wr128` + 8 more in `build/.../payload/` | compiled ELF binaries committed by accident; all have tracked source and build from a clean checkout |
+| `tools/fpdshim/` | SDK-delegation route: `dlopen`ed `libFocalpointSDK.so`. Never worked, never on a runtime path, strategically superseded. Findings preserved privately. |
 
 None of these had ever been pushed, so they never entered public history. `.gitignore` now blocks
 the whole class (`*_spico_code.bin`, `ucode_*.raw`, `fwd*.txt`, `*mrl_table.h`, the ELF tools).
 
-> **Before the branch is pushed:** it is 43 commits ahead of `origin`, and the removed files exist
-> in that unpushed history. Squash or filter the branch so the blobs never reach GitHub. Deleting
-> them in a tip commit is not sufficient.
+**Done (2026-08-06).** The 45 unpushed commits were filtered with `git filter-branch` to strip 31
+paths from every commit — ~90 MB of build artifacts (20 initramfs images, `m1-warm-bzImage`, 10
+payload ELF tools) plus `fm6000_mrl_table.h`. History is otherwise intact. Verified: zero stripped
+paths reachable, zero tracked binaries, and a fresh `--no-hardlinks` clone is **1.1 MB** across all
+202 commits. The pushed base was already clean, so no blob ever reached GitHub. Original history is
+kept locally on `backup/pre-cleanup-20260806`.
 
 ### 2.3 Retained — reviewed and judged distributable
 
@@ -174,9 +198,11 @@ Our measured microcode footprint — 34,089 words in 747 regions — decomposes 
 
 | block | base | words | what it is |
 |---|---|---:|---|
-| PARSER | `0x100000` | ~16,900 | per-slice CAM/RAM pairs, `0x200` apart — visible as paired regions growing 180 → 468 entries as parsing deepens |
-| L2AR | `0x140000` | ~1,600 | L2 action resolution TCAM/action |
-| MOD | `0x150000` | ~15,600 | ~50 small per-modification routines (64–460 words each), e.g. egress tag strip |
+| block | base | writes | distinct words | what it is |
+|---|---|---:|---:|---|
+| PARSER | `0x100000` | 22,246 | 17,616 | per-slice CAM/RAM pairs, `0x200` apart — paired regions growing 180 → 468 entries as parsing deepens. **Only 2,117 populated CAM entries.** |
+| L2AR | `0x140000` | 26,376 | 12,467 | L2 action-resolution TCAM/action — **the largest block by write count** |
+| MOD | `0x150000` | 4,204 | 3,768 | ~50 small per-modification routines (64–460 words each), e.g. egress tag strip |
 
 And the action encoding is documented: **Table 5-3 "Parser Action SRAM Encoding"**, with
 Table 5-4 (header flags), Table 5-5 (fixed field mapping) and Table 5-6 (action flags). The CAM
@@ -229,9 +255,9 @@ initially).
 
 | # | Task | Effect |
 |---|---|---|
-| 1 | Parser program generator (CAM/RAM from a protocol description) | removes the largest microcode block |
-| 2 | MOD routine generator — start with egress F64 tag strip | removes MOD |
-| 3 | L2AR action table generator | removes the last microcode |
+| 1 | Parser program generator (CAM/RAM from a protocol description) | 22,246 writes; best-understood block, 2,117 CAM entries |
+| 2 | L2AR action-table generator | 26,376 writes — the largest block; do it alongside the parser |
+| 3 | MOD routine generator — start with egress F64 tag strip | 4,204 writes; smallest, and the tag strip is the piece we already need |
 | 4 | Config generator to replace the remaining 93% of the replay | removes `fwd5.txt` entirely; we already understand GLORT/dmask/SAF/CM/EPL/`EPL_CFG_B` |
 | 5 | Derive `fm6000_serdes_ports.h` by measurement | removes the last Arista-derived data |
 
