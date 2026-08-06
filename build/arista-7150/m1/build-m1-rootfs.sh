@@ -63,7 +63,13 @@ FM6000DMA_KO="$EROOT/asic/fm6000/kmod/fm6000dma.ko"
 PAY="$HERE/payload"
 if [ -d "$PAY" ]; then
     mkdir -p "$R/usr/bin" "$R/lib64" "$R/lib/x86_64-linux-gnu"
-    for b in kexec resettool scdreg fm6000_bringup si5338 pcicfg scddump fm6000reg fm6000load fm6000_i2c_bringup fm6000_l2_probe fpdma_probe fm6000_crm fm6000_sched fm6000_wr128 fm6000_mrl fm6000_ucode_dbg; do
+    # base tools + the cold bring-up sequence (fm6000-fullseq.sh) so the image is
+    # self-contained and needs no runtime wget of tooling.
+    for b in kexec resettool scdreg fm6000_bringup si5338 pcicfg scddump fm6000reg fm6000load \
+             fm6000_i2c_bringup fm6000_l2_probe fpdma_probe fm6000_crm fm6000_sched fm6000_wr128 \
+             fm6000_mrl fm6000_ucode_dbg \
+             fm6000_coldreplay fm6000_initsbus fm6000_memfill fm6000_fullreplay fm6000_spico \
+             fm6000_txinline fm6000_l3; do
         [ -f "$PAY/$b" ] && { cp "$PAY/$b" "$R/usr/bin/"; chmod +x "$R/usr/bin/$b"; }
     done
     # bundle the dynamic loader + libc for the (non-static) tools
