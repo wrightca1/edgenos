@@ -136,6 +136,51 @@ distinguished a good replay from a broken one).
 
 Steps 1–2 remove `fwd4.txt`. Steps 3–4 remove `ucode_*.raw`. At that point the image is whole.
 
+## Validated on hardware: the SAF generator (2026-08-07)
+
+Step 1 of the route, tested on a cold boot of the real switch.
+
+| | original replay | SAF generated |
+|---|---|---|
+| writes | 389,809 | **355,480** (−34,329) |
+| Et1 link | `0x8c0` -> `0xcc0`, pcsRx=1 | **identical** |
+| Et2 (copper) | `0x815` (down) | `0x815` — same, pre-existing |
+| SAF end state | accumulated over 111 iterations | **byte-identical**, written once |
+| OSPF | adjacency, 35 kernel routes | **adjacency, 35 kernel routes** |
+| hardware FIB | 13 routes programmed | **13 routes programmed** |
+| ping to neighbour | works, then degrades | works, then degrades |
+
+**The 34,668-write SAF accumulation is unnecessary.** Writing the completed matrix in 168 writes
+brings the switch up cold, forms an OSPF adjacency, learns 33 routes and programs 13 of them into
+silicon. `0x0a0054 = 0010000f` and `0x0a00a0 = 00000007` read back exactly as generated.
+
+### ⚠ A pre-existing bug this surfaced: ping degrades over time
+
+The first SAF boot showed ping loss climbing 40% -> 70% -> 90% -> 100%, which looked like a leak we
+had introduced. It is not. The control — a cold boot of the **unmodified** replay, same procedure —
+degrades the same way:
+
+```
+control (original replay), successive 10-ping rounds:
+    0%   0%  70%  60%  10%  70%  50%  60%  90%  80%
+management path (eth0) over the same period:  0%
+```
+
+So the dataplane punt path degrades regardless of SAF, while management is clean. The
+"L3 PING WORKS 10/10, 0% loss" result recorded earlier was a fresh-boot snapshot and does **not**
+hold over minutes. This is a real, separate defect and it needs its own investigation — most likely
+the portd DMA ring rather than the ASIC, given `edgenos-up.sh` already warns that restarting portd
+wedges RX.
+
+### Method note: in-place re-runs cannot test forwarding
+
+Re-running `fm6000-fullseq.sh` on a live box is fine for link-level checks but useless for
+forwarding: **both** the SAF replay and the unmodified control gave `et1 rx=0` that way. Only cold
+boots produce a valid signal. Two further traps found the hard way: alpha4's `init-m1` rewrites
+`boot-config` back to EOS on every boot (a deliberate one-shot safety net, so each EdgeNOS boot must
+be armed), and the initramfs regenerates its SSH host key, so `ssh-keygen -R` is needed between
+boots or the reconnect looks like a hung box.
+
 ## The three pieces, hardest last
 
 ### 1. SPICO firmware — 23.1%, and possibly deletable
