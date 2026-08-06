@@ -83,9 +83,70 @@ Everything needed to implement hardware routing ourselves:
 3. **Slice config** — the `0x3b0/0x3b4/0x3b8/0x3bc` groups configure the FFU slices that perform the
    lookup. This is the part still to be decoded properly.
 
-**Next step:** capture a *second* route addition and diff it against this one. The delta isolates
-exactly which writes are "insert one prefix" versus one-time slice setup — which is the last thing
-needed before we can generate routes ourselves rather than replay them.
+## 4. Marginal cost of a route — measured
+
+The 1,159 writes of the first capture were mostly **one-time FFU slice setup**. Measured against a
+proper noise floor (tracing armed, nothing changed):
+
+| capture | 30 s window | non-polling |
+|---|---:|---:|
+| baseline (no change) | 393 writes | **0** |
+| add 5 routes | 718 writes | **220** |
+
+⇒ **~65 writes per route**, and the baseline is *entirely* JSS/SBus SerDes polling
+(`int(0x20, lane)`) — useful to know, because it means any route trace must have that subtracted or
+it drowns the signal. An earlier 7-second capture showed "162 writes, all JSS/SBus" and *zero*
+route programming: the window was too short and the noise looked like content.
+
+## 5. The data structures, confirmed
+
+Adding 5 routes (`10.31.0.0` … `10.35.0.0`) rewrote the prefix array repeatedly, and the successive
+snapshots show exactly how it behaves:
+
+```
+0x33bfce <- 0x0a020000   10.2.0.0     0x33bfcb <- 0x0a010100   10.1.1.0
+0x33bfd9 <- 0x0a1f0000   10.31.0.0    ...
+0x33bfda <- 0x0a200000   10.32.0.0    0x33bfd9 <- 0x0a210000   10.33.0.0
+                                      0x33bfda <- 0x0a220000   10.34.0.0
+                                      0x33bfdb <- 0x0a230000   10.35.0.0
+```
+
+- **Sorted array, one word per prefix**, holding the network address as a plain `u32`.
+- **It grows downward**: the base moved `0x33bfce` → `0x33bfcb` as entries were added, and the whole
+  array from the insertion point is rewritten. That is the per-route cost, and it scales with table
+  size, not with insertion position.
+- **Two copies, `0x400` words apart** (`0x33bbxx` and `0x33bfxx`) — double-buffered.
+
+**Parallel action array at `0x337xxx`, two words per entry:**
+
+```
+0x337fee = 0x0800000a
+0x337fef = 0x00014000
+```
+
+**Commit strobe** after each batch:
+
+```
+0x33c09e <- 0x00000000
+0x33c09f <- 0x00000f1e
+0x3f0000 <- 0x00000002
+```
+
+## 6. What is now needed to route
+
+Everything except the FFU slice configuration is understood:
+
+| piece | where | status |
+|---|---|---|
+| adjacency (MAC + egress GLORT) | `NEXTHOP 0x160000 + 10*idx` | ✅ decoded |
+| prefix array (sorted, 1 word each, ×2 copies) | `0x33bxxx` | ✅ decoded |
+| action array (2 words each) | `0x337xxx` | ⚠️ layout known, fields not decoded |
+| commit strobe | `0x33c09e/9f`, `0x3f0000` | ✅ |
+| FFU slice setup (the one-time ~900 writes) | `0x3b0/3b4/3b8/3bc` | ❌ not decoded |
+
+The slice setup can be taken from the existing replay for now (it is one-time), which means a
+**minimal hardware-routing implementation is reachable**: program a NEXTHOP adjacency, append to the
+sorted prefix array plus its action entry, and hit the commit strobe.
 
 Note this is also the first concrete evidence that ECMP is expressible: two NEXTHOP entries already
 exist (one per port), which is what the pre-existing `10.99.99.0/24` ECMP route uses.
