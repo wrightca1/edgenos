@@ -68,6 +68,74 @@ automatically, which is why CONFIG is 60.8% rather than 43.5%.
 None of it is a program. The two largest blocks (MA table, CM) are regular table fill with
 structure, which is the easiest kind of thing to generate.
 
+## The goal, stated exactly
+
+**Ship an image that needs zero files from EOS.** Today the boot path
+(`fm6000-fullseq.sh`) reads exactly three, and the Si5338 clock map is already gone:
+
+| input | source | status |
+|---|---|---|
+| `/mnt/flash/fwd4.txt` | EOS register trace | **must be generated** |
+| `/mnt/flash/ucode_l2.raw` | EOS | **must be generated** |
+| `/mnt/flash/ucode_tail.raw` | EOS | **must be generated** |
+| ~~`Cotati-Clock-0010.si5338`~~ | Silicon Labs | ✅ eliminated in alpha4 |
+
+Nothing else in the image is third-party except optional Quagga (GPL, redistributable).
+So the whole problem is two files.
+
+## Why this is smaller than 389,809 writes
+
+A trace records EOS's *control flow*, not just its intent. Where EOS ran a per-port loop, the
+trace holds N near-identical copies of one body. A generator only has to reproduce the resulting
+state, plus whatever ordering the hardware genuinely requires. Measured with
+`asic/fm6000/tools/replay_structure.py`:
+
+```
+MMIO writes (excluding SBus)   296,084
+distinct addresses              93,659      <- 3.2x redundancy
+non-zero final values           70,396
+
+outer loop on 0x1a0c00:  336 iterations, 227,745 writes = 77% of all MMIO
+    L2F + LBS core        74,034 writes  ->  only 8 distinct variants
+    per-port remainder   153,711 writes  ->  SAF, CM, EPL, L2L
+```
+
+**A quarter of the entire replay is eight patterns written 336 times.** One iteration decodes
+cleanly, and it is plainly a generated sweep, not a program:
+
+```
+LBS  0x014000 + k   = (n << 16) | (~n & 0xffff)     0001fffe, 0002fffd, 0003fffc, ...
+L2F  0x1a0c00 + 4j  = 3 words, value 0x09 or 0x0b
+```
+
+That is a `for` loop with two constants in it. The same is true of the SAF and CM bulk: 34,668 SAF
+writes land in 168 distinct addresses (206x), 18,547 LBS writes in 67 (277x).
+
+**This does not mean the replay can simply be de-duplicated.** Ordering has not been shown to be
+irrelevant, and the one time we assumed a category was redundant — the zero-writes — hardware said
+otherwise. The 53% figure the tool prints is a *bound on what a generator must emit*, not a shorter
+replay you can boot. Every reduction gets tested on the switch.
+
+## The route to zero
+
+Each step is independently testable and leaves the previous working state intact. The test harness
+already exists and gives a clean signal: link state plus packet count at the far end (`+60` vs `+0`
+distinguished a good replay from a broken one).
+
+1. **Reproduce the loop.** Emit the 336-iteration sweep from a generator (8 core variants + the
+   per-port SAF/CM/EPL body) and splice it into `fwd4` in place of the recorded writes. If the
+   switch still forwards, 77% of the replay is ours. This is the single highest-value experiment
+   and it needs no new decoding.
+2. **Generate the per-port blocks** — SAF, CM, EPL — parameterised by the platform description we
+   already have (port map, GLORT allocation, MTU). One block at a time, replace and test.
+3. **Generate the parser microcode.** TCAM + action SRAM, published encoding, 2,117 populated CAM
+   entries. Kills part of `ucode_*.raw`.
+4. **Generate MOD, then L2AR.** Finishes the microcode files.
+5. **Decide SPICO** on the Et2 copper answer. It is inline in the replay, not a separate file, and
+   Et1 already forwards without it.
+
+Steps 1–2 remove `fwd4.txt`. Steps 3–4 remove `ucode_*.raw`. At that point the image is whole.
+
 ## The three pieces, hardest last
 
 ### 1. SPICO firmware — 23.1%, and possibly deletable

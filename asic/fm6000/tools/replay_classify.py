@@ -29,26 +29,32 @@ import collections
 import sys
 
 # word-address ranges, from fm6000_api_regs_int.h / docs/ROUTING-FIB.md
+# Block address map. These are the chip's top-level base/size pairs -- interface
+# facts, each one independently confirmable from our own traces by where writes
+# actually cluster. An earlier hand-guessed version of this table was wrong in
+# several places (it invented an "MA_TABLE" at 0x1A0000, which is really L2F).
 BLOCKS = [
-    (0x000000, 0x001000, "MGMT1"),        (0x001000, 0x002000, "PCIE"),
-    (0x002000, 0x003000, "ESCHED"),       (0x003000, 0x004000, "MONITOR"),
-    (0x004000, 0x005000, "MSB"),          (0x005000, 0x006000, "FIBM"),
-    (0x006000, 0x007000, "EACL"),         (0x007000, 0x008000, "LAG"),
-    (0x008000, 0x00B000, "SSCHED"),       (0x00B000, 0x00C000, "HASH"),
-    (0x00C000, 0x00D000, "ALU"),          (0x00D000, 0x00E000, "L2L_SWEEPER"),
-    (0x00E000, 0x00F000, "GLORT"),        (0x00F000, 0x010000, "JSS/SBus"),
-    (0x010000, 0x014000, "L3AR"),         (0x014000, 0x018000, "LBS"),
-    (0x018000, 0x01A000, "STATS_AR"),     (0x01A000, 0x01C000, "STATS_DISCRETE"),
-    (0x01C000, 0x01E000, "MGMT2"),
-    (0x020000, 0x028000, "CMM"),          (0x030000, 0x040000, "L2L"),
-    (0x0A0000, 0x0B0000, "SAF"),          (0x0E0000, 0x100000, "EPL"),
-    (0x100000, 0x110000, "PARSER"),       (0x110000, 0x120000, "CM"),
-    (0x120000, 0x130000, "MAPPER"),       (0x130000, 0x140000, "POLICERS"),
-    (0x140000, 0x150000, "L2AR"),         (0x150000, 0x160000, "MOD"),
-    (0x160000, 0x170000, "NEXTHOP"),      (0x180000, 0x190000, "L2F"),
-    (0x190000, 0x1A0000, "L2F_HI"),       (0x1A0000, 0x1B0000, "MA_TABLE"),
-    (0x200000, 0x240000, "STATS"),        (0x240000, 0x280000, "MCAST"),
-    (0x280000, 0x290000, "L2L_MAC"),      (0x300000, 0x400000, "FFU"),
+    (0x000000, 0x001000, "MGMT1"), (0x001000, 0x002000, "PCIE"),
+    (0x002000, 0x003000, "ESCHED"), (0x003000, 0x004000, "MONITOR"),
+    (0x004000, 0x005000, "MSB"), (0x005000, 0x006000, "FIBM"),
+    (0x006000, 0x007000, "EACL"), (0x007000, 0x008000, "LAG"),
+    (0x008000, 0x009000, "SSCHED"), (0x00B000, 0x00C000, "HASH"),
+    (0x00C000, 0x00D000, "ALU"), (0x00D000, 0x00E000, "L2L_SWEEPER"),
+    (0x00E000, 0x00F000, "GLORT"), (0x00F000, 0x010000, "JSS"),
+    (0x010000, 0x014000, "L3AR"), (0x014000, 0x015000, "LBS"),
+    (0x018000, 0x01A000, "STATS_AR"), (0x01A000, 0x01B000, "STATS_DISCRETE"),
+    (0x01C000, 0x020000, "MGMT2"), (0x020000, 0x028000, "CMM"),
+    (0x028000, 0x029000, "FC_BEM"), (0x030000, 0x038000, "L2L"),
+    (0x0A0000, 0x0A1000, "SAF"), (0x0B0500, 0x0C0500, "SERDES_ETH_WRITE"),
+    (0x0C0500, 0x0D0500, "SERDES_ETH_READ"), (0x0D1100, 0x0D1500, "SERDES_PCIE_WRITE"),
+    (0x0D2100, 0x0D2500, "SERDES_PCIE_READ"), (0x0E0000, 0x100000, "EPL"),
+    (0x100000, 0x110000, "PARSER"), (0x110000, 0x120000, "CM"),
+    (0x120000, 0x130000, "MAPPER"), (0x130000, 0x140000, "POLICERS"),
+    (0x140000, 0x150000, "L2AR"), (0x150000, 0x160000, "MOD"),
+    (0x160000, 0x180000, "NEXTHOP"), (0x180000, 0x200000, "L2F"),
+    (0x200000, 0x240000, "STATS_BANK"), (0x240000, 0x260000, "MCAST_MID"),
+    (0x260000, 0x280000, "MCAST_POST"), (0x280000, 0x300000, "L2L_MAC"),
+    (0x300000, 0x400000, "FFU"),
 ]
 
 
