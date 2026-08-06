@@ -34,6 +34,40 @@ Per-port egress steering works on both ports simultaneously.
 Original note kept for the record — run #1 was the only success at the time of writing** — not by rerunning the same script, and
 not by recreating its apparent precondition (EOS having just had the link up).
 
+## ROOT CAUSE FOUND: the replay was running too fast
+
+**Pacing the replay fixes it.** `fm6000_fullreplay` takes a pace argument (µs per 4k ops); we had
+been running it at **0**.
+
+| replay pacing | Et2 success rate |
+|---|---|
+| `0` (unpaced, full speed) | **2 / 5** |
+| `2000` µs per 4k ops | **3 / 3** |
+
+The mechanism fits every observation:
+
+- **Intermittent.** A missing register write fails 100% of the time. A timing-dependent
+  initialisation fails *sometimes* — exactly what we saw with byte-identical inputs.
+- **Latched at bring-up.** Once Et2 misses lock, nothing recovers it: not 8 retries of the EPL
+  sequence, not 6 replays of EOS's *complete* 2,632-write port bounce including the SBus lane reset
+  (`op20`). A mis-sequenced SerDes init cannot be undone by a port bounce.
+- **Only copper.** Et1 (10GBASE-SR fibre) links every time either way — an optical receiver needs no
+  equalisation. Et2 (10GBASE-CR DAC) needs its RX equaliser to converge, and that needs settle time.
+- **EOS always works** because it never bulk-writes: it polls, waits, and re-checks between steps.
+
+The failure state decodes precisely from `PORT_STATUS`:
+
+```
+0x8c0 (good) = RxLinkUp | HeartbeatOk | SerXmit
+0x815 (bad)  = LinkFaultDebounced=1, LinkFaultMac=1, LinkFaultRx=1, SerXmit=1
+```
+
+`LinkFaultRx = 1` is a **local** fault (0=none, 1=local, 2=remote): our PCS never achieves block
+lock. In one sample `Receiving=1` was also set — signal present, but undecodable. Classic
+equalisation failure.
+
+`fm6000-fullseq.sh` now paces by default (`PACE=2000`, override with `PACE=<µs>`).
+
 ## What that means for earlier conclusions
 
 Both of these were stated too strongly and are **withdrawn**:

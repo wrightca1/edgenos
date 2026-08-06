@@ -1,0 +1,52 @@
+#!/bin/sh
+# EdgeNOS M0 stage-0 boot -- DCS-7050SX2-72Q (Trident2+ / "magpie", SID PortolaSPlus)
+#
+# Derived from the 7150 M0 boot0. Aboot exports $swipath and provides busybox
+# unzip + kexec. RAM-only: nothing here writes flash.
+#
+# PLATFORM DELTAS vs the 7150 version (see td2plus docs/M0-ON-7050SX2.md):
+#
+#   reboot=p   (NOT "p,force")
+#       The 7150 needed reboot=p,force because its AP cores wedge post-kexec and
+#       reboot -f loops in stop_other_cpus(). This board reboots cleanly -- EOS's
+#       own cmdline here is plain "reboot=p", and "reload now" has never failed.
+#
+#   nosmp
+#       Kept for the FIRST boot only, as a conservative default inherited from
+#       the 7150. This box has 4 cores (AMD Family 16h) and no known post-kexec
+#       SMP problem. Once M0 boots, drop nosmp and reclaim them.
+#
+#   dmamem
+#       NOT set here. EOS passes dmamem=136M on this platform (platform=magpie;
+#       PortolaSPlus is not in the 272M SID list). M0 does not touch the ASIC so
+#       it is unnecessary -- but it IS required from M1 onward, once anything
+#       does DMA. Do not forget it then.
+#
+#   console
+#       ttyS0 @ 9600 -- same as the 7150. Confirmed against this box's boot
+#       banner, not assumed.
+#
+# The SCD watchdog is left ARMED on purpose: if this kernel hangs, the board
+# resets itself back into EOS. That is the recovery path, not a bug.
+
+kernel=linux-i386
+arch=i386
+: "${swipath:=$0}"
+
+if [ -d "${swipath}" ]; then
+   cp "${swipath}/${kernel}" "${swipath}/initrd-${arch}" /tmp/
+else
+   unzip -oq "${swipath}" "${kernel}" "initrd-${arch}" -d /tmp
+fi
+
+echo "console=ttyS0,9600 earlyprintk=serial,ttyS0,9600 rdinit=/init panic=10 nosmp reboot=p" \
+     > /tmp/append
+
+kexec --load --initrd="/tmp/initrd-${arch}" --append="$(cat /tmp/append)" "/tmp/${kernel}"
+
+# Honour Aboot's --testonly: stage the image but do not jump. Unlike the 7150's
+# Aboot 2.1.0, this box's Aboot 6.1.2 genuinely supports this, so Phase D of the
+# runbook is a real dry run.
+[ -z "${testonly}" ] || exit 0
+
+kexec --exec
