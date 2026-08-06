@@ -157,43 +157,82 @@ A release where the only inputs are our own source: no microcode, no replay, no 
 achieved in alpha4), and no SPICO — or SPICO as an optional extra for media that needs it. At that
 point the image is genuinely self-contained and the licensing question closes entirely.
 
-## ★ A shortcut worth taking first: Intel published a BSD-licensed switch SDK
+## Using IES: what the BSD licence actually buys us
 
-Before writing generators from scratch, note that **Intel Ethernet Switch (IES) software is public
-and BSD-3-Clause licensed**: <https://github.com/andriymoroz/IES>. The headers carry
-`Copyright (c) 2007-2014, Intel Corporation` — a range that spans the FM6000 era, not just its
-FM10000 successor.
+**Intel Ethernet Switch (IES)** is public and BSD-3-Clause:
+<https://github.com/andriymoroz/IES> — `Copyright (c) 2005 - 2015, Intel Corporation`.
+Cloned and audited 2026-08-06.
 
-`include/api/fm_api_ffu.h` alone documents, under a permissive licence, exactly the things we could
-not decode from register traces:
+### The licence: yes, we can modify and ship it
 
-| IES structure | what it gives us |
-|---|---|
-| `fm_ffuSliceInfo` | slice config: `keyStart`, `keyEnd`, `actionEnd`, key selectors |
-| `fm_ffuAction` / `fm_ffuActionType` | **the action encoding** — `ROUTE_ARP`, `ROUTE_LOGICAL_PORT`, `SET_FLAGS`, `SET_TRIGGER`, `SET_FIELDS` |
-| `FM_FFU_MUX_SELECT_*` | 40+ packet-field → TCAM-key mappings |
-| `FM_FFU_SCN_*` | scenario encodings (packet type × routing context) |
-| `fm_policerState` | token-bucket rate limiting |
+BSD-3-Clause permits use, modification and redistribution, in source or binary, subject to three
+conditions, all of which we can meet:
 
-The **action array at `0x337xxx`** — two words per entry, listed as "fields not decoded" in
-`ROUTING-FIB.md`, and the single thing blocking `fm6000_fibd` from being a general FIB — is very
-likely described by `fm_ffuAction`. Also present: `fm_api_acl.h`, `fm_api_routing.h`,
-`fm_api_regs.h`.
+1. retain the copyright notice and disclaimer in source redistributions;
+2. reproduce them in the documentation for binary redistributions;
+3. **do not use Intel's name or its contributors' names to endorse or promote** anything derived
+   from it — so EdgeNOS must not be marketed as Intel-endorsed or Intel-supported.
 
-**Two caveats, both important.** IES targets the **FM10000**, a different chip: the *concepts and
-structures* are shared Fulcrum architecture, but **register addresses will not transfer** and must
-still be confirmed against our own traces. And BSD-3-Clause permits use with attribution — it does
-not make Intel's *compiled firmware* redistributable, so SPICO and the microcode images are
-unaffected.
+It is compatible with our GPL-2.0-or-later tree (BSD-3 has no advertising clause). Practically:
+keep any lifted file under its own header, add ours below it, list it in `PROVENANCE.md`, and carry
+`COPYING` into the image's licence directory. **There is no legal obstacle.**
 
-**Why this matters beyond convenience:** today our register knowledge is cross-checked against
-`fm6000_api_regs_int.h`, which is marked INTEL CONFIDENTIAL and lives only in the private notes
-repo. A BSD-licensed reference covering the same architecture would let us re-derive that knowledge
-from a source we can actually cite — improving the provenance story in `PROVENANCE.md`, not just
-saving effort.
+### The engineering: the FM6000 backend was removed from the public drop
 
-**Do this before building generators.** An afternoon reading IES could turn the FFU action array
-from "undecoded" into "documented", which is the difference between slot-reuse and a real FIB.
+This is the part that decides the strategy. `src/api/` has exactly **one** chip backend, `fm10000/`.
+FM6000 survives only as ~2,174 textual references — family enums, `switchFamily ==
+FM_SWITCH_FAMILY_FM6000` branches in shared code, and a handful of prototypes
+(`fm6000ReadSBus`, `fm6000WriteEthSerDes`, `fm6000IdentifySwitch`). **No FM6000 register
+definitions, and no FM6000 chip source.**
+
+| layer | lines | transfers to FM6000? |
+|---|---:|---|
+| `src/api/*.c` chip-independent | 116,326 | **yes** — route/ACL/nexthop/GLORT/LAG/event management |
+| `src/alos/` OS abstraction | 14,432 | yes |
+| `src/platforms/` | 40,329 | partly — includes I2C register access, SMBus |
+| `src/api/fm10000/` chip backend | 271,675 | **no** — wrong chip |
+
+The backend contract is **561 function pointers**. FM10000 fills it with 271k lines. "Change it to
+what we need" is therefore not a port; it is writing a new backend of that scale against someone
+else's API — considerably more work than finishing our own generators, and it would make EdgeNOS
+depend on IES's threading, event and memory model throughout.
+
+### ⚠ Tested: FM10000 register layouts do NOT transfer
+
+The tempting shortcut was the FFU action array at `0x337xxx` — two words per entry, fields
+undecoded, and the one thing blocking `fm6000_fibd` from being a general FIB.
+`FM10000_FFU_SLICE_SRAM` is *also* two words per entry (`_WIDTH 2`), with a documented layout:
+
+```
+Command    bits 22:21     ROUTE_ARP:   ArpIndex 15:0, ArpCount 19:16, ArpType 20
+CounterIdx bits 34:23     ROUTE_GLORT: DGlort 15:0,   FloodSet 20
+Precedence bits 39:37     SET_BITS / SET_VLAN / SET_PRI variants also defined
+```
+
+Applied to our replay: 4,248 writes, 4,092 distinct addresses, **62 real entries** (the rest are a
+uniform `0x00700000` default) in two clusters, entries 1009–1023 and 2001–2047, with `w1` taking
+only two values (`0x00014000`, `0x0001c000`).
+
+Decoding `w0` bits 15:0 as `ArpIndex` yields {5, 6, 7, 10, 11, 12, 14} — but the populated NEXTHOP
+slots in the same replay are {0, 1, 2}. **Zero overlap.** The field is not an ARP index at our
+assumed stride, and `w1`'s two-value distribution is inconsistent with a 40-bit entry. The
+FM6000 encoding is genuinely different, as the two-caveat warning predicted.
+
+**Conclusion: use IES as documentation, not as a dependency.** Its value is that it names the
+concepts and supplies *candidate* encodings to test against our own traces — cheap to try, and a
+negative result costs an afternoon, as above. What it does not supply is FM6000 bit positions.
+
+### The provenance win, which is real
+
+Today our register knowledge is cross-checked against `fm6000_api_regs_int.h`, marked INTEL
+CONFIDENTIAL and held only in the private notes repo. Where IES documents the same architectural
+concept under BSD-3, we can **re-derive and cite that instead** — `fm_api_ffu.h`, `fm_api_routing.h`,
+`fm_api_nexthop.h`, `fm_api_acl.h`. That improves what `PROVENANCE.md` can claim even when the bit
+positions still have to come from our own traces.
+
+**Action:** vendor IES under `third_party/IES/` for reference, cite it in `PROVENANCE.md`, and mine
+`fm_api_ffu.h` for the FFU action *semantics* while deriving the FM6000 bit positions from the
+replay. Do not build against it.
 
 ## Honest assessment
 
@@ -202,7 +241,8 @@ from "undecoded" into "documented", which is the difference between slot-reuse a
 - **Parser microcode** — the genuinely interesting RE. Days to weeks, and the format is published.
 - **L2AR/MOD microcode** — same technique, less documented. Unknown.
 - **SPICO** — not regenerable, only droppable. Depends on the Et2 answer.
-- **Reading IES first** — hours, and it may collapse several of the above.
+- **IES** — read, and it is a reference not a shortcut. The FM10000 FFU layout was tested against
+  our replay and does not fit. Worth citing for provenance; not worth building against.
 
 Also public and worth checking: Intel's FM6000 documentation collection (the datasheet we already
 have came from there), and Silicon Labs' ClockBuilder, which generates `.si5338` register maps from
