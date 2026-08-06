@@ -46,6 +46,10 @@
 
 #define MAX_FRAME 1600
 #define F64_LEN   8
+/* The ASIC appends the 4-byte Ethernet FCS to punted frames. The kernel expects
+ * frames WITHOUT it: leaving it on makes every packet 4 bytes too long, which
+ * ospfd parses as an extra (garbage) neighbour entry in a Hello. */
+#define FCS_LEN   4
 
 static struct fpdma     fp;
 static struct fm6000_dev dev;
@@ -53,6 +57,15 @@ static int      tapfd = -1;
 static uint16_t TAG[4] = { 0x0100, 0x03ef, 0xff00, 0x0000 };
 static volatile sig_atomic_t stop_flag;
 static unsigned long n_rx, n_tx, n_rx_drop;
+static int dbg;                      /* PORTD_DEBUG=N -> hexdump first N frames */
+
+static void hexdump(const char *tag, const uint8_t *p, int n)
+{
+    int i, m = n > 64 ? 64 : n;
+    printf("  %s len=%d:", tag, n);
+    for (i = 0; i < m; i++) printf("%s%02x", (i % 16) ? " " : "\n    ", p[i]);
+    printf("\n"); fflush(stdout);
+}
 
 static void on_signal(int sig) { (void)sig; stop_flag = 1; }
 
@@ -84,8 +97,10 @@ static void on_punt(void *ctx, const void *data, uint16_t len)
     for (off = 0; off + 14 <= (int)len && off < 40; off++) {
         uint16_t et = (raw[off + 12] << 8) | raw[off + 13];
         if (et == 0x0800 || et == 0x0806 || et == 0x86dd || et == 0x8100) {
-            uint16_t n = len - off;
+            int n = (int)len - off - FCS_LEN;            /* drop the trailing FCS */
+            if (n < 14) { n_rx_drop++; return; }
             if (n > MAX_FRAME) n = MAX_FRAME;
+            if (dbg > 0) { dbg--; hexdump("TAP<-ASIC (no tag)", raw + off, n); }
             if (write(tapfd, raw + off, n) < 0 && errno != EAGAIN) n_rx_drop++;
             else n_rx++;
             return;
@@ -94,10 +109,13 @@ static void on_punt(void *ctx, const void *data, uint16_t len)
         if (off + 22 <= (int)len) {
             uint16_t et2 = (raw[off + 20] << 8) | raw[off + 21];
             if (et2 == 0x0800 || et2 == 0x0806 || et2 == 0x86dd || et2 == 0x8100) {
-                uint16_t body = len - off - 20;
-                if (body + 12 > MAX_FRAME) { n_rx_drop++; return; }
+                int body = (int)len - off - 20 - FCS_LEN;  /* ditto */
+                if (body < 0 || body + 12 > MAX_FRAME) { n_rx_drop++; return; }
                 memcpy(clean, raw + off, 12);
                 memcpy(clean + 12, raw + off + 20, body);
+                if (dbg > 0) { dbg--;
+                    hexdump("ASIC raw", raw + off, (int)len - off);
+                    hexdump("TAP<-ASIC (tag spliced)", clean, body + 12); }
                 if (write(tapfd, clean, body + 12) < 0 && errno != EAGAIN) n_rx_drop++;
                 else n_rx++;
                 return;
@@ -176,6 +194,7 @@ int main(int argc, char **argv)
     time_t t0;
 
     if (argc > 2) TAG[1] = (uint16_t)strtoul(argv[2], 0, 16);
+    { const char *d = getenv("PORTD_DEBUG"); if (d) dbg = atoi(d); }
 
     struct fpdma_kmod *k = NULL;
     size_t bsz = 0;
