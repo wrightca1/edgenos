@@ -12,11 +12,13 @@ Legend: ✅ working · ⚠️ partial · ❌ not implemented / broken · ❓ unt
 
 ## Headline
 
-The **dataplane is up on one port**: cold boot → 10G link → packets both directions → our own
-IP stack answering ARP and ICMP. The **control plane is not**: there is no routing, no learned
-switching, and no second port.
+The **dataplane is up**: cold boot → 10G link → packets both ways → hardware IP routing with TTL
+decrement and MAC rewrite. The **control plane is up**: OSPF peers with a neighbouring switch and
+learns a full routing table.
 
-Put plainly: this is a working *NIC-through-a-switch-ASIC*, not yet a switch.
+Put plainly: this is a switch that boots itself, forwards in hardware, and speaks a routing
+protocol — with no EOS involved. The remaining gap is FIB sync: OSPF's routes land in the Linux
+kernel but are not yet pushed into the ASIC automatically.
 
 ---
 
@@ -109,7 +111,10 @@ down→up (`shutdown`/`no shutdown` — the "shut == cold" trick already proven 
 | Route table / FIB programming | ✅ | the replay programs a **44-prefix FIB**, verified by reading it back off the live cold chip (`0x33bfd2`–`0x33bffd`) |
 | ARP/neighbour table in hardware | ✅ | `NEXTHOP 0x160000` holds real adjacencies; decoded entries match EOS's ARP table exactly (`80a2.3581.cab4` Et1 / `cab5` Et2) |
 | ECMP | ⚠️ | group present and both NEXTHOP entries exist; **not yet exercised** (needs Et2 up) |
-| OSPF / BGP / any routing protocol | ❌ | no control plane at all |
+| **OSPF** | ✅ | **Full adjacency with the AS5610, both sides confirming.** Complete routing table learned incl. a default route. Chain: ASIC → punt → TAP → kernel → ospfd → zebra → kernel FIB |
+| Port as a Linux netdev | ✅ | `fm6000_portd` — `et1` is a real interface; ping answered by the kernel stack |
+| FIB sync (kernel → ASIC) | ❌ | the last link: `fm6000_route` programs the hardware but nothing drives it from the kernel FIB yet |
+| BGP / other protocols | ❌ | not built (the `quagga` component supports it) |
 | IPv6 | ❌ | parser recognises `0x86dd`, nothing above it |
 
 > **Is routing working? YES — verified 2026-08-06.** A packet was forwarded *through* the switch by
