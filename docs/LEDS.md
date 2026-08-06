@@ -1,6 +1,10 @@
 # Front-panel LEDs on the 7150
 
-**2026-08-06.** The plumbing is complete and works. **Nothing drives it** — the front panel is dark.
+**2026-08-06. RESOLVED: the LEDs work, and there was nothing to build.**
+
+Visually confirmed on the switch: with EdgeNOS booted and Et1 up, the front-panel port LED is
+**lit**. The SCD drives the port LEDs directly from link state in hardware — no software policy is
+required, and none should be written.
 
 ## The stack
 
@@ -61,20 +65,27 @@ If that is right there is nothing to implement: the LEDs should already work und
 EdgeNOS exactly as they do under EOS, and the 57 sysfs objects are simply pointed at
 the wrong (harmless, read-as-zero) addresses.
 
-## ⚠ The one thing that needs a human
+## Confirmed by looking at it
 
-**I cannot see the front panel.** Everything above is inference from registers.
+With EdgeNOS booted and Et1 up, **the front-panel LED is lit.** That settles it:
 
-The check takes ten seconds: boot EdgeNOS, confirm a port is up
-(`fm6000reg 0000:02:00.0 0xe3826` reads `1`), and **look at the switch**.
+- The SCD drives port LEDs from link state in hardware.
+- EdgeNOS needs no LED daemon. The earlier "53 status LEDs are dark" reading was an artefact of
+  looking at sysfs objects that are not connected to anything, not of a dark panel.
 
-- **Port LED lit** → hardware-driven, nothing to build. Fix `scd-setup.sh` to stop
-  declaring bogus addresses (or drop the LED objects entirely) and close this out.
-- **Port LED dark** → the SCD needs software after all, and the register is somewhere
-  we have not found. Next step would be a full-BAR diff between EOS booted with a
-  port up and the same port down, looking specifically outside `0x6000-0x6400`.
+## Leftover: `scd-setup.sh` declares 57 objects that control nothing
 
-Until someone looks, treat "LEDs work" as **unverified** either way.
+`scd-setup.sh` declares `led 0x60D0+0x10*(N-1)` per port and `led 0x6050` for status, from
+`CotatiP4.fdl` line 111. Those addresses read **zero under EOS with the panel lit**, so they are
+wrong for this board, and the resulting `/sys/class/leds/status*` nodes are inert — writing
+`brightness` changes the sysfs value and nothing else.
+
+They are **harmless** (we wrote 0/1/2/255 to them repeatedly during investigation with no ill
+effect) but **misleading**: an operator would reasonably think those nodes control the panel.
+
+Worth cleaning up — either drop the LED declarations, or find the real register block if we ever
+want software override (e.g. an identify/locator blink). Neither is urgent, and neither affects
+whether the panel works today.
 
 ## What a policy would look like
 
@@ -83,5 +94,6 @@ Small and low-risk once the above is settled — poll each port's `PORT_STATUS` 
 link down → off, link up → on, activity → blink. Plus `status_sys` green once the dataplane is up
 and the thermal loop is healthy.
 
-It is the most *visible* remaining gap — an operator's first check on a switch is the front panel —
-and it is one of the cheapest.
+Not needed for normal operation, since the hardware already does link-state indication. It would
+only be worth building for something the hardware cannot express — a locator/identify blink, or
+folding thermal and dataplane health into `status_sys`.

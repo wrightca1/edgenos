@@ -145,7 +145,7 @@ routing works.
 | SFP presence / EEPROM / DOM | ⚠️ | SCD SMBus reachable; topology extracted; no monitoring loop |
 | 3rd-party transceiver unlock | ✅ | key = `MD5(licensee + Arista copyright)[0:4]` BE, must be present at boot |
 | **Thermal loop** | ✅ | `thermal-control.sh`, automatic at boot. MAX6658 (board + FM6000 die) → 4× `raven-fan-driver` PWM. Fails safe to 255 on sensor loss or a stopped fan — both paths tested on hardware. PWM 255→102 with the die steady at 37–38 °C |
-| Front-panel LEDs | ⚠️ | 57 LED-class devices exist and sysfs writes are accepted, but **no policy drives them** and it is unverified that a write reaches the hardware (the SCD register reads 0). See `docs/LEDS.md` |
+| Front-panel LEDs | ✅ | **Work with no software involvement** — the SCD drives them from link state; visually confirmed lit with Et1 up under EdgeNOS. (`scd-setup.sh` declares 57 sysfs objects at wrong, inert addresses — harmless, worth cleaning up. `docs/LEDS.md`) |
 | PSU / CPLD status | ❌ | not implemented |
 | Watchdog | ⚠️ | works, but **must be petted every ~10 s or it resets the board**; arming it without a petting loop is a self-inflicted reboot |
 
