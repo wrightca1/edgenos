@@ -47,7 +47,7 @@ import collections
 import json
 import sys
 
-SBUS = (0xF001, 0xF002, 0xF003, 0xF004)
+SBUS = (0xF000, 0xF001, 0xF002, 0xF003, 0xF004)   # JSS SBus master window
 ANCHOR = 0x1A0C00
 L2F_BASE = 0x1A0C00
 LBS_BASE = 0x014000
@@ -110,6 +110,8 @@ def emit_sweep(order, states):
 # 48-51) are not swept.
 # After the 48 front-panel ports the sweep visits front-panel 53-56 (the uplink
 # group) and two internal ports. Front-panel 49-52 are not swept at all.
+SAF_LO, SAF_HI = 0x0A0000, 0x0A1000
+
 SWEEP_FRONT = list(range(1, 49))
 SWEEP_UPLINK = [53, 54, 55, 56]
 SWEEP_INTERNAL = [3, 1]
@@ -126,6 +128,22 @@ def port_order_from_platform(header):
     return ([alta[n] for n in SWEEP_FRONT]
             + [alta[n] for n in SWEEP_UPLINK]
             + SWEEP_INTERNAL)
+
+
+def saf_final_state(rows):
+    """The SAF store-and-forward matrix as EOS leaves it.
+
+    EOS builds this matrix incrementally -- 34,668 writes across 111 iterations,
+    OR-ing one port's bit in at a time. The end state is 56 ports drawn from
+    just four 3-word patterns, so a generator can write it directly in 168
+    writes. Emitting the final state INSTEAD of the accumulation is the first
+    change that alters the replay's behaviour, and must be boot-tested.
+    """
+    final = {}
+    for a, v in rows:
+        if SAF_LO <= a < SAF_HI:
+            final[a] = v
+    return [(a, final[a]) for a in sorted(final)]
 
 
 def extract(rows):
@@ -206,6 +224,11 @@ def main():
     ap.add_argument("-d", "--desc")
     ap.add_argument("--ports", help="derive PORT_ORDER from this port-table header "
                                     "instead of from the trace")
+    ap.add_argument("--saf", choices=["keep", "final"], default="keep",
+                    help="keep = copy EOS's incremental SAF accumulation "
+                         "(byte-identical); final = emit the end state once "
+                         "(168 writes instead of 34,668 -- CHANGES BEHAVIOUR, "
+                         "boot-test required)")
     args = ap.parse_args()
 
     if args.cmd == "emit":
@@ -238,17 +261,30 @@ def main():
         # later change to the generator can alter the switch's behaviour.
         its = iterations(rows)
         at = [i for i, (a, _) in enumerate(rows) if a == ANCHOR]
+        saf = saf_final_state(rows) if args.saf == "final" else None
+        emitted_saf = False
         out_rows = list(rows[:at[0]])
         for k, it in enumerate(its):
             gen = list(generated_core(desc, k))
             for a, v in it:
+                if saf is not None and SAF_LO <= a < SAF_HI:
+                    # Drop the accumulation. Emit the completed matrix at the
+                    # position of the FIRST SAF write, so downstream config
+                    # never sees a partially-built matrix -- EOS finished
+                    # building it much later, so this is the conservative side.
+                    if not emitted_saf:
+                        out_rows.extend(saf)
+                        emitted_saf = True
+                    continue
                 out_rows.append(gen.pop(0) if in_core(a) and gen else (a, v))
         out_rows += rows[at[-1]:]
         same = out_rows == rows
         dest = args.out or "fwd-generated.txt"
+        if args.saf == "final":
+            print(f"  SAF: accumulation replaced by {len(saf)} final-state writes")
         with open(dest, "w") as f:
             for a, v in out_rows:
-                f.write(f"{a:06x} {v:08x}\n")
+                f.write(f"{a:08x} {v:08x}\n")   # match the recorded format
         print(f"  {dest}: {len(out_rows)} writes")
         print(f"  identical to input: {'YES' if same else 'NO'}")
         sys.exit(0 if same else 1)
