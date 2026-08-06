@@ -107,11 +107,30 @@ static void on_punt(void *ctx, const void *data, uint16_t len)
     n_rx_drop++;                       /* no recognisable ethertype */
 }
 
+/* Drain the ASIC RX ring into the TAP.
+ * Scan ALL descriptors and pair descriptor i with buf_va[i]; fpdma_rx_poll()
+ * walks by ring tail, which races the hardware fill order and hands the callback
+ * a length from one descriptor with another's buffer. */
+static void rx_drain(void)
+{
+    for (unsigned i = 0; i < fp.rx.size; i++) {
+        volatile uint8_t *d = fp.rx.desc + i * FM6000_DESC_STRIDE;
+        uint16_t rlen;
+
+        if (!(d[0] & FM6000_DESC_DONE)) continue;
+        rlen = *(volatile uint16_t *)(d + 2);
+        if (rlen) on_punt(NULL, (uint8_t *)fp.rx.buf_va[i], rlen);
+        d[0] = FM6000_DESC_RX_READY;
+        __sync_synchronize();
+        fm6000_dma_write(&dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_RX_POST);
+    }
+}
+
 /* TAP -> ASIC. Insert the 8-byte F64 tag inline at offset 12 (after SMAC). */
 static void inject(const uint8_t *frame, int len)
 {
     uint8_t out[MAX_FRAME + F64_LEN];
-    int w;
+    int w, tlen;
 
     if (len < 14 || len + F64_LEN > (int)sizeof out) return;
     memcpy(out, frame, 12);                                   /* DMAC + SMAC   */
@@ -120,7 +139,32 @@ static void inject(const uint8_t *frame, int len)
         out[12 + 2 * w + 1] = TAG[w] & 0xff;
     }
     memcpy(out + 12 + F64_LEN, frame + 12, len - 12);         /* ethertype ... */
-    if (fpdma_tx(&fp, out, (uint16_t)(len + F64_LEN)) == 0) n_tx++;
+    tlen = len + F64_LEN;
+    if (tlen < 72) tlen = 72;                                 /* min frame     */
+
+    /* The TX engine will NOT pick work up on its own: fpdma_tx only queues a
+     * descriptor. Issuing TX_START on an empty ring leaves the processor Idle
+     * and TX_POST does not wake it, so every frame needs
+     *     TX_STOP (resets the descriptor index) -> fill READY -> TX_START.
+     * This is the sequence fm6000_l3/fm6000_txinline use and it is why bare
+     * fpdma_tx() silently sends nothing.
+     *
+     * Cost: ~10 ms per frame, so this caps out around 100 pps. That is fine for
+     * ARP and OSPF hellos -- it is NOT a data path. */
+    /* TX must be ATOMIC with respect to the DMA command register: rx_drain()
+     * writes RX_POST to the SAME register (FM6000_DMA_COMMAND), and issuing it
+     * inside the TX_STOP..TX_START window corrupts the transmit -- frames are
+     * queued and completed but never reach the wire. Drain RX before and after,
+     * never during. */
+    rx_drain();
+    fm6000_dma_write(&dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_TX_STOP);
+    usleep(1500);
+    fp.tx.head = 0; fp.tx.tail = 0;
+    memset((void *)fp.tx.desc, 0, fp.tx.size * FM6000_DESC_STRIDE);
+    if (fpdma_tx(&fp, out, (uint16_t)tlen) == 0) n_tx++;
+    fm6000_dma_write(&dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_TX);
+    usleep(8000);
+    rx_drain();
 }
 
 int main(int argc, char **argv)
@@ -162,22 +206,7 @@ int main(int argc, char **argv)
             int n = read(tapfd, buf, sizeof buf);
             if (n > 0) inject(buf, n);
         }
-        /* ASIC -> kernel.
-         * Do NOT use fpdma_rx_poll(): it walks descriptors by ring tail, which
-         * races the hardware's fill order and pairs a descriptor's length with
-         * the wrong buffer -- the frames then fail the ethertype scan. Scan all
-         * descriptors and pair descriptor i with buf_va[i], as fm6000_l3 does. */
-        for (unsigned i = 0; i < fp.rx.size; i++) {
-            volatile uint8_t *d = fp.rx.desc + i * FM6000_DESC_STRIDE;
-            uint16_t rlen;
-
-            if (!(d[0] & FM6000_DESC_DONE)) continue;
-            rlen = *(volatile uint16_t *)(d + 2);
-            if (rlen) on_punt(NULL, (uint8_t *)fp.rx.buf_va[i], rlen);
-            d[0] = FM6000_DESC_RX_READY;                  /* re-arm */
-            __sync_synchronize();
-            fm6000_dma_write(&dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_RX_POST);
-        }
+        rx_drain();                                       /* ASIC -> kernel */
         fpdma_tx_reclaim(&fp);
 
         if (secs && (unsigned)(time(NULL) - t0) >= secs) break;
