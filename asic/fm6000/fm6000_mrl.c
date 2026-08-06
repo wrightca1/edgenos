@@ -4,8 +4,9 @@
  *
  * This is a LIVE read-write handshake (not a static replay): it writes scan-select + scan-data
  * per block, then reads 0x1C03D/0x1C03C back (the reads clock/advance the scan chain) and branches
- * on the readback. Ported verbatim from the disassembly; the mrlTable is extracted verbatim from
- * the byte-identical SDK (fm6000_mrl_table.h).
+ * on the readback. Procedure reimplemented from the disassembly. The scan-config VALUES are
+ * third-party data and are NOT in this tree -- they are loaded at runtime from a data file
+ * (FM6000_MRL_TABLE=<file>, see fm6000_mrl_table.h).
  *
  *   fm6000_mrl <BDF>
  * Run AFTER PCIe enum + BistMemoryInit, BEFORE the CRM bank fill.

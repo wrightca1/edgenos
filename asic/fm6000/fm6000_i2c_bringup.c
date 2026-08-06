@@ -31,7 +31,7 @@
 #include <sys/ioctl.h>
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
-#include "fm6000_mrl_table.h"   /* MRL scan-config table (verbatim from libFocalpointSDK.so) */
+#include "fm6000_mrl_table.h"   /* runtime loader for the MRL scan-config data (not bundled) */
 
 #define SLAVE 0x40u
 
