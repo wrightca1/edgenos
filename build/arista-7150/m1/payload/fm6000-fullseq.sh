@@ -68,7 +68,37 @@ say "STEP5 FULL REPLAY of EOS's port+forwarding bring-up (299803 writes: BOTH po
 # 1/1. The failure is LATCHED at bring-up: once Et2 misses lock, replaying EOS's
 # own port-bounce -- 6 times, including the full 2,632-write version with the
 # SBus lane reset -- does not recover it. See docs/ET2-COPPER-LINK.md.
-$BIN/fm6000_fullreplay "$FWD" $B ${PACE:-1500000} >> $LOG 2>&1
+# SAFGEN=1 (default): program the SAF store-and-forward matrix with OUR OWN code
+# instead of replaying EOS's 34,668-write incremental accumulation. fm6000_safinit
+# writes the 168-register end state, derived from our own board port table.
+#
+# The split reproduces EXACTLY the file cold-boot validated on 2026-08-07:
+# everything up to the first IN-LOOP SAF write verbatim (which keeps the 171 SAF
+# writes that precede the loop), then our generator, then the remainder with the
+# recorded SAF writes dropped. Byte-identity was checked offline -- do NOT
+# "simplify" this to a plain `grep -v` over the whole file: that also drops those
+# 171 and produces a sequence nothing has ever booted.
+#
+# Set SAFGEN=0 to replay EOS's accumulation unchanged.
+if [ "${SAFGEN:-1}" = "1" ] && [ -x "$BIN/fm6000_safinit" ]; then
+	A0=$(grep -n '^001a0c00 ' "$FWD" | head -1 | cut -d: -f1)
+	F1=$(tail -n +${A0:-1} "$FWD" | grep -n '^000a0' | head -1 | cut -d: -f1)
+	if [ -n "$A0" ] && [ -n "$F1" ]; then
+		F1=$((A0 + F1 - 1))
+		head -n $((F1 - 1)) "$FWD" > /tmp/fwd.p1
+		tail -n +$F1 "$FWD" | grep -v '^000a0' > /tmp/fwd.p2
+		say "  SAF is ours: $(wc -l < /tmp/fwd.p1) + safinit(168) + $(wc -l < /tmp/fwd.p2)"
+		$BIN/fm6000_fullreplay /tmp/fwd.p1 $B ${PACE:-1500000} >> $LOG 2>&1
+		$BIN/fm6000_safinit $B >> $LOG 2>&1; say "  safinit rc=$?"
+		$BIN/fm6000_fullreplay /tmp/fwd.p2 $B ${PACE:-1500000} >> $LOG 2>&1
+		rm -f /tmp/fwd.p1 /tmp/fwd.p2
+	else
+		say "  SAFGEN: loop/SAF split not found; replaying unchanged"
+		$BIN/fm6000_fullreplay "$FWD" $B ${PACE:-1500000} >> $LOG 2>&1
+	fi
+else
+	$BIN/fm6000_fullreplay "$FWD" $B ${PACE:-1500000} >> $LOG 2>&1
+fi
 say "  rc=$? PIN=$(R 0x1c021) PORT_STATUS=$(R 0xe3800) pcsRx=$(R 0xe3826) sched=$(R 0x8062)"
 
 say "STEP6 SFP laser"
