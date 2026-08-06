@@ -1,5 +1,5 @@
 /*
- * fpdma_kmod.c - kmod DMA backing for the FM6000 (clean-room, IOMMU-less)
+ * fpdma_kmod.c - kmod DMA backing for the FM6000 (independent, IOMMU-less)
  *
  * Userspace side of fm6000dma.ko: opens /dev/fm6000dma, mmaps BAR0 (for the
  * register layer) and the module's coherent low-4GiB DMA pool, and hands out

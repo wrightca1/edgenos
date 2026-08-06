@@ -1,5 +1,5 @@
 /*
- * fm6000_boot.c - FM6000 bring-up sequence (clean-room)
+ * fm6000_boot.c - FM6000 bring-up sequence (independent implementation)
  *
  * Recovered from libFocalpointSDK.so fm6000BootSwitch / fm6000PrebootSwitch /
  * fm6000BistMemoryInit (notes/analysis/phase7g-fm6000-bringup-recovered.md §b).

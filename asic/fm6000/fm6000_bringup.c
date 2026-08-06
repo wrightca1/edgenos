@@ -1,7 +1,7 @@
 /*
  * fm6000_bringup.c - standalone FM6000 bring-up / punt diagnostic
  *
- * Ties the clean-room pieces together end to end:
+ * Ties the FM6000 pieces together end to end:
  *   vfio open -> hw attach -> fm6000_boot_switch -> fpdma_init -> punt/inject.
  * Not part of the edged link (guarded); build as a tool to smoke-test bring-up
  * on the box once the device is bound to vfio-pci.

@@ -1,6 +1,6 @@
 # asic/fm6000 — Intel/Fulcrum FM6000 ("Alta") support
 
-First non-Broadcom ASIC in EdgeNOS, and the first **clean-room** datapath (no vendor SDK linked — cf.
+First non-Broadcom ASIC in EdgeNOS, and the first datapath with **no vendor SDK linked** (no vendor SDK linked — cf.
 `asic/bcm56846` which links OpenMDK). This is the **M2** milestone; the mgmt-plane MVP (M0/M1) uses nothing
 here. The code is a skeleton driven entirely by the reverse-engineering writeups in the arista RE repo —
 every constant cites its source.
@@ -24,7 +24,7 @@ own BAR0. It is **not** hidden behind the SCD FPGA (`3475:0001`, which is separa
 | `fm6000_ucode.{c,h}` | Microcode load: parser/FFU **text CSR replay** + SerDes **SPICO SBus** upload | phase7g §c/d |
 | `fm6000_boot.{c,h}` | `fm6000BootSwitch` ordering + BIST/memory-init skeleton | phase7g §b |
 | `fpdma.{c,h}` | Packet-DMA ring engine (0x5000 block, TX/RX rings, punt/inject) | FPDMA.md |
-| `kmod/fm6000dma.c` | **Clean-room DMA/MSI kernel module** (default backing) — BAR0 + coherent low-4GiB pool + MSI | phase13 |
+| `kmod/fm6000dma.c` | **Independent DMA/MSI kernel module** (default backing) — BAR0 + coherent low-4GiB pool + MSI | phase13 |
 | `fpdma_kmod.{c,h}` | Userspace side of the kmod (mmap BAR0 + pool, MSI fd) — same seam as VFIO | phase13 |
 | `fpdma_vfio.{c,h}` | Alt DMA backing via **VFIO** (IOMMU-capable boxes only) | — |
 | `fm6000_bringup.c` | Standalone end-to-end bring-up/punt diagnostic (`make fm6000_bringup`) | — |
@@ -44,7 +44,7 @@ own BAR0. It is **not** hidden behind the SCD FPGA (`3475:0001`, which is separa
 Either way `fpdma.c` + the rings are identical — only the `struct fpdma_backing` differs. The whole set links
 into `fm6000_bringup` / `edged-7150` and runs `backend → boot_switch → fpdma_init → inject/punt`.
 
-## Clean-room boundary (important)
+## Provenance boundary (important)
 The **procedures** are reimplemented from behavioral RE. The **payloads** are Arista/Intel proprietary and
 are **NOT** vendored: the parser/FFU microcode (`fm6000Microcode.raw`) and the SerDes SPICO blob (12000 B,
 embedded in `libFocalpointSDK.so`) are staged on the box by the operator (extracted from the running EOS

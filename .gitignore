@@ -33,3 +33,12 @@ ucode_*.raw
 fwd*.txt
 # (the MRL *loader* header is ours and IS tracked; only the data file is excluded)
 mrl-table.txt
+
+# build artifacts (were bloating history ~90MB; never commit these)
+build/*/m1/*.cpio.gz
+build/*/m1/*bzImage*
+build/*/m1/payload/fm6000_*
+build/*/m1/payload/fm6000load
+build/*/m1/payload/fm6000reg
+!build/*/m1/payload/*.sh
+!build/*/m1/payload/*.c

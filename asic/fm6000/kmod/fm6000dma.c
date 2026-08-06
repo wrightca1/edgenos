@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * fm6000dma.c - clean-room DMA/MSI backing for the FM6000 packet engine.
+ * fm6000dma.c - independent DMA/MSI backing for the FM6000 packet engine.
  *
  * The Arista 7150 (AMD RS780) has NO usable IOMMU (0 iommu_groups, GART fallback;
  * see notes/analysis/phase13-live-probe-2026-07-21.md), so the VFIO path can't
@@ -268,5 +268,5 @@ static struct pci_driver fm6000dma_driver = {
 module_pci_driver(fm6000dma_driver);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("EdgeNOS clean-room FM6000 DMA/MSI backing (IOMMU-less boxes)");
+MODULE_DESCRIPTION("EdgeNOS independent FM6000 DMA/MSI backing (IOMMU-less boxes)");
 MODULE_AUTHOR("EdgeNOS Contributors");

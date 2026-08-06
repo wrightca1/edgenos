@@ -1,5 +1,5 @@
 /*
- * fm6000_regs.h - FM6000 "Alta" register map (clean-room, RE-derived)
+ * fm6000_regs.h - FM6000 "Alta" register map (independently written; register facts RE-derived)
  *
  * Intel/Fulcrum FM6000 switch ASIC on the Arista DCS-7150S-52.
  *

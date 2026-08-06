@@ -7,7 +7,7 @@
  *   2. SerDes SPICO == a BINARY uint16[] blob pushed over SBus into the SPICO
  *      IMEM, then CRC-verified via an SPICO interrupt.
  *
- * CLEAN-ROOM BOUNDARY: the firmware payloads (fm6000Microcode.raw, the 12000-byte
+ * PROVENANCE BOUNDARY: the firmware payloads (fm6000Microcode.raw, the 12000-byte
  * SPICO blob) are Arista/Intel proprietary and are NOT vendored. They are staged
  * on the box (extracted from the running EOS image by the operator) and loaded by
  * path at runtime. This file implements only the *load procedure*.

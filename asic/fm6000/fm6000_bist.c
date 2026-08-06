@@ -1,4 +1,8 @@
-/* fm6000_bist.c - clean-room port of fm6000BistMemoryInit (libFocalpointSDK.so @0x34bb94):
+/* fm6000_bist.c - independent reimplementation of the FM6000 BIST memory init.
+ *
+ * Behaviour derived by disassembling libFocalpointSDK.so (fm6000BistMemoryInit
+ * @0x34bb94) for hardware interoperability. Contains no third-party code.
+ *
  * the BM (built-in memory-BIST) march that configures the memory CONTROLLERS and runs the defect/repair
  * march. Boot order: BistMemoryInit -> MrlRegisterFix -> (InitSBus/sched) -> CRM bank fills. The CRM fill
  * off-buses without the memory-controller config this routine programs (phase90).

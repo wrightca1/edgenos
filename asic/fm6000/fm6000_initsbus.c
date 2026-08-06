@@ -1,5 +1,11 @@
-/* fm6000_initsbus.c - clean-room port of fm6000InitSBus (libFocalpointSDK.so @0x478a1f) + the SBus
- * transaction engine (@0x477c54) and its Write/Reset wrappers. Brings the JSS/SBus management bus up so
+/* fm6000_initsbus.c - independent reimplementation of the FM6000 SBus master init,
+ * plus the SBus transaction engine and its Write/Reset wrappers.
+ *
+ * Behaviour derived by disassembling libFocalpointSDK.so (fm6000InitSBus @0x478a1f,
+ * transaction engine @0x477c54) for hardware interoperability. Contains no
+ * third-party code.
+ *
+ * Brings the JSS/SBus management bus up so
  * the CRM memory-fill engine can reach the block memories (without this the CRM fill off-buses at trigger).
  *
  * Boot order: PrebootSwitch(BistMemoryInit + MrlRegisterFix) -> InitSBus -> ValidateSchedulerToken -> CRM fills.

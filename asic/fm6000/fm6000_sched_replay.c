@@ -1,7 +1,7 @@
 /* fm6000_sched_replay.c — FAITHFUL replay of EOS's LIVE FM6000 SSCHED scheduler-start sequence.
  *
  * Captured live via fmPlatformTraceRegOps on EOS 4.16.8M (fm6000-sched-start-LIVE-trace.txt).
- * This is the GROUND TRUTH the earlier clean-room attempts were missing. Key differences from our
+ * This is the GROUND TRUTH the earlier earlier from-scratch attempts were missing. Key differences from our
  * prior fm6000_sched_std:
  *   1. TOKEN FIFO ARMING: write 0x8062<-0 and 0x8022<-0 BEFORE streaming (loader is an
  *      auto-incrementing FIFO; must reset its index). We never did this.
@@ -56,7 +56,7 @@ int main(int argc,char**argv){
 
   /* --- A1b. PORT/EPL config sweep — captured verbatim from EOS live trace (lines 27-130): the
    * per-port MAC/EPL config the scheduler circulates through, then a HW port-init completion poll on
-   * 0x1d08e draining to 0. EVERY prior clean-room scheduler attempt SKIPPED this — phase92's splice
+   * 0x1d08e draining to 0. EVERY prior from-scratch scheduler attempt SKIPPED this — phase92's splice
    * reached 0x313 then jumped straight to tokens with the ports unconfigured, so nothing serviceable
    * to circulate. This is the missing pre-scheduler state. --- */
   if(getenv("FM6000_PORTCFG")){

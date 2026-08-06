@@ -1,5 +1,5 @@
 /*
- * fm6000_ucode.c - FM6000 microcode load procedures (clean-room)
+ * fm6000_ucode.c - FM6000 microcode load procedures (independent implementation)
  *
  * Recovered from libFocalpointSDK.so fmPlatformLoadMicrocode /
  * fm6000LoadSpicoCode (notes/analysis/phase7g-fm6000-bringup-recovered.md §c/d).

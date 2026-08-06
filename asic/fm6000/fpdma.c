@@ -1,5 +1,5 @@
 /*
- * fpdma.c - FM6000 packet-DMA ring engine (clean-room)
+ * fpdma.c - FM6000 packet-DMA ring engine (independent implementation)
  *
  * Ring setup + descriptor mechanics recovered in edgenos/FPDMA.md (fpdma_init /
  * fpr_post / fpr_reclaim / fpdma_napi_poll). Register block at BAR0+0x5000.

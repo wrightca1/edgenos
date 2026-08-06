@@ -1,5 +1,5 @@
 /* fm6000_memfill.c - do the FM6000's 129 ordered memory fills by DIRECT MMIO, replacing the CRM engine
- * (which has been "Running stuck" in our clean-room since phase107b).
+ * (which has been "Running stuck" in our own stack since phase107b).
  *
  * Source of truth: notes/reference/fm6000-crm-fill-sequence.md (SDK-mined from libFocalpointSDK.so).
  * These tables are memory-backed and hold UNINITIALISED SRAM GARBAGE on a cold chip; EOS fills them via

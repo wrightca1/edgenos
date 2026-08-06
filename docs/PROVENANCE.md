@@ -25,6 +25,38 @@ Accordingly:
 
 ---
 
+## 1.1 Was the FocalPoint SDK used?
+
+Worth stating precisely, because the answer is "no" and "yes" depending on what is being asked.
+
+**At runtime: no.** The working cold sequence is five binaries we wrote — `fm6000_coldreplay`,
+`fm6000_initsbus`, `fm6000_memfill`, `fm6000_ucode_dbg`, `fm6000_fullreplay`. Nothing links or
+`dlopen`s `libFocalpointSDK.so`. With the SPICO firmware now dropped (§3.1), the only third-party
+code that executes anywhere is the FM6000 microcode on the chip itself.
+
+**As a reverse-engineering source: yes.** The SDK was disassembled to learn what the silicon
+needs. Files whose *behaviour* was recovered that way:
+
+| file | SDK symbol |
+|---|---|
+| `fm6000_initsbus.c` *(working path)* | `fm6000InitSBus @0x478a1f`, txn engine `@0x477c54` |
+| `fm6000_memfill.c` *(working path)* | CRM fill sequence, SDK-mined |
+| `fm6000_spico.c` | `fm6000LoadSpicoCode @0x4793a1`, `fm6000InterruptSpico @0x47935a` |
+| `fm6000_ucode.c` | `fmPlatformLoadMicrocode`, `fm6000WriteSBus @0x479e09` |
+| `fm6000_bist.c` | `fm6000BistMemoryInit @0x34bb94` |
+| `fm6000_mrl.c` | `fm6000MrlRegisterFix @0x47a4bc` |
+| `fm6000_boot.c`, `fm6000_sched.c`, `fm6000_serdes_enable.c`, `fm6000_regs.h` | various |
+
+**One tool does load the SDK:** `tools/fpdshim/` `dlopen`s `libFocalpointSDK.so`. It is a
+diagnostic oracle for comparing our bring-up against the vendor's on live silicon — it is not part
+of EdgeNOS and is not on any runtime path.
+
+**Terminology.** These files previously described themselves as "clean-room". That was inaccurate
+and has been corrected throughout. Clean-room implies a two-team separation in which the
+implementer never sees the original; that is not what happened. What happened is
+disassembly-derived reimplementation for hardware interoperability — a well-established practice,
+but it should be labelled as what it is. The headers now say so.
+
 ## 2. Inventory
 
 ### 2.1 Blocking — cannot be distributed

@@ -1,5 +1,5 @@
 /*
- * fpdma_vfio.c - VFIO backing for the FM6000 (clean-room, no vendor kmod)
+ * fpdma_vfio.c - VFIO backing for the FM6000 (independent, no vendor kmod)
  *
  * Binds the FM6000 through vfio-pci: maps BAR0, enables bus-master, stands up an
  * IOMMU-mapped DMA pool with IOVAs pinned below 4 GiB (the FM6000 is a 32-bit DMA

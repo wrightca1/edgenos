@@ -1,4 +1,4 @@
-/* fm6000_sched_std.c - standalone (direct-mmap) FM6000 scheduler init for the cold clean-room sequence.
+/* fm6000_sched_std.c - standalone (direct-mmap) FM6000 scheduler init for the cold independent sequence.
  * Ports the phase61/82 SSCHED ring-init + scheduler config to a self-contained tool (like fm6000_bist/mrl/
  * initsbus) with PIN_STRAP liveness checks. Runs AFTER BM-march + MRL + InitSBus, BEFORE the CRM fills —
  * fm6000ValidateSchedulerToken / the scheduler bring-up is the confirmed next CRM-fill gate (phase90).

@@ -1,5 +1,5 @@
 /*
- * fpdma.h - FM6000 packet-DMA engine (CPU punt/inject) — clean-room
+ * fpdma.h - FM6000 packet-DMA engine (CPU punt/inject) — independent
  *
  * The FM6000's on-chip DMA engine at BAR0+0x5000 with dual descriptor rings
  * (TX/RX). Recovered in edgenos/FPDMA.md from Arista's proprietary fpdma.ko

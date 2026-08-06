@@ -1,7 +1,7 @@
-# EdgeNOS ASIC fragment: FM6000 "Alta" (Intel/Fulcrum) — clean-room FocalPoint.
+# EdgeNOS ASIC fragment: FM6000 "Alta" (Intel/Fulcrum) — independent FocalPoint reimplementation.
 #
 # Unlike asic/bcm56846 (which links Broadcom's OpenMDK static libs), the FM6000
-# datapath is a clean-room reimplementation: no vendor SDK to link. Register
+# datapath is a independent reimplementation: no vendor SDK to link. Register
 # access is a userspace BAR0 mmap (x86_64, no MMIO barriers); only packet DMA
 # needs kernel/VFIO backing (see fpdma.h struct fpdma_backing).
 #

@@ -1,7 +1,7 @@
 /*
  * fm6000_edged.h - FM6000 backend for the EdgeNOS ASIC-ops seam
  *
- * Wraps the clean-room FM6000 driver (fpdma_vfio + fm6000_boot + fpdma) as a
+ * Wraps the independent FM6000 driver (fpdma_vfio + fm6000_boot + fpdma) as a
  * struct asic_ops the 7150 datapath daemon binds to.
  *
  * Copyright (C) 2024 EdgeNOS Contributors.

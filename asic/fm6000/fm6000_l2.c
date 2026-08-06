@@ -1,5 +1,5 @@
 /*
- * fm6000_l2.c - FM6000 L2-forwarding bring-up for CPU punt (RX). Clean-room.
+ * fm6000_l2.c - FM6000 L2-forwarding bring-up for CPU punt (RX). Independently written.
  *
  * See fm6000_l2.h for the pipeline overview. Programs the minimal
  * GLORT -> MCAST_DEST(DMASK) -> L2F subset so a CPU-injected special-delivery

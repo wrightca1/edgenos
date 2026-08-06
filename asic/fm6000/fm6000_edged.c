@@ -1,7 +1,7 @@
 /*
  * fm6000_edged.c - FM6000 backend implementing struct asic_ops
  *
- * Binds the clean-room FM6000 pieces into the datapath seam:
+ * Binds the FM6000 pieces into the datapath seam:
  *   init      : VFIO open -> hw attach -> fm6000_boot_switch -> fpdma_init
  *   tx        : fpdma_tx  (caller supplies the frame; F64/CPU tag TODO)
  *   rx_poll   : fpdma_rx_poll
@@ -40,7 +40,7 @@ static struct {
     int                up;
 } g;
 
-/* Bring up a DMA backend + attach BAR0, filling *back. Prefers the clean-room
+/* Bring up a DMA backend + attach BAR0, filling *back. Prefers the
  * kmod (works without an IOMMU — the 7150's case); falls back to VFIO on
  * IOMMU-capable boxes. */
 static int backend_open(struct fpdma_backing *back)
