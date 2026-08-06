@@ -105,24 +105,28 @@ down→up (`shutdown`/`no shutdown` — the "shut == cold" trick already proven 
 | Feature | Status | Evidence |
 |---|:--:|---|
 | L3 **endpoint** (host) | ✅ | our own userspace stack answers ARP who-has and ICMP echo for `10.101.101.26`. **ping 8/8, 0% loss** |
-| **Hardware routing / forwarding** | ❌ | **not implemented.** `NEXTHOP` (`0x160000`) has just **34 writes** in the whole replay — no route entries. `fm6000_l3.c` only *replies*; it contains no forwarding path, no TTL decrement, no MAC rewrite |
-| Route table / FIB programming | ❌ | nothing writes routes into the ASIC |
-| ARP/neighbour table in hardware | ❌ | ARP is answered in software, not resolved into a hardware adjacency |
-| ECMP | ⚠️ | an ECMP *group* is present in the replayed config; **never exercised** |
+| **Hardware routing / forwarding** | ✅ | **WORKS COLD, no EOS.** Frame in with `DMAC=44:4c:a8:31:5d:ab` (our router) → out with `SMAC=44:4c:a8:31:5d:ab`, `DMAC=80:a2:35:81:ca:b4` (nexthop), and **ttl 20 → 19**. FIB lookup + adjacency + MAC rewrite + TTL decrement, all in silicon |
+| Route table / FIB programming | ✅ | the replay programs a **44-prefix FIB**, verified by reading it back off the live cold chip (`0x33bfd2`–`0x33bffd`) |
+| ARP/neighbour table in hardware | ✅ | `NEXTHOP 0x160000` holds real adjacencies; decoded entries match EOS's ARP table exactly (`80a2.3581.cab4` Et1 / `cab5` Et2) |
+| ECMP | ⚠️ | group present and both NEXTHOP entries exist; **not yet exercised** (needs Et2 up) |
 | OSPF / BGP / any routing protocol | ❌ | no control plane at all |
 | IPv6 | ❌ | parser recognises `0x86dd`, nothing above it |
 
-> **Is routing working? No.** What works is a *host* — the switch answers pings addressed to it,
-> from its own software stack, on one port. That is genuinely useful (it proves TX, RX, tag
-> handling and the IP path end to end) but it is **not routing**: no packet has ever been
-> *forwarded through* this switch between two networks.
+> **Is routing working? YES — verified 2026-08-06.** A packet was forwarded *through* the switch by
+> the ASIC, cold, with no EOS running:
+> ```
+> in : 80:a2:35:81:ca:b4 > 44:4c:a8:31:5d:ab   10.101.101.25 > 10.22.1.99   ttl 20
+> out: 44:4c:a8:31:5d:ab > 80:a2:35:81:ca:b4   10.101.101.25 > 10.22.1.99   ttl 19
+> ```
+> The MACs were rewritten to the nexthop adjacency and **the TTL was decremented** — that is
+> hardware IP routing, not a software reply.
 >
-> Two things block the test, and both are real work, not configuration:
-> 1. **Et2 doesn't link cold**, so there is no second port to route to (§3).
-> 2. **No FIB.** Even with two ports, nothing programs routes into `NEXTHOP`/L3AR, so the ASIC
->    would have no route to act on.
+> **This corrects the earlier "not implemented" verdict.** That was based on `NEXTHOP` having only
+> 34 writes and `fm6000_l3.c` containing no forwarding path. Both observations were true but the
+> conclusion was wrong: the **replay itself programs the FIB** (44 prefixes, read back live off the
+> cold chip) and 34 NEXTHOP writes is simply all a two-port adjacency table needs.
 
-**The test to run, once Et2 links** (config already exists on the EOS side, so the topology is
+**Still to do:** ECMP and true two-port routing need Et2, which is intermittent (§3). The test: (config already exists on the EOS side, so the topology is
 proven): our switch holds `10.101.101.26/29` on Et1 and `10.101.101.34/29` on Et2, peering with the
 AS5610 at `.25` and `.33`. Put swp7 in a network namespace on the AS5610 so its kernel cannot
 short-cut between the two directly-connected subnets, then ping from the `.24/29` side to a host on
