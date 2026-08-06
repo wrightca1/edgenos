@@ -22,8 +22,16 @@ tested. This file records the full experiment matrix so the next attempt doesn't
 | 6 | `fwd6m` + `@SPICO_IMEM` marker injection at the original offset | ✅ | ❌ |
 | 7 | as #6, with the `FD06` write-enable/disable bracketing restored | ✅ | ❌ |
 | 8 | SFP-enable bounce (`SCD 0x5020` bit6) ×5 on a running chip | ✅ | ❌ |
+| 9 | `fwd4` unmodified, after an EOS `shutdown`/`no shutdown` of Et2 | ✅ | **✅ `0x8c0` rx=1** |
 
-**Run #1 is the only success and it is not reproducible** — not by rerunning the same script, and
+**Et2 is INTERMITTENT: 2 successes in 4 `fwd4` runs.** Runs #1 and #9 worked; #2 and #3 did not,
+with byte-identical inputs. So this is a marginal/racy link bring-up, not a missing register write.
+
+**With both ports up (run #9) two-port operation was verified for the first time:**
+60 frames to GLORT `0x03ef` → far-end swp6 **+60**; 60 frames to GLORT `0x03ee` → swp7 **+60**.
+Per-port egress steering works on both ports simultaneously.
+
+Original note kept for the record — run #1 was the only success at the time of writing** — not by rerunning the same script, and
 not by recreating its apparent precondition (EOS having just had the link up).
 
 ## What that means for earlier conclusions
