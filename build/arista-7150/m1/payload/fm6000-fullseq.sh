@@ -11,7 +11,7 @@ B=0000:02:00.0
 # ad-hoc runs where they were wget'd. Replay set is operator-supplied (not
 # distributable) - override with FWD=<path>.
 BIN=/usr/bin; [ -x $BIN/fm6000_coldreplay ] || BIN=/tmp
-FWD="${FWD:-/mnt/flash/fwd5.txt}"; [ -f "$FWD" ] || FWD=/tmp/fwd5.txt
+FWD="${FWD:-/mnt/flash/fwd4.txt}"; [ -f "$FWD" ] || FWD=/tmp/fwd4.txt
 LOG=/mnt/flash/fullseq.log
 : > $LOG
 say(){ echo "[fs] $*" >> $LOG; echo "[fs] $*"; sync; }
@@ -29,14 +29,18 @@ say "  rc=$? PIN=$(R 0x1c021) sched=$(R 0x8062)"
 
 say "STEP2 initsbus (JSS SBus master)"
 $BIN/fm6000_initsbus $B >> $LOG 2>&1; say "  initsbus rc=$? PIN=$(R 0x1c021)"
-# NOTE: the Intel SPICO SerDes firmware is deliberately NOT loaded.
-# Proven unnecessary on this platform (2026-08-06): with all 30,002 SPICO IMEM
-# SBus transactions stripped from the replay, Et1 still trains to 10G
-# (PORT_STATUS=0x8c0, pcsRx=1) and the datapath is fully functional
-# (39 frames TX, 29 RX, ICMP 8/8 0% loss). Dropping it removes a 12,000-byte
-# third-party firmware blob from the runtime. See docs/PROVENANCE.md.
-# Caveat: only validated on a short SR fibre link; the SPICO drives RX
-# adaptation, so longer/lossier media may yet need an equaliser strategy.
+# The SPICO SerDes firmware is uploaded INLINE by the replay (fwd4.txt), at the
+# point EOS does it -- ~14.5% in, right after the MOD microcode. Do NOT load it
+# with a separate fm6000_spico step before the replay: the replay later resets
+# and starts the SPICO, wiping an early upload, and the SPICO then runs with an
+# empty IMEM.
+#
+# *** SPICO IS REQUIRED for 10GBASE-CR (DAC/copper). ***
+# An earlier bisect concluded it was unnecessary -- that was WRONG, because it
+# only ever checked Et1 (10GBASE-SR fibre). With the firmware stripped:
+#   Et1 (SR)  links fine   -> PORT_STATUS=0x8c0, pcsRx=1
+#   Et2 (CR)  does NOT     -> PORT_STATUS=0x815, pcsRx=0
+# With fwd4.txt unmodified, BOTH link at 0x8c0/pcsRx=1. See docs/SPICO-RE.md.
 
 say "STEP3 memfill (129 memory fills)"
 $BIN/fm6000_memfill $B 0 >> $LOG 2>&1

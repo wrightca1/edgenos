@@ -27,10 +27,83 @@ static void sbus(uint32_t cmd,uint32_t data){
     if(!(s&(1u<<25))) { sbus_n++; return; } }
   sbus_to++;
 }
+/* --- SPICO IMEM injection -------------------------------------------------
+ * The SerDes SPICO firmware is third-party and is NOT distributed with the
+ * replay set. Where it was stripped out, the replay carries a marker line:
+ *
+ *     @SPICO_IMEM
+ *
+ * On reaching it we upload the operator-supplied firmware, at exactly the point
+ * in the boot order where EOS did. This MATTERS: the replay later resets and
+ * starts the SPICO, so a firmware loaded earlier (e.g. by running fm6000_spico
+ * before the replay) is wiped and the SPICO runs with an empty IMEM. That is
+ * what silently broke the 10GBASE-CR (DAC) link on Et2 while leaving the
+ * 10GBASE-SR link on Et1 working.
+ *
+ * Word format: 10 bits. reg 0x07 = data[7:0]; reg 0x06 = data[9:8] with bit3 =
+ * IMEM write enable and bit2 = strobe. See docs/SPICO-RE.md.
+ */
+static const char *spico_path = NULL;
+
+static void spico_sw(uint32_t reg, uint32_t val)   /* one SBus write to the SPICO */
+{
+    sbus((reg & 0xFFFFu) | (0x21u << 16) | (1u << 24), val);
+}
+
+static long spico_upload(void)
+{
+    FILE *bf;
+    uint16_t *code;
+    long bytes, nwords, i;
+
+    if (!spico_path) {
+        printf("  @SPICO_IMEM marker reached but no firmware given "
+               "(-s <file>) -- SKIPPING. Copper/CR ports will not link.\n");
+        return 0;
+    }
+    bf = fopen(spico_path, "rb");
+    if (!bf) { perror("  open spico firmware"); return -1; }
+    fseek(bf, 0, SEEK_END); bytes = ftell(bf); fseek(bf, 0, SEEK_SET);
+    nwords = bytes / 2;
+    code = malloc((size_t)nwords * 2);
+    if (!code || fread(code, 2, (size_t)nwords, bf) != (size_t)nwords) {
+        fprintf(stderr, "  spico firmware read failed\n"); fclose(bf); free(code); return -1;
+    }
+    fclose(bf);
+
+    printf("  @SPICO_IMEM: uploading %ld words from %s\n", nwords, spico_path);
+    /* The per-word writes are bracketed by an IMEM-write-enable and a matching
+     * disable. Both are reg 0x06, so the strip that removed the upload removed
+     * these too -- omitting them leaves write-enable asserted when the SPICO is
+     * told to run, and it never executes. */
+    spico_sw(0xFD06, 0x8);                          /* IMEM write enable */
+    for (i = 0; i < nwords; i++) {
+        uint32_t w = code[i];
+        if (w > 0x3FFu) {
+            fprintf(stderr, "  word %ld = 0x%x exceeds 10 bits -- wrong image?\n", i, w);
+            free(code); return -1;
+        }
+        spico_sw(0xFD04, (uint32_t)((i >> 8) & 0xFF));
+        spico_sw(0xFD05, (uint32_t)(i & 0xFF));
+        spico_sw(0xFD07, w & 0xFF);
+        spico_sw(0xFD06, ((w >> 8) & 0x3) | 0xC);   /* data[9:8] + we + strobe */
+        spico_sw(0xFD06, ((w >> 8) & 0x3) | 0x8);   /* strobe released         */
+    }
+    spico_sw(0xFD06, 0x0);                          /* IMEM write enable off */
+    free(code);
+    printf("  @SPICO_IMEM: done (bracketed), PIN=0x%08x\n", rd(PIN));
+    return nwords;
+}
+
 int main(int argc,char**argv){
-  if(argc<2){fprintf(stderr,"usage: %s <file> [bdf] [pace_us_per_4k]\n",argv[0]);return 2;}
-  const char *bdf = argc>2?argv[2]:"0000:02:00.0";
-  unsigned pace = argc>3?(unsigned)strtoul(argv[3],0,0):0;
+  if(argc<2){fprintf(stderr,
+      "usage: %s <file> [bdf] [pace_us_per_4k] [-s <spico-firmware>]\n"
+      "  -s  firmware to upload at the @SPICO_IMEM marker (required for CR/DAC links)\n",
+      argv[0]);return 2;}
+  for(int i=1;i<argc;i++)
+    if(!strcmp(argv[i],"-s") && i+1<argc){ spico_path=argv[i+1]; argv[i]=argv[i+1]=(char*)""; }
+  const char *bdf = (argc>2 && argv[2][0])?argv[2]:"0000:02:00.0";
+  unsigned pace = (argc>3 && argv[3][0])?(unsigned)strtoul(argv[3],0,0):0;
   char p[256]; snprintf(p,sizeof p,"/sys/bus/pci/devices/%s/resource0",bdf);
   int fd=open(p,O_RDWR|O_SYNC); if(fd<0){perror("open");return 1;}
   M=mmap(NULL,32u*1024*1024,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
@@ -42,6 +115,12 @@ int main(int argc,char**argv){
   char line[64]; unsigned long n=0,mmio=0; uint32_t pend=0; int aborted=0;
   while(fgets(line,sizeof line,f)){
     uint32_t a,v;
+    if(line[0]=='@'){                       /* injection marker */
+      if(!strncmp(line,"@SPICO_IMEM",11)){
+        if(spico_upload()<0){ printf("  spico upload failed\n"); aborted=1; break; }
+      }
+      continue;
+    }
     if(sscanf(line,"%x %x",&a,&v)!=2) continue;
     n++;
     if(a==0xF002u){ pend=v; continue; }
