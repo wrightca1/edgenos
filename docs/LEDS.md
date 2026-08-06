@@ -28,34 +28,53 @@ Every trigger is `[none]`. The only lit LEDs are the four fan ones, set by the f
 than by us. **Nothing maps link state → port LED or system health → status LED**, so all 53 status
 LEDs are dark — including on the two ports that are up and forwarding.
 
-## ⚠ Unverified: does a write actually reach the hardware?
+## What the EOS comparison showed
 
-Writing brightness through sysfs is accepted and reads back correctly:
+The open question was whether `0x60D0`/`0x6050` are the right addresses. They are **not**.
 
-```
-echo 1 > /sys/class/leds/status1/brightness   ->  reads 1
-echo 2 > ...                                  ->  reads 2
-echo 255 > /sys/class/leds/status_sys/...     ->  reads 255
-```
-
-but the backing SCD register stays zero throughout:
+Booted EOS with **both ports up and the panel definitely lit**, and read the SCD:
 
 ```
-scd[0x060d0] = 0x00000000     (before and after)
-scd[0x06050] = 0x00000000     (before and after)
+port1 0x60D0 = 0x00000000      <- zero, under EOS, with the LED lit
+port2 0x60E0 = 0x00000000
+sys   0x6050 = 0x00000000
+0x6000-0x600c = 0x00a95f60     <- the only non-zero registers in the whole block
 ```
 
-So we can drive the *software* LED object; **it is not confirmed that a physical LED illuminates.**
-Three possibilities, not yet distinguished:
+So `scd-setup.sh` is declaring the wrong addresses. `0x60D0 + 0x10*(N-1)` came from
+`CotatiP4.fdl` line 111, but nothing lives there on this board.
 
-1. the register is write-only / reads as zero,
-2. the address declared by `scd-setup.sh` is wrong for this board,
-3. the driver is not reaching hardware at all.
+**Then the important part:** the same block under EdgeNOS is *byte-identical*.
 
-**The experiment that settles it:** boot EOS (which definitely lights the panel), bring a port up,
-and read `0x60D0`/`0x6050`. If EOS shows a non-zero value there, our address is right and the gap is
-policy; if EOS's LED state lives elsewhere, `scd-setup.sh` is declaring the wrong block. Five
-minutes, and it decides whether this is a trivial feature or an addressing bug.
+| register | EOS (panel lit) | EdgeNOS |
+|---|---|---|
+| `0x6000`-`0x600c` | `0x00a95f60` | `0x00a95f60` |
+| `0x6050`, `0x60D0`, `0x60E0` | `0` | `0` |
+
+Our LED-related hardware state matches a working EOS exactly. Combined with a port
+bounce diff (`shutdown`/`no shutdown` on Et1 under EOS) which changed only the SFP
+TX-disable bit `0x5010`, an interrupt flag `0x30b0`, and counters — **and no LED
+register at all** — the likely explanation is that **the SCD drives the port LEDs
+directly from link state in hardware**, with no software involvement.
+
+If that is right there is nothing to implement: the LEDs should already work under
+EdgeNOS exactly as they do under EOS, and the 57 sysfs objects are simply pointed at
+the wrong (harmless, read-as-zero) addresses.
+
+## ⚠ The one thing that needs a human
+
+**I cannot see the front panel.** Everything above is inference from registers.
+
+The check takes ten seconds: boot EdgeNOS, confirm a port is up
+(`fm6000reg 0000:02:00.0 0xe3826` reads `1`), and **look at the switch**.
+
+- **Port LED lit** → hardware-driven, nothing to build. Fix `scd-setup.sh` to stop
+  declaring bogus addresses (or drop the LED objects entirely) and close this out.
+- **Port LED dark** → the SCD needs software after all, and the register is somewhere
+  we have not found. Next step would be a full-BAR diff between EOS booted with a
+  port up and the same port down, looking specifically outside `0x6000-0x6400`.
+
+Until someone looks, treat "LEDs work" as **unverified** either way.
 
 ## What a policy would look like
 
