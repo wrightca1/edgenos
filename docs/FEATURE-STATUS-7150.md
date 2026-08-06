@@ -58,20 +58,24 @@ Put plainly: this is a working *NIC-through-a-switch-ASIC*, not yet a switch.
 | Remaining 50 ports | ❓ | never attempted |
 | Link up/down events, autoneg | ❓ | no link-state monitoring exists |
 
-**Why Et2 fails — best current theory.** `EPL_CFG_B` (`PcsSel=3`) is *identical* on both ports, so
-the PCS type is not the difference. The golden EOS capture shows the delta is in the SerDes tuning
-words, and SPICO — which we deliberately dropped — is exactly what drives **RX equaliser
-adaptation**, which matters far more on copper than on short fibre:
+**Why Et2 fails — two theories tested and killed.**
 
-| EPL cfg | Et1 (SR) | Et2 (CR) |
-|---|---|---|
-| `+5` / `+6` | `04` / `03` | `0a` / `0a` |
-| `+7` | `c9` | `96` |
-| `+b` / `+c` | `30` / `30` | `10` / `03` |
-| `+d` | `0a24` | `0eb6` |
+1. ~~"The EPL `+5/+6/+7/+b/+c/+d` deltas vs EOS are the CR tuning we're missing."~~ **No.** The
+   replay never writes those words for *either* port — only `+1`, `+2`, `+4`, identically. They are
+   read-only status: zero on cold Et2 because the link is down, non-zero on Et1 because it is up.
+   Symptom, not cause.
+2. ~~"Et2 needs the SPICO firmware for RX equaliser adaptation."~~ **No.** Loading SPICO cold — alive
+   check passes, CRC self-check OK, SPICO running — leaves Et2 at `0x815`/`pcsRx=0`, unchanged.
 
-Captured in `notes/reference/fm6000-golden-epl-Et1-SR-vs-Et2-CR.txt`. This may be the caveat in
-`PROVENANCE.md §3.1` coming true — *"validated on a short SR fibre link only"*.
+**What is established.** Both SerDes lanes (SBus receivers `0x45` and `0x49`) get *identical*
+programming — 15 real config transactions each, then a `2a` toggle loop — and the replay contains
+**no CR/copper-specific setup at all**, no per-lane polarity/drive/pre/post anywhere. `EPL_CFG_B`
+(`PcsSel=3`) is also identical on both.
+
+**Leading hypothesis:** 10GBASE-CR requires **link training**, which 10GBASE-SR does not. The
+capture window very likely missed Et2's training sequence. **Next step:** trace EOS bringing Et2
+down→up (`shutdown`/`no shutdown` — the "shut == cold" trick already proven for Et1) with
+`fmPlatformTraceRegOps` armed, which yields the exact CR bring-up we're missing.
 
 ## 4. Dataplane (packet DMA)
 
@@ -80,7 +84,7 @@ Captured in `notes/reference/fm6000-golden-epl-Et1-SR-vs-Et2-CR.txt`. This may b
 | CPU → wire (inject) | ✅ | 30 frames queued, `DONE=30`, **+39 counted at the far-end AS5610** |
 | Wire → CPU (punt) | ✅ | 28 frames received into the RX ring |
 | F64 tag handling | ✅ | 8-byte tag inline at frame offset 12; stripped at egress (far end parses our frames) |
-| Per-port egress steering | ⚠️ | works via the F64 tag's GLORT word, but **the GLORT↔port mapping is not stable** — it must be read out of the trace, not assumed |
+| Per-port egress steering | ⚠️ | works via the F64 tag's GLORT word. The mapping lives in `PARSER_INIT_FIELDS[port]` = `0x108200+4*port`; it is unstable only because we inherited EOS's arbitrary allocation — see `GLORT-MAPPING.md` for the fix |
 | DMA kernel module | ✅ | `fm6000dma.ko`, coherent low-4 GiB pool + MSI |
 | RX ring accounting | ⚠️ | `fm6000_rxcount` **double-counts** (re-arms before DMA clears DONE). Don't quote its numbers |
 | Multi-queue / QoS / rate limit | ❌ | not implemented |
@@ -152,8 +156,8 @@ routing works.
 1. **Thermal loop** — the only *safety* item on this list. Everything else is a feature; this one
    can damage hardware.
 2. **Et2 / copper link.** Unblocks every multi-port capability: switching, routing, ECMP, LAG.
-   Start by re-testing with the SPICO firmware loaded to confirm or kill the RX-adaptation theory;
-   the golden SR-vs-CR register deltas are already captured.
+   SPICO and the EPL-register theories are both dead (above); the live lead is **CR link training**.
+   Trace EOS doing `shutdown`/`no shutdown` on Et2 to capture it.
 3. **A real FIB** — program `NEXTHOP`/L3AR from a route table so the ASIC can forward. This is what
    makes it a router rather than a host.
 4. **Port-to-port switching test** — the cheapest big win once Et2 is up; likely already works,
