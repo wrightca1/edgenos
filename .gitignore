@@ -42,3 +42,12 @@ build/*/m1/payload/fm6000load
 build/*/m1/payload/fm6000reg
 !build/*/m1/payload/*.sh
 !build/*/m1/payload/*.c
+# makefile builds standalone tools next to their sources
+asic/fm6000/fm6000_bringup
+asic/fm6000/fm6000_l2_probe
+asic/fm6000/fm6000_sched
+asic/fm6000/fm6000_crm
+asic/fm6000/fm6000_mrl
+asic/fm6000/fpdma_probe
+asic/fm6000/fm6000_i2c_bringup
+build/*/m1/payload/fpdma_probe
