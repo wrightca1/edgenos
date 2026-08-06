@@ -23,9 +23,24 @@ default       via 10.101.101.25 dev et1  metric 20
 10.101.1.0/29 ... 10.101.1.32/29 ...
 ```
 
-The chain works end to end: **ASIC -> punt -> TAP -> kernel -> ospfd -> zebra ->
-kernel FIB.** The remaining link is FIB sync (kernel -> ASIC); `fm6000_route`
-already programs the hardware, it just is not driven automatically yet.
+**The chain is now closed end to end:**
+
+```
+ASIC -> punt -> TAP -> kernel -> ospfd -> zebra -> kernel FIB -> fibd -> ASIC
+```
+
+`fm6000_fibd` mirrors the kernel FIB into hardware. Verified: the hardware prefix
+array matches the OSPF-learned routes exactly,
+
+```
+kernel   10.3.1.0/24  10.4.1.0/24  10.11.1.0/24  10.12.1.0/24 ... via 10.101.101.25
+hw slot  241:10.3.1.0 242:10.4.1.0 243:10.11.1.0 244:10.12.1.0 ...
+```
+
+and traffic to an OSPF-learned prefix is forwarded **in silicon** — `ttl 40 -> 39`
+on `10.22.1.0/24` (learned by OSPF, programmed by fibd, decremented by the ASIC).
+
+Bring it all up with `edgenos-up.sh`.
 
 ## The four things that had to be right
 
