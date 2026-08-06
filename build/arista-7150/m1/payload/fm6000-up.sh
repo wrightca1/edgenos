@@ -96,11 +96,32 @@ if [ -z "$BUS" ]; then
 	echo "ERROR: no Si5338 (0x$SI5338_ADDR) found on any i2c bus - check smbus_master base"
 	exit 1
 fi
-echo "--- Si5338 found on i2c-$BUS; programming Rosa-Quartzy map ---"
-[ -n "$REGMAP" ] || { echo "ERROR: no .si5338 regmap staged (/usr/share/firmware/)"; exit 1; }
-si5338 "$BUS" "$REGMAP" -a "$SI5338_ADDR"
-echo "--- clock status (want PLL_LOL=0 LOS_CLKIN=0) ---"
-si5338 "$BUS" -p -a "$SI5338_ADDR"
+# On this board the Si5338 comes up ALREADY CONFIGURED AND LOCKED. Verified on a
+# genuinely cold boot with no regmap staged anywhere:
+#     reg6: SYS_CAL=0  LOS_CLKIN=0  PLL_LOL=0
+# So programming it is unnecessary -- and reprogramming a good part is actively
+# dangerous: an unlocked Si5338 takes the board out until a PHYSICAL power cycle.
+# The regmap is also third-party board data (Silicon Labs copyright, out of a
+# licensed EOS) that we deliberately do not ship.
+#
+# Check the lock FIRST; only program if the part is genuinely unlocked AND the
+# operator staged a regmap. This previously hard-exited whenever no regmap was
+# present, which made a perfectly healthy clock look like a bring-up failure.
+echo "--- Si5338 on i2c-$BUS: checking lock before touching anything ---"
+STAT="$(si5338 "$BUS" -p -a "$SI5338_ADDR" 2>/dev/null)"
+echo "$STAT" | sed 's/^/    /'
+if echo "$STAT" | grep -q 'PLL_LOL=0' && echo "$STAT" | grep -q 'LOS_CLKIN=0'; then
+	echo "--- Si5338 already locked -- NOT reprogramming (no regmap required) ---"
+elif [ -n "$REGMAP" ]; then
+	echo "--- Si5338 NOT locked -- programming from $REGMAP ---"
+	si5338 "$BUS" "$REGMAP" -a "$SI5338_ADDR"
+	echo "--- clock status after programming (want PLL_LOL=0 LOS_CLKIN=0) ---"
+	si5338 "$BUS" -p -a "$SI5338_ADDR"
+else
+	echo "ERROR: Si5338 is NOT locked and no regmap is staged. Stage a .si5338 map"
+	echo "       in /usr/share/firmware/ or /mnt/flash/ and retry."
+	exit 1
+fi
 
 # --- 3.5. margin FM6000 core VDD_ALTA 1.057V -> 1.2V (phase35, chip IN RESET) --
 # The FM6000 boots undervolted (Chl822X NVM default = 1.057V); at 1.057V the PCIe

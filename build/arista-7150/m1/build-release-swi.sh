@@ -84,6 +84,21 @@ else
     exit 1
 fi
 
+# ---- PURGE third-party payloads inherited from the base initramfs -----------
+# The base initrd is a development image and carries operator-supplied blobs:
+# the FM6000 microcode and the Si5338 clock register maps (Silicon Labs
+# copyright, extracted from EOS). A RELEASE must not redistribute those, and
+# they are already forbidden by .gitignore -- but they arrive here through the
+# overlay, not through git, so they have to be removed explicitly.
+purged=0
+for junk in "$WORK/usr/share/firmware"/*.si5338 \
+            "$WORK/usr/share/firmware"/fm6000Microcode.raw \
+            "$WORK/usr/share/firmware"/*.raw \
+            "$WORK"/mnt/flash/fwd*.txt "$WORK"/mnt/flash/ucode_*.raw; do
+    [ -e "$junk" ] && { rm -f "$junk"; purged=$((purged+1)); echo "    purged $(basename "$junk")"; }
+done
+[ "$purged" = "0" ] && echo "    no third-party payloads in the base image"
+
 mkdir -p "$WORK/usr/bin" "$WORK/usr/lib/edgenos/platform"
 n=0
 for b in "$P"/fm6000_* "$P"/scdreg "$P"/resettool "$P"/kexec "$P"/pcicfg "$P"/scddump "$P"/si5338; do
