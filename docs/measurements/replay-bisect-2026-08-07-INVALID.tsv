@@ -1,0 +1,9 @@
+range	name	writes_dropped	verdict
+030000-038000	L2L	31049	link=0x000008c0 routes=2 rx=0
+0e0000-100000	EPL	22164	link=0x00000015 routes=2 rx=10
+014000-015000	LBS	15867	link=0xffffffff routes=35 rx=40
+# INVALID -- the range filter under/over-removed. busybox awk compared
+# all-digit addresses ('00381880') numerically and hex-letter addresses
+# ('003b1000') lexicographically, so one file got two orderings.
+# Actual vs intended writes removed: L2L 31049/24620, EPL 22164/22051,
+# LBS 15867/18547, FFU 27999/14549. Kept only as a record of the bug.
