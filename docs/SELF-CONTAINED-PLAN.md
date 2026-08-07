@@ -181,6 +181,30 @@ boots produce a valid signal. Two further traps found the hard way: alpha4's `in
 be armed), and the initramfs regenerates its SSH host key, so `ssh-keygen -R` is needed between
 boots or the reconnect looks like a hung box.
 
+## ⚠ Tested: the two biggest blocks are NOT dead weight
+
+The hope behind `replay_bisect.sh` was that much of EOS's replay configures features EdgeNOS does
+not implement, so it could be deleted rather than generated. Cold-boot tested, that hope does not
+survive contact with the two largest blocks:
+
+| block dropped | writes | result |
+|---|---:|---|
+| **CM** (`0x110000-0x120000`) | 39,142 | link up `0x8c0`, but **routes=2, rx=0 — no forwarding** |
+| **L2F** (`0x180000-0x200000`) | 56,028 | **`link=0xffffffff` — chip off-bus, box unreachable** |
+
+CM comes up at link level and then forwards nothing, which is the same signature as the zero-write
+experiment. L2F is worse: dropping it takes the chip off the bus entirely and the board had to walk
+itself back to EOS on the sticky boot budget.
+
+**So CM and L2F must be generated, not deleted.** That is 95,170 writes of real configuration, and
+it sets the honest expectation for the rest: assume load-bearing until measured otherwise.
+
+The remaining blocks are still worth measuring (L2L 24,620, EPL 22,051, LBS 18,547, FFU 14,549) —
+each answer is cheap now that the harness exists, and a single droppable block is worth more than
+days of decoding. But the plan should be budgeted as *generation*, not deletion.
+
+Results: `docs/measurements/replay-bisect-2026-08-07.tsv`.
+
 ## The three pieces, hardest last
 
 ### 1. SPICO firmware — 23.1%, and possibly deletable
