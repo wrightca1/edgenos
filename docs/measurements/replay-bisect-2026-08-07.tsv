@@ -1,3 +1,10 @@
 range	name	writes_dropped	verdict
-110000-120000	CM	39142	link=0x000008c0 routes=2 rx=0
-180000-200000	L2F	56028	link=0xffffffff routes=2 rx=0
+030000-038000	L2L	24620	link=0x000008c0 routes=2 rx=10
+0e0000-100000	EPL	22051	link=0x00000015 routes=2 rx=10
+014000-015000	LBS	18547	link=? routes=1 rx=0
+300000-400000	FFU	14549	NO-BOOT
+# Corrected sweep (fixed range filter + non-hanging verdict). Earlier results in
+# replay-bisect-2026-08-07-INVALID.tsv are void.
+# Verdict signal: OSPF adjacency + routes learned. routes<=2 means only the local
+# routes exist, i.e. no forwarding. FFU NO-BOOT = the box never returned and the
+# sweep stopped there by design; MAPPER and L3AR were therefore not tested.

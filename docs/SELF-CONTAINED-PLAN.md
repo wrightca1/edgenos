@@ -249,6 +249,34 @@ replay shows (0/0/70/60/10/70/50/60/90/80%), so unchanged by this.
 | LBS | 18,547 | untested |
 | FFU | 14,549 | FIB — format already decoded |
 
+## Bisect complete: nothing is dead weight
+
+Every block tested is load-bearing. The hypothesis that EOS's replay carries a lot of configuration
+for features EdgeNOS does not implement — and could therefore be deleted rather than generated —
+is now comprehensively dead.
+
+| block dropped | writes | result |
+|---|---:|---|
+| CM | 47,742 | link up `0x8c0`, **routes=2, no forwarding** |
+| L2F | 56,127 | **`link=0xffffffff`** — chip off-bus |
+| L2L | 24,620 | link up `0x8c0`, **routes=2, no forwarding** |
+| EPL | 22,051 | **`link=0x15`** — link fault, port never trains |
+| LBS | 18,547 | **routes=1, rx=0** — nothing comes up |
+| FFU | 14,549 | **NO-BOOT** — box never returned, needed recovery |
+
+`routes<=2` means only the local routes exist: no OSPF adjacency, no forwarding.
+
+So the remaining ~317k writes must be **generated**, block by block, the way CM and SAF were. There
+is no shortcut left in the replay itself.
+
+⚠ Two harness bugs were found and fixed during this, and the first sweep's results were void —
+see `docs/measurements/replay-bisect-2026-08-07-INVALID.tsv`. Both are recorded in
+`replay_bisect.sh` because they are easy to reintroduce: awk comparing all-digit addresses
+numerically and hex-letter addresses lexicographically, and `edgenos-up.sh`'s daemons holding the
+ssh session open so the harness blocked forever.
+
+**MAPPER (6,644) and L3AR (4,489) were never tested** — the sweep stops on NO-BOOT by design.
+
 ## The three pieces, hardest last
 
 ### 1. SPICO firmware — 23.1%, and possibly deletable
