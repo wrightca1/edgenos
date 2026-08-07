@@ -205,6 +205,50 @@ days of decoding. But the plan should be budgeted as *generation*, not deletion.
 
 Results: `docs/measurements/replay-bisect-2026-08-07.tsv`.
 
+## Progress: two blocks are now ours (cold-boot validated)
+
+| block | EOS writes | ours | tool | validated |
+|---|---:|---:|---|---|
+| SAF | 34,668 | **168** | `fm6000_safinit` | 2026-08-06 |
+| CM | 47,742 | **8,180** | `fm6000_cminit` | 2026-08-07 |
+| | **82,410** | **8,348** | | |
+
+**Replay: 389,809 -> 317,189 writes (-72,620, 18.6%).** End state of all 93,662 registers unchanged.
+
+CM was the larger of the two blocks the bisect proved load-bearing, and it turned out to be the
+easiest real win so far — because it is laid out exactly as the **public datasheet** says:
+
+```
+0x113000  76x16  CM_PORT_RXMP_HOG_WM         uniformly 0xffffffff
+0x112800  76x12  CM_PORT_RXMP_PRIVATE_WM
+0x115000  76x12  CM_PORT_RXMP_PAUSE_ON_WM?   identical content to...
+0x115800  76x12  CM_PORT_RXMP_PAUSE_OFF_WM?  ...this one
+0x113800  80x16  CM_PORT_TXMP_PRIVATE_WM?
+0x114000  80x16  CM_PORT_TXMP_HOG_WM?
+0x117000  80x12  CM_PORT_TXMP_IP_WM?
+```
+
+47,742 writes carry only 8,180 registers holding **40 distinct values**, and within each array the
+ports fall into 2–4 classes — so `gen_cminit.py` stores 18 rows plus a port→class map. Names with
+`?` are geometry-unique matches against the datasheet's declared index ranges, not behaviourally
+confirmed; they are labelled that way deliberately.
+
+Cold boot with both generators: `Et1 0x8c0`, `Et2 0x8c0`, OSPF adjacency, 35 kernel routes, 13
+programmed into silicon, ping loss 0/90/60/60% — inside the pre-existing degradation band the stock
+replay shows (0/0/70/60/10/70/50/60/90/80%), so unchanged by this.
+
+### What is left
+
+| block | writes | notes |
+|---|---:|---|
+| L2F | 56,127 | load-bearing (dropping it takes the chip off-bus); **not** in the public datasheet |
+| L2AR | 29,110 | microcode |
+| L2L | 24,620 | untested by bisect |
+| PARSER | 22,246 | microcode; 2,117 CAM entries |
+| EPL | 22,051 | untested |
+| LBS | 18,547 | untested |
+| FFU | 14,549 | FIB — format already decoded |
+
 ## The three pieces, hardest last
 
 ### 1. SPICO firmware — 23.1%, and possibly deletable
