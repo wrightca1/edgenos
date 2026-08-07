@@ -121,15 +121,25 @@ arm_boot() {
 
 # The verdict. Link alone is not enough -- alpha4/5 both link with a broken
 # forwarding path -- so the signal is OSPF adjacency + routes learned.
+# edgenos-up.sh leaves daemons running (portd, zebra, ospfd, fibd). If they
+# inherit the ssh session's stdout the connection NEVER CLOSES and the harness
+# blocks forever -- observed hanging 20+ minutes on a box that had booted fine.
+# So: start it detached with every fd redirected, return immediately, then read
+# the result over a separate short-lived connection. Both calls are wrapped in
+# `timeout` so a wedged box costs one iteration rather than the whole sweep.
 verdict() {
-	$SSH '
+	timeout 240 $SSH '
 		for i in $(seq 1 40); do grep -q "FULLSEQ DONE" /mnt/flash/fullseq.log 2>/dev/null && break; sleep 5; done
-		B=0000:02:00.0
-		L=$(fm6000reg $B 0xe3800 2>/dev/null | sed "s/.*= //")
-		sh /usr/lib/edgenos/platform/edgenos-up.sh >/tmp/up.log 2>&1
+		fm6000reg 0000:02:00.0 0xe3800 2>/dev/null | sed "s/.*= //" > /tmp/link.txt
+		setsid sh /usr/lib/edgenos/platform/edgenos-up.sh >/tmp/up.log 2>&1 </dev/null &
+		exit 0
+	' >/dev/null 2>&1
+	sleep 150
+	timeout 60 $SSH '
+		L=$(cat /tmp/link.txt 2>/dev/null)
 		R=$(ip route 2>/dev/null | wc -l)
-		X=$(grep -oE "et1 rx=[0-9]+" /tmp/up.log | tail -1 | cut -d= -f2)
-		echo "link=$L routes=$R rx=${X:-0}"
+		X=$(grep -oE "et1 rx=[0-9]+" /tmp/up.log 2>/dev/null | tail -1 | cut -d= -f2)
+		echo "link=${L:-?} routes=$R rx=${X:-0}"
 	' 2>/dev/null | tail -1
 }
 
