@@ -1,0 +1,155 @@
+#!/bin/bash
+# replay_bisect.sh - find out which parts of the replay the switch actually NEEDS.
+#
+# WHY THIS EXISTS
+#   Removing fwd4.txt by decoding and regenerating each block is slow: CM alone
+#   is 46,110 writes. But EOS's replay configures a fully-featured 52-port L2/L3
+#   switch with QoS, ACLs and features EdgeNOS does not implement. Much of it is
+#   very likely dead weight for our feature set -- and dead weight does not need
+#   to be generated at all, only deleted.
+#
+#   So: before decoding anything else, MEASURE what is load-bearing. Drop a
+#   block, cold-boot, see if the switch still forwards. Each answer either
+#   removes thousands of writes from the problem or tells us the block is real.
+#
+# WHY IT HAS TO BE A COLD BOOT
+#   Re-running fm6000-fullseq.sh in place cannot test forwarding: both a modified
+#   replay and the unmodified control give et1 rx=0 (the documented portd wedge).
+#   Only a cold boot gives a valid signal. This script therefore drives real
+#   reboots, which is why the sticky boot budget in init-m1 exists.
+#
+# SAFETY
+#   - Each iteration writes a boot budget to /mnt/flash/edgenos-sticky, so a
+#     candidate that wedges the box burns the budget and lands back in EOS.
+#   - The stock replay is kept at /mnt/flash/fwd4.orig.txt and restored on exit.
+#   - If the box does not come back as EdgeNOS within the timeout, we stop rather
+#     than push another candidate at it.
+#
+# Usage:
+#   replay_bisect.sh <lo>-<hi> [<lo>-<hi> ...]     word-address ranges to drop
+#   replay_bisect.sh --blocks                      drop each big block in turn
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+set -uo pipefail
+
+SW=${SW:-10.1.1.77}
+PW=${PW:-arista}
+SSHO="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8"
+SSH="sshpass -p $PW ssh $SSHO root@$SW"
+RESULTS=${RESULTS:-bisect-results.tsv}
+# A dedicated image, so a released build is never the thing being rebooted in a
+# loop. It must contain the init-m1 sticky boot budget or every iteration costs
+# an extra EOS round-trip.
+SWI=${SWI:-edgenos-m1-bisect.swi}
+
+# The blocks worth testing first, largest share of CONFIG first.
+BIG_BLOCKS=(
+	"110000-120000:CM"
+	"180000-200000:L2F"
+	"030000-038000:L2L"
+	"0e0000-100000:EPL"
+	"014000-015000:LBS"
+	"300000-400000:FFU"
+	"120000-130000:MAPPER"
+	"010000-014000:L3AR"
+)
+
+say() { echo "[bisect] $*"; }
+
+remote_up() { timeout 8 $SSH true 2>/dev/null; }
+
+wait_for_edgenos() {   # $1 = seconds
+	local deadline=$(( SECONDS + $1 ))
+	ssh-keygen -R "$SW" >/dev/null 2>&1
+	while [ $SECONDS -lt $deadline ]; do
+		if remote_up; then return 0; fi
+		sleep 10
+		ssh-keygen -R "$SW" >/dev/null 2>&1
+	done
+	return 1
+}
+
+# Build a candidate replay with the given ranges removed, on the switch itself
+# (avoids pushing 6 MB per iteration).
+#
+# busybox awk has no strtonum(), but every address in the trace is a zero-padded
+# 8-digit lowercase hex string, so LEXICOGRAPHIC comparison is numeric
+# comparison. Ranges are given the same way, hence the printf padding below.
+make_candidate() {
+	local ranges="$1" spec="" r lo hi
+	for r in ${ranges//,/ }; do
+		lo=$(printf '%08x' "0x${r%%-*}")
+		hi=$(printf '%08x' "0x${r##*-}")
+		spec+="${spec:+,}$lo-$hi"
+	done
+	$SSH "awk -v R='$spec' '
+		BEGIN { n = split(R, a, \",\");
+		        for (i = 1; i <= n; i++) { split(a[i], b, \"-\"); lo[i] = b[1]; hi[i] = b[2] } }
+		{ k = 1;
+		  for (i = 1; i <= n; i++) if (\$1 >= lo[i] && \$1 < hi[i]) { k = 0; break }
+		  if (k) print }
+	' /mnt/flash/fwd4.orig.txt > /mnt/flash/fwd4.txt; sync; wc -l < /mnt/flash/fwd4.txt"
+}
+
+arm_boot() {
+	$SSH "echo ${1:-2} > /mnt/flash/edgenos-sticky
+	      printf 'SWI=flash:/%s\n' "$SWI" > /mnt/flash/boot-config; sync" >/dev/null
+}
+
+# The verdict. Link alone is not enough -- alpha4/5 both link with a broken
+# forwarding path -- so the signal is OSPF adjacency + routes learned.
+verdict() {
+	$SSH '
+		for i in $(seq 1 40); do grep -q "FULLSEQ DONE" /mnt/flash/fullseq.log 2>/dev/null && break; sleep 5; done
+		B=0000:02:00.0
+		L=$(fm6000reg $B 0xe3800 2>/dev/null | sed "s/.*= //")
+		sh /usr/lib/edgenos/platform/edgenos-up.sh >/tmp/up.log 2>&1
+		R=$(ip route 2>/dev/null | wc -l)
+		X=$(grep -oE "et1 rx=[0-9]+" /tmp/up.log | tail -1 | cut -d= -f2)
+		echo "link=$L routes=$R rx=${X:-0}"
+	' 2>/dev/null | tail -1
+}
+
+restore() {
+	say "restoring the stock replay"
+	$SSH 'cp /mnt/flash/fwd4.orig.txt /mnt/flash/fwd4.txt; rm -f /mnt/flash/edgenos-sticky; sync' >/dev/null 2>&1
+}
+trap restore EXIT
+
+# ---- preflight ----------------------------------------------------------
+remote_up || { say "switch is not reachable as EdgeNOS; boot it first"; exit 1; }
+$SSH '[ -f /mnt/flash/fwd4.orig.txt ] || cp /mnt/flash/fwd4.txt /mnt/flash/fwd4.orig.txt; sync' >/dev/null
+BASE=$($SSH 'wc -l < /mnt/flash/fwd4.orig.txt' 2>/dev/null | tr -d ' \r')
+say "stock replay: $BASE writes"
+
+CASES=()
+if [ "${1:-}" = "--blocks" ]; then
+	for b in "${BIG_BLOCKS[@]}"; do CASES+=("$b"); done
+else
+	for r in "$@"; do CASES+=("$r:$r"); done
+fi
+[ ${#CASES[@]} -gt 0 ] || { say "nothing to test"; exit 1; }
+
+printf 'range\tname\twrites_dropped\tverdict\n' > "$RESULTS"
+
+for c in "${CASES[@]}"; do
+	RANGE=${c%%:*}; NAME=${c##*:}
+	say "=== dropping $NAME ($RANGE) ==="
+	LEFT=$(make_candidate "$RANGE" 2>/dev/null | tail -1 | tr -d ' \r')
+	DROPPED=$(( BASE - ${LEFT:-BASE} ))
+	say "    $DROPPED writes removed, $LEFT remain -- rebooting"
+	arm_boot 2
+	$SSH '(sleep 2; reboot -f) >/dev/null 2>&1 &' >/dev/null 2>&1
+	sleep 30
+	if ! wait_for_edgenos 420; then
+		say "    DID NOT COME BACK as EdgeNOS -- stopping (box should be in EOS)"
+		printf '%s\t%s\t%s\tNO-BOOT\n' "$RANGE" "$NAME" "$DROPPED" >> "$RESULTS"
+		break
+	fi
+	V=$(verdict)
+	say "    $NAME -> $V"
+	printf '%s\t%s\t%s\t%s\n' "$RANGE" "$NAME" "$DROPPED" "$V" >> "$RESULTS"
+done
+
+say "results in $RESULTS"
+column -t "$RESULTS" 2>/dev/null || cat "$RESULTS"

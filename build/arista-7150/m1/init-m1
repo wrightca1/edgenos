@@ -44,8 +44,24 @@ echo "--- declaring SCD board blocks + enabling SFP TX ---"
 if [ -f /cold-init-test ]; then
     echo "--- COLD-INIT-TEST: arming remote-recovery safety BEFORE FM6000 bring-up ---"
     if [ -b /dev/sda1 ] && { mount -t vfat /dev/sda1 /mnt/flash 2>/dev/null || mkdir -p /mnt/flash && mount /dev/sda1 /mnt/flash 2>/dev/null; }; then
-        printf 'SWI=flash:/EOS-4.16.8M.swi\n' > /mnt/flash/boot-config; sync
-        echo "    boot-config self-reverted -> $(cat /mnt/flash/boot-config) (any reboot = EOS)"
+        # STICKY MODE, for automated cold-boot bisection of the replay set.
+        # /mnt/flash/edgenos-sticky holds a BOOT BUDGET. While it is > 0 we
+        # decrement it and keep booting this image, so a harness can cold-boot
+        # back-to-back instead of paying an EOS round-trip every iteration.
+        # When it reaches 0 -- including when a wedge-reboot burns through it --
+        # we revert to EOS exactly as before. The budget is what keeps this
+        # safe: a boot loop terminates itself in EOS instead of spinning.
+        STICKY=0
+        [ -f /mnt/flash/edgenos-sticky ] && STICKY=$(cat /mnt/flash/edgenos-sticky 2>/dev/null)
+        case "$STICKY" in ''|*[!0-9]*) STICKY=0;; esac
+        if [ "$STICKY" -gt 0 ]; then
+            echo $((STICKY - 1)) > /mnt/flash/edgenos-sticky; sync
+            echo "    STICKY: $((STICKY - 1)) boot(s) left before auto-revert to EOS"
+        else
+            rm -f /mnt/flash/edgenos-sticky 2>/dev/null
+            printf 'SWI=flash:/EOS-4.16.8M.swi\n' > /mnt/flash/boot-config; sync
+            echo "    boot-config self-reverted -> $(cat /mnt/flash/boot-config) (any reboot = EOS)"
+        fi
     else
         echo "    *** could not mount /dev/sda1 to self-revert boot-config — UNSAFE, dropping to shell ***"
         exec setsid cttyhack /bin/busybox sh
