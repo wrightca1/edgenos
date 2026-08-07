@@ -277,6 +277,33 @@ ssh session open so the harness blocked forever.
 
 **MAPPER (6,644) and L3AR (4,489) were never tested** — the sweep stops on NO-BOOT by design.
 
+## ⚠ L2F/LBS: generated correctly, and it still breaks forwarding
+
+`fm6000_sweepinit` reproduces all 637 L2F+LBS registers exactly, and every readback on the switch
+was right (`0x1a0c00=0x09`, `0x1a1000=0x0008180a`, `0x014000=0xff0000ff`, `0x014028=0x0001fffe`).
+The link came up `0xcc0`. And the dataplane was dead: **routes=2, rx=2, ping 100% loss.**
+
+The reason is structural, and it is the most useful thing learned so far:
+
+```
+one loop iteration = 272 writes:   SWEEP:219   other:52   SWEEP:1
+```
+
+Each of the 336 iterations interleaves ~52 EPL/CM/L2L writes *inside* the sweep. `gen_split` hoists
+every write of a block to a single point — which is fine for CM and SAF, where only the end state
+matters, but for the sweep it moves all 336×52 per-port writes to *after* the entire sweep instead
+of inside it. The chip depends on that interleaving.
+
+**So the blocks are not independently extractable.** CM and SAF came out because they are state.
+L2F/LBS is a *sequenced interaction* with the per-port bring-up, and generating it means generating
+the whole loop body — EPL and L2L included — not one block at a time.
+
+That is a much bigger unit of work than the CM-style wins, and it reframes what is left: the
+remaining ~317k writes are not six independent blocks but one interleaved bring-up plus some
+genuinely separable state.
+
+`SWEEPGEN=1` re-enables the generator for further work; it is off by default and does not ship.
+
 ## The three pieces, hardest last
 
 ### 1. SPICO firmware — 23.1%, and possibly deletable

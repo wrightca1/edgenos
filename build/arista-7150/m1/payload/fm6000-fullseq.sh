@@ -72,8 +72,16 @@ say "STEP5 FULL REPLAY of EOS's port+forwarding bring-up (299803 writes: BOTH po
 # EOS's writes for them. Each generator writes that block's END STATE; the
 # recorded writes for the block are filtered out of the replay.
 #
-#   fm6000_cminit   CM  0x110000-0x11ffff   47,742 writes ->  8,180
-#   fm6000_safinit  SAF 0x0a0000-0x0a0fff   34,668 writes ->    168
+#   fm6000_cminit    CM      0x110000-0x11ffff   47,742 writes ->  8,180
+#   fm6000_safinit   SAF     0x0a0000-0x0a0fff   34,668 writes ->    168
+#   fm6000_sweepinit L2F+LBS 0x180000-0x1fffff   74,674 writes -> 74,382
+#                            + 0x014000-0x014fff
+#
+# sweepinit is different in kind: it does not shrink the write count, it
+# reproduces the 336-iteration port sweep from OUR port table instead of
+# replaying EOS's. The LBS write paired with each L2F entry is very likely the
+# commit for it (dropping LBS gives routes=1, rx=0), so the pairing is
+# reproduced rather than collapsed to an end state.
 #
 # Both are spliced at the first IN-LOOP write for their block, so the writes
 # that PRECEDE the 0x1a0c00 loop are kept verbatim (1,271 for CM, 171 for SAF).
@@ -102,6 +110,19 @@ CUR="$FWD"; NEXT=/tmp/fwd.a
 if [ "${GENBLK:-1}" = "1" ]; then
 	[ -x "$BIN/fm6000_cminit" ]  && gen_split '0011'  fm6000_cminit  CM
 	[ -x "$BIN/fm6000_safinit" ] && gen_split '000a0' fm6000_safinit SAF
+	# L2F+LBS: OFF by default -- it BREAKS FORWARDING. Cold-boot tested
+	# 2026-08-07: link came up 0xcc0 but routes=2, rx=2, ping 100% loss.
+	#
+	# Why: unlike CM and SAF, the sweep cannot be hoisted. Each of the 336 loop
+	# iterations is 220 sweep writes with 52 EPL/CM/L2L writes INTERLEAVED in the
+	# middle, and gen_split moves every sweep write to one point -- so all
+	# 336x52 per-port writes end up after the entire sweep instead of inside it.
+	# The chip depends on that interleaving.
+	#
+	# Generating L2F/LBS therefore means generating the WHOLE loop body, per-port
+	# work included, not just the sweep slice. SWEEPGEN=1 to re-test.
+	[ "${SWEEPGEN:-0}" = "1" ] && [ -x "$BIN/fm6000_sweepinit" ] && \
+		gen_split '\(001[89abcdef]\|00014\)' fm6000_sweepinit L2F+LBS
 fi
 $BIN/fm6000_fullreplay "$CUR" $B ${PACE:-1500000} >> $LOG 2>&1; RC=$?
 [ "$CUR" != "$FWD" ] && rm -f /tmp/fwd.a /tmp/fwd.b
