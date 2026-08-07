@@ -131,6 +131,18 @@ if [ "${GENBLK:-1}" = "1" ]; then
 	# 2026-08-07: both links up, OSPF adjacency, 35 kernel routes, 13 in silicon
 	# -- indistinguishable from the stock replay run back-to-back.
 	[ -x "$BIN/fm6000_l2finit" ] && gen_after '\(001[89abcdef]\|00014\)' fm6000_l2finit L2F+LBS
+	# EPL: OFF. 22,051 -> 1,027 looked like the biggest remaining win (21x
+	# redundancy, 32 distinct values) and it WEDGES THE CHIP. Cold-boot tested
+	# 2026-08-07: bring-up ran, then EPL reads returned 0xffffffff and the box
+	# wedged hard enough for the watchdog to reboot it.
+	#
+	# The caveat written into fm6000_eplinit.c turned out to be the answer: EPL
+	# IS the port bring-up, and the intermediate states are real -- a SerDes
+	# needs the steps, not the destination. Unlike L2F/LBS this is not fixable
+	# by moving where the writes land; the 21x redundancy is a sequence, not
+	# repetition. EPLGEN=1 to re-test.
+	[ "${EPLGEN:-0}" = "1" ] && [ -x "$BIN/fm6000_eplinit" ] && \
+		gen_after '000[ef]' fm6000_eplinit EPL
 
 	# fm6000_sweepinit: OFF -- it BREAKS FORWARDING. Cold-boot tested
 	# 2026-08-07: link came up 0xcc0 but routes=2, rx=2, ping 100% loss.
