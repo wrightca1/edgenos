@@ -267,6 +267,16 @@ if [ "${GENBLK:-1}" = "1" ]; then
 		else
 			[ -x "$BIN/fm6000_l2arinit" ] && gen_list_early fm6000_l2arinit L2AR
 		fi
+		# Small control blocks, surveyed 2026-08-08. EACL and LAG are 100%
+		# write-once, GLORT 97%, STATS_AR 97%; MGMT2/MONITOR are mixed and
+		# SWEEPER/CMM are mostly control, so --mode once lifts only the safe
+		# part of each. SMALLGEN=0 drops the whole set.
+		if [ "${SMALLGEN:-1}" = "1" ]; then
+			for _g in mgmt2 sweeper cmm monitor statsar eacl lag glort; do
+				[ -x "$BIN/fm6000_${_g}init" ] && \
+					gen_list "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"
+			done
+		fi
 		for _g in l3ar hash; do
 			[ -x "$BIN/fm6000_${_g}init" ] && \
 				gen_list "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"

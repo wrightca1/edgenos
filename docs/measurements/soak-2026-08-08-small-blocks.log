@@ -1,0 +1,4 @@
+[small] === run 1 ===
+[small]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=135 ping=0,0,0,0,0,
+[small] === run 2 ===
+[small]   Et1=0x00000ec0 Et2=0x00000815 routes=34 rx=140 ping=0,0,0,0,0,

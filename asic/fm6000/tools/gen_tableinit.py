@@ -79,6 +79,15 @@ KNOWN = {
     # Sequence blocks -- relocate, never collapse.
     "eplseq":  (0x0E0000, 0x100000, "seq", "EPL: per-port SerDes/PCS bring-up"),
     "l2arseq": (0x140000, 0x150000, "seq", "L2AR: L2 action resolution, 84% multi-write"),
+    # Small control blocks, surveyed 2026-08-08.
+    "mgmt2":   (0x01C000, 0x020000, "once", "MGMT2: management/control registers"),
+    "sweeper": (0x00D000, 0x00E000, "once", "L2L_SWEEPER: L2 table ageing sweeper"),
+    "cmm":     (0x020000, 0x028000, "once", "CMM: congestion management manager"),
+    "monitor": (0x003000, 0x004000, "once", "MONITOR: monitoring/mirroring control"),
+    "statsar": (0x018000, 0x01A000, "once", "STATS_AR: statistics action resolution"),
+    "eacl":    (0x006000, 0x007000, "once", "EACL: egress ACL"),
+    "lag":     (0x007000, 0x008000, "once", "LAG: link aggregation"),
+    "glort":   (0x00E000, 0x00F000, "once", "GLORT: global resource tags"),
 }
 
 
