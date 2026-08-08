@@ -46,19 +46,25 @@ say "STEP3 memfill (129 memory fills)"
 $BIN/fm6000_memfill $B 0 >> $LOG 2>&1
 say "  rc=$? PIN=$(R 0x1c021) MCAST=$(R 0x240000) PRIVWM=$(R 0x112800)"
 
-# STEP4 microcode -- REDUNDANT, and off by default.
+# STEP4 microcode. REQUIRED -- do not remove, despite appearances.
 #
-# ucode_l2.raw + ucode_tail.raw write 39,415 registers. Compared against the
-# replay's final state: ALL 39,415 are also written by the replay -- not one
-# register is unique to the microcode files. 38,564 (97.8%) end up with the
-# identical value; the other 851 differ only because the replay writes them
-# again LATER, in STEP5, and therefore wins regardless.
+# ucode_l2.raw + ucode_tail.raw write 39,415 registers, and every single one of
+# them is ALSO written by the replay: 38,564 (97.8%) to the identical value, and
+# the other 851 to a value the replay overwrites later in STEP5 anyway. On paper
+# the load is pure redundancy.
 #
-# So loading them is writing 39,415 registers that STEP5 immediately overwrites.
-# They are one of the two operator-supplied files, and they buy nothing.
+# It is not. Cold-boot tested 2026-08-08 with STEP4 skipped:
 #
-# UCODE=1 to restore the load.
-if [ "${UCODE:-0}" = "1" ]; then
+#     links came up 0xcc0/0x8c0, and the dataplane was dead --
+#     routes=2, et1 rx=0, ping 100% loss on all 10 rounds.
+#
+# So writing the same registers to the same values is NOT equivalent to loading
+# the microcode. fm6000_ucode_dbg's access sequence matters -- the TCAM/action
+# SRAM evidently needs its own write protocol, not just the right end state.
+# Same lesson as EPL (a procedure, not state) and the FFU commit strobes.
+#
+# UCODE=0 to skip it and reproduce the failure.
+if [ "${UCODE:-1}" = "1" ]; then
 	say "STEP4 microcode (parser/FFU/mapper + MOD)"
 	fm6000_ucode_dbg $B /mnt/flash/ucode_l2.raw   /mnt/flash/u1.log >/dev/null 2>&1; say "  l2 rc=$? PIN=$(R 0x1c021)"
 	fm6000_ucode_dbg $B /mnt/flash/ucode_tail.raw /mnt/flash/u2.log >/dev/null 2>&1; say "  tail rc=$? PIN=$(R 0x1c021)"

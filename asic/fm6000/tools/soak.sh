@@ -63,7 +63,7 @@ arm_watchdog() {
 		exit 0' >/dev/null 2>&1
 	local w
 	w=$(timeout 20 $SSH 'scdreg 0x0120 2>/dev/null | sed "s/.*= //"' 2>/dev/null | tail -1)
-	say "    watchdog: $w  petters: $(timeout 20 $SSH 'pgrep -fc "scdreg 0x0120"' 2>/dev/null | tail -1)"
+	say "    watchdog: $w  petters: $(timeout 20 $SSH 'pgrep -f "scdreg 0x0120" | wc -l' 2>/dev/null | tail -1)"
 }
 
 boot() {   # $1 = expected version substring
