@@ -1,0 +1,7 @@
+[hunt] === boot 1 ===
+[hunt]   routes=35 rx=101 ping=0,0,0,
+[hunt] === boot 2 ===
+[hunt]   routes=35 rx=108 ping=0,0,0,
+[hunt] === boot 3 ===
+[hunt]   routes=35 rx=82 ping=100,100,100,
+[hunt]   *** FAILURE CAPTURED on boot 3 ***
