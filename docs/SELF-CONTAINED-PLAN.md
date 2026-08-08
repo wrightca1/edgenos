@@ -17,28 +17,42 @@ cold-boot validated on the switch.** Everything below is measured, not estimated
 Replay file: **389,809 → 243,152 lines.** FFU and L2L are write-neutral by design; the metric that
 matters is lines of EOS's trace no longer required, not the write count.
 
-## ★ The predictor: write-once fraction
+## ⚠ There is no statistical predictor — it is a semantic question
 
-Compute this before building a generator. A register written once is table state; a register written
-many times is a sequence, and collapsing it destroys the sequence.
+I claimed earlier that the write-once fraction predicts whether a block can be collapsed to its end
+state. **That was wrong**, and the correction matters more than the claim did:
 
-```
-L2L    99.9% write-once   -> generated, works
-FFU    82%   write-once   -> generated (table only), works
-EPL     2%   write-once   -> PROCEDURE, wedges the chip
-```
+| block | writes | once/write | transitions | collapses? |
+|---|---:|---:|---:|---|
+| SAF | 34,668 | 0.5% | 8.9% | yes |
+| CM | 47,742 | 17.1% | 89.1% | yes |
+| L2F+LBS | 56,127 | 0.6% | 1.7% | yes |
+| L2L | 24,620 | 99.8% | 99.9% | yes |
+| FFU | 14,549 | 59.7% | 89.2% | yes (table only) |
+| **EPL** | 22,051 | 1.9% | 36.6% | **no — wedges the chip** |
 
-Two corollaries learned the hard way:
+Neither column separates EPL from the rest. L2F is *less* write-once than EPL and collapses fine;
+CM has a *higher* transition rate than EPL and collapses fine.
 
-- **Blocks that are part table, part control need address-list filtering, not prefix filtering.**
-  The FFU has a commit strobe at `0x3f0000` pulsed **59 times** (alternating `0x1`/`0x2`). Writing
-  the end state performs one commit instead of 59, so the CPU-punt traps never apply: links come up,
-  unicast forwards, and OSPF never forms because hellos don't reach the CPU. `gen_list` filters by
-  the generator's own `-a` address list so control writes stay in sequence.
-- **Placement is per-block and is not guessable.** CM/SAF want hoisting to their first in-loop
-  write; L2F/LBS only works written *after* the whole loop, because the sweep is EOS recomputing the
-  port map after each port state change and it must land once the ports are configured. Hoisting
-  L2F/LBS to the front, or faithfully replaying all 336 sweep iterations, both give routes=2, rx=2.
+**The real distinction is what the block is for.** A block collapses if it holds table state the
+pipeline reads — SAF, CM, L2F, L2L, FFU. It does not collapse if its writes drive hardware through
+a sequence: EPL is the SerDes/PCS bring-up, where the intermediate states are the point. You have to
+know what the block does; the statistics won't tell you.
+
+What the statistics *are* good for — `gen_tableinit.py --survey`:
+
+- **choosing the mode.** `--mode once` emits only write-once registers and leaves multi-write
+  control registers in the replay; `--mode final` emits the end state of everything in range.
+- **spotting strobes.** The FFU has a commit pulse at `0x3f0000` fired **59 times** (alternating
+  `0x1`/`0x2`). Writing the end state performs one commit instead of 59, so the CPU-punt traps never
+  apply: links come up, unicast forwards, and OSPF never forms because hellos don't reach the CPU.
+  That is why blocks mixing table and control need address-list filtering (`-a` + `gen_list`), not
+  prefix filtering.
+
+**Placement is also per-block and not guessable.** CM/SAF want hoisting to their first in-loop
+write; L2F/LBS only works written *after* the whole loop, because the sweep is EOS recomputing the
+port map after each port state change and it must land once the ports are configured. Hoisting
+L2F/LBS to the front, or faithfully replaying all 336 sweep iterations, both give routes=2, rx=2.
 
 ## ⚠ Ordering is load-bearing in the boot script
 

@@ -107,10 +107,10 @@ tree and are blocked by `.gitignore`.
 | **microcode: parser + L2AR + MOD** | **53,108** | **13.6%** | **no — Intel's program** |
 | ~~SerDes SPICO firmware~~ | ~~90,006~~ | ~~23.1%~~ | **removed — see §3.1** |
 
-So after removing the SPICO firmware, **17.7% of what remains (`fwd5.txt`, 299,803 writes) is
+So after removing the SPICO firmware, **17.7% of what remains (299,803 writes) is
 genuinely somebody else's code**; the other 82% is configuration we can generate ourselves.
 
-Measured against `fwd5.txt` directly:
+Measured against the SPICO-stripped replay directly:
 
 | content | writes | % |
 |---|---:|---:|
@@ -281,7 +281,7 @@ initially).
 | 1 | Parser program generator (CAM/RAM from a protocol description) | 22,246 writes; best-understood block, 2,117 CAM entries |
 | 2 | L2AR action-table generator | 26,376 writes — the largest block; do it alongside the parser |
 | 3 | MOD routine generator — start with egress F64 tag strip | 4,204 writes; smallest, and the tag strip is the piece we already need |
-| 4 | Config generator to replace the remaining 93% of the replay | removes `fwd5.txt` entirely; we already understand GLORT/dmask/SAF/CM/EPL/`EPL_CFG_B` |
+| 4 | Config generators to replace the replay | **in progress — 50.3% done 2026-08-07** (SAF, CM, FFU, L2L, L2F/LBS). See `SELF-CONTAINED-PLAN.md`; EPL resists because it is a bring-up procedure, not state |
 | 5 | Derive `fm6000_serdes_ports.h` by measurement | removes the last Arista-derived data |
 
 Items 1–3 are the licence-blocking ones. Item 4 is a large but purely mechanical job and is not a
