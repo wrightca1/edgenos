@@ -130,19 +130,55 @@ static void on_punt(void *ctx, const void *data, uint16_t len)
  * Scan ALL descriptors and pair descriptor i with buf_va[i]; fpdma_rx_poll()
  * walks by ring tail, which races the hardware fill order and hands the callback
  * a length from one descriptor with another's buffer. */
+/* Hand a descriptor back to hardware.
+ *
+ * ⚠ The WHOLE descriptor has to be rewritten, not just the status byte.
+ * Hardware overwrites LEN with the RECEIVED length when it fills the slot --
+ * that is where rlen is read from below. Recycling with `d[0] = RX_READY`
+ * alone leaves LEN set to the last frame's size, so the slot is offered back
+ * to hardware as a buffer of that size. It shrinks with every short frame
+ * until the ring can no longer accept anything and RX stops dead, silently,
+ * with no error counter moving.
+ *
+ * Measured before the fix: RX delivered 157 packets and then went to zero
+ * permanently -- OSPF hellos stopped, the adjacency dropped 35 routes -> 2,
+ * ping went to 100%, while TX kept working. It presents as an ASIC/replay
+ * defect and is neither; it reproduced identically on the stock replay.
+ *
+ * Order matters: length and address first, barrier, status last -- the status
+ * byte is the handoff, so it must not become visible before the fields it
+ * describes. (fpdma.c's desc_write does the same; it is static, hence the
+ * open-coded copy here.)
+ */
+static void rx_recycle(volatile uint8_t *d, unsigned i)
+{
+    *(volatile uint16_t *)(d + FM6000_DESC_LEN)     = (uint16_t)fp.rx.buf_len;
+    *(volatile uint32_t *)(d + FM6000_DESC_ADDR_LO) =
+        (uint32_t)(fp.rx.buf_dma[i] & 0xFFFFFFFFu);
+    *(volatile uint32_t *)(d + FM6000_DESC_ADDR_HI) =
+        (uint32_t)(fp.rx.buf_dma[i] >> 32);
+    __sync_synchronize();
+    *(volatile uint8_t *)(d + FM6000_DESC_STATUS)   = FM6000_DESC_RX_READY;
+}
+
 static void rx_drain(void)
 {
+    int refilled = 0;
+
     for (unsigned i = 0; i < fp.rx.size; i++) {
         volatile uint8_t *d = fp.rx.desc + i * FM6000_DESC_STRIDE;
         uint16_t rlen;
 
-        if (!(d[0] & FM6000_DESC_DONE)) continue;
-        rlen = *(volatile uint16_t *)(d + 2);
+        if (!(d[FM6000_DESC_STATUS] & FM6000_DESC_DONE)) continue;
+        rlen = *(volatile uint16_t *)(d + FM6000_DESC_LEN);
         if (rlen) on_punt(NULL, (uint8_t *)fp.rx.buf_va[i], rlen);
-        d[0] = FM6000_DESC_RX_READY;
-        __sync_synchronize();
-        fm6000_dma_write(&dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_RX_POST);
+        rx_recycle(d, i);
+        refilled++;
     }
+    /* One RX_POST for the batch rather than one per descriptor: this register
+     * is shared with the TX path, and the fewer writes to it the better. */
+    if (refilled)
+        fm6000_dma_write(&dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_RX_POST);
 }
 
 /* TAP -> ASIC. Insert the 8-byte F64 tag inline at offset 12 (after SMAC). */
