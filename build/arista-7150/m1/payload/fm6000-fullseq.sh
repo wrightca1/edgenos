@@ -176,6 +176,15 @@ if [ "${GENBLK:-1}" = "1" ]; then
 	# written exactly once. Same write-once split as FFU.
 	[ "${L2LGEN:-1}" = "1" ] && [ -x "$BIN/fm6000_l2linit" ] && \
 		gen_list fm6000_l2linit L2L
+	# Second tranche -- all lookup state the pipeline reads. Each keeps its
+	# multi-write control registers in the replay (gen_list, write-once only).
+	# TRANCHE2=0 to drop the whole set if one of them regresses.
+	if [ "${TRANCHE2:-1}" = "1" ]; then
+		for _g in l2ar parser mod l3ar hash mapper; do
+			[ -x "$BIN/fm6000_${_g}init" ] && \
+				gen_list "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"
+		done
+	fi
 
 	# L2F+LBS end state, written ONCE AFTER the whole loop. Cold-boot validated
 	# 2026-08-07: both links up, OSPF adjacency, 35 kernel routes, 13 in silicon

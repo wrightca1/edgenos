@@ -62,6 +62,14 @@ KNOWN = {
     "l2l":  (0x030000, 0x038000, "once",  "L2L: the L2 lookup table"),
     "l2f":  (0x180000, 0x200000, "final", "L2F + LBS: port map and load-balance state"),
     "epl":  (0x0E0000, 0x100000, "once",  "EPL: per-port SerDes/PCS -- A PROCEDURE, does not work"),
+    # Second tranche. All lookup state the pipeline reads, which is the
+    # category that collapses; PARSER/MOD/L2AR are TCAM + action SRAM.
+    "l2ar":   (0x140000, 0x150000, "once", "L2AR: L2 action resolution (TCAM + action SRAM)"),
+    "parser": (0x100000, 0x110000, "once", "PARSER: protocol CAM + action SRAM, 28 slices"),
+    "mod":    (0x150000, 0x160000, "once", "MOD: egress modification routines"),
+    "l3ar":   (0x010000, 0x014000, "once", "L3AR: L3 action resolution"),
+    "hash":   (0x00B000, 0x00C000, "once", "HASH: hash/ECMP selection config"),
+    "mapper": (0x120000, 0x130000, "once", "MAPPER: field mapping tables"),
 }
 
 

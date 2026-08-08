@@ -55,6 +55,7 @@ built=0
 for t in fm6000_coldreplay fm6000_initsbus fm6000_memfill fm6000_fullreplay \
          fm6000_spico fm6000_mrl fm6000_ucode_dbg fm6000_i2c_bringup \
          fm6000_safinit fm6000_cminit fm6000_sweepinit fm6000_l2finit fm6000_eplinit fm6000_ffuinit fm6000_l2linit \
+         fm6000_l2arinit fm6000_parserinit fm6000_modinit fm6000_l3arinit fm6000_hashinit fm6000_mapperinit \
          fm6000_route fm6000_fibd; do
     [ -f "$A/$t.c" ] || continue
     cc -O2 -I"$A" -o "$P/$t" "$A/$t.c" 2>/dev/null && built=$((built+1)) \
