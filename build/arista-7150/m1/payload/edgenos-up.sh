@@ -2,9 +2,22 @@
 # edgenos-up.sh - bring the 7150 up as a router: dataplane + port netdev +
 # OSPF control plane + hardware FIB sync. Run once after a cold boot.
 #
-# NOTE: restarting portd repeatedly without a chip reset can wedge the DMA rings
-# (RX silently goes to 0). If RX stops, reboot rather than restarting portd.
+# ⚠ RUN ONCE PER COLD BOOT. Restarting portd without a chip reset wedges the DMA
+# rings and RX silently goes to 0 -- and because `ip link del et1` removes the
+# netdev but does NOT kill the old portd, a second run leaves TWO instances
+# fighting over the same rings. That was observed live: two pids, et1 rx=0 for
+# 96s, ping 100% loss, and it looks exactly like a dataplane defect.
+#
+# So this script now refuses to run twice rather than silently producing a
+# broken box. Set FORCE=1 to override (it will still be wedged).
 set -u
+
+if pidof fm6000_portd >/dev/null 2>&1 && [ "${FORCE:-0}" != "1" ]; then
+	echo "[up] portd is ALREADY RUNNING (pid $(pidof fm6000_portd))." >&2
+	echo "[up] Starting a second one wedges the DMA rings and RX goes to 0." >&2
+	echo "[up] Reboot for a clean dataplane, or FORCE=1 to override." >&2
+	exit 1
+fi
 export LD_LIBRARY_PATH=/usr/lib
 B=http://10.1.1.30:8001
 LOG=/tmp/edgenos-up.log; : > $LOG
