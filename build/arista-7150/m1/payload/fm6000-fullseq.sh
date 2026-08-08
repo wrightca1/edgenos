@@ -172,6 +172,10 @@ if [ "${GENBLK:-1}" = "1" ]; then
 	# FFUGEN=1 to re-test.
 	[ "${FFUGEN:-1}" = "1" ] && [ -x "$BIN/fm6000_ffuinit" ] && \
 		gen_list fm6000_ffuinit FFU
+	# L2L: the purest table in the replay -- 24,568 of 24,592 registers are
+	# written exactly once. Same write-once split as FFU.
+	[ "${L2LGEN:-1}" = "1" ] && [ -x "$BIN/fm6000_l2linit" ] && \
+		gen_list fm6000_l2linit L2L
 
 	# L2F+LBS end state, written ONCE AFTER the whole loop. Cold-boot validated
 	# 2026-08-07: both links up, OSPF adjacency, 35 kernel routes, 13 in silicon
