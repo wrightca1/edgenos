@@ -313,6 +313,275 @@ Cold boot with both generators: `Et1 0x8c0`, `Et2 0x8c0`, OSPF adjacency, 35 ker
 programmed into silicon, ping loss 0/90/60/60% — inside the pre-existing degradation band the stock
 replay shows (0/0/70/60/10/70/50/60/90/80%), so unchanged by this.
 
+### What is left, and what EPL actually is
+
+`fwd4.txt` is the only operator-supplied file remaining. Of its 389,809 lines, **79,150 are still
+EOS-derived** (with the SPICO firmware dropped). The bulk:
+
+| | writes | why it resisted |
+|---|---:|---|
+| L2AR control | 24,504 | multi-write sequence; only 4,606 of its registers are write-once |
+| EPL | 22,051 | the SerDes/PCS bring-up — collapsing it wedges the chip |
+| SBus lane tuning | 3,719 | per-lane board measurement |
+| MGMT2 / L2L_SWEEPER / CMM / MONITOR | ~5,500 | small control blocks, not yet looked at |
+
+### EPL is a per-lane state sequence, not 22,051 independent facts
+
+Collapsing EPL to an end state wedges the chip, and that was read as "EPL is unstructured
+procedure, give up". Wrong — it has clear structure, decoded by
+`asic/fm6000/tools/epl_decode.py`:
+
+```
+instance base   0x0e0000 + 0x800*instance          10 instances touched
+lane groups     0x010 0x090 0x110 0x190 0x410 0x490 0x510 0x590   (stride 0x80)
+per lane        ~87 bursts of 4 consecutive words
+sharing         7 of 8 lanes get the IDENTICAL 87-burst sequence
+offset stream   69% self-similar at period 32  (8 lanes x 4 words)
+```
+
+Across all ten instances: **22,051 writes reduce to 3,976 words of distinct burst table — 5.5x.**
+
+The distinction that matters is between *collapsing* and *regenerating*. A sequence cannot be
+collapsed to its end state, but it can be emitted from a compact table. That is the route for EPL,
+and it is the same route the L2F/LBS sweep took — the sweep was also a repeated pattern that had to
+be reproduced rather than reduced.
+
+**Not yet implemented.** What remains is the interleave: the recorded stream is not lane-major, and
+there are non-burst writes (e.g. offset `0x301`) between the bursts. Because collapsing EPL
+demonstrably wedges the chip, that ordering has to be decoded and reproduced rather than assumed.
+That is the next concrete piece of work, and it is bounded: decode the interleave, emit the table
+per lane, cold-boot test.
+
+## ⚠ There is no statistical predictor — it is a semantic question
+
+I claimed earlier that the write-once fraction predicts whether a block can be collapsed to its end
+state. **That was wrong**, and the correction matters more than the claim did:
+
+| block | writes | once/write | transitions | collapses? |
+|---|---:|---:|---:|---|
+| SAF | 34,668 | 0.5% | 8.9% | yes |
+| CM | 47,742 | 17.1% | 89.1% | yes |
+| L2F+LBS | 56,127 | 0.6% | 1.7% | yes |
+| L2L | 24,620 | 99.8% | 99.9% | yes |
+| FFU | 14,549 | 59.7% | 89.2% | yes (table only) |
+| **EPL** | 22,051 | 1.9% | 36.6% | **no — wedges the chip** |
+
+Neither column separates EPL from the rest. L2F is *less* write-once than EPL and collapses fine;
+CM has a *higher* transition rate than EPL and collapses fine.
+
+**The real distinction is what the block is for.** A block collapses if it holds table state the
+pipeline reads — SAF, CM, L2F, L2L, FFU. It does not collapse if its writes drive hardware through
+a sequence: EPL is the SerDes/PCS bring-up, where the intermediate states are the point. You have to
+know what the block does; the statistics won't tell you.
+
+What the statistics *are* good for — `gen_tableinit.py --survey`:
+
+- **choosing the mode.** `--mode once` emits only write-once registers and leaves multi-write
+  control registers in the replay; `--mode final` emits the end state of everything in range.
+- **spotting strobes.** The FFU has a commit pulse at `0x3f0000` fired **59 times** (alternating
+  `0x1`/`0x2`). Writing the end state performs one commit instead of 59, so the CPU-punt traps never
+  apply: links come up, unicast forwards, and OSPF never forms because hellos don't reach the CPU.
+  That is why blocks mixing table and control need address-list filtering (`-a` + `gen_list`), not
+  prefix filtering.
+
+**Placement is also per-block and not guessable.** CM/SAF want hoisting to their first in-loop
+write; L2F/LBS only works written *after* the whole loop, because the sweep is EOS recomputing the
+port map after each port state change and it must land once the ports are configured. Hoisting
+L2F/LBS to the front, or faithfully replaying all 336 sweep iterations, both give routes=2, rx=2.
+
+## ⚠ Ordering is load-bearing in the boot script
+
+`gen_split`/`gen_after`/`gen_list` locate the loop by grepping for the anchor line `001a0c00` — and
+that address is itself an L2F register, so **the L2F filter deletes it.** Any generator running
+after L2F cannot find the loop and splices at an arbitrary point, silently. That produced an FFU
+"result" whose replay *grew* by 5,152 writes. L2F must stay last in the chain.
+
+## ⚠ What is left, and what it is worth
+
+**60,099 write-once registers remain** — L2AR 4,606, PARSER 16,960, MOD 3,855, L3AR 3,933,
+HASH 2,048, and a tail. PARSER and MOD are microcode: generating them shrinks `fwd4.txt` but does
+**not** remove the separate `ucode_*.raw` dependency, so count that win carefully.
+
+EPL (22,051, 98% multi-write) needs its bring-up *procedure* reimplemented, not its state.
+
+## ⚠ The largest open defect is not ours
+
+Ping collapses to 100% loss and the OSPF adjacency drops from 35 routes to 2 within about three
+minutes — **on the stock replay as well as on every generated variant**, while the management path
+stays at 0%. Always run a stock-replay control at the same cadence before attributing anything to a
+change. This is now the biggest problem with the platform and it predates all of this work.
+
+---
+
+## The goal, stated exactly
+
+**Ship an image that needs zero files from EOS.** Today the boot path
+(`fm6000-fullseq.sh`) reads exactly three, and the Si5338 clock map is already gone:
+
+| input | source | status |
+|---|---|---|
+| `/mnt/flash/fwd4.txt` | EOS register trace | **must be generated** |
+| `/mnt/flash/ucode_l2.raw` | EOS | **must be generated** |
+| `/mnt/flash/ucode_tail.raw` | EOS | **must be generated** |
+| ~~`Cotati-Clock-0010.si5338`~~ | Silicon Labs | ✅ eliminated in alpha4 |
+
+Nothing else in the image is third-party except optional Quagga (GPL, redistributable).
+So the whole problem is two files.
+
+## Why this is smaller than 389,809 writes
+
+A trace records EOS's *control flow*, not just its intent. Where EOS ran a per-port loop, the
+trace holds N near-identical copies of one body. A generator only has to reproduce the resulting
+state, plus whatever ordering the hardware genuinely requires. Measured with
+`asic/fm6000/tools/replay_structure.py`:
+
+```
+MMIO writes (excluding SBus)   296,084
+distinct addresses              93,659      <- 3.2x redundancy
+non-zero final values           70,396
+
+outer loop on 0x1a0c00:  336 iterations, 227,745 writes = 77% of all MMIO
+    L2F + LBS core        74,034 writes  ->  only 8 distinct variants
+    per-port remainder   153,711 writes  ->  SAF, CM, EPL, L2L
+```
+
+**A quarter of the entire replay is eight patterns written 336 times.** One iteration decodes
+cleanly, and it is plainly a generated sweep, not a program:
+
+```
+LBS  0x014000 + k   = (n << 16) | (~n & 0xffff)     0001fffe, 0002fffd, 0003fffc, ...
+L2F  0x1a0c00 + 4j  = 3 words, value 0x09 or 0x0b
+```
+
+That is a `for` loop with two constants in it. The same is true of the SAF and CM bulk: 34,668 SAF
+writes land in 168 distinct addresses (206x), 18,547 LBS writes in 67 (277x).
+
+**This does not mean the replay can simply be de-duplicated.** Ordering has not been shown to be
+irrelevant, and the one time we assumed a category was redundant — the zero-writes — hardware said
+otherwise. The 53% figure the tool prints is a *bound on what a generator must emit*, not a shorter
+replay you can boot. Every reduction gets tested on the switch.
+
+## The route to zero
+
+Each step is independently testable and leaves the previous working state intact. The test harness
+already exists and gives a clean signal: link state plus packet count at the far end (`+60` vs `+0`
+distinguished a good replay from a broken one).
+
+1. **Reproduce the loop.** Emit the 336-iteration sweep from a generator (8 core variants + the
+   per-port SAF/CM/EPL body) and splice it into `fwd4` in place of the recorded writes. If the
+   switch still forwards, 77% of the replay is ours. This is the single highest-value experiment
+   and it needs no new decoding.
+2. **Generate the per-port blocks** — SAF, CM, EPL — parameterised by the platform description we
+   already have (port map, GLORT allocation, MTU). One block at a time, replace and test.
+3. **Generate the parser microcode.** TCAM + action SRAM, published encoding, 2,117 populated CAM
+   entries. Kills part of `ucode_*.raw`.
+4. **Generate MOD, then L2AR.** Finishes the microcode files.
+5. **Decide SPICO** on the Et2 copper answer. It is inline in the replay, not a separate file, and
+   Et1 already forwards without it.
+
+Steps 1–2 remove `fwd4.txt`. Steps 3–4 remove `ucode_*.raw`. At that point the image is whole.
+
+## Validated on hardware: the SAF generator (2026-08-07)
+
+Step 1 of the route, tested on a cold boot of the real switch.
+
+| | original replay | SAF generated |
+|---|---|---|
+| writes | 389,809 | **355,480** (−34,329) |
+| Et1 link | `0x8c0` -> `0xcc0`, pcsRx=1 | **identical** |
+| Et2 (copper) | `0x815` (down) | `0x815` — same, pre-existing |
+| SAF end state | accumulated over 111 iterations | **byte-identical**, written once |
+| OSPF | adjacency, 35 kernel routes | **adjacency, 35 kernel routes** |
+| hardware FIB | 13 routes programmed | **13 routes programmed** |
+| ping to neighbour | works, then degrades | works, then degrades |
+
+**The 34,668-write SAF accumulation is unnecessary.** Writing the completed matrix in 168 writes
+brings the switch up cold, forms an OSPF adjacency, learns 33 routes and programs 13 of them into
+silicon. `0x0a0054 = 0010000f` and `0x0a00a0 = 00000007` read back exactly as generated.
+
+### ⚠ A pre-existing bug this surfaced: ping degrades over time
+
+The first SAF boot showed ping loss climbing 40% -> 70% -> 90% -> 100%, which looked like a leak we
+had introduced. It is not. The control — a cold boot of the **unmodified** replay, same procedure —
+degrades the same way:
+
+```
+control (original replay), successive 10-ping rounds:
+    0%   0%  70%  60%  10%  70%  50%  60%  90%  80%
+management path (eth0) over the same period:  0%
+```
+
+So the dataplane punt path degrades regardless of SAF, while management is clean. The
+"L3 PING WORKS 10/10, 0% loss" result recorded earlier was a fresh-boot snapshot and does **not**
+hold over minutes. This is a real, separate defect and it needs its own investigation — most likely
+the portd DMA ring rather than the ASIC, given `edgenos-up.sh` already warns that restarting portd
+wedges RX.
+
+### Method note: in-place re-runs cannot test forwarding
+
+Re-running `fm6000-fullseq.sh` on a live box is fine for link-level checks but useless for
+forwarding: **both** the SAF replay and the unmodified control gave `et1 rx=0` that way. Only cold
+boots produce a valid signal. Two further traps found the hard way: alpha4's `init-m1` rewrites
+`boot-config` back to EOS on every boot (a deliberate one-shot safety net, so each EdgeNOS boot must
+be armed), and the initramfs regenerates its SSH host key, so `ssh-keygen -R` is needed between
+boots or the reconnect looks like a hung box.
+
+## ⚠ Tested: the two biggest blocks are NOT dead weight
+
+The hope behind `replay_bisect.sh` was that much of EOS's replay configures features EdgeNOS does
+not implement, so it could be deleted rather than generated. Cold-boot tested, that hope does not
+survive contact with the two largest blocks:
+
+| block dropped | writes | result |
+|---|---:|---|
+| **CM** (`0x110000-0x120000`) | 39,142 | link up `0x8c0`, but **routes=2, rx=0 — no forwarding** |
+| **L2F** (`0x180000-0x200000`) | 56,028 | **`link=0xffffffff` — chip off-bus, box unreachable** |
+
+CM comes up at link level and then forwards nothing, which is the same signature as the zero-write
+experiment. L2F is worse: dropping it takes the chip off the bus entirely and the board had to walk
+itself back to EOS on the sticky boot budget.
+
+**So CM and L2F must be generated, not deleted.** That is 95,170 writes of real configuration, and
+it sets the honest expectation for the rest: assume load-bearing until measured otherwise.
+
+The remaining blocks are still worth measuring (L2L 24,620, EPL 22,051, LBS 18,547, FFU 14,549) —
+each answer is cheap now that the harness exists, and a single droppable block is worth more than
+days of decoding. But the plan should be budgeted as *generation*, not deletion.
+
+Results: `docs/measurements/replay-bisect-2026-08-07.tsv`.
+
+## Progress: two blocks are now ours (cold-boot validated)
+
+| block | EOS writes | ours | tool | validated |
+|---|---:|---:|---|---|
+| SAF | 34,668 | **168** | `fm6000_safinit` | 2026-08-06 |
+| CM | 47,742 | **8,180** | `fm6000_cminit` | 2026-08-07 |
+| | **82,410** | **8,348** | | |
+
+**Replay: 389,809 -> 317,189 writes (-72,620, 18.6%).** End state of all 93,662 registers unchanged.
+
+CM was the larger of the two blocks the bisect proved load-bearing, and it turned out to be the
+easiest real win so far — because it is laid out exactly as the **public datasheet** says:
+
+```
+0x113000  76x16  CM_PORT_RXMP_HOG_WM         uniformly 0xffffffff
+0x112800  76x12  CM_PORT_RXMP_PRIVATE_WM
+0x115000  76x12  CM_PORT_RXMP_PAUSE_ON_WM?   identical content to...
+0x115800  76x12  CM_PORT_RXMP_PAUSE_OFF_WM?  ...this one
+0x113800  80x16  CM_PORT_TXMP_PRIVATE_WM?
+0x114000  80x16  CM_PORT_TXMP_HOG_WM?
+0x117000  80x12  CM_PORT_TXMP_IP_WM?
+```
+
+47,742 writes carry only 8,180 registers holding **40 distinct values**, and within each array the
+ports fall into 2–4 classes — so `gen_cminit.py` stores 18 rows plus a port→class map. Names with
+`?` are geometry-unique matches against the datasheet's declared index ranges, not behaviourally
+confirmed; they are labelled that way deliberately.
+
+Cold boot with both generators: `Et1 0x8c0`, `Et2 0x8c0`, OSPF adjacency, 35 kernel routes, 13
+programmed into silicon, ping loss 0/90/60/60% — inside the pre-existing degradation band the stock
+replay shows (0/0/70/60/10/70/50/60/90/80%), so unchanged by this.
+
 ### What is left
 
 | block | writes | notes |
