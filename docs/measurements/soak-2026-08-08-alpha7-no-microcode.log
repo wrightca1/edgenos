@@ -1,0 +1,6 @@
+[s7] === run 1 ===
+[s7]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=133 ping=0,10,0,0,0,
+[s7] === run 2 ===
+[s7]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=141 ping=0,0,0,0,0,
+[s7] === run 3 ===
+[s7]   Et1=0x00000ec0 Et2=0x00000815 routes=35 rx=129 ping=0,0,0,0,0,
