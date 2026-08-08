@@ -10,6 +10,10 @@
 #   This runs the same measurement repeatedly on two arms -- the generated
 #   config and the stock replay -- so claims can be stated with a denominator.
 #
+#   NOTE: the first soak (2026-08-07) ran with a broken portd whose RX ring died
+#   after ~157 packets, so its ping column was measuring that bug on both arms
+#   rather than anything about the replay. Re-run after e124f98.
+#
 # METHOD NOTES, each learned the hard way
 #   - Only COLD boots test forwarding. Re-running fm6000-fullseq.sh in place
 #     gives et1 rx=0 for a good replay and a bad one alike.
@@ -69,7 +73,7 @@ measure() {
 		X=$(grep -oE "et1 rx=[0-9]+" /tmp/up.log 2>/dev/null | tail -1 | cut -d= -f2)
 		F=$(grep -oE "programmed [0-9]+ route" /tmp/up.log 2>/dev/null | grep -oE "[0-9]+")
 		P=""
-		for i in 1 2 3; do
+		for i in 1 2 3 4 5 6; do
 			L=$(ping -c 10 -W 2 10.101.101.25 2>&1 | grep -oE "[0-9]+% packet" | grep -oE "[0-9]+")
 			P="$P${L:-?},"
 		done

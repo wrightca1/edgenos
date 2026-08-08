@@ -1,0 +1,9 @@
+arm	run	Et1	Et2	routes	routes_end	rx	fib	ping%
+generated	1	0x00000ec0	0x000008c0	35	35	23	13	0,0,0,0,0,0,
+generated	2	
+stock	1	NO-BOOT
+stock	2	0x00000ec0	0x000008c0	35	35	19	13	0,0,0,0,0,0,
+# Re-run after e124f98 (RX descriptor recycle fix). Both arms are the same image
+# differing only by GENBLK=0. 6 ping rounds of 10 per run.
+# 2 of 4 runs produced data (1 NO-BOOT, 1 measurement timeout) -- same ~75%
+# harness reliability as the 2026-08-07 soak; the box recovers either way.
