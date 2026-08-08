@@ -258,7 +258,7 @@ if [ "${GENBLK:-1}" = "1" ]; then
 	if [ "${TRANCHE2:-1}" = "1" ]; then
 		# Microcode-adjacent blocks go EARLY (see gen_list_early); the rest
 		# can land at the loop end.
-		for _g in parser mod mapper; do
+		for _g in parser mod; do
 			[ -x "$BIN/fm6000_${_g}init" ] && \
 				gen_list_early "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"
 		done
@@ -289,12 +289,24 @@ if [ "${GENBLK:-1}" = "1" ]; then
 		else
 			[ -x "$BIN/fm6000_l2arinit" ] && gen_list_early fm6000_l2arinit L2AR
 		fi
+		# MAPPER and MGMT2 take the same pre-loop split as L2AR: 5,662 of
+		# MAPPER's 6,644 writes and all 1,541 of MGMT2's are before the loop.
+		# The write-once generators only reached 361 and 502 respectively.
+		[ "${PRESPLIT:-1}" = "1" ] && [ -x "$BIN/fm6000_mapperpre" ] && \
+			gen_preloop '0012' fm6000_mapperpre MAPPER
+		# MGMT2 pre-split: OFF pending bisect -- it holds chip-level control
+		# (PIN lives at 0x1c021) and coldreplay writes this range during clock
+		# and BOOT_CTRL setup, so relocating it is far more invasive than a
+		# table lift.
+		[ "${MGMT2PRE:-0}" = "1" ] && [ -x "$BIN/fm6000_mgmt2pre" ] && \
+			gen_preloop '0001[cdef]' fm6000_mgmt2pre MGMT2
+
 		# Small control blocks, surveyed 2026-08-08. EACL and LAG are 100%
 		# write-once, GLORT 97%, STATS_AR 97%; MGMT2/MONITOR are mixed and
 		# SWEEPER/CMM are mostly control, so --mode once lifts only the safe
 		# part of each. SMALLGEN=0 drops the whole set.
 		if [ "${SMALLGEN:-1}" = "1" ]; then
-			for _g in mgmt2 sweeper cmm monitor statsar eacl lag glort; do
+			for _g in sweeper cmm monitor statsar eacl lag glort; do
 				[ -x "$BIN/fm6000_${_g}init" ] && \
 					gen_list "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"
 			done
