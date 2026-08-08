@@ -44,6 +44,26 @@ directions and should be read as 79.7% with SPICO dropped, or 74.5% with SPICO r
 | HASH | 2,354 | `fm6000_hashinit` | 2,048 |
 | **EPL** | 22,051 | — | ❌ procedure, wedges the chip |
 
+## ★ The microcode files are gone
+
+`ucode_l2.raw` + `ucode_tail.raw` wrote 39,415 registers, every one of which the replay also writes.
+The separate STEP4 load is redundant — **provided the microcode blocks land early enough**, and that
+proviso exposed a real bug in our own generators:
+
+```
+pure replay,             no STEP4  ->  WORKS, 0% loss / 8 rounds
+generators at loop end,  no STEP4  ->  routes=2, et1 rx=0, ping 100%
+generators placed EARLY, no STEP4  ->  WORKS, 0% loss / 10 rounds
+```
+
+PARSER, L2AR, MOD and MAPPER are written early by the replay, before the port bring-up needs them.
+`gen_list` was hoisting them to the loop end — too late — and the defect was **invisible because
+STEP4 loaded those same registers early from the microcode files.** The generators were leaning on
+the very file they were meant to make unnecessary, and would have shipped that way.
+`gen_list_early` fixes the placement.
+
+**Operator dependency is now `fwd4.txt` alone.**
+
 ## ★ SPICO firmware is droppable — validated with a working dataplane
 
 Intel's SerDes SPICO image is 90,006 writes and the single clearest piece of non-distributable code
