@@ -242,6 +242,10 @@ if [ "${GENBLK:-1}" = "1" ]; then
 			[ -x "$BIN/fm6000_${_g}init" ] && \
 				gen_list_early "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"
 		done
+		# EPL: emit the exact recorded SEQUENCE at its first write, rather
+		# than collapsing it. EPLSEQ=1 to try; off by default until proven.
+		[ "${EPLSEQ:-1}" = "1" ] && [ -x "$BIN/fm6000_eplseq" ] && \
+			gen_list_early fm6000_eplseq EPL
 		for _g in l3ar hash; do
 			[ -x "$BIN/fm6000_${_g}init" ] && \
 				gen_list "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"

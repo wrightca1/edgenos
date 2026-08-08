@@ -1,0 +1,6 @@
+[eplseq] === run 1 ===
+[eplseq]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=124 ping=0,0,0,0,0,
+[eplseq] === run 2 ===
+[eplseq]   Et1=0x00000ec0 Et2=0x00000815 routes=35 rx=129 ping=0,0,10,0,10,
+[eplseq] === run 3 ===
+[eplseq]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=128 ping=0,0,0,0,0,
