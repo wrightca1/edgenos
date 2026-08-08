@@ -338,6 +338,14 @@ That closes the technique. Blocks fall into three kinds, and each needs a differ
 | table + control strobes | FFU (`0x3f0000` pulses 59x) | collapse the table, leave the strobes |
 | hardware-driving sequence | **EPL**, L2F/LBS sweep | **relocate the sequence, never collapse it** |
 
+⚠ **"Relocate the sequence" does not generalise.** L2AR is 84% multi-write — a sequence by the same
+measure as EPL — and relocating it fails: OSPF stays up (35 routes, rx growing, ARP resolving) but
+unicast forwarding dies, 100% loss across 14 rounds. L2AR is L2 *action resolution*, deciding
+forward/trap/drop, and its interleaving with the rest of the loop matters in a way EPL's does not.
+Being a sequence makes a block a *candidate* for relocation; it does not make it relocatable.
+**Placement must be cold-boot tested per block, every time.** Its write-once generator (4,606
+registers) is what ships.
+
 ## Where it stands
 
 ```
