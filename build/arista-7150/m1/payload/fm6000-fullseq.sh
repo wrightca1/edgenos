@@ -238,7 +238,7 @@ if [ "${GENBLK:-1}" = "1" ]; then
 	if [ "${TRANCHE2:-1}" = "1" ]; then
 		# Microcode-adjacent blocks go EARLY (see gen_list_early); the rest
 		# can land at the loop end.
-		for _g in parser l2ar mod mapper; do
+		for _g in parser mod mapper; do
 			[ -x "$BIN/fm6000_${_g}init" ] && \
 				gen_list_early "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"
 		done
@@ -246,6 +246,27 @@ if [ "${GENBLK:-1}" = "1" ]; then
 		# than collapsing it. EPLSEQ=1 to try; off by default until proven.
 		[ "${EPLSEQ:-1}" = "1" ] && [ -x "$BIN/fm6000_eplseq" ] && \
 			gen_list_early fm6000_eplseq EPL
+		# L2AR: sequence relocation FAILS -- off by default.
+		#
+		# L2AR is 84% multi-write, so the EPL treatment looked like it should
+		# apply: lift the whole 29,110-write sequence instead of only the 4,606
+		# write-once registers. Cold-boot tested 2026-08-08 placed early:
+		#
+		#   links up 0xcc0/0x8c0, OSPF fine (35 routes, rx growing 95->138),
+		#   ARP resolves -- but unicast ping is 100% loss across 14 rounds.
+		#
+		# So multicast punt survives and unicast forwarding does not. L2AR is L2
+		# ACTION RESOLUTION: it decides forward/trap/drop, and its interleaving
+		# with the rest of the loop evidently matters in a way EPL's does not.
+		# Being a sequence made it a candidate; it did not make it relocatable.
+		#
+		# The write-once generator (4,606 registers) works and stays the
+		# default. L2ARSEQ=1 to retry the full sequence.
+		if [ "${L2ARSEQ:-0}" = "1" ] && [ -x "$BIN/fm6000_l2arseq" ]; then
+			gen_list_early fm6000_l2arseq L2AR
+		else
+			[ -x "$BIN/fm6000_l2arinit" ] && gen_list_early fm6000_l2arinit L2AR
+		fi
 		for _g in l3ar hash; do
 			[ -x "$BIN/fm6000_${_g}init" ] && \
 				gen_list "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"
