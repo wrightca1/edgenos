@@ -46,9 +46,25 @@ say "STEP3 memfill (129 memory fills)"
 $BIN/fm6000_memfill $B 0 >> $LOG 2>&1
 say "  rc=$? PIN=$(R 0x1c021) MCAST=$(R 0x240000) PRIVWM=$(R 0x112800)"
 
-say "STEP4 microcode (parser/FFU/mapper + MOD)"
-fm6000_ucode_dbg $B /mnt/flash/ucode_l2.raw   /mnt/flash/u1.log >/dev/null 2>&1; say "  l2 rc=$? PIN=$(R 0x1c021)"
-fm6000_ucode_dbg $B /mnt/flash/ucode_tail.raw /mnt/flash/u2.log >/dev/null 2>&1; say "  tail rc=$? PIN=$(R 0x1c021)"
+# STEP4 microcode -- REDUNDANT, and off by default.
+#
+# ucode_l2.raw + ucode_tail.raw write 39,415 registers. Compared against the
+# replay's final state: ALL 39,415 are also written by the replay -- not one
+# register is unique to the microcode files. 38,564 (97.8%) end up with the
+# identical value; the other 851 differ only because the replay writes them
+# again LATER, in STEP5, and therefore wins regardless.
+#
+# So loading them is writing 39,415 registers that STEP5 immediately overwrites.
+# They are one of the two operator-supplied files, and they buy nothing.
+#
+# UCODE=1 to restore the load.
+if [ "${UCODE:-0}" = "1" ]; then
+	say "STEP4 microcode (parser/FFU/mapper + MOD)"
+	fm6000_ucode_dbg $B /mnt/flash/ucode_l2.raw   /mnt/flash/u1.log >/dev/null 2>&1; say "  l2 rc=$? PIN=$(R 0x1c021)"
+	fm6000_ucode_dbg $B /mnt/flash/ucode_tail.raw /mnt/flash/u2.log >/dev/null 2>&1; say "  tail rc=$? PIN=$(R 0x1c021)"
+else
+	say "STEP4 microcode SKIPPED (redundant: the replay writes all 39,415 registers)"
+fi
 
 say "STEP5 FULL REPLAY of EOS's port+forwarding bring-up (299803 writes: BOTH ports + ECMP)"
 # fwd5.txt = fwd4.txt with the 30,002 SPICO-firmware SBus transactions removed

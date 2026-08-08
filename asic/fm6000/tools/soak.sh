@@ -44,6 +44,28 @@ N=${1:-2}
 say() { echo "[soak] $*"; }
 rekey() { ssh-keygen -R "$SW" >/dev/null 2>&1; }
 
+# ⚠ ARM THE WATCHDOG BEFORE ANY MANUAL PROBING.
+#
+# fm6000-fullseq.sh arms it and pets it, but its EXIT trap DISARMS it again --
+# so once bring-up finishes the box is unprotected, which is exactly when we
+# start poking at it. A hard host hang with the watchdog disarmed has no remote
+# recovery at all: it cost a physical power cycle earlier in this work, with the
+# serial console emitting nothing.
+#
+# (Petting loops have sometimes survived as orphaned subshells, leaving the
+# watchdog armed by accident. Do not rely on that -- check and arm.)
+arm_watchdog() {
+	timeout 30 $SSH '
+		pgrep -f "scdreg 0x0120" >/dev/null 2>&1 && exit 0
+		scdreg 0x0120 0xC0000BB8 >/dev/null 2>&1
+		setsid sh -c "while :; do scdreg 0x0120 0xC0000BB8 >/dev/null 2>&1; sleep 5; done" \
+			</dev/null >/dev/null 2>&1 &
+		exit 0' >/dev/null 2>&1
+	local w
+	w=$(timeout 20 $SSH 'scdreg 0x0120 2>/dev/null | sed "s/.*= //"' 2>/dev/null | tail -1)
+	say "    watchdog: $w  petters: $(timeout 20 $SSH 'pgrep -fc "scdreg 0x0120"' 2>/dev/null | tail -1)"
+}
+
 boot() {   # $1 = expected version substring
 	$SSH "echo 4 > /mnt/flash/edgenos-sticky
 	      printf 'SWI=flash:/%s\n' '$2' > /mnt/flash/boot-config; sync" >/dev/null 2>&1
@@ -94,6 +116,7 @@ for arm in generated stock; do
 			say "    did not come back"
 			printf '%s\t%d\tNO-BOOT\n' "$arm" "$r" >> "$RESULTS"; continue
 		fi
+		arm_watchdog
 		M=$(measure)
 		say "    $M"
 		printf '%s\t%d\t%s\n' "$arm" "$r" "$(echo $M | tr ' ' '\t')" >> "$RESULTS"
