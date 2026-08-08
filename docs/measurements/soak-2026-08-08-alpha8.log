@@ -1,0 +1,12 @@
+[a8] === run 1 ===
+[a8]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=82 ping=100,100,100,100,100,
+[a8] === run 2 ===
+[a8]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=129 ping=0,0,0,0,0,
+[a8] === run 1 ===
+[a8]   Et1=0x00000ec0 Et2=0x00000815 routes=35 rx=126 ping=0,0,0,0,0,
+[a8] === run 2 ===
+[a8]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=133 ping=0,0,0,0,0,
+[a8] === run 3 ===
+[a8]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=135 ping=0,0,0,0,0,
+[a8] === run 4 ===
+[a8]   Et1=0x00000ec0 Et2=0x00000815 routes=35 rx=125 ping=0,0,0,0,0,
