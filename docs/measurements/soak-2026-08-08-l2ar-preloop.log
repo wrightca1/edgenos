@@ -1,0 +1,4 @@
+[l2arpre] === run 1 ===
+[l2arpre]   Et1=0x00000ec0 Et2=0x00000815 routes=35 rx=125 ping=0,0,0,0,0,
+[l2arpre] === run 2 ===
+[l2arpre]   Et1=0x00000ec0 Et2=0x00000815 routes=34 rx=146 ping=10,0,0,0,0,
