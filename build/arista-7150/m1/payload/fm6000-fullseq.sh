@@ -111,6 +111,14 @@ gen_split() {          # $1 = prefix to drop, $2 = generator, $3 = label
 # reason L2F/LBS works: the sweep is EOS recomputing the port map after every
 # port state change, so the map must land once the ports are configured, not
 # before. Hoisting it to the front produced routes=2, rx=2, ping 100%.
+# ⚠ ORDERING IS LOAD-BEARING. Both helpers locate the loop by grepping for the
+# anchor line '001a0c00', and that address is itself an L2F register -- so the
+# L2F filter DELETES IT. Any generator that runs after L2F therefore cannot find
+# the loop and splices at an arbitrary point, silently. That is not theoretical:
+# it produced an FFU "result" whose replay grew by 5,152 writes.
+#
+# So L2F must stay LAST in the chain. Anything added later needs a stable anchor
+# instead of this one.
 gen_after() {          # $1 = prefix to drop, $2 = generator, $3 = label
 	_a1=$(grep -n '^001a0c00 ' "$CUR" | tail -1 | cut -d: -f1)
 	[ -n "$_a1" ] || return 1
@@ -127,6 +135,23 @@ CUR="$FWD"; NEXT=/tmp/fwd.a
 if [ "${GENBLK:-1}" = "1" ]; then
 	[ -x "$BIN/fm6000_cminit" ]  && gen_split '0011'  fm6000_cminit  CM
 	[ -x "$BIN/fm6000_safinit" ] && gen_split '000a0' fm6000_safinit SAF
+	# FFU: OFF. 14,549 -> 10,643 works for the DATAPATH but kills the OSPF
+	# adjacency. Cold-boot tested 2026-08-07 in both placements (after the loop,
+	# and hoisted to the block's first in-loop write): links come up 0x8c0 and
+	# unicast forwarding is fine -- in fact ping ran 0/0/0/10% loss, far better
+	# than the stock replay's collapse -- but routes stay at 2, i.e. no
+	# adjacency, so OSPF hellos are not reaching the CPU.
+	#
+	# The FFU holds the CPU-punt traps, so the likely reading is that it is not
+	# purely state: installing a trap has an ordering requirement the end state
+	# does not capture. Note the side-observation though -- with FFU generated,
+	# unicast loss did NOT collapse the way it does on the stock replay. That is
+	# a lead on the pre-existing adjacency collapse, not just a failure.
+	#
+	# FFUGEN=1 to re-test.
+	[ "${FFUGEN:-0}" = "1" ] && [ -x "$BIN/fm6000_ffuinit" ] && \
+		gen_split '003' fm6000_ffuinit FFU
+
 	# L2F+LBS end state, written ONCE AFTER the whole loop. Cold-boot validated
 	# 2026-08-07: both links up, OSPF adjacency, 35 kernel routes, 13 in silicon
 	# -- indistinguishable from the stock replay run back-to-back.
