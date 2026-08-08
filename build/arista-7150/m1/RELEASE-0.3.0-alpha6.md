@@ -1,6 +1,6 @@
 # EdgeNOS 7150 — 0.3.0-alpha6
 
-**The dataplane actually works now, and two thirds of the ASIC bring-up is our own code.**
+**The dataplane actually works now, and three quarters of EOS's replay is no longer read at boot.**
 
 Arista DCS-7150S-52 · Intel FM6000 "Alta" · x86_64 · Aboot
 
@@ -110,7 +110,7 @@ An A/B soak against the stock replay (same image, `GENBLK=0`) is indistinguishab
 
 | file | what it is |
 |---|---|
-| `/mnt/flash/fwd4.txt` | the register replay — 243,152 of 389,809 lines still read from it |
+| `/mnt/flash/fwd4.txt` | the register replay — the boot still reads 169,156 EOS-derived lines of it (down from 389,809) |
 | `/mnt/flash/ucode_l2.raw`, `ucode_tail.raw` | FM6000 microcode |
 
 ⚠ PARSER, MOD and L2AR are microcode blocks. Generating them shrinks `fwd4.txt` but does **not**
