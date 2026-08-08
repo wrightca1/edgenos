@@ -32,6 +32,37 @@ separate `ucode_l2.raw` / `ucode_tail.raw` are still loaded at STEP4 — so this
 the two-file operator burden. Count that win honestly: it is 56,190 writes of trace, not a file
 removed.
 
+## A/B soak: generated vs stock are indistinguishable
+
+Every generator here had been validated by a single cold boot. `asic/fm6000/tools/soak.sh` reboots
+the switch repeatedly on two arms — the same image, differing only by `GENBLK=0` — so the only
+variable is who writes the blocks. 4 runs per arm, 6 produced data.
+
+| arm | Et1 | Et2 | routes | end | rx | fib | ping % |
+|---|---|---|---:|---:|---:|---:|---|
+| generated | `0xec0` | `0x8c0` | 35 | 35 | 21 | 13 | 60, 100, 80 |
+| generated | `0xec0` | `0x8c0` | 35 | 35 | 23 | 13 | 70, 100, 80 |
+| generated | `0xec0` | `0x815` | 35 | 35 | 7 | 0 | 0, 0, 60 |
+| stock | `0xec0` | `0x815` | 35 | 35 | 37 | 13 | 70, 80, 90 |
+| stock | `0xec0` | `0x8c0` | 35 | 35 | 21 | 13 | 100, 100, 100 |
+| stock | `0xec0` | `0x815` | 35 | 35 | 19 | 13 | 70, 90, 100 |
+
+- **Et1 linked in 6/6**, both arms.
+- **OSPF reached 35 routes in 6/6, and still had 35 at the end of every run.**
+- **13 routes in silicon in 5/6** (one generated run programmed 0).
+- **Ping is bad and highly variable in both arms**, with no systematic difference — the worst run in
+  this set was a *stock* one at 100/100/100.
+- Et2 came up in 3 of 6, split evenly across arms: the known copper intermittency.
+- Boot reliability: **1 NO-BOOT and 1 measurement timeout in 8 attempts.**
+
+### ⚠ Correction: the adjacency collapse is intermittent, not systematic
+
+Earlier notes state that the OSPF adjacency drops from 35 routes to 2 within about three minutes.
+**That did not reproduce in any of these six runs** — `routes_end` was 35 every time, on both arms.
+It was observed twice and over-generalised into a standing characterisation. What is consistently
+true is that **ping loss is high and erratic in both arms**; the adjacency loss is an occasional
+consequence, not a reliable one. The defect is still real and still pre-existing.
+
 ## What is left
 
 | | writes | why it resists |

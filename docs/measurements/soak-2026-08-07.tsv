@@ -1,0 +1,12 @@
+arm	run	Et1	Et2	routes	routes_end	rx	fib	ping%
+generated	1	0x00000ec0	0x000008c0	35	35	21	13	60,100,80,
+generated	2	
+stock	1	NO-BOOT
+stock	2	0x00000ec0	0x00000815	35	35	37	13	70,80,90,
+generated	1	0x00000ec0	0x000008c0	35	35	23	13	70,100,80,
+generated	2	0x00000ec0	0x00000815	35	35	7	0	0,0,60,
+stock	1	0x00000ec0	0x000008c0	35	35	21	13	100,100,100,
+stock	2	0x00000ec0	0x00000815	35	35	19	13	70,90,100,
+# A/B cold-boot soak, 4 runs per arm. Both arms are the SAME image; the stock
+# arm differs only by GENBLK=0, so the only variable is who writes the blocks.
+# 6 of 8 runs produced data (1 NO-BOOT, 1 measurement timeout).
