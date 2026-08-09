@@ -37,6 +37,12 @@ import re
 import sys
 
 MACRO = re.compile(r'^#define\s+FM6000_([A-Z0-9_]+)\(([^)]*)\)\s+(.+)$')
+# Scalar registers: no index, just an offset from a block base. These were
+# missed entirely by the first version, which only enumerated the parameterised
+# macros -- so several thousand writes came back as "unnamed" when the header
+# names them perfectly well.
+SCALAR = re.compile(r'^#define\s+FM6000_([A-Z0-9_]+)\s+'
+                    r'\(\((0x[0-9a-fA-F]+)\)\s*\+\s*\(FM6000_([A-Z0-9_]+_BASE)\)\)')
 # _BASE/_SIZE are hex; _ENTRIES/_WIDTH are DECIMAL. Accept both -- requiring
 # 0x silently dropped every bound and left the whole map empty.
 PLAIN = re.compile(r'^#define\s+FM6000_([A-Z0-9_]+)\s+(0x[0-9a-fA-F]+|\d+)\s*$')
@@ -45,8 +51,12 @@ TERM = re.compile(r'\(0x([0-9a-fA-F]+)\)\s*\*\s*\(\s*\(([a-z0-9]+)\)')
 
 def parse(path):
     """Return (consts, regs). regs: name -> (strides, offset, base, nidx)."""
-    consts, regs, raw = {}, {}, {}
+    consts, regs, raw, scalars = {}, {}, {}, {}
     for line in open(path, errors="ignore"):
+        m = SCALAR.match(line)
+        if m:
+            scalars[m.group(1)] = (int(m.group(2), 16), m.group(3))
+            continue
         m = PLAIN.match(line)
         if m:
             t = m.group(2)
@@ -83,6 +93,11 @@ def parse(path):
             bounds.append(n)
         width = consts.get(f"{name}_WIDTH", 1)
         regs[name] = ([strides[a] for a in idx], off, base, bounds, width, idx)
+
+    # resolve scalars once the bases are known
+    for name, (off, basename) in scalars.items():
+        if basename in consts and name not in regs:
+            regs[name] = ([], off, consts[basename], [], 1, [])
     return consts, regs
 
 
@@ -92,7 +107,9 @@ def build_index(regs, limit=4_000_000):
     for name, (strides, off, base, bounds, width, idx) in regs.items():
         if any(b is None for b in bounds):
             continue
-        if len(strides) == 1:
+        if not strides:                      # scalar register
+            amap.setdefault(base + off, (name, (), 0))
+        elif len(strides) == 1:
             n0 = bounds[0]
             if n0 * width > limit:
                 continue
