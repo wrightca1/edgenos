@@ -50,16 +50,20 @@ macros whose bounds `regmap.py` could not resolve.
 **Action: extend regmap.py** to handle the unbounded/scalar macros it currently skips. Cheap, and
 it may reclassify most of these into groups 2 or 4.
 
-## 4. Collapsible tables — ~1,400 writes  ← DO THESE NEXT
+## 4. Collapsible tables — ~1,400 writes  ← TRIED, BOTH BACKED OUT
 
-| register | writes | pattern |
+| register | writes | result |
 |---|---:|---|
-| PARSER_INIT_FIELDS | 970 | idempotent repeats |
-| ESCHED_DRR_Q | 444 | idempotent repeats |
+| ESCHED_DRR_Q | 444 | **breaks forwarding** — OSPF up, RX alive, 100% loss on 8/8 rounds |
+| PARSER_INIT_FIELDS | 970 | **degrades reliability** — 2 of 3 boots clean vs TBL3's 3 of 3 |
 
-Same shape as the three already lifted by `fm6000_tbl3init`. PARSER_INIT_FIELDS is the safer of the
-two; ESCHED is delicate — reading `0x2000` in that block off-buses the chip, so treat scheduler
-state carefully even though writing it is routine.
+Both looked as collapsible as the three that worked: idempotent repeats, low transition rates, plain
+table names. ESCHED_DRR_Q was bisected to itself by dropping it and re-testing. PARSER_INIT_FIELDS
+passed its first boot at 7/8 rounds and only failed under soak — it would have shipped on a single
+run.
+
+**Group 4 is closed.** 1,414 writes is not worth degrading a platform that already fails one boot in
+six. Scheduler state joins EPL and the CRM triplet in the category where statistics mislead.
 
 ## 5. CRM command triplet — 1,158 writes
 
@@ -79,7 +83,8 @@ Changing values, interleaved through the loop. Needs per-case work; lowest prior
 
 ## Realistic ceiling
 
-Excluding SBus, **16,962 MMIO writes remain.** Groups 4 and 5 (~2,600) are near-term. Group 2
+Excluding SBus, **16,962 MMIO writes remain.** Group 4 is now closed as not-worth-it, and group 5
+is a command interface rather than state, so the near-term list is shorter than it looked: Group 2
 (5,364) needs the strobe-pairing generator. Group 3 (~3,700) needs a better decoder. Even clearing
 all of them leaves the SPICO firmware, which is not generatable — only droppable, and only for
 fibre.
