@@ -54,3 +54,6 @@ build/*/m1/payload/fpdma_probe
 # 7050sx2 build artifacts (kernel + initrd) -- regenerable, never commit
 build/*/m0/linux-i386
 build/*/m0/initrd-i386
+
+# compiled diagnostic tools (source is tracked)
+asic/fm6000/tools/fm6000_l2scan
