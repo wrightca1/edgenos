@@ -15,6 +15,20 @@
  * the commit strobe at 0x3f0000, and moving entries away from their strobe is
  * what broke the first FFU attempt (links up, OSPF never formed).
  *
+ * ⚠ TWO MORE TABLES WERE TRIED AND BACKED OUT. Both looked like safe additions
+ * on the same reasoning, and both cost reliability:
+ *
+ *   ESCHED_DRR_Q        444 writes. Scheduler DRR weights, 8%% transitions --
+ *                       as collapsible-looking as anything here. Result: OSPF
+ *                       up at 35 routes, RX alive, 100%% ping loss on 8 of 8
+ *                       rounds. Bisected to this register alone.
+ *   PARSER_INIT_FIELDS  970 writes. Passed its first boot 7/8 rounds clean,
+ *                       then a 3-boot soak gave 2 clean and 1 at 90-100%% loss.
+ *                       TBL3 alone soaks 3 of 3 clean, so this looks like a
+ *                       reliability regression rather than variance.
+ *
+ * 970 writes is not worth degrading a platform that already fails 1 boot in 6.
+ *
  * 6370 writes -> 1812 registers.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
