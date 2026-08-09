@@ -319,6 +319,11 @@ if [ "${GENBLK:-1}" = "1" ]; then
 		# paired with the 0x3f0000 commit strobe.
 		[ "${TBL3:-1}" = "1" ] && [ -x "$BIN/fm6000_tbl3init" ] && \
 			gen_list fm6000_tbl3init TBL3
+		# CRM command interface: DROPPED, not generated. It drives the CRM
+		# memory-fill engine, which fm6000_memfill replaced -- dead code on our
+		# boot path. gen_list removes the addresses and the tool emits nothing.
+		[ "${CRMDROP:-1}" = "1" ] && [ -x "$BIN/fm6000_crmdrop" ] && \
+			gen_list fm6000_crmdrop CRM-drop
 		for _g in l3ar hash; do
 			[ -x "$BIN/fm6000_${_g}init" ] && \
 				gen_list "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"

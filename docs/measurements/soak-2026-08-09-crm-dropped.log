@@ -1,0 +1,4 @@
+[nocrm] === run 1 ===
+[nocrm]   Et1=0x00000ec0 Et2=0x00000815 routes=34 rx=131 ping=0,0,0,0,10,
+[nocrm] === run 2 ===
+[nocrm]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=125 ping=0,0,0,0,0,
