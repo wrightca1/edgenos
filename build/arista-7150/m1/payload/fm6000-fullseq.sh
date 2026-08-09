@@ -311,6 +311,14 @@ if [ "${GENBLK:-1}" = "1" ]; then
 					gen_list "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"
 			done
 		fi
+		# Three tables selected by NAME rather than address range (regmap.py):
+		# HASH_LAYER3_PTABLE, PARSER_INIT_STATE, CM_PORT_TXMP_IP_WM. Each is
+		# written more than once per register so the write-once filters skipped
+		# them, but the repeats carry changed values rather than strobes, so the
+		# final value is what matters. CAMs are deliberately excluded -- they are
+		# paired with the 0x3f0000 commit strobe.
+		[ "${TBL3:-1}" = "1" ] && [ -x "$BIN/fm6000_tbl3init" ] && \
+			gen_list fm6000_tbl3init TBL3
 		for _g in l3ar hash; do
 			[ -x "$BIN/fm6000_${_g}init" ] && \
 				gen_list "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"

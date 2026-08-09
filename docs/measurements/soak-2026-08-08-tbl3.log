@@ -1,0 +1,4 @@
+[tbl3] === run 1 ===
+[tbl3]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=126 ping=0,0,0,0,0,
+[tbl3] === run 2 ===
+[tbl3]   Et1=0x00000ec0 Et2=0x000008c0 routes=35 rx=146 ping=0,0,0,0,0,

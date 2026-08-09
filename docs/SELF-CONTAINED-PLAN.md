@@ -86,8 +86,19 @@ overwhelmingly *tables*:
 
 CAMs, PTABLEs, INIT_STATE, SRC_PORT_TABLE — the category that *collapses*. The earlier conclusion
 that the remainder was load-bearing control writes was drawn from address ranges alone, before
-anything had names, and it looks wrong for most of this. These are candidates for the existing
-techniques, not new reverse engineering.
+anything had names, and it was wrong for most of this.
+
+**Acted on immediately.** `fm6000_tbl3init` selects three of them BY NAME rather than address range
+— `HASH_LAYER3_PTABLE`, `PARSER_INIT_STATE`, `CM_PORT_TXMP_IP_WM`. Each is written more than once
+per register, so every write-once filter had skipped them, but the repeats carry changed values
+rather than strobes, so the final value is what matters. 6,370 writes → 1,812 registers.
+
+CAMs were deliberately excluded: `FFU_SLICE_CAM` and friends are paired with the `0x3f0000` commit
+strobe, and separating entries from their strobe is what broke the first FFU attempt.
+
+Validated over 3 cold boots: routes 34–35, 17 of 18 ping rounds at zero loss.
+
+**That takes it to 93.2% — 363,168 of 389,809 lines, with 26,641 EOS-derived writes left.**
 
 ⚠ Provenance: `regmap.py` READS the header at runtime and never embeds it. The header is marked
 INTEL CONFIDENTIAL and stays in the private notes repo; nothing Intel-authored enters this tree.
