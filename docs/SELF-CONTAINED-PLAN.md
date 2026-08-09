@@ -44,6 +44,54 @@ hardest.
 | hardware-driving sequence | EPL, L2F/LBS | relocate the sequence |
 | **bulk load + interleaved control** | **L2AR** | **split on the loop boundary** |
 
+## ★ The address arithmetic did not need reverse engineering
+
+`fwd4.txt` is addresses and values with no meaning attached, and every technique up to this point
+worked on its *shape* — redundancy, loop structure, pre/post-loop position. That reached ~93% and
+stalled, because what remains resists shape analysis.
+
+The semantics were already in hand. The FM6000 register header carries **632 parameterised macros**
+plus **458 index bounds** and per-field bit positions:
+
+```
+FM6000_CM_PORT_RXMP_PRIVATE_WM(index1, index0)
+    ((0x00010) * (index1) + (0x00001) * (index0) + (0x02800) + FM6000_CM_BASE)
+```
+
+`asic/fm6000/tools/regmap.py` enumerates them into address → (register, indices). Two independent
+confirmations that both sides are right: that CM formula is *exactly* what was recovered by hand
+from the trace before the header was consulted, and the EPL macros' `0x400*bank + 0x80*lane`
+matches `epl_decode.py`'s lane geometry.
+
+It also corrects a guess: `0x117000`, tentatively labelled `CM_PORT_TXMP_IP_WM?`, is **`ERL_CFG`**.
+
+**65.9% of the whole replay now decodes to named registers.** Most of the undecoded remainder is
+the `0x00f000` SBus window (93,728 writes) — the JSS master, not a register array.
+
+### ⚠ This overturns "what is left is control writes"
+
+Of the ~23,290 EOS writes we still cannot generate, **80% now have names** — and they are
+overwhelmingly *tables*:
+
+| register | writes |
+|---|---:|
+| PARSER_INIT_STATE | 3,008 |
+| FFU_SLICE_CAM | 2,480 |
+| HASH_LAYER3_PTABLE | 2,048 |
+| PARSER_CAM | 1,308 |
+| CM_PORT_TXMP_IP_WM | 1,272 |
+| L2L_SWEEPER_CAM | 976 |
+| PARSER_INIT_FIELDS | 970 |
+| MAPPER_SRC_PORT_TABLE | 634 |
+
+CAMs, PTABLEs, INIT_STATE, SRC_PORT_TABLE — the category that *collapses*. The earlier conclusion
+that the remainder was load-bearing control writes was drawn from address ranges alone, before
+anything had names, and it looks wrong for most of this. These are candidates for the existing
+techniques, not new reverse engineering.
+
+⚠ Provenance: `regmap.py` READS the header at runtime and never embeds it. The header is marked
+INTEL CONFIDENTIAL and stays in the private notes repo; nothing Intel-authored enters this tree.
+
 ## What is left: 33,252 lines
 
 | | writes | note |
