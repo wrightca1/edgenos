@@ -98,7 +98,15 @@ strobe, and separating entries from their strobe is what broke the first FFU att
 
 Validated over 3 cold boots: routes 34–35, 17 of 18 ping rounds at zero loss.
 
-**That takes it to 93.2% — 363,168 of 389,809 lines, with 26,641 EOS-derived writes left.**
+**That takes it to 93.2% — 363,168 of 389,809 lines.**
+
+Then the CRM command interface (1,158 writes) was found to be dead code — EdgeNOS replaced the CRM
+engine with `fm6000_memfill`, so those writes drive nothing. Deleting them outright works
+(3 boots, 17/18 rounds clean), taking it to **93.5%**.
+
+Two further candidates were tried and **backed out**: `ESCHED_DRR_Q` breaks forwarding, and
+`PARSER_INIT_FIELDS` degrades boot reliability and only revealed it under soak. See
+`REPLAY-TRIAGE.md` group 4.
 
 ⚠ Provenance: `regmap.py` READS the header at runtime and never embeds it. The header is marked
 INTEL CONFIDENTIAL and stays in the private notes repo; nothing Intel-authored enters this tree.

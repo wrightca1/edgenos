@@ -65,7 +65,7 @@ run.
 **Group 4 is closed.** 1,414 writes is not worth degrading a platform that already fails one boot in
 six. Scheduler state joins EPL and the CRM triplet in the category where statistics mislead.
 
-## 5. CRM command triplet — 1,158 writes
+## 5. CRM command triplet — 1,158 writes  ← DONE, DROPPED
 
 `CRM_COMMAND` 386, `CRM_REGISTER` 386, `CRM_PERIOD` 386 — identical counts, which is the tell: this
 is a three-register command interface driven 386 times, not three tables.
@@ -74,6 +74,11 @@ is a three-register command interface driven 386 times, not three tables.
 of a command sequence. This is the same trap as every other statistical shortcut in this project:
 the numbers suggest, the register name decides. We replaced the CRM engine with `fm6000_memfill`
 already, so these may be droppable outright — worth testing before generating.
+
+**Tested: they are.** Simply deleting all 1,158 works — 3 cold boots, routes 34–35, 17 of 18 ping
+rounds at zero loss. `fm6000_crmdrop` lists the addresses for `gen_list` to filter and emits
+nothing. Unlike the group-4 attempts this is a pure deletion, which cannot introduce a code path
+that costs reliability.
 
 ## 6. MAPPER_SRC_PORT_TABLE — 634 writes
 
