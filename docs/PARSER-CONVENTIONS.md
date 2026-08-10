@@ -442,6 +442,31 @@ the I/G bit. If downstream expects the DMAC class encoded in the state, our
 uniform path would lose it — but that is a hypothesis, and the last one was
 wrong.
 
+## ★★ COLD BOOT VALIDATED (2026-08-10)
+
+Built a SWI with `fm6000_parserinit` **removed from the initrd**, spliced our parser into the
+replay, set `boot-config`, cold booted.
+
+```
+image     edgenos-ourparser.swi   md5 0764934006fccc73145e681cd7ce902c
+          /usr/bin/fm6000_parserinit: No such file or directory
+boot log  no PARSER generator ran
+replay    373,345 writes (EOS's 18,032 parser writes out, our 1,568 in)
+parser    0x100c01 = 0x94ffffeb   ours, resident after a cold boot
+Et1       0xcc0, pcsRx=1          FULLSEQ DONE
+
+routes    34   34   34    across three minutes
+ARP       resolved
+rx        52 -> 90                fresh boot counters
+```
+
+**EOS's parser program exists nowhere in this configuration** — not in the image, not in the
+replay — and the switch forwards. `fm6000_parserinit.c` can now be deleted rather than bypassed.
+
+Method: a SWI is a zip containing a gzip cpio initrd, so removing a binary and repacking takes
+about a minute and needs none of the build toolchain. Repack with `zip -X -0` (stored), matching
+how the EOS image is built.
+
 ## Scope: what the 7150S datasheet says we can leave out
 
 The product datasheet (`arista-reverse-engineering/docs/datasheets/7150S_Datasheet.pdf`)
