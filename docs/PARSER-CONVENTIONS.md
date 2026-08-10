@@ -281,6 +281,55 @@ either, because the two runs differed in more than one variable.
 That needs a cold boot from an image built without `fm6000_parserinit`, since the RAM rootfs
 discards `chmod` on reboot.
 
+## ★★ A/B on hardware: EOS's parser forwards, ours does not
+
+The decisive experiment, and it is clean: same box, same boot, same dataplane,
+`fm6000load` swapping only the parser program between measurements.
+
+| parser | kernel routes | ping to neighbour |
+|---|---:|---|
+| **EOS's** | **35** | **4/4, 0% loss**, adjacency in <4s |
+| **ours** | 2 | 0/4, 100% loss |
+
+`et1` rx counts grow under both, so frames reach the CPU either way — our parse
+is not fatally wrong, it is wrong in a way that stops downstream classifying.
+
+### Two earlier claims this overturns
+
+**In-place runs CAN test forwarding.** `SELF-CONTAINED-PLAN.md` says they cannot
+(both modified and control give `et1 rx=0`), and this document repeated it. That
+holds when `fm6000-fullseq.sh` is re-run over a live dataplane; it does not hold
+here, because `portd` was started fresh on this boot. EOS's parser reached 35
+routes and full ping in an in-place state.
+
+**The multicast-DIP flag was not the cause.** Table 5-6 bit 19 (`L3_Mcst` from
+the DIP) was genuinely missing and is a real fix — OSPF hellos to 224.0.0.5 are
+multicast by address, not just by MAC — but adding it changed nothing. Routes
+stayed at 2. A plausible mechanism is not a diagnosis.
+
+### What the loop is worth
+
+Loading a parser with `fm6000load` and measuring takes about a minute, against
+roughly ten for a reboot cycle:
+
+```
+fm6000load 0000:02:00.0 <clear+program>   # ~17k writes, seconds
+ip route | wc -l ; ping -c4 10.101.101.25 # verdict in <10s
+```
+
+Clearing slices 0-15 to all-zero first is required: all-zero is the never-match
+encoding, so it disables stale entries from a previous load that would otherwise
+survive at higher indices and win under last-match-wins.
+
+### The open question
+
+Not yet diagnosed. One structural difference stands out for a next look: EOS's
+slice 0 classifies the DMAC into four different next-states (`0x03`, `0x04`,
+`0x06`, `0x07`) by content, where ours has a single path and only distinguishes
+the I/G bit. If downstream expects the DMAC class encoded in the state, our
+uniform path would lose it — but that is a hypothesis, and the last one was
+wrong.
+
 ## Reproducing
 
 ```
