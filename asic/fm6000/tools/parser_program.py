@@ -137,7 +137,8 @@ class Rule:
     def __init__(self, state, next_state, tag_depth=0, next_tag_depth=None,
                  match_halfword0=None, dest0=None, dest1=None,
                  match_halfword1=None, match_halfword1_mask=0xFFFF,
-                 rot0=0, rot1=0, terminate=False, note=""):
+                 rot0=0, rot1=0, match_q=None, set_q=None,
+                 terminate=False, note=""):
         self.state = state
         self.next_state = next_state
         self.tag_depth = tag_depth
@@ -149,6 +150,8 @@ class Rule:
         self.dest1 = dest1                       # FIELDS channel for bytes[2:3]
         self.rot0 = rot0      # nibble rotation, 4*rot bits; 2 == byte swap
         self.rot1 = rot1
+        self.match_q = match_q   # require STATE8[2] == this
+        self.set_q = set_q       # set STATE8[2]; None leaves it unchanged
         self.terminate = terminate
         self.note = note
 
@@ -163,6 +166,9 @@ class Rule:
             m = self.match_halfword1_mask & 0xFFFF
             value |= (self.match_halfword1 & m) << 16
             care |= m << 16
+        if self.match_q is not None:
+            value |= (self.match_q & 0xFF) << 48
+            care |= 0xFF << 48
         return value, care
 
     def action(self):
@@ -178,6 +184,10 @@ class Rule:
             f["Halfword1Dest"] = self.dest1
             f["Halfword1Rot"] = self.rot1
             f["Byte2Enable"] = f["Byte3Enable"] = 1
+        # StateOp2=0 with value 0 leaves STATE8[2] unchanged, so the qualifier
+        # survives across the address walk without every rule restating it.
+        if self.set_q is not None:
+            f["StateOp2"], f["StateValue2"] = 1, self.set_q
         if self.terminate:
             f["Terminate"] = 1
         return f
@@ -268,7 +278,7 @@ def build_program():
             # next-header then hop-limit on the wire, but ch19 wants TTL in
             # [15:8] and protocol in [7:0] -- rot0=2 swaps the bytes.
             (S_IP6_NH, S_IP6_S1, CH_L3_TTL_PROT, S6[0], 2, False,
-             "IPv6 hop-limit/next-header, SIP[127:112]"),
+             "IPv6 hop-limit/next-header (ext headers assumed), SIP[127:112]"),
             (S_IP6_S1, S_IP6_S2, S6[1], S6[2], 0, False, "IPv6 SIP[111:80]"),
             (S_IP6_S2, S_IP6_S3, S6[3], S6[4], 0, False, "IPv6 SIP[79:48]"),
             (S_IP6_S3, S_IP6_S4, S6[5], S6[6], 0, False, "IPv6 SIP[47:16]"),
@@ -277,12 +287,39 @@ def build_program():
             (S_IP6_D1, S_IP6_D2, D6[1], D6[2], 0, False, "IPv6 DIP[111:80]"),
             (S_IP6_D2, S_IP6_D3, D6[3], D6[4], 0, False, "IPv6 DIP[79:48]"),
             (S_IP6_D3, S_IP6_L4, D6[5], D6[6], 0, False, "IPv6 DIP[47:16]"),
-            (S_IP6_L4, S_DONE_OTHER, D6[7], CH_L4_SRC, 0, True,
-             "IPv6 DIP[15:0], L4 source port; done"),
         ):
+            kw = {"set_q": 0} if st == S_IP6_NH else {}
             rules.append(Rule(st, nxt, tag_depth=depth, dest0=d0, dest1=d1,
-                              rot0=r0, terminate=term,
+                              rot0=r0, terminate=term, **kw,
                               note=f"{note} (depth {depth})"))
+
+        # ⚠ IPv6 extension headers are the same trap as IPv4 options: they sit
+        # between the addresses and L4, so the ports are NOT where the fixed
+        # walk expects them. The addresses are unaffected -- extension headers
+        # follow them -- so only the L4 step needs guarding.
+        #
+        # STATE8[2] carries the verdict. It is set at the next-header field and
+        # survives the whole address walk untouched, because every intervening
+        # rule leaves StateOp2 at 0 (add zero).
+        #
+        # The next-header byte is the FIRST byte of the halfword at S_IP6_NH,
+        # and the first byte received occupies the most significant byte
+        # (datasheet 5.5), so it is key[15:8] -- matched with mask 0xFF00.
+        for proto in (6, 17, 58):        # TCP, UDP, ICMPv6
+            rules.append(Rule(S_IP6_NH, S_IP6_S1, tag_depth=depth,
+                              match_halfword0=proto << 8,
+                              match_halfword1_mask=0xFFFF,
+                              dest0=CH_L3_TTL_PROT, dest1=CH_SIP6[0], rot0=2,
+                              set_q=1,
+                              note=f"IPv6 next-header {proto}: L4 follows directly"))
+        # L4 ports, only when STATE8[2] says the walk is still aligned.
+        rules.append(Rule(S_IP6_L4, S_DONE_OTHER, tag_depth=depth,
+                          dest0=CH_DIP6[7], dest1=CH_L4_SRC, match_q=1,
+                          terminate=True,
+                          note="IPv6 DIP[15:0] + L4 source port (no ext headers)"))
+        rules.append(Rule(S_IP6_L4, S_DONE_OTHER, tag_depth=depth,
+                          dest0=CH_DIP6[7], terminate=True,
+                          note="IPv6 DIP[15:0]; ext headers present, ports skipped"))
     return rules
 
 
