@@ -110,7 +110,14 @@ FIELDS_CHANNEL = {
     12: "L2_SMAC[15:0]", 13: "L2_SMAC[31:16]", 14: "L2_SMAC[47:32]",
     15: "L2_TYPE (EtherType)", 16: "L3_FLOW[19:16]/L3_PRI", 17: "L3_FLOW[15:0]",
     18: "L3_LENGTH", 19: "L3_TTL/L3_PROT",
-    20: "L3_SIP/DIP[15:0]", 21: "L3_SIP/DIP[31:16]",
+    20: "L3_SIP[15:0]", 21: "L3_SIP[31:16]",
+    # ⚠ DERIVED, not from Table 5-5. That table lists identical channels for
+    # L3_SIP and L3_DIP -- the DIP row is a copy-paste of the SIP row (its note
+    # even reads "IPv4 SIP goes in L3_DIP[31:0]"). EOS's own program settles it:
+    # ch20/21 first written at slice 7, ch22/23 at slice 8 -- one slice, 4 bytes
+    # later, exactly SIP-then-DIP. Its state chain runs 0x23 (ch20/21) -> 0x24
+    # (ch22/23) -> 0x40 (L4 ports), header order, and no rule writes both pairs.
+    22: "L3_DIP[15:0] (derived)", 23: "L3_DIP[31:16] (derived)",
     24: "L4_SRC", 25: "L4_DST",
     32: "L3_S/DIP[111:96]", 33: "L3_S/DIP[127:112]",
     36: "L3_S/DIP[47:32]", 37: "L3_S/DIP[63:48]",

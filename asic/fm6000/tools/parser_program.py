@@ -33,11 +33,10 @@ nothing counts until a cold boot with a stock-replay control at the same
 cadence, and the pre-existing ping/OSPF degradation makes that control
 mandatory rather than optional.
 
-⚠ SCOPE. L2 is complete: DMAC, SMAC, EtherType, and 0/1/2 VLAN tags including
-VID and priority. L3 is deliberately NOT emitted yet -- Table 5-5 lists
-identical channel sets for L3_SIP and L3_DIP, which cannot both be right, and
-guessing there would produce a parser that looks finished and forwards wrong.
-See --summary for exactly what is and is not covered.
+SCOPE. L2 complete (DMAC, SMAC, EtherType, 0/1/2 VLAN tags with VID and
+priority) plus the IPv4 header: TOS/DSCP, total length, TTL, protocol, source
+and destination addresses, and both L4 ports. IPv6 and ARP are dispatched to
+their own states but their headers are not yet walked.
 """
 import argparse
 import sys
@@ -56,6 +55,20 @@ CH_SGLORT = 3
 CH_DMAC_HI, CH_DMAC_MID, CH_DMAC_LO = 7, 6, 5
 CH_SMAC_HI, CH_SMAC_MID, CH_SMAC_LO = 14, 13, 12
 CH_ETHERTYPE = 15
+# L3. Table 5-5 lists IDENTICAL channels for L3_SIP and L3_DIP, which cannot
+# both be right -- the DIP row is a copy-paste of the SIP row, note even its
+# comment says "IPv4 SIP goes in L3_DIP[31:0]". Resolved from EOS's own program:
+# ch20/21 are first written at slice 7 and ch22/23 at slice 8, one slice (4
+# bytes) later, which is exactly SIP-then-DIP in an IPv4 header. The state chain
+# confirms it -- 0x23 (writes ch20/21) -> 0x24 (writes ch22/23) -> 0x40 (writes
+# L4 ports), i.e. SIP, DIP, ports in header order -- and no rule anywhere writes
+# both pairs, so they are distinct fields.
+CH_L3_PRI = 16       # bits 7:0 carry TOS/DSCP
+CH_L3_LENGTH = 18
+CH_L3_TTL_PROT = 19  # TTL in 15:8, protocol in 7:0
+CH_SIP_HI, CH_SIP_LO = 21, 20
+CH_DIP_HI, CH_DIP_LO = 23, 22
+CH_L4_SRC, CH_L4_DST = 24, 25
 
 ET_VLAN_C = 0x8100
 ET_VLAN_S = 0x88A8
@@ -71,15 +84,24 @@ S_DMAC_LO = 0x10     # consumed DMAC[47:16]
 S_SMAC_LO = 0x12     # consumed DMAC[15:0] + SMAC[47:32]
 S_ETYPE = 0x14       # consumed SMAC[31:0]; next halfword is an EtherType
 S_TAGGED = 0x16      # just consumed a VLAN tag; another EtherType follows
-S_DONE_IPV4 = 0x20
-S_DONE_IPV6 = 0x22
-S_DONE_ARP = 0x24
-S_DONE_OTHER = 0x26
+S_IP4_LEN = 0x20     # at total-length word
+S_IP4_TTL = 0x21     # at flags/frag + TTL/protocol
+S_IP4_SIP_HI = 0x22  # at checksum + SIP[31:16]
+S_IP4_SIP_LO = 0x23  # at SIP[15:0] + DIP[31:16]
+S_IP4_DIP_LO = 0x24  # at DIP[15:0] + L4 source port
+S_IP4_L4 = 0x25      # at L4 destination port
+S_DONE_IPV4 = S_IP4_LEN
+S_DONE_IPV6 = 0x30   # was 0x22 -- collided with S_IP4_SIP_HI
+S_DONE_ARP = 0x32    # was 0x24 -- collided with S_IP4_DIP_LO
+S_DONE_OTHER = 0x34
 
 STATE_NAME = {
     S_START: "start", S_DMAC_LO: "dmac-hi-consumed", S_SMAC_LO: "smac-hi-consumed",
     S_ETYPE: "at-ethertype", S_TAGGED: "at-ethertype(after tag)",
-    S_DONE_IPV4: "ipv4", S_DONE_IPV6: "ipv6", S_DONE_ARP: "arp",
+    S_IP4_LEN: "ipv4-length", S_IP4_TTL: "ipv4-ttl/proto",
+    S_IP4_SIP_HI: "ipv4-sip-hi", S_IP4_SIP_LO: "ipv4-sip-lo/dip-hi",
+    S_IP4_DIP_LO: "ipv4-dip-lo/l4src", S_IP4_L4: "ipv4-l4dst",
+    S_DONE_IPV6: "ipv6", S_DONE_ARP: "arp",
     S_DONE_OTHER: "other-l3",
 }
 
@@ -151,8 +173,12 @@ def build_program():
                                   match_halfword0=et,
                                   dest0=CH_ETHERTYPE, dest1=CH_VID1,
                                   note=f"VLAN 0x{et:04x} at depth {depth}"))
-        for et, nxt in ((ET_IPV4, S_DONE_IPV4), (ET_IPV6, S_DONE_IPV6),
-                        (ET_ARP, S_DONE_ARP)):
+        # IPv4 dispatch also captures the halfword after the EtherType, which is
+        # ver/IHL + TOS -- and ch16 bits 7:0 are L3_PRI, so TOS lands correctly.
+        rules.append(Rule(here, S_IP4_LEN, tag_depth=depth, match_halfword0=ET_IPV4,
+                          dest0=CH_ETHERTYPE, dest1=CH_L3_PRI,
+                          note=f"IPv4 at depth {depth}; TOS -> L3_PRI"))
+        for et, nxt in ((ET_IPV6, S_DONE_IPV6), (ET_ARP, S_DONE_ARP)):
             rules.append(Rule(here, nxt, tag_depth=depth, match_halfword0=et,
                               dest0=CH_ETHERTYPE,
                               note=f"0x{et:04x} at depth {depth}"))
@@ -160,6 +186,25 @@ def build_program():
         rules.append(Rule(here, S_DONE_OTHER, tag_depth=depth,
                           dest0=CH_ETHERTYPE, terminate=True,
                           note=f"unknown EtherType at depth {depth}"))
+
+        # --- IPv4 header walk. One rule per state per tag depth, because the
+        # header sits 4 bytes later for each tag in front of it. ---
+        for st, nxt, d0, d1, term, note in (
+            (S_IP4_LEN, S_IP4_TTL, CH_L3_LENGTH, None, False,
+             "IPv4 total length"),
+            (S_IP4_TTL, S_IP4_SIP_HI, None, CH_L3_TTL_PROT, False,
+             "IPv4 TTL + protocol"),
+            (S_IP4_SIP_HI, S_IP4_SIP_LO, None, CH_SIP_HI, False,
+             "IPv4 SIP[31:16]"),
+            (S_IP4_SIP_LO, S_IP4_DIP_LO, CH_SIP_LO, CH_DIP_HI, False,
+             "IPv4 SIP[15:0], DIP[31:16]"),
+            (S_IP4_DIP_LO, S_IP4_L4, CH_DIP_LO, CH_L4_SRC, False,
+             "IPv4 DIP[15:0], L4 source port"),
+            (S_IP4_L4, S_DONE_OTHER, CH_L4_DST, None, True,
+             "L4 destination port; done"),
+        ):
+            rules.append(Rule(st, nxt, tag_depth=depth, dest0=d0, dest1=d1,
+                              terminate=term, note=f"{note} (depth {depth})"))
     return rules
 
 
@@ -169,7 +214,9 @@ def reachable_slices(rule):
     A position sits at byte offset 4*n + 4*tag_depth, so the slice is fixed by
     the state AND the tag depth. This is the step that makes tagged frames work.
     """
-    base = {S_START: 0, S_DMAC_LO: 1, S_SMAC_LO: 2, S_ETYPE: 3, S_TAGGED: 3}
+    base = {S_START: 0, S_DMAC_LO: 1, S_SMAC_LO: 2, S_ETYPE: 3, S_TAGGED: 3,
+            S_IP4_LEN: 4, S_IP4_TTL: 5, S_IP4_SIP_HI: 6,
+            S_IP4_SIP_LO: 7, S_IP4_DIP_LO: 8, S_IP4_L4: 9}
     if rule.state not in base:
         return []
     return [base[rule.state] + rule.tag_depth]
@@ -206,6 +253,16 @@ def writes(placed):
 
 def check(placed):
     problems = []
+
+    # State values must be unique. Two states sharing a value silently merge
+    # two parse positions -- the IPv6/ARP terminals originally collided with
+    # the IPv4 walk this way, and nothing downstream would have flagged it.
+    seen = {}
+    for name, val in sorted(STATE_NAME.items(), key=lambda t: t[1]):
+        if name in seen:
+            problems.append(f"state value 0x{name:02x} used by both "
+                            f"'{seen[name]}' and '{val}'")
+        seen[name] = val
     for s, entries in placed.items():
         if len(entries) > ENTRIES_PER_SLICE:
             problems.append(f"slice {s}: {len(entries)} entries exceeds {ENTRIES_PER_SLICE}")
@@ -214,7 +271,7 @@ def check(placed):
     # every non-terminal next_state must be matched by some rule
     produced = {r.next_state for _, rs in placed.items() for _, r in rs if not r.terminate}
     consumed = {r.state for _, rs in placed.items() for _, r in rs}
-    terminal = {S_DONE_IPV4, S_DONE_IPV6, S_DONE_ARP, S_DONE_OTHER}
+    terminal = {S_DONE_IPV6, S_DONE_ARP, S_DONE_OTHER}
     for st in produced - consumed - terminal:
         problems.append(f"state 0x{st:02x} ({STATE_NAME.get(st,'?')}) is produced but never consumed")
     # channels must exist in Table 5-5
@@ -254,10 +311,10 @@ def main():
                       f" -> {STATE_NAME.get(r.next_state,'?'):<24} {r.note}")
                 if dest:
                     print(f"         {', '.join(dest)}")
-        print("\nNOT COVERED: L3 field extraction (IPv4/IPv6 addresses, TTL, protocol,")
-        print("length) and L4 ports. Table 5-5 lists identical channels for L3_SIP and")
-        print("L3_DIP, which cannot both be right; guessing would produce a parser that")
-        print("looks finished and forwards wrong.")
+        print("\nNOT COVERED: IPv6 and ARP header walks (both are dispatched to a")
+        print("state, but their fields are not extracted). IPv4 options are not")
+        print("handled -- the walk assumes IHL=5, so a packet with options mis-aligns")
+        print("everything after it.")
 
     if args.check:
         problems = check(placed)
