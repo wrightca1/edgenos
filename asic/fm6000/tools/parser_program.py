@@ -69,6 +69,16 @@ CH_L3_TTL_PROT = 19  # TTL in 15:8, protocol in 7:0
 CH_SIP_HI, CH_SIP_LO = 21, 20
 CH_DIP_HI, CH_DIP_LO = 23, 22
 CH_L4_SRC, CH_L4_DST = 24, 25
+# IPv6 128-bit address channels, in descending byte order. DERIVED from EOS's
+# own chain, which walks SIP then DIP across 8 consecutive slices:
+#   SIP  0x32 -> 0x33 -> 0x34 -> 0x35   ch33/32, 39/38, 37/36, 21/20
+#   DIP  0x36 -> 0x37 -> 0x38 -> 0x39   ch31/30, 29/28, 35/34, 23/22
+# The SIP set reproduces Table 5-5's L3_SIP list exactly, and the DIP set ends
+# on the ch23/22 pair derived independently from the IPv4 path -- two separate
+# routes agreeing on the same answer.
+CH_SIP6 = [33, 32, 39, 38, 37, 36, 21, 20]   # [127:112] .. [15:0]
+CH_DIP6 = [31, 30, 29, 28, 35, 34, 23, 22]
+CH_L3_FLOW_LO = 17
 
 ET_VLAN_C = 0x8100
 ET_VLAN_S = 0x88A8
@@ -91,6 +101,16 @@ S_IP4_SIP_LO = 0x23  # at SIP[15:0] + DIP[31:16]
 S_IP4_DIP_LO = 0x24  # at DIP[15:0] + L4 source port
 S_IP4_L4 = 0x25      # at L4 destination port
 S_DONE_IPV4 = S_IP4_LEN
+S_IP6_FLOW = 0x40    # at flow[15:0] + payload length
+S_IP6_NH = 0x41      # at next-header/hop-limit + SIP[127:112]
+S_IP6_S1 = 0x42
+S_IP6_S2 = 0x43
+S_IP6_S3 = 0x44
+S_IP6_S4 = 0x45      # SIP[15:0] + DIP[127:112]
+S_IP6_D1 = 0x46
+S_IP6_D2 = 0x47
+S_IP6_D3 = 0x48      # DIP[31:16] via ch23
+S_IP6_L4 = 0x49
 S_DONE_IPV6 = 0x30   # was 0x22 -- collided with S_IP4_SIP_HI
 S_DONE_ARP = 0x32    # was 0x24 -- collided with S_IP4_DIP_LO
 S_DONE_OTHER = 0x34
@@ -101,7 +121,10 @@ STATE_NAME = {
     S_IP4_LEN: "ipv4-length", S_IP4_TTL: "ipv4-ttl/proto",
     S_IP4_SIP_HI: "ipv4-sip-hi", S_IP4_SIP_LO: "ipv4-sip-lo/dip-hi",
     S_IP4_DIP_LO: "ipv4-dip-lo/l4src", S_IP4_L4: "ipv4-l4dst",
-    S_DONE_IPV6: "ipv6", S_DONE_ARP: "arp",
+    S_IP6_FLOW: "ipv6-flow", S_IP6_NH: "ipv6-nexthdr", S_IP6_S1: "ipv6-sip-1",
+    S_IP6_S2: "ipv6-sip-2", S_IP6_S3: "ipv6-sip-3", S_IP6_S4: "ipv6-sip-4/dip-1",
+    S_IP6_D1: "ipv6-dip-2", S_IP6_D2: "ipv6-dip-3", S_IP6_D3: "ipv6-dip-4",
+    S_IP6_L4: "ipv6-l4dst", S_DONE_IPV6: "ipv6-other", S_DONE_ARP: "arp",
     S_DONE_OTHER: "other-l3",
 }
 
@@ -114,7 +137,7 @@ class Rule:
     def __init__(self, state, next_state, tag_depth=0, next_tag_depth=None,
                  match_halfword0=None, dest0=None, dest1=None,
                  match_halfword1=None, match_halfword1_mask=0xFFFF,
-                 terminate=False, note=""):
+                 rot0=0, rot1=0, terminate=False, note=""):
         self.state = state
         self.next_state = next_state
         self.tag_depth = tag_depth
@@ -124,6 +147,8 @@ class Rule:
         self.match_halfword1_mask = match_halfword1_mask
         self.dest0 = dest0                       # FIELDS channel for bytes[0:1]
         self.dest1 = dest1                       # FIELDS channel for bytes[2:3]
+        self.rot0 = rot0      # nibble rotation, 4*rot bits; 2 == byte swap
+        self.rot1 = rot1
         self.terminate = terminate
         self.note = note
 
@@ -147,9 +172,11 @@ class Rule:
         f["StateOp1"], f["StateValue1"] = 1, self.next_tag_depth
         if self.dest0 is not None:
             f["Halfword0Dest"] = self.dest0
+            f["Halfword0Rot"] = self.rot0
             f["Byte0Enable"] = f["Byte1Enable"] = 1
         if self.dest1 is not None:
             f["Halfword1Dest"] = self.dest1
+            f["Halfword1Rot"] = self.rot1
             f["Byte2Enable"] = f["Byte3Enable"] = 1
         if self.terminate:
             f["Terminate"] = 1
@@ -199,10 +226,16 @@ def build_program():
                           match_halfword0=ET_IPV4,
                           dest0=CH_ETHERTYPE, terminate=True,
                           note=f"IPv4 with options at depth {depth}: L2 only"))
-        for et, nxt in ((ET_IPV6, S_DONE_IPV6), (ET_ARP, S_DONE_ARP)):
-            rules.append(Rule(here, nxt, tag_depth=depth, match_halfword0=et,
-                              dest0=CH_ETHERTYPE,
-                              note=f"0x{et:04x} at depth {depth}"))
+        # IPv6: the halfword after the EtherType is ver/traffic-class/flow[19:16].
+        # Table 5-5 wants traffic class in ch16[7:0] and FlowLabel[19:16] in
+        # ch16[15:12], which is the ">>4 rotation" its note calls for: rot=3
+        # (BarrelShiftLeft by 12 == right by 4 in a 16-bit halfword).
+        rules.append(Rule(here, S_IP6_FLOW, tag_depth=depth, match_halfword0=ET_IPV6,
+                          dest0=CH_ETHERTYPE, dest1=CH_L3_PRI, rot1=3,
+                          note=f"IPv6 at depth {depth}; TC/flow -> L3_PRI"))
+        rules.append(Rule(here, S_DONE_ARP, tag_depth=depth, match_halfword0=ET_ARP,
+                          dest0=CH_ETHERTYPE, terminate=True,
+                          note=f"ARP at depth {depth}"))
         # Anything else: record the EtherType and stop.
         rules.append(Rule(here, S_DONE_OTHER, tag_depth=depth,
                           dest0=CH_ETHERTYPE, terminate=True,
@@ -226,6 +259,30 @@ def build_program():
         ):
             rules.append(Rule(st, nxt, tag_depth=depth, dest0=d0, dest1=d1,
                               terminate=term, note=f"{note} (depth {depth})"))
+
+        # --- IPv6 header walk. Fixed 40 bytes, so no options problem. ---
+        S6, D6 = CH_SIP6, CH_DIP6
+        for st, nxt, d0, d1, r0, term, note in (
+            (S_IP6_FLOW, S_IP6_NH, CH_L3_FLOW_LO, CH_L3_LENGTH, 0, False,
+             "IPv6 flow[15:0], payload length"),
+            # next-header then hop-limit on the wire, but ch19 wants TTL in
+            # [15:8] and protocol in [7:0] -- rot0=2 swaps the bytes.
+            (S_IP6_NH, S_IP6_S1, CH_L3_TTL_PROT, S6[0], 2, False,
+             "IPv6 hop-limit/next-header, SIP[127:112]"),
+            (S_IP6_S1, S_IP6_S2, S6[1], S6[2], 0, False, "IPv6 SIP[111:80]"),
+            (S_IP6_S2, S_IP6_S3, S6[3], S6[4], 0, False, "IPv6 SIP[79:48]"),
+            (S_IP6_S3, S_IP6_S4, S6[5], S6[6], 0, False, "IPv6 SIP[47:16]"),
+            (S_IP6_S4, S_IP6_D1, S6[7], D6[0], 0, False,
+             "IPv6 SIP[15:0], DIP[127:112]"),
+            (S_IP6_D1, S_IP6_D2, D6[1], D6[2], 0, False, "IPv6 DIP[111:80]"),
+            (S_IP6_D2, S_IP6_D3, D6[3], D6[4], 0, False, "IPv6 DIP[79:48]"),
+            (S_IP6_D3, S_IP6_L4, D6[5], D6[6], 0, False, "IPv6 DIP[47:16]"),
+            (S_IP6_L4, S_DONE_OTHER, D6[7], CH_L4_SRC, 0, True,
+             "IPv6 DIP[15:0], L4 source port; done"),
+        ):
+            rules.append(Rule(st, nxt, tag_depth=depth, dest0=d0, dest1=d1,
+                              rot0=r0, terminate=term,
+                              note=f"{note} (depth {depth})"))
     return rules
 
 
@@ -237,7 +294,9 @@ def reachable_slices(rule):
     """
     base = {S_START: 0, S_DMAC_LO: 1, S_SMAC_LO: 2, S_ETYPE: 3, S_TAGGED: 3,
             S_IP4_LEN: 4, S_IP4_TTL: 5, S_IP4_SIP_HI: 6,
-            S_IP4_SIP_LO: 7, S_IP4_DIP_LO: 8, S_IP4_L4: 9}
+            S_IP4_SIP_LO: 7, S_IP4_DIP_LO: 8, S_IP4_L4: 9,
+            S_IP6_FLOW: 4, S_IP6_NH: 5, S_IP6_S1: 6, S_IP6_S2: 7, S_IP6_S3: 8,
+            S_IP6_S4: 9, S_IP6_D1: 10, S_IP6_D2: 11, S_IP6_D3: 12, S_IP6_L4: 13}
     if rule.state not in base:
         return []
     return [base[rule.state] + rule.tag_depth]

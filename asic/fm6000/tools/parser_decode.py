@@ -118,6 +118,17 @@ FIELDS_CHANNEL = {
     # later, exactly SIP-then-DIP. Its state chain runs 0x23 (ch20/21) -> 0x24
     # (ch22/23) -> 0x40 (L4 ports), header order, and no rule writes both pairs.
     22: "L3_DIP[15:0] (derived)", 23: "L3_DIP[31:16] (derived)",
+    # The rest of the 128-bit L3_DIP, also DERIVED -- Table 5-5 never lists it.
+    # EOS walks SIP then DIP across 8 consecutive slices:
+    #   SIP 0x32->0x33->0x34->0x35  ch33/32, 39/38, 37/36, 21/20
+    #   DIP 0x36->0x37->0x38->0x39  ch31/30, 29/28, 35/34, 23/22
+    # The SIP half reproduces Table 5-5's L3_SIP list exactly, which is the
+    # control: the same method applied to a set the datasheet DOES document
+    # returns the documented answer. The DIP half ends on ch23/22, derived
+    # earlier and independently from the IPv4 path.
+    28: "L3_DIP[79:64] (derived)", 29: "L3_DIP[95:80] (derived)",
+    30: "L3_DIP[111:96] (derived)", 31: "L3_DIP[127:112] (derived)",
+    34: "L3_DIP[47:32] (derived)", 35: "L3_DIP[63:48] (derived)",
     24: "L4_SRC", 25: "L4_DST",
     32: "L3_S/DIP[111:96]", 33: "L3_S/DIP[127:112]",
     36: "L3_S/DIP[47:32]", 37: "L3_S/DIP[63:48]",
