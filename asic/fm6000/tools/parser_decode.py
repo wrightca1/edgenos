@@ -54,28 +54,55 @@ ENTRIES_PER_SLICE = 128
 WORDS_PER_ENTRY = 4
 NUM_SLICES = 28
 
-# Action SRAM layout, datasheet Table 5-3, in table order packed LSB-first.
-# Sums to 109 bits and the entry is 128, so 19 bits are spare.
+# Action SRAM field list and widths, datasheet Table 5-3. Sums to 109 bits.
 #
-# The order is the datasheet's; that it is packed LSB-first is OUR finding, and
-# it is corroborated rather than assumed -- decoding all 2,117 entries under it
-# puts every field inside its documented range:
+# ############################################################################
+# ⚠⚠ THE OFFSETS BELOW ARE WRONG. The field LIST and WIDTHS are datasheet
+# facts; the assumption that they are packed LSB-first in table order is NOT,
+# and it has been REFUTED. Do not trust action_render() output.
 #
-#   Halfword0Dest  {0,1,2,3,4,5,8,60,62}   valid 6-bit FIELDS channel indices
-#   Halfword1Dest  {0,1,15}
-#   ShiftNextSlice {0,4}                   documented 0..7
-#   LegalPadding   {0,1}                   documented 0..3
-#   StateFrameRot  {0,1,2,3}               exactly the full 2-bit range
-#   Byte0-3Enable  mostly 0000, then 0111 / 1111
+# Refuted by datasheet Table 5-5 (Parser Fixed Mapping), which fixes in
+# hardware which FIELDS channel carries which header:
 #
-# and no bit above 107 is ever set anywhere in the image.
+#     FIELDS[5,6,7]    = L2_DMAC[15:0], [31:16], [47:32]
+#     FIELDS[12,13,14] = L2_SMAC
+#     FIELDS[15]       = L2_TYPE
 #
-# ⚠ Terminate (bit 108) is never set in EOS's program. That is not evidence the
-# layout is wrong -- it was briefly read that way here and the reading was
-# mistaken. The parser has 28 slices and can end by exhausting them, so a
-# forced terminate is simply unused. TerminateAllowed (bit 107) IS used, and
-# with a very regular shape: exactly 5 entries per slice for slices 3-14, then
-# exactly 2 for slices 15-20, none elsewhere.
+# Any real parser must write those channels. Under the LSB-first layout,
+# Halfword0Dest sits at bit 80 and yields {0,1,2,3,4,5,8,60,62} -- never 6, 7,
+# 12, 13 or 14, and 60/62 do not exist in a table that stops at 43.
+#
+# Scanning every offset for a 6-bit field that hits the documented channels
+# gives exactly ONE candidate, bit 45, and it is unambiguous:
+#
+#     ch7  L2_DMAC[47:32]  written in slices 1,3,5,6,7...
+#     ch6  L2_DMAC[31:16]  slices 2,4,7,8...
+#     ch5  L2_DMAC[15:0]   slices 6,8,9,10...
+#     ch14 L2_SMAC[47:32]  slices 7,8,9...
+#     ch15 L2_TYPE         slices 10,11,12...
+#
+# That is a parser walking an Ethernet header in wire order, deeper with each
+# slice. So Halfword0Dest is at bit 45 (see HALFWORD0_DEST_OFFSET), and the
+# whole LSB-first hypothesis falls with it.
+#
+# ⚠ WHY gen_parser --verify DID NOT CATCH THIS, which is the lesson worth
+# keeping: round-tripping decode->encode only proves the packing is SELF-
+# CONSISTENT. Shifted field boundaries re-encode to the identical bits and pass
+# perfectly. A round-trip validates an encoder, never an interpretation. Only an
+# external fact -- here Table 5-5 -- can do that.
+#
+# Consequently the earlier "every field lands inside its documented range"
+# corroboration was weak evidence and should not have been treated as
+# confirmation; several fields are narrow enough that a wrong offset still
+# yields plausible values.
+#
+# Halfword1Dest is NOT located. Bit 65 produces the right kind of pairing with
+# bit 45 -- (7,6), (13,12), (11,10), i.e. the two halves of one frame word --
+# but on only 2.2% of entries, which is not good enough to claim.
+#
+# TODO: re-derive the full layout against Table 5-3 field by field, anchored on
+# bit 45, before any generated parser is emitted.
+# ############################################################################
 ACTION_FIELDS = [
     ("StateOp0", 2), ("StateOp1", 2), ("StateOp2", 2), ("StateOp3", 2),
     ("StateValue0", 8), ("StateValue1", 8), ("StateValue2", 8), ("StateValue3", 8),
@@ -94,6 +121,35 @@ for _n, _w in ACTION_FIELDS:
     ACTION_OFFSET[_n] = (_p, _w)
     _p += _w
 ACTION_WIDTH = _p
+
+# The one action field located by external evidence rather than assumption:
+# datasheet Table 5-5's hardware-fixed channel map. See the block comment above.
+HALFWORD0_DEST_OFFSET = 45
+HALFWORD0_DEST_WIDTH = 6
+
+# Table 5-5 Parser Fixed Mapping -- which FIELDS channel carries which header.
+# Datasheet facts, and the external check that refuted the packing hypothesis.
+FIELDS_CHANNEL = {
+    0: "ISL_FTYPE/VTYPE/PRI/USER", 1: "L2_VID1 (+L2_VPRI1)", 2: "L2_VID2 (+L2_VPRI2)",
+    3: "ISL_SGLORT", 4: "ISL_DGLORT",
+    5: "L2_DMAC[15:0]", 6: "L2_DMAC[31:16]", 7: "L2_DMAC[47:32]",
+    12: "L2_SMAC[15:0]", 13: "L2_SMAC[31:16]", 14: "L2_SMAC[47:32]",
+    15: "L2_TYPE (EtherType)", 16: "L3_FLOW[19:16]/L3_PRI", 17: "L3_FLOW[15:0]",
+    18: "L3_LENGTH", 19: "L3_TTL/L3_PROT",
+    20: "L3_SIP/DIP[15:0]", 21: "L3_SIP/DIP[31:16]",
+    24: "L4_SRC", 25: "L4_DST",
+    32: "L3_S/DIP[111:96]", 33: "L3_S/DIP[127:112]",
+    36: "L3_S/DIP[47:32]", 37: "L3_S/DIP[63:48]",
+    38: "L3_S/DIP[79:64]", 39: "L3_S/DIP[95:80]",
+    8: "FIELD16A (LABEL8A/B)", 9: "FIELD16B (LABEL16)", 10: "FIELD16C", 11: "FIELD16D",
+    26: "FIELD16A'", 27: "FIELD16B'", 40: "FIELD16G", 41: "FIELD16H", 42: "FIELD16I",
+    43: "unused",
+}
+
+
+def halfword0_dest(action):
+    """The one dest field we can actually trust. Returns a FIELDS channel index."""
+    return (action >> HALFWORD0_DEST_OFFSET) & ((1 << HALFWORD0_DEST_WIDTH) - 1)
 
 # StateOpN encoding, Table 5-3. M = (N + StateFrameRot) % 4.
 STATE_OP = {
@@ -196,9 +252,15 @@ def action_field(value, name):
 
 
 def action_render(value):
-    """Render an action as the non-default fields only."""
+    """Render an action as the non-default fields only.
+
+    ⚠ Everything except the Halfword0Dest line is derived from the REFUTED
+    LSB-first offsets and is not to be trusted. See the block comment above.
+    """
     if value is None:
         return "(unreadable)"
+    ch = halfword0_dest(value)
+    trusted = f"[VERIFIED] Halfword0->FIELDS[{ch}] {FIELDS_CHANNEL.get(ch, '(generic)')}" if ch else ""
     out = []
     for n in range(4):
         op = action_field(value, f"StateOp{n}")
@@ -236,7 +298,8 @@ def action_render(value):
         out.append("TerminateAllowed")
     if action_field(value, "Terminate"):
         out.append("TERMINATE")
-    return "; ".join(out) if out else "(no-op)"
+    body = "; ".join(out) if out else "(no-op)"
+    return (trusted + " | UNTRUSTED: " + body) if trusted else ("UNTRUSTED: " + body)
 
 
 def describe(value, care):
