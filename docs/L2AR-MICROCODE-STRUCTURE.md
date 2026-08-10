@@ -32,6 +32,71 @@ treatment.
 **L3AR does not share this geometry.** `0x158000`–`0x159fff` gives 111 runs of mixed lengths
 (2, 52, 84, 100) against 153 named rules. Its layout is a separate problem.
 
+## ★★ SOLVED: the geometry and the action layout came from the register header
+
+`docs/PARSER-CONVENTIONS.md` records the same lesson twice; this is the third
+time it paid. The header defines L2AR exactly as it defined `PARSER_RAM`:
+
+```
+L2AR_CAM(slice, rule, seg, word) = 0x140000 + 0x800*slice + 0x20*rule + 4*seg
+    ENTRIES_2 = 8 slices, ENTRIES_1 = 64 rules, ENTRIES_0 = 6 segments, WIDTH 4
+L2AR_RAM(slice, rule, word)      = 0x145400 + 0x80*slice + 2*rule
+```
+
+**A rule is 6 CAM segments × 4 words = 24 words, key 6 × 128 = 768 bits.** That
+is what the 24-word runs at stride `0x20` below always were — six segments, not
+one wide entry. The earlier conclusion that the encoding "resists statistical
+attack" was correct and beside the point: it needed the header, not more data.
+
+Action RAM fields, exact: `FLAGS_TAG[7:0]`, `DMT_PROFILE[12:8]`,
+`TransformDestMask`, `DMT_NEXT_STAGE`, `SetCpuCode`, `SetTrapHeader`,
+`SetMirror[23:20]`, and fifteen `MuxOutput_*` bits (24–38).
+
+Validated two ways before use:
+
+- **structural** — RAM entries come out at exactly 2× the rule count on all
+  eight slices (92/48/128/108/102/128/92/128 against 46/24/64/54/51/64/46/64
+  from the rule-name file). Intel's header and Arista's names agreeing.
+- **semantic** — slice 0 rule 2 is named `allowAndLearnNewSmac` and its action
+  decodes to `MuxOutput_MA_WRITEBACK`, MAC-table writeback. The name says learn,
+  the action writes the MA table, and the two come from unrelated files.
+  `denyNewSmacOnSecuredPort` likewise sets `SetTrapHeader`.
+
+Decoder: `asic/fm6000/tools/l2ar_decode.py`. 407 of 413 rules decode; the
+shortfall is rules whose key is entirely fill.
+
+## The key composition (Table 5-71), and where the fields sit
+
+The datasheet lists the key fields but not their bit positions. The positions
+follow from the data: **100 rules match seg0's full 64 bits together with
+seg1[11:0]** — exactly 76 — and seg0 carries 6,409 care-bits of which 6,400 are
+those matches. So `DMASK_A` (76 bits, the first entry in Table 5-71) occupies key
+bits [75:0], and the table's order then lays out the rest:
+
+| field | width | key bits | segment |
+|---|---:|---|---|
+| DMASK_A | 76 | 0–75 | seg0 + seg1[11:0] |
+| SMASK | 76 | 76–151 | seg1[63:12] + seg2[23:0] |
+| ACTION_FLAGS | 76 | 152–227 | seg2[63:24] + seg3[35:0] |
+| ACTION_DATA.W8F | 8 | 228–235 | seg3 |
+| POL{1,2}_TAG{1,2}_TOP, POL3_TAG_TOP | 4 each | 236–255 | seg3 |
+| DROP_CODE | 8 | 256–263 | seg4 |
+| L2F_ISTATE | 13 | 264–276 | seg4 |
+| DGLORT_TAG | 1 | 277 | seg4 |
+| ALU13_Z / ALU46_Z | 16 each | 278–309 | seg4 |
+| MA1/MA2_FID2_IVL | 1 each | 310–311 | seg4 |
+
+⚠ **Ordering-derived, not stated.** Only `DMASK_A` is confirmed by measurement;
+the rest assume Table 5-71 lists fields in key order, which is how Table 5-3
+behaved for the parser but is not guaranteed. Table 5-71 has a continuation page
+not yet read, which should cover seg5 (bits 320+) where several rules match.
+Confirm each field the way `DMASK_A` was confirmed before authoring against it.
+
+`DMASK_A` also has **bitwise-OR matching semantics** per the datasheet — if any
+set bit matches, the whole field matches. That is unlike every other field here
+and unlike anything in the parser, and a generator that treats it as a normal
+ternary compare will be wrong.
+
 ## The encoding is sparse ternary
 
 Each rule is 24 words = 768 bits, overwhelmingly `0xffffffff` with a few bits cleared:
