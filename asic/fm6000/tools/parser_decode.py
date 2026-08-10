@@ -362,6 +362,41 @@ def trace_states(mem):
     return edges, labels, seen
 
 
+def state_map(mem):
+    """Characterise each STATE8[0] value by what its rules write and match.
+
+    A state whose rules deposit the DMAC is a state that is parsing the DMAC.
+    Only rules that pin STATE8[0] exactly (care byte 0xff) are counted, so the
+    attribution is unambiguous.
+    """
+    out = collections.defaultdict(
+        lambda: dict(n=0, slices=set(), ch=collections.Counter(),
+                     et=collections.Counter(), term=0))
+    for s in range(NUM_SLICES):
+        for entry, key, inv, value, care, never, act in decode_slice(mem, s):
+            if never:
+                continue
+            a = action_value(act)
+            if a is None:
+                continue
+            if (care >> 32) & 0xFF != 0xFF:
+                continue
+            rec = out[(value >> 32) & 0xFF]
+            rec["n"] += 1
+            rec["slices"].add(s)
+            rec["term"] += action_field(a, "Terminate")
+            for h in (0, 1):
+                if action_field(a, f"Byte{2*h}Enable") or action_field(a, f"Byte{2*h+1}Enable"):
+                    rec["ch"][action_field(a, f"Halfword{h}Dest")] += 1
+            fv, fc = value & 0xFFFFFFFF, care & 0xFFFFFFFF
+            for shift in (0, 16):
+                if (fc >> shift) & 0xFFFF == 0xFFFF:
+                    v = (fv >> shift) & 0xFFFF
+                    if v in ETHERTYPE:
+                        rec["et"][ETHERTYPE[v]] += 1
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -369,6 +404,8 @@ def main():
     ap.add_argument("--slice", type=int, help="dump one slice in full")
     ap.add_argument("--summary", action="store_true", help="per-slice entry counts")
     ap.add_argument("--ethertypes", action="store_true", help="protocol set recovered from keys")
+    ap.add_argument("--state-map", action="store_true",
+                    help="label each STATE8[0] value by the headers its rules extract")
     ap.add_argument("--states", action="store_true",
                     help="trace the state machine from state 0 and label protocol transitions")
     args = ap.parse_args()
@@ -400,6 +437,17 @@ def main():
         print("protocol set matched by the parser TCAM:")
         for (v, name), n in sorted(found.items(), key=lambda t: -t[1]):
             print(f"  0x{v:04x}  {name:<16} {n:>4} entries")
+
+    if args.state_map:
+        sm = state_map(mem)
+        print(f"STATE8[0] values pinned exactly by at least one rule: {len(sm)}\n")
+        print(f"{'state':>6} {'rules':>6} {'slices':<10} {'extracts':<46} matches")
+        for v, r in sorted(sm.items(), key=lambda t: -t[1]["n"]):
+            sl = sorted(r["slices"])
+            span = f"{sl[0]}-{sl[-1]}" if len(sl) > 1 else str(sl[0])
+            chs = ", ".join(FIELDS_CHANNEL.get(c, f"ch{c}") for c, _ in r["ch"].most_common(2))
+            ets = ", ".join(k for k, _ in r["et"].most_common(2))
+            print(f"  0x{v:02x} {r['n']:>6} {span:<10} {chs[:44]:<46} {ets}")
 
     if args.states:
         edges, labels, seen = trace_states(mem)

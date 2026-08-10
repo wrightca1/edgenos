@@ -56,8 +56,38 @@ slice3 0x00007f10 --VLAN C-tag--> slice4 0x0000f110 --VLAN C-tag--> slice5 0x000
 ```
 
 with `STATE8[1]` carrying the tag-depth context (`0x7f` → `0xf1` → …) while `STATE8[0]` stays
-`0x10`. Assigning a human meaning to each of the 63 `STATE8[0]` values is not done, and is the
-remaining parser-side gap.
+`0x10`.
+
+### ★ What the STATE8[0] values mean
+
+`--state-map` labels each state by what its rules extract: a state whose rules deposit the DMAC is
+a state parsing the DMAC. Only rules pinning `STATE8[0]` exactly are counted, so attribution is
+unambiguous. 55 of the 63 values are pinned exactly by at least one rule, and they read as a walk
+through the packet:
+
+| state | slices | extracts | reading |
+|---:|---|---|---|
+| `0x01` | 5–15 | L2_DMAC[47:32], [31:16] | first Ethernet word |
+| `0x02` | 1–16 | L2_DMAC[15:0], L2_SMAC[47:32] | second Ethernet word |
+| `0x11` | 15–20 | L2_TYPE (matches IPv6, FCoE) | EtherType position |
+| `0x20` | 4–20 | L3_FLOW/L3_PRI, L3_LENGTH | IP header start |
+| `0x30` | 4–20 | L3_FLOW/L3_PRI, L3_FLOW[15:0] | IPv6 flow label |
+| `0x22` | 6–22 | L3_TTL / L3_PROT | IP TTL/protocol |
+| `0x31` | 5–21 | L3_LENGTH, L3_TTL/L3_PROT | IP header body |
+| `0x23` | 7–23 | L3_SIP/DIP[31:16], [15:0] | IP addresses |
+| `0x40` | 9–27 | L4_SRC, L4_DST | L4 ports |
+| `0x50` | 9–27 | L3_TTL/L3_PROT, L4_SRC | deepest L3/L4 |
+| `0x3a` | 4–23 | — (matches **IPv4**) | IPv4 EtherType decision |
+
+A state is not a single packet offset — most span many slices, because the same logical position is
+reached at different depths depending on how many tags precede it. That is the whole point of an
+unrolled parser, and it is why a generated program must emit the same rule at every slice where the
+state is reachable, not once.
+
+⚠ Not every state is labelled. Several high-traffic ones (`0x24` with 160 rules, `0x39`, `0x36`)
+extract only into unmapped generic channels (`ch22`, `ch23`, `ch30`, `ch31`), which Table 5-5 does
+not name. Those are FIELD16-class channels used for whatever the program wants; their meaning is a
+choice EOS made, not a hardware fact.
 
 ## The state machine is legible
 
