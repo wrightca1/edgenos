@@ -56,6 +56,22 @@ def build_frame(kind, isl):
             "0a65651a"            # src 10.101.101.26
             "e0000005")           # dst 224.0.0.5
         ether = bytes.fromhex("0800")
+    elif kind == "ipv6":
+        # ICMPv6 echo to a link-local-ish unicast; next-header 58 so the L4
+        # ports are reachable (no extension headers).
+        ip = bytes.fromhex(
+            "60000000"            # ver/traffic class/flow label
+            "0008"                # payload length
+            "3a"                  # next header = 58 (ICMPv6)
+            "40"                  # hop limit
+            "fe800000000000000000000000000001"   # SIP
+            "fe800000000000000000000000000002")  # DIP
+        ether = bytes.fromhex("86dd")
+    elif kind == "vlan-ipv4":
+        # one C-tag, VID 100, priority 0, then IPv4
+        ip = (bytes.fromhex("0064") + bytes.fromhex("0800") +
+              bytes.fromhex("4500003400010000400100000a65651a0a656519"))
+        ether = bytes.fromhex("8100")
     elif kind == "arp":
         ip = bytes.fromhex("0001080006040001") + smac + bytes.fromhex("0a65651a")
         ether = bytes.fromhex("0806")
@@ -172,7 +188,8 @@ def main():
     ap.add_argument("--image", help="run EOS's program from a microcode image")
     ap.add_argument("--ours", action="store_true", help="run our generated program")
     ap.add_argument("--diff", metavar="IMAGE", help="run both and diff")
-    ap.add_argument("--frame", default="ospf-hello", choices=["ospf-hello", "arp"])
+    ap.add_argument("--frame", default="ospf-hello",
+                    choices=["ospf-hello", "arp", "ipv6", "vlan-ipv4"])
     ap.add_argument("--isl", action="store_true", help="prepend the F64 ISL tag")
     ap.add_argument("-v", "--verbose", action="store_true", help="per-slice trace")
     ap.add_argument("--init-state", default="0",

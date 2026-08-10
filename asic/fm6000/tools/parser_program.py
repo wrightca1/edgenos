@@ -439,10 +439,14 @@ def build_program():
             # ch1 -- as this did until now -- loses the inner VID entirely on
             # double-tagged frames, and the mapper's VID2 table then sees zero.
             vid_ch = CH_VID1 if depth == 0 else CH_VID2
-            # Table 5-6 names the flags by tag TYPE, not position: bit 6 is
-            # "has S-TAG", bit 7 is "has C-TAG".
-            for et, flag in ((ET_VLAN_C, FLAG_VLAN2_TAGGED),
-                             (ET_VLAN_S, FLAG_VLAN1_TAGGED)):
+            # ⚠ The flags follow POSITION, not tag type. Table 5-6 words them
+            # as "has S-TAG"/"has C-TAG", but Table 5-5 defines L2_VID1 as the
+            # OUTER VID and L2_VID2 as the inner, and EOS sets bit 6 for an
+            # outer 0x8100 C-tag. So bit 6 = outer tag present, bit 7 = inner.
+            # Keying them off the TPID put the flag on the wrong bit for every
+            # singly-tagged C-tag frame, which is the common case.
+            flag = FLAG_VLAN1_TAGGED if depth == 0 else FLAG_VLAN2_TAGGED
+            for et in (ET_VLAN_C, ET_VLAN_S):
                 rules.append(Rule(here, S_TAGGED, tag_depth=depth, isl=isl,
                           match_r=(PORT_STATE3_CPU if isl else PORT_STATE3_WIRE),
                                   next_tag_depth=depth + 1,
@@ -615,8 +619,12 @@ def build_program():
         for proto in (6, 17, 58):        # TCP, UDP, ICMPv6
             rules.append(Rule(S_IP6_NH, S_IP6_S1, tag_depth=depth, isl=isl,
                           match_r=(PORT_STATE3_CPU if isl else PORT_STATE3_WIRE),
-                              match_halfword0=proto << 8,
-                              match_halfword1_mask=0xFFFF,
+                              # ⚠ mask 0xFF00: halfword0 is {next-header, hop-limit},
+                              # so an exact match on proto<<8 requires hop-limit
+                              # to be zero and never fires. The extension-header
+                              # fallback then won every time, setting
+                              # IPv6_HopByHop on ordinary TCP/UDP/ICMPv6 traffic.
+                              match_halfword0=proto << 8, match_halfword0_mask=0xFF00,
                               dest0=CH_L3_TTL_PROT, dest1=CH_SIP6[0], rot0=2,
                               set_q=1,
                               note=f"IPv6 next-header {proto}: L4 follows directly"))
