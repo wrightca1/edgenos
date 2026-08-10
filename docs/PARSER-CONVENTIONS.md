@@ -384,8 +384,19 @@ Three measurements decomposed it:
 | ours, slices 0–15 | 2 | fails |
 
 Truncated EOS forms a full adjacency, so **slice depth is not what blocks OSPF**
-— our program fails at something EOS's does within the same slices. (Depth does
-matter for ping, which is a second and separate defect.)
+— our program fails at something EOS's does within the same slices.
+
+⚠ **The ping column is not a reliable metric, and one earlier reading of it here
+was wrong.** `SELF-CONTAINED-PLAN.md` documents a pre-existing defect: ping
+collapses to 100% loss within about three minutes *on the stock replay as well
+as on every generated variant*, while management stays clean. Confirmed again at
+the end of this session — EOS's parser restored, routes=34, ARP resolved
+(`lladdr 80:a2:35:81:ca:b4`), and ping still 0/4.
+
+So "EOS truncated to 0–15 fails ping" does **not** establish that depth is
+needed for forwarding. That was a second defect I inferred from a metric that
+degrades on its own. **Route count is the reliable signal** — 35 versus 2 is
+robust and reproducible across every trial; ping is not.
 
 The decisive clue was that `et1` rx kept growing under our parser while no
 adjacency ever formed: we were *receiving* fine and failing to *transmit*.
