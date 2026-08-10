@@ -85,12 +85,43 @@ bits [75:0], and the table's order then lays out the rest:
 | DGLORT_TAG | 1 | 277 | seg4 |
 | ALU13_Z / ALU46_Z | 16 each | 278–309 | seg4 |
 | MA1/MA2_FID2_IVL | 1 each | 310–311 | seg4 |
+| *(~19 bits unaccounted — padding or unlisted fields)* | | 312–330 | |
+| MA1_LOOKUP / HPV / TAG | 1/4/12 | 331–347 | seg5 |
+| MA2_LOOKUP / HPV | 1/4 | 348–352 | seg5 |
+| **MA2_MPV** | 4 | **353–356** | seg5 — **measured** |
+| MA2_TAG, L2L_ETAG1/2, L2L_ITAG1/2 | 12 each | 357–416 | seg5+ |
+| DGLORT, SGLORT | 16 each | 417–448 | |
+| L2_DMAC_ID3, L2_SMAC_ID3, L2_TYPE_ID2 | 5/5/4 | 449–462 | |
+| ISL_USER | 8 | 463–470 | |
 
-⚠ **Ordering-derived, not stated.** Only `DMASK_A` is confirmed by measurement;
-the rest assume Table 5-71 lists fields in key order, which is how Table 5-3
-behaved for the parser but is not guaranteed. Table 5-71 has a continuation page
-not yet read, which should cover seg5 (bits 320+) where several rules match.
-Confirm each field the way `DMASK_A` was confirmed before authoring against it.
+### ⚠⚠ The ordering hypothesis is REFUTED — do not author against that table
+
+Tested, and it fails. `MA2_MPV` is 4 bits and the datasheet says it is "used for
+entry write-back control (**including learning**)", so the rules Arista names
+`…Learn…` should match it. They do match a clean 4-bit group — **seg5 bits
+33–36**, in 11–17 rules each — but the ordering hypothesis predicts `MA2_MPV` at
+seg5 bits **14–17**. A 19-bit discrepancy.
+
+Rules *not* named Learn match seg5 bits 0–3, 25–27 and 63 as well, so 33–36 is
+specific to learning rather than a generally-hot region.
+
+Working backwards from `MA2_MPV` at key bit 353 places the continuation-page
+fields 19 bits later than a straight concatenation predicts, i.e. there are ~19
+bits of padding or unlisted fields between the two pages of Table 5-71. That is
+not something to guess at.
+
+**Two anchors are now measured**, and only two:
+
+| field | key bits | how |
+|---|---|---|
+| `DMASK_A` | 0–75 | 100 rules match seg0[63:0]+seg1[11:0] = exactly its 76-bit width |
+| `MA2_MPV` | ~353–356 | the `…Learn…` rules match seg5[33:36], and it is the 4-bit learning-control field |
+
+Every other row in the table below is **ordering-derived and now known to be
+unreliable**. Confirm each field the way these two were before authoring against
+it. This is the fourth time in this work that a plausible ordering assumption
+has been wrong — twice for the parser action layout, once for CAM match
+priority, now here.
 
 `DMASK_A` also has **bitwise-OR matching semantics** per the datasheet — if any
 set bit matches, the whole field matches. That is unlike every other field here
