@@ -442,6 +442,29 @@ the I/G bit. If downstream expects the DMAC class encoded in the state, our
 uniform path would lose it — but that is a hypothesis, and the last one was
 wrong.
 
+## Scope: what the 7150S datasheet says we can leave out
+
+The product datasheet (`arista-reverse-engineering/docs/datasheets/7150S_Datasheet.pdf`)
+explains most of the parser complexity we deliberately skipped, and confirms none of it is an
+EdgeNOS requirement:
+
+| 7150S feature | what it accounts for in EOS's parser |
+|---|---|
+| wire-speed **VXLAN / NVGRE** gateway | the deep slices 16–27, and the `…DefaultDglortVxlan` L2AR rules |
+| line-rate **NAT / MNAT** | L4 port extraction (ch24/25) — NAT needs the ports |
+| **IEEE 1588 PTP**, boundary + transparent clock | the `0x88f7` entries |
+| **FCoE** | the `0x8906` entries |
+| **LANZ**, sFlow, per-packet timestamping | generic FIELD16 channel usage |
+
+EOS's 2,117 rules cover a product that does all of this. EdgeNOS needs Ethernet, VLAN, IPv4,
+IPv6 and ARP, which is why 196 rules suffice — the gap is features, not fidelity.
+
+⚠ It does **not** explain the open ARP diff, and one reading of it here was wrong. EOS writes
+`0x0000` into ch22/23 on the ARP path because it keeps parsing into the ARP body, where the
+padding is zero — not because it deliberately zeroes the DIP channels to make `DIP_V4InV6`
+well-defined. Our program terminates at the ARP dispatch instead. A design difference, not a
+defect, and outside the scenario key.
+
 ## Reproducing
 
 ```
