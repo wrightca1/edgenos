@@ -50,6 +50,7 @@ from gen_parser import encode_cam, encode_action  # noqa: E402
 
 # ---------------------------------------------------------------- field map
 # Table 5-5, hardware-fixed. Names are ours; the numbers are not negotiable.
+CH_ISL_MISC = 0      # ISL_FTYPE/VTYPE/PRI/USER share this channel
 CH_VID1 = 1
 CH_VID2 = 2          # inner / C-tag VID; Table 5-5
 CH_SGLORT = 3
@@ -104,6 +105,10 @@ FLAG_L3_BCST = 1 << 18        # DMAC == ff:ff:ff:ff:ff:ff
 # flag set, downstream multicast classification sees a unicast IP frame with a
 # multicast MAC. Frames did reach the CPU (rx=18, ~89 bytes each, hello-sized)
 # but no adjacency formed.
+# ⚠ NOT set by the parser. EOS leaves bit 19 clear even on a frame whose DIP is
+# 224.0.0.5, so it is produced downstream (the mapper) rather than here. Setting
+# it ourselves put a bit in the FFU scenario key that the reference does not,
+# which changes the scenario value. Kept for reference; deliberately unused.
 FLAG_L3_MCST_DIP = 1 << 19
 # ⚠ READ OFF THE CHIP, not inferred. MAPPER_SCENARIO_FLAGS_CFG (0x123e00, four
 # words, one 6-bit selector per byte) says which 16 ACTION_FLAGS feed the FFU's
@@ -120,8 +125,15 @@ FLAG_L3_MCST_DIP = 1 << 19
 # were "correctly left clear" because our ports carry no ISL tag: the datasheet
 # says FType is "specified by the ISL tag OR ASSIGNED", and the scenario key
 # matches on it regardless of whether a tag was present.
-FLAG_ISL_TYPE0 = 1 << 2
+# EOS sets ISL_Type1 for the F64 tag, not ISL_Type0 -- confirmed by simulating
+# its program on a tagged frame. Both bits are in the FFU scenario key, so
+# picking the wrong one changes the scenario value and selects different FFU
+# rules. This was a guess; it is now matched to the reference.
+FLAG_ISL_TYPE1 = 1 << 3
 FLAG_ISL_FTYPE0 = 1 << 4
+FLAG_ISGLORT_NZ = 1 << 11
+FLAG_VLAN1_TAGGED_S = 1 << 6
+FLAG_CHECKSUM_TEST = 1 << 37   # Table 5-4: SET to ENABLE checksum testing
 FLAG_TTL_EXPIRED = 1 << 13
 FLAG_HEAD_FRAG = 1 << 14
 FLAG_IPV6_HOPBYHOP = 1 << 22
@@ -140,10 +152,11 @@ def hdr_offsets(l3_word, l4_word):
     a single rule sets is a fragment, not the answer. We do not need to read
     EOS's: our own geometry is known exactly, so the offsets are computed.
 
-    L3AR muxes these into ACTION_DATA so they can be annotated onto the egress
-    frame. That is an egress-editing feature, not a forwarding decision, so a
-    wrong value here should degrade annotation rather than break forwarding --
-    which is the only reason it is safe to compute rather than copy.
+    ⚠ Bits 27 and 28 ARE in the FFU scenario key, so this is not purely
+    cosmetic after all. EOS emits only HdrOffsets[0] for a tagged IPv4 frame --
+    L3=1, L4=0 -- which does not match any offset-in-words reading we can derive.
+    We now emit the same value rather than a computed one, because matching the
+    reference matters more than a theory of the encoding we cannot confirm.
     """
     return ((l3_word & 0x7) | ((l4_word & 0x1F) << 3)) << 24
 
@@ -365,12 +378,19 @@ def build_program():
     # Matching the tag by content (0x0100) was wrong twice over: it made the
     # tagged path optional when it is mandatory, and it would miss any frame
     # whose tag word 0 differs.
+    # Tag word placement matched to EOS rather than assumed: simulating its
+    # program on a tagged frame puts w0 (0x0100) in ch0, w1 (0x03ef) in ch1 and
+    # w2 (0xff00) in ch3. We had w1 in ch3, which is where the SGLORT is NAMED
+    # in Table 5-5 but not where this program actually puts the tag's words.
+    # ISL_SGLORT is an L3AR input key (Table 5-30), so the placement matters
+    # downstream and is not merely cosmetic.
     rules.append(Rule(S_ETYPE, S_ISL_W2,
-                      dest1=CH_SGLORT, next_isl=1,
-                      set_flags=FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0,
-                      note="F64 ISL tag (always present): SGLORT -> ch3"))
-    rules.append(Rule(S_ISL_W2, S_ETYPE, isl=1,
-                      note="F64 tag second half consumed; EtherType next"))
+                      dest0=CH_ISL_MISC, dest1=CH_VID1, next_isl=1,
+                      set_flags=(FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE1
+                                 | FLAG_ISGLORT_NZ | FLAG_VLAN1_TAGGED_S),
+                      note="F64 tag w0->ch0, w1->ch1; ISL flags"))
+    rules.append(Rule(S_ISL_W2, S_ETYPE, isl=1, dest0=CH_SGLORT,
+                      note="F64 tag w2 -> ISL_SGLORT(ch3); EtherType next"))
 
     # --- EtherType dispatch, per tag depth, for both the plain and ISL paths ---
     # Only the tagged path is generated: every frame reaching the EtherType has
@@ -406,15 +426,15 @@ def build_program():
         # read from the middle of the option area -- wrong, and silently so.
         rules.append(Rule(here, S_IP4_LEN, tag_depth=depth, isl=isl, match_halfword0=ET_IPV4,
                           match_halfword1=0x4500, match_halfword1_mask=0xFF00,
-                          set_flags=FLAG_IS_IPV4 | FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0
-                                    | hdr_offsets(3 + depth, 8 + depth),
+                          set_flags=FLAG_IS_IPV4 | FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE1
+                                    | FLAG_CHECKSUM_TEST | hdr_offsets(1, 0),
                           dest0=CH_ETHERTYPE, dest1=CH_L3_PRI,
                           note=f"IPv4 (ver/IHL=0x45) at depth {depth}; TOS -> L3_PRI"))
         # IPv4 WITH options: record the EtherType and stop rather than mis-parse.
         # Placed after the guarded rule so the TCAM prefers the specific match.
         rules.append(Rule(here, S_DONE_OTHER, tag_depth=depth, isl=isl,
                           match_halfword0=ET_IPV4,
-                          set_flags=FLAG_IS_IPV4 | FLAG_L3_OPTIONS | FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0,
+                          set_flags=FLAG_IS_IPV4 | FLAG_L3_OPTIONS | FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE1,
                           dest0=CH_ETHERTYPE, terminate=True,
                           note=f"IPv4 with options at depth {depth}: L2 only"))
         # IPv6: the halfword after the EtherType is ver/traffic-class/flow[19:16].
@@ -422,8 +442,8 @@ def build_program():
         # ch16[15:12], which is the ">>4 rotation" its note calls for: rot=3
         # (BarrelShiftLeft by 12 == right by 4 in a 16-bit halfword).
         rules.append(Rule(here, S_IP6_FLOW, tag_depth=depth, isl=isl, match_halfword0=ET_IPV6,
-                          set_flags=FLAG_IS_IPV6 | FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0
-                                    | hdr_offsets(3 + depth, 13 + depth),
+                          set_flags=FLAG_IS_IPV6 | FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE1
+                                    | hdr_offsets(1, 0),
                           dest0=CH_ETHERTYPE, dest1=CH_L3_PRI, rot1=3,
                           note=f"IPv6 at depth {depth}; TC/flow -> L3_PRI"))
         # ARP. The body is deliberately NOT extracted, and that is a conclusion
@@ -433,7 +453,7 @@ def build_program():
         # (L3_Bcst) and punted to the CPU, both of which key on flags we do set.
         # Extracting the body would only matter for ARP-aware ACLs.
         rules.append(Rule(here, S_DONE_ARP, tag_depth=depth, isl=isl, match_halfword0=ET_ARP,
-                          set_flags=FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0 | hdr_offsets(3 + depth, 0),
+                          set_flags=FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE1 | hdr_offsets(1, 0),
                           dest0=CH_ETHERTYPE, terminate=True,
                           note=f"ARP at depth {depth}"))
         # Anything else: record the EtherType and stop.
@@ -493,12 +513,19 @@ def build_program():
         # TTL_Expired (scenario bit 10): ttl 0 or 1. TTL is byte 22, the high
         # byte of halfword1 in the same state. Two rules -- a TCAM matches
         # equality, not "<=".
+        # ⚠ These must ALSO match the fragment-offset condition. A TCAM fires
+        # exactly ONE entry, and the HeadFrag rule above carries more care bits
+        # (29 vs 24), so with last-match-wins it out-specified these and
+        # TTL_Expired was never set on a frame that was both unfragmented and
+        # TTL-expired -- which is every OSPF hello. Conditions that CO-OCCUR
+        # have to be encoded in the same entry, not as separate rules.
         for ttl in (0, 1):
             rules.append(Rule(S_IP4_TTL, S_IP4_SIP_HI, tag_depth=depth, isl=isl,
+                              match_halfword0=0x0000, match_halfword0_mask=0x1FFF,
                               match_halfword1=ttl << 8, match_halfword1_mask=0xFF00,
                               dest1=CH_L3_TTL_PROT,
                               set_flags=FLAG_TTL_EXPIRED | FLAG_HEAD_FRAG,
-                              note=f"IPv4 TTL={ttl} -> TTL_Expired"))
+                              note=f"IPv4 TTL={ttl}, frag offset 0 -> TTL_Expired + HeadFrag"))
 
         # IPv4 multicast by DIP: 224.0.0.0/4, i.e. the top nibble of DIP[31:16]
         # is 0xE. DIP[31:16] is halfword1 in the SIP_LO state, so it is matched
@@ -506,15 +533,13 @@ def build_program():
         rules.append(Rule(S_IP4_SIP_LO, S_IP4_DIP_LO, tag_depth=depth, isl=isl,
                           match_halfword1=0xE000, match_halfword1_mask=0xF000,
                           dest0=CH_SIP_LO, dest1=CH_DIP_HI,
-                          set_flags=FLAG_L3_MCST_DIP,
-                          note="IPv4 DIP is multicast (224/4) -> L3_Mcst(DIP)"))
+                          note="IPv4 DIP multicast (224/4): extraction only"))
         # IPv6 multicast by DIP: ff00::/8. DIP[127:112] is halfword1 in the
         # SIP_S4 state, where the SIP ends and the DIP begins.
         rules.append(Rule(S_IP6_S4, S_IP6_D1, tag_depth=depth, isl=isl,
                           match_halfword1=0xFF00, match_halfword1_mask=0xFF00,
                           dest0=CH_SIP6[7], dest1=CH_DIP6[0],
-                          set_flags=FLAG_L3_MCST_DIP,
-                          note="IPv6 DIP is multicast (ff00::/8) -> L3_Mcst(DIP)"))
+                          note="IPv6 DIP multicast (ff00::/8): extraction only"))
 
         # ⚠ IPv6 extension headers are the same trap as IPv4 options: they sit
         # between the addresses and L4, so the ports are NOT where the fixed
