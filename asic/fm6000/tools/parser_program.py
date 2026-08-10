@@ -105,6 +105,25 @@ FLAG_L3_BCST = 1 << 18        # DMAC == ff:ff:ff:ff:ff:ff
 # multicast MAC. Frames did reach the CPU (rx=18, ~89 bytes each, hello-sized)
 # but no adjacency formed.
 FLAG_L3_MCST_DIP = 1 << 19
+# ⚠ READ OFF THE CHIP, not inferred. MAPPER_SCENARIO_FLAGS_CFG (0x123e00, four
+# words, one 6-bit selector per byte) says which 16 ACTION_FLAGS feed the FFU's
+# SCENARIO_CAM. On this box they are:
+#
+#   0 Unbound0, 2 ISL_Type0, 3 ISL_Type1, 4 ISL_FType0, 8 IsIPv4, 9 IsIPv6,
+#   13 TTL_Expired, 14 HeadFrag, 16 L3_Options, 19 L3_Mcst(DIP),
+#   27/28 HdrOffsets[3:4], and 40/42/43 which are mapper-set and beyond the
+#   parser's 38-bit SetFlags.
+#
+# A flag in that list that we leave clear changes the scenario value, which
+# selects different FFU rules -- the exact shape of "frames arrive, nothing
+# classifies them". This retires an earlier WRONG conclusion that the ISL flags
+# were "correctly left clear" because our ports carry no ISL tag: the datasheet
+# says FType is "specified by the ISL tag OR ASSIGNED", and the scenario key
+# matches on it regardless of whether a tag was present.
+FLAG_ISL_TYPE0 = 1 << 2
+FLAG_ISL_FTYPE0 = 1 << 4
+FLAG_TTL_EXPIRED = 1 << 13
+FLAG_HEAD_FRAG = 1 << 14
 FLAG_IPV6_HOPBYHOP = 1 << 22
 
 
@@ -161,6 +180,7 @@ S_IP6_D3 = 0x48      # DIP[31:16] via ch23
 S_IP6_L4 = 0x49
 S_DONE_IPV6 = 0x30   # was 0x22 -- collided with S_IP4_SIP_HI
 S_DONE_ARP = 0x32    # was 0x24 -- collided with S_IP4_DIP_LO
+S_ISL_W2 = 0x36      # consumed the tag's first half; second half next
 S_DONE_OTHER = 0x34
 
 STATE_NAME = {
@@ -173,10 +193,31 @@ STATE_NAME = {
     S_IP6_S2: "ipv6-sip-2", S_IP6_S3: "ipv6-sip-3", S_IP6_S4: "ipv6-sip-4/dip-1",
     S_IP6_D1: "ipv6-dip-2", S_IP6_D2: "ipv6-dip-3", S_IP6_D3: "ipv6-dip-4",
     S_IP6_L4: "ipv6-l4dst", S_DONE_IPV6: "ipv6-other", S_DONE_ARP: "arp",
-    S_DONE_OTHER: "other-l3",
+    S_ISL_W2: "isl-tag-w2", S_DONE_OTHER: "other-l3",
 }
 
 MAX_TAGS = 2
+
+# ★ CPU-injected frames carry an 8-byte F64 ISL tag between the SMAC and the
+# EtherType (asic/fm6000/fm6000_txinline.c):
+#
+#     DMAC     SMAC     <---- F64 tag, 8 bytes ---->     ethertype
+#
+# Frames from the wire do NOT. Parsing only the untagged layout meant every
+# frame the switch transmitted was mis-parsed and dropped -- we received fine
+# and never transmitted, so no OSPF adjacency and no ARP. See
+# docs/PARSER-CONVENTIONS.md.
+#
+# The tag shifts everything after it by 8 bytes = 2 slices, so it is modelled as
+# an offset alongside VLAN tag depth rather than as a separate program. STATE8[1]
+# carries both: tag depth in bits 0-1, the ISL flag in bit 2, so the two paths
+# never collide even where they share a slice.
+ISL_TAG_W0 = 0x0100          # first halfword of EOS's F64 tag; we build the same
+ISL_SLICES = 2               # 8 bytes
+
+
+def state1(tag_depth, isl):
+    return (tag_depth & 0x3) | (0x4 if isl else 0)
 
 
 class Rule:
@@ -188,6 +229,7 @@ class Rule:
                  match_halfword1=None, match_halfword1_mask=0xFFFF,
                  rot0=0, rot1=0, match_q=None, set_q=None,
                  match_r=None, set_r=None, set_flags=0,
+                 isl=0, next_isl=None,
                  terminate=False, note=""):
         self.state = state
         self.next_state = next_state
@@ -202,6 +244,8 @@ class Rule:
         self.rot0 = rot0      # nibble rotation, 4*rot bits; 2 == byte swap
         self.rot1 = rot1
         self.set_flags = set_flags
+        self.isl = isl
+        self.next_isl = isl if next_isl is None else next_isl
         self.match_q = match_q   # require STATE8[2] == this
         self.set_q = set_q       # set STATE8[2]; None leaves it unchanged
         self.match_r = match_r   # require STATE8[3] == this
@@ -211,7 +255,7 @@ class Rule:
 
     def cam(self):
         """Return (value, care) for the 64-bit key."""
-        value = (self.state | (self.tag_depth << 8)) << 32
+        value = (self.state | (state1(self.tag_depth, self.isl) << 8)) << 32
         care = 0x0000FFFF << 32                  # pin STATE8[0] and STATE8[1]
         if self.match_halfword0 is not None:
             m = self.match_halfword0_mask & 0xFFFF
@@ -233,7 +277,7 @@ class Rule:
         f = {}
         # StateOp1 := literal, for both the state byte and the tag-depth byte.
         f["StateOp0"], f["StateValue0"] = 1, self.next_state
-        f["StateOp1"], f["StateValue1"] = 1, self.next_tag_depth
+        f["StateOp1"], f["StateValue1"] = 1, state1(self.next_tag_depth, self.next_isl)
         if self.dest0 is not None:
             f["Halfword0Dest"] = self.dest0
             f["Halfword0Rot"] = self.rot0
@@ -294,8 +338,17 @@ def build_program():
     rules.append(Rule(S_SMAC_LO, S_ETYPE, dest0=CH_SMAC_MID, dest1=CH_SMAC_LO,
                       note="bytes 8-11: SMAC[31:16], SMAC[15:0]"))
 
-    # --- EtherType dispatch, once per reachable tag depth ---
-    for depth in range(MAX_TAGS + 1):
+    # --- ISL entry: the tag sits where an EtherType would, so it is detected
+    # at the same state and simply consumes two extra slices before dispatch.
+    rules.append(Rule(S_ETYPE, S_ISL_W2, match_halfword0=ISL_TAG_W0,
+                      dest1=CH_SGLORT, next_isl=1,
+                      set_flags=FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0,
+                      note="F64 ISL tag: SGLORT -> ch3, enter tagged path"))
+    rules.append(Rule(S_ISL_W2, S_ETYPE, isl=1,
+                      note="F64 tag second half consumed; EtherType next"))
+
+    # --- EtherType dispatch, per tag depth, for both the plain and ISL paths ---
+    for isl, depth in [(i, d) for i in (0, 1) for d in range(MAX_TAGS + 1)]:
         here = S_ETYPE if depth == 0 else S_TAGGED
         # A VLAN tag: capture the EtherType, and the TCI lands in L2_VID1,
         # whose top nibble is the priority -- exactly the TCI layout.
@@ -309,7 +362,7 @@ def build_program():
             # "has S-TAG", bit 7 is "has C-TAG".
             for et, flag in ((ET_VLAN_C, FLAG_VLAN2_TAGGED),
                              (ET_VLAN_S, FLAG_VLAN1_TAGGED)):
-                rules.append(Rule(here, S_TAGGED, tag_depth=depth,
+                rules.append(Rule(here, S_TAGGED, tag_depth=depth, isl=isl,
                                   next_tag_depth=depth + 1,
                                   match_halfword0=et, set_flags=flag,
                                   dest0=CH_ETHERTYPE, dest1=vid_ch,
@@ -323,24 +376,26 @@ def build_program():
         # options simply does not take this path. Without the guard, options
         # shift every subsequent field and the parser reports a source address
         # read from the middle of the option area -- wrong, and silently so.
-        rules.append(Rule(here, S_IP4_LEN, tag_depth=depth, match_halfword0=ET_IPV4,
+        rules.append(Rule(here, S_IP4_LEN, tag_depth=depth, isl=isl, match_halfword0=ET_IPV4,
                           match_halfword1=0x4500, match_halfword1_mask=0xFF00,
-                          set_flags=FLAG_IS_IPV4 | hdr_offsets(3 + depth, 8 + depth),
+                          set_flags=FLAG_IS_IPV4 | FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0
+                                    | hdr_offsets(3 + depth, 8 + depth),
                           dest0=CH_ETHERTYPE, dest1=CH_L3_PRI,
                           note=f"IPv4 (ver/IHL=0x45) at depth {depth}; TOS -> L3_PRI"))
         # IPv4 WITH options: record the EtherType and stop rather than mis-parse.
         # Placed after the guarded rule so the TCAM prefers the specific match.
-        rules.append(Rule(here, S_DONE_OTHER, tag_depth=depth,
+        rules.append(Rule(here, S_DONE_OTHER, tag_depth=depth, isl=isl,
                           match_halfword0=ET_IPV4,
-                          set_flags=FLAG_IS_IPV4 | FLAG_L3_OPTIONS,
+                          set_flags=FLAG_IS_IPV4 | FLAG_L3_OPTIONS | FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0,
                           dest0=CH_ETHERTYPE, terminate=True,
                           note=f"IPv4 with options at depth {depth}: L2 only"))
         # IPv6: the halfword after the EtherType is ver/traffic-class/flow[19:16].
         # Table 5-5 wants traffic class in ch16[7:0] and FlowLabel[19:16] in
         # ch16[15:12], which is the ">>4 rotation" its note calls for: rot=3
         # (BarrelShiftLeft by 12 == right by 4 in a 16-bit halfword).
-        rules.append(Rule(here, S_IP6_FLOW, tag_depth=depth, match_halfword0=ET_IPV6,
-                          set_flags=FLAG_IS_IPV6 | hdr_offsets(3 + depth, 13 + depth),
+        rules.append(Rule(here, S_IP6_FLOW, tag_depth=depth, isl=isl, match_halfword0=ET_IPV6,
+                          set_flags=FLAG_IS_IPV6 | FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0
+                                    | hdr_offsets(3 + depth, 13 + depth),
                           dest0=CH_ETHERTYPE, dest1=CH_L3_PRI, rot1=3,
                           note=f"IPv6 at depth {depth}; TC/flow -> L3_PRI"))
         # ARP. The body is deliberately NOT extracted, and that is a conclusion
@@ -349,12 +404,12 @@ def build_program():
         # channels, not a hardware contract. ARP works by being flooded
         # (L3_Bcst) and punted to the CPU, both of which key on flags we do set.
         # Extracting the body would only matter for ARP-aware ACLs.
-        rules.append(Rule(here, S_DONE_ARP, tag_depth=depth, match_halfword0=ET_ARP,
-                          set_flags=hdr_offsets(3 + depth, 0),
+        rules.append(Rule(here, S_DONE_ARP, tag_depth=depth, isl=isl, match_halfword0=ET_ARP,
+                          set_flags=FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0 | hdr_offsets(3 + depth, 0),
                           dest0=CH_ETHERTYPE, terminate=True,
                           note=f"ARP at depth {depth}"))
         # Anything else: record the EtherType and stop.
-        rules.append(Rule(here, S_DONE_OTHER, tag_depth=depth,
+        rules.append(Rule(here, S_DONE_OTHER, tag_depth=depth, isl=isl,
                           dest0=CH_ETHERTYPE, terminate=True,
                           note=f"unknown EtherType at depth {depth}"))
 
@@ -374,7 +429,7 @@ def build_program():
             (S_IP4_L4, S_DONE_OTHER, CH_L4_DST, None, True,
              "L4 destination port; done"),
         ):
-            rules.append(Rule(st, nxt, tag_depth=depth, dest0=d0, dest1=d1,
+            rules.append(Rule(st, nxt, tag_depth=depth, isl=isl, dest0=d0, dest1=d1,
                               terminate=term, note=f"{note} (depth {depth})"))
 
         # --- IPv6 header walk. Fixed 40 bytes, so no options problem. ---
@@ -396,21 +451,38 @@ def build_program():
             (S_IP6_D3, S_IP6_L4, D6[5], D6[6], 0, False, "IPv6 DIP[47:16]"),
         ):
             kw = {"set_q": 0, "set_flags": FLAG_IPV6_HOPBYHOP} if st == S_IP6_NH else {}
-            rules.append(Rule(st, nxt, tag_depth=depth, dest0=d0, dest1=d1,
+            rules.append(Rule(st, nxt, tag_depth=depth, isl=isl, dest0=d0, dest1=d1,
                               rot0=r0, terminate=term, **kw,
                               note=f"{note} (depth {depth})"))
+
+        # HeadFrag (scenario bit 6): the head fragment, i.e. fragment offset 0 --
+        # true for an unfragmented packet and for the first fragment. Bytes 20-21
+        # are halfword0 in the TTL state; the low 13 bits are the offset.
+        rules.append(Rule(S_IP4_TTL, S_IP4_SIP_HI, tag_depth=depth, isl=isl,
+                          match_halfword0=0x0000, match_halfword0_mask=0x1FFF,
+                          dest1=CH_L3_TTL_PROT, set_flags=FLAG_HEAD_FRAG,
+                          note="IPv4 fragment offset 0 -> HeadFrag"))
+        # TTL_Expired (scenario bit 10): ttl 0 or 1. TTL is byte 22, the high
+        # byte of halfword1 in the same state. Two rules -- a TCAM matches
+        # equality, not "<=".
+        for ttl in (0, 1):
+            rules.append(Rule(S_IP4_TTL, S_IP4_SIP_HI, tag_depth=depth, isl=isl,
+                              match_halfword1=ttl << 8, match_halfword1_mask=0xFF00,
+                              dest1=CH_L3_TTL_PROT,
+                              set_flags=FLAG_TTL_EXPIRED | FLAG_HEAD_FRAG,
+                              note=f"IPv4 TTL={ttl} -> TTL_Expired"))
 
         # IPv4 multicast by DIP: 224.0.0.0/4, i.e. the top nibble of DIP[31:16]
         # is 0xE. DIP[31:16] is halfword1 in the SIP_LO state, so it is matched
         # there, alongside the same extraction the unqualified rule does.
-        rules.append(Rule(S_IP4_SIP_LO, S_IP4_DIP_LO, tag_depth=depth,
+        rules.append(Rule(S_IP4_SIP_LO, S_IP4_DIP_LO, tag_depth=depth, isl=isl,
                           match_halfword1=0xE000, match_halfword1_mask=0xF000,
                           dest0=CH_SIP_LO, dest1=CH_DIP_HI,
                           set_flags=FLAG_L3_MCST_DIP,
                           note="IPv4 DIP is multicast (224/4) -> L3_Mcst(DIP)"))
         # IPv6 multicast by DIP: ff00::/8. DIP[127:112] is halfword1 in the
         # SIP_S4 state, where the SIP ends and the DIP begins.
-        rules.append(Rule(S_IP6_S4, S_IP6_D1, tag_depth=depth,
+        rules.append(Rule(S_IP6_S4, S_IP6_D1, tag_depth=depth, isl=isl,
                           match_halfword1=0xFF00, match_halfword1_mask=0xFF00,
                           dest0=CH_SIP6[7], dest1=CH_DIP6[0],
                           set_flags=FLAG_L3_MCST_DIP,
@@ -429,18 +501,18 @@ def build_program():
         # and the first byte received occupies the most significant byte
         # (datasheet 5.5), so it is key[15:8] -- matched with mask 0xFF00.
         for proto in (6, 17, 58):        # TCP, UDP, ICMPv6
-            rules.append(Rule(S_IP6_NH, S_IP6_S1, tag_depth=depth,
+            rules.append(Rule(S_IP6_NH, S_IP6_S1, tag_depth=depth, isl=isl,
                               match_halfword0=proto << 8,
                               match_halfword1_mask=0xFFFF,
                               dest0=CH_L3_TTL_PROT, dest1=CH_SIP6[0], rot0=2,
                               set_q=1,
                               note=f"IPv6 next-header {proto}: L4 follows directly"))
         # L4 ports, only when STATE8[2] says the walk is still aligned.
-        rules.append(Rule(S_IP6_L4, S_DONE_OTHER, tag_depth=depth,
+        rules.append(Rule(S_IP6_L4, S_DONE_OTHER, tag_depth=depth, isl=isl,
                           dest0=CH_DIP6[7], dest1=CH_L4_SRC, match_q=1,
                           terminate=True,
                           note="IPv6 DIP[15:0] + L4 source port (no ext headers)"))
-        rules.append(Rule(S_IP6_L4, S_DONE_OTHER, tag_depth=depth,
+        rules.append(Rule(S_IP6_L4, S_DONE_OTHER, tag_depth=depth, isl=isl,
                           dest0=CH_DIP6[7], terminate=True,
                           note="IPv6 DIP[15:0]; ext headers present, ports skipped"))
     return rules
@@ -456,10 +528,16 @@ def reachable_slices(rule):
             S_IP4_LEN: 4, S_IP4_TTL: 5, S_IP4_SIP_HI: 6,
             S_IP4_SIP_LO: 7, S_IP4_DIP_LO: 8, S_IP4_L4: 9,
             S_IP6_FLOW: 4, S_IP6_NH: 5, S_IP6_S1: 6, S_IP6_S2: 7, S_IP6_S3: 8,
-            S_IP6_S4: 9, S_IP6_D1: 10, S_IP6_D2: 11, S_IP6_D3: 12, S_IP6_L4: 13}
+            S_IP6_S4: 9, S_IP6_D1: 10, S_IP6_D2: 11, S_IP6_D3: 12, S_IP6_L4: 13,
+            # ⚠ base 2, not 4. reachable_slices() adds ISL_SLICES for isl=1, but
+            # this state CONSUMES the tag's second half (bytes 16-19 = slice 4)
+            # rather than following it -- the +2 shift applies only to states
+            # after the tag. 2 + 2 = 4. Getting this wrong put the rule at slice
+            # 6 and silently broke the whole ISL path.
+            S_ISL_W2: 2}
     if rule.state not in base:
         return []
-    return [base[rule.state] + rule.tag_depth]
+    return [base[rule.state] + rule.tag_depth + ISL_SLICES * rule.isl]
 
 
 def place(rules):
