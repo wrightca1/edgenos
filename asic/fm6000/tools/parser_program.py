@@ -51,6 +51,7 @@ from gen_parser import encode_cam, encode_action  # noqa: E402
 # ---------------------------------------------------------------- field map
 # Table 5-5, hardware-fixed. Names are ours; the numbers are not negotiable.
 CH_VID1 = 1
+CH_VID2 = 2          # inner / C-tag VID; Table 5-5
 CH_SGLORT = 3
 CH_DMAC_HI, CH_DMAC_MID, CH_DMAC_LO = 7, 6, 5
 CH_SMAC_HI, CH_SMAC_MID, CH_SMAC_LO = 14, 13, 12
@@ -79,6 +80,21 @@ CH_L4_SRC, CH_L4_DST = 24, 25
 CH_SIP6 = [33, 32, 39, 38, 37, 36, 21, 20]   # [127:112] .. [15:0]
 CH_DIP6 = [31, 30, 29, 28, 35, 34, 23, 22]
 CH_L3_FLOW_LO = 17
+
+# ---------------------------------------------------------------- flags
+# Table 5-6, Parser Action Flags. The datasheet is explicit that only bits
+# 37-39 are fixed-function inside the parser, and that other bits are
+# "interpreted by downstream fixed-function logic" or are conventions. Since we
+# are replacing ONLY the parser and keeping EOS's mapper/FFU/L3AR
+# configuration, these are not ours to choose -- downstream is already wired to
+# expect them. SetFlags ORs into FLAGS, so a flag set at one slice persists.
+FLAG_VLAN1_TAGGED = 1 << 6    # has S-TAG
+FLAG_VLAN2_TAGGED = 1 << 7    # has C-TAG
+FLAG_IS_IPV4 = 1 << 8
+FLAG_IS_IPV6 = 1 << 9
+FLAG_L3_OPTIONS = 1 << 16
+FLAG_L3_MCST = 1 << 17        # "derives from bit 40 of DMAC" -- the I/G bit
+FLAG_IPV6_HOPBYHOP = 1 << 22
 
 ET_VLAN_C = 0x8100
 ET_VLAN_S = 0x88A8
@@ -135,21 +151,24 @@ class Rule:
     """One CAM+RAM entry, before slice placement."""
 
     def __init__(self, state, next_state, tag_depth=0, next_tag_depth=None,
-                 match_halfword0=None, dest0=None, dest1=None,
+                 match_halfword0=None, match_halfword0_mask=0xFFFF,
+                 dest0=None, dest1=None,
                  match_halfword1=None, match_halfword1_mask=0xFFFF,
-                 rot0=0, rot1=0, match_q=None, set_q=None,
+                 rot0=0, rot1=0, match_q=None, set_q=None, set_flags=0,
                  terminate=False, note=""):
         self.state = state
         self.next_state = next_state
         self.tag_depth = tag_depth
         self.next_tag_depth = tag_depth if next_tag_depth is None else next_tag_depth
-        self.match_halfword0 = match_halfword0   # exact 16-bit match on bytes[0:1]
+        self.match_halfword0 = match_halfword0   # match on bytes[0:1]
+        self.match_halfword0_mask = match_halfword0_mask
         self.match_halfword1 = match_halfword1   # masked match on bytes[2:3]
         self.match_halfword1_mask = match_halfword1_mask
         self.dest0 = dest0                       # FIELDS channel for bytes[0:1]
         self.dest1 = dest1                       # FIELDS channel for bytes[2:3]
         self.rot0 = rot0      # nibble rotation, 4*rot bits; 2 == byte swap
         self.rot1 = rot1
+        self.set_flags = set_flags
         self.match_q = match_q   # require STATE8[2] == this
         self.set_q = set_q       # set STATE8[2]; None leaves it unchanged
         self.terminate = terminate
@@ -160,8 +179,9 @@ class Rule:
         value = (self.state | (self.tag_depth << 8)) << 32
         care = 0x0000FFFF << 32                  # pin STATE8[0] and STATE8[1]
         if self.match_halfword0 is not None:
-            value |= self.match_halfword0 & 0xFFFF
-            care |= 0xFFFF
+            m = self.match_halfword0_mask & 0xFFFF
+            value |= self.match_halfword0 & m
+            care |= m
         if self.match_halfword1 is not None:
             m = self.match_halfword1_mask & 0xFFFF
             value |= (self.match_halfword1 & m) << 16
@@ -186,6 +206,8 @@ class Rule:
             f["Byte2Enable"] = f["Byte3Enable"] = 1
         # StateOp2=0 with value 0 leaves STATE8[2] unchanged, so the qualifier
         # survives across the address walk without every rule restating it.
+        if self.set_flags:
+            f["SetFlags"] = self.set_flags
         if self.set_q is not None:
             f["StateOp2"], f["StateValue2"] = 1, self.set_q
         if self.terminate:
@@ -200,6 +222,15 @@ def build_program():
     # --- Ethernet header, identical regardless of tags (it precedes them) ---
     rules.append(Rule(S_START, S_DMAC_LO, dest0=CH_DMAC_HI, dest1=CH_DMAC_MID,
                       note="bytes 0-3: DMAC[47:32], DMAC[31:16]"))
+    # L3_Mcst (Table 5-6 bit 17) "derives from bit 40 of DMAC" -- the I/G bit,
+    # the low bit of the first octet on the wire. That octet is the MOST
+    # significant byte of the first halfword (datasheet 5.5: first byte received
+    # lands in the most significant byte), so DMAC bit 40 is key bit 8.
+    # Without this every multicast frame classifies as unicast downstream.
+    rules.append(Rule(S_START, S_DMAC_LO, dest0=CH_DMAC_HI, dest1=CH_DMAC_MID,
+                      match_halfword0=0x0100, match_halfword0_mask=0x0100,
+                      set_flags=FLAG_L3_MCST,
+                      note="DMAC I/G bit set -> L3_Mcst"))
     rules.append(Rule(S_DMAC_LO, S_SMAC_LO, dest0=CH_DMAC_LO, dest1=CH_SMAC_HI,
                       note="bytes 4-7: DMAC[15:0], SMAC[47:32]"))
     rules.append(Rule(S_SMAC_LO, S_ETYPE, dest0=CH_SMAC_MID, dest1=CH_SMAC_LO,
@@ -211,12 +242,20 @@ def build_program():
         # A VLAN tag: capture the EtherType, and the TCI lands in L2_VID1,
         # whose top nibble is the priority -- exactly the TCI layout.
         if depth < MAX_TAGS:
-            for et in (ET_VLAN_C, ET_VLAN_S):
+            # Table 5-5: the OUTER tag's VID belongs in L2_VID1 and the inner in
+            # L2_VID2, so the destination depends on tag depth. Writing both to
+            # ch1 -- as this did until now -- loses the inner VID entirely on
+            # double-tagged frames, and the mapper's VID2 table then sees zero.
+            vid_ch = CH_VID1 if depth == 0 else CH_VID2
+            # Table 5-6 names the flags by tag TYPE, not position: bit 6 is
+            # "has S-TAG", bit 7 is "has C-TAG".
+            for et, flag in ((ET_VLAN_C, FLAG_VLAN2_TAGGED),
+                             (ET_VLAN_S, FLAG_VLAN1_TAGGED)):
                 rules.append(Rule(here, S_TAGGED, tag_depth=depth,
                                   next_tag_depth=depth + 1,
-                                  match_halfword0=et,
-                                  dest0=CH_ETHERTYPE, dest1=CH_VID1,
-                                  note=f"VLAN 0x{et:04x} at depth {depth}"))
+                                  match_halfword0=et, set_flags=flag,
+                                  dest0=CH_ETHERTYPE, dest1=vid_ch,
+                                  note=f"VLAN 0x{et:04x} at depth {depth} -> ch{vid_ch}"))
         # IPv4 dispatch also captures the halfword after the EtherType, which is
         # ver/IHL + TOS -- and ch16 bits 7:0 are L3_PRI, so TOS lands correctly.
         #
@@ -228,12 +267,14 @@ def build_program():
         # read from the middle of the option area -- wrong, and silently so.
         rules.append(Rule(here, S_IP4_LEN, tag_depth=depth, match_halfword0=ET_IPV4,
                           match_halfword1=0x4500, match_halfword1_mask=0xFF00,
+                          set_flags=FLAG_IS_IPV4,
                           dest0=CH_ETHERTYPE, dest1=CH_L3_PRI,
                           note=f"IPv4 (ver/IHL=0x45) at depth {depth}; TOS -> L3_PRI"))
         # IPv4 WITH options: record the EtherType and stop rather than mis-parse.
         # Placed after the guarded rule so the TCAM prefers the specific match.
         rules.append(Rule(here, S_DONE_OTHER, tag_depth=depth,
                           match_halfword0=ET_IPV4,
+                          set_flags=FLAG_IS_IPV4 | FLAG_L3_OPTIONS,
                           dest0=CH_ETHERTYPE, terminate=True,
                           note=f"IPv4 with options at depth {depth}: L2 only"))
         # IPv6: the halfword after the EtherType is ver/traffic-class/flow[19:16].
@@ -241,6 +282,7 @@ def build_program():
         # ch16[15:12], which is the ">>4 rotation" its note calls for: rot=3
         # (BarrelShiftLeft by 12 == right by 4 in a 16-bit halfword).
         rules.append(Rule(here, S_IP6_FLOW, tag_depth=depth, match_halfword0=ET_IPV6,
+                          set_flags=FLAG_IS_IPV6,
                           dest0=CH_ETHERTYPE, dest1=CH_L3_PRI, rot1=3,
                           note=f"IPv6 at depth {depth}; TC/flow -> L3_PRI"))
         rules.append(Rule(here, S_DONE_ARP, tag_depth=depth, match_halfword0=ET_ARP,
@@ -288,7 +330,7 @@ def build_program():
             (S_IP6_D2, S_IP6_D3, D6[3], D6[4], 0, False, "IPv6 DIP[79:48]"),
             (S_IP6_D3, S_IP6_L4, D6[5], D6[6], 0, False, "IPv6 DIP[47:16]"),
         ):
-            kw = {"set_q": 0} if st == S_IP6_NH else {}
+            kw = {"set_q": 0, "set_flags": FLAG_IPV6_HOPBYHOP} if st == S_IP6_NH else {}
             rules.append(Rule(st, nxt, tag_depth=depth, dest0=d0, dest1=d1,
                               rot0=r0, terminate=term, **kw,
                               note=f"{note} (depth {depth})"))
