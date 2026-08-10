@@ -257,14 +257,22 @@ class Rule:
         """Return (value, care) for the 64-bit key."""
         value = (self.state | (state1(self.tag_depth, self.isl) << 8)) << 32
         care = 0x0000FFFF << 32                  # pin STATE8[0] and STATE8[1]
+        # ⚠ Halfword0 is the HIGH half of the frame key, not the low.
+        # Datasheet 5.5: the first byte received occupies the most significant
+        # byte, so byte0 -> key[31:24] and Halfword0 = {byte0,byte1} = key[31:16].
+        # This was inverted until now, so every EtherType match looked for
+        # 0x0800 where the hardware had put ver/IHL -- no rule matched, and
+        # every frame fell through to the unknown-EtherType terminate. Confirmed
+        # by parser_sim against EOS's program, which matches Halfword0 values at
+        # key[31:16] and Halfword1 values at key[15:0].
         if self.match_halfword0 is not None:
             m = self.match_halfword0_mask & 0xFFFF
-            value |= self.match_halfword0 & m
-            care |= m
+            value |= (self.match_halfword0 & m) << 16
+            care |= m << 16
         if self.match_halfword1 is not None:
             m = self.match_halfword1_mask & 0xFFFF
-            value |= (self.match_halfword1 & m) << 16
-            care |= m << 16
+            value |= self.match_halfword1 & m
+            care |= m
         if self.match_q is not None:
             value |= (self.match_q & 0xFF) << 48
             care |= 0xFF << 48
@@ -338,17 +346,37 @@ def build_program():
     rules.append(Rule(S_SMAC_LO, S_ETYPE, dest0=CH_SMAC_MID, dest1=CH_SMAC_LO,
                       note="bytes 8-11: SMAC[31:16], SMAC[15:0]"))
 
-    # --- ISL entry: the tag sits where an EtherType would, so it is detected
-    # at the same state and simply consumes two extra slices before dispatch.
-    rules.append(Rule(S_ETYPE, S_ISL_W2, match_halfword0=ISL_TAG_W0,
+    # --- ISL entry. ⚠ UNCONDITIONAL, not content-detected.
+    #
+    # The tag is not an option on this port, it is the layout. Established by
+    # simulating EOS's own program (parser_sim.py): with the port's real
+    # PARSER_INIT_STATE it extracts a complete IPv4 header from an ISL-tagged
+    # frame, and produces garbage from an untagged one -- writing the IP header
+    # into ISL_SGLORT/ISL_DGLORT.
+    #
+    # ⚠ And the init state is NOT zero, which invalidated a foundational
+    # assumption recorded in docs/PARSER-CONVENTIONS.md. PARSER_INIT_STATE is
+    # all zeros in the microcode IMAGE, which is where "parsing starts at
+    # STATE8[0]=0x00" came from -- but the replay programs per-port values and
+    # the live chip reads 0x6b3f0000 on port 0. EOS's IPv4 rules require
+    # STATE8[3] & 0x20 and 0x6b supplies it; simulating from zero makes EOS's
+    # own program appear to die at slice 3.
+    #
+    # Matching the tag by content (0x0100) was wrong twice over: it made the
+    # tagged path optional when it is mandatory, and it would miss any frame
+    # whose tag word 0 differs.
+    rules.append(Rule(S_ETYPE, S_ISL_W2,
                       dest1=CH_SGLORT, next_isl=1,
                       set_flags=FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE0,
-                      note="F64 ISL tag: SGLORT -> ch3, enter tagged path"))
+                      note="F64 ISL tag (always present): SGLORT -> ch3"))
     rules.append(Rule(S_ISL_W2, S_ETYPE, isl=1,
                       note="F64 tag second half consumed; EtherType next"))
 
     # --- EtherType dispatch, per tag depth, for both the plain and ISL paths ---
-    for isl, depth in [(i, d) for i in (0, 1) for d in range(MAX_TAGS + 1)]:
+    # Only the tagged path is generated: every frame reaching the EtherType has
+    # already consumed the F64 tag. Keeping an untagged path as well would put
+    # rules at slices 3-5 that can never be right for this port.
+    for isl, depth in [(1, d) for d in range(MAX_TAGS + 1)]:
         here = S_ETYPE if depth == 0 else S_TAGGED
         # A VLAN tag: capture the EtherType, and the TCI lands in L2_VID1,
         # whose top nibble is the priority -- exactly the TCI layout.

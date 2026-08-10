@@ -89,7 +89,13 @@ def frame_word(frame, slice_, window_shift=0):
     """
     lo = 4 * slice_ - window_shift
     b = bytes(frame[i] if 0 <= i < len(frame) else 0 for i in range(lo, lo + 4))
-    return (b[0] << 8) | b[1] | (b[2] << 24) | (b[3] << 16)
+    # Datasheet 5.5: "the first byte received loaded into the MOST SIGNIFICANT
+    # byte of those structures". Applied to the whole 32-bit frame key, so
+    # byte0 is key[31:24]. Halfword0 = {byte0,byte1} is therefore the HIGH half
+    # of the key, and Halfword1 the low -- which is what EOS's slice-3 rules
+    # require: they match the VLAN TPID as 0x81000000/0xffff0000, i.e. at bytes
+    # 12-13, the EtherType position.
+    return (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]
 
 
 def load_program(mem):
@@ -107,8 +113,8 @@ def load_program(mem):
     return prog
 
 
-def run(prog, frame, verbose=False):
-    state = 0
+def run(prog, frame, verbose=False, init_state=0):
+    state = init_state
     fields = {}
     flags = 0
     shift = 0
@@ -129,7 +135,7 @@ def run(prog, frame, verbose=False):
         for h in (0, 1):
             if action_field(a, f"Byte{2*h}Enable") or action_field(a, f"Byte{2*h+1}Enable"):
                 ch = action_field(a, f"Halfword{h}Dest")
-                half = (fw & 0xFFFF) if h == 0 else ((fw >> 16) & 0xFFFF)
+                half = ((fw >> 16) & 0xFFFF) if h == 0 else (fw & 0xFFFF)
                 fields[ch] = half
         flags |= action_field(a, "SetFlags")
         ns, ok = next_state(state, fw, 0xFFFFFFFF, a)
@@ -169,8 +175,16 @@ def main():
     ap.add_argument("--frame", default="ospf-hello", choices=["ospf-hello", "arp"])
     ap.add_argument("--isl", action="store_true", help="prepend the F64 ISL tag")
     ap.add_argument("-v", "--verbose", action="store_true", help="per-slice trace")
+    ap.add_argument("--init-state", default="0",
+                    help="PARSER_INIT_STATE for the ingress port (hex). ⚠ NOT zero on "
+                         "real hardware: the microcode image has zeros there but the "
+                         "replay programs per-port values -- port 0 reads 0x6b3f0000 on "
+                         "this switch. EOS's IPv4 rules require STATE8[3] & 0x20, and "
+                         "0x6b supplies it, so simulating from 0 makes EOS's own program "
+                         "appear to terminate at slice 3.")
     args = ap.parse_args()
 
+    init = int(args.init_state, 16)
     frame = build_frame(args.frame, args.isl)
     print(f"frame: {args.frame}{' +ISL' if args.isl else ''}, {len(frame)} bytes")
     print(f"  {frame[:24].hex()}...\n")
@@ -183,8 +197,8 @@ def main():
         return load_program(mem)
 
     if args.diff:
-        fe = run(load_program(load(args.diff)), frame, args.verbose)
-        fo = run(ours_prog(), frame, args.verbose)
+        fe = run(load_program(load(args.diff)), frame, args.verbose, init)
+        fo = run(ours_prog(), frame, args.verbose, init)
         report("EOS", *fe, args.verbose)
         print()
         report("OURS", *fo, args.verbose)
@@ -204,9 +218,9 @@ def main():
         return 0
 
     if args.image:
-        report("EOS", *run(load_program(load(args.image)), frame, args.verbose), args.verbose)
+        report("EOS", *run(load_program(load(args.image)), frame, args.verbose, init), args.verbose)
     if args.ours:
-        report("OURS", *run(ours_prog(), frame, args.verbose), args.verbose)
+        report("OURS", *run(ours_prog(), frame, args.verbose, init), args.verbose)
     if not (args.image or args.ours or args.diff):
         ap.print_help()
     return 0
