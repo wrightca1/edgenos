@@ -94,6 +94,7 @@ FLAG_IS_IPV4 = 1 << 8
 FLAG_IS_IPV6 = 1 << 9
 FLAG_L3_OPTIONS = 1 << 16
 FLAG_L3_MCST = 1 << 17        # "derives from bit 40 of DMAC" -- the I/G bit
+FLAG_L3_BCST = 1 << 18        # DMAC == ff:ff:ff:ff:ff:ff
 FLAG_IPV6_HOPBYHOP = 1 << 22
 
 ET_VLAN_C = 0x8100
@@ -154,7 +155,8 @@ class Rule:
                  match_halfword0=None, match_halfword0_mask=0xFFFF,
                  dest0=None, dest1=None,
                  match_halfword1=None, match_halfword1_mask=0xFFFF,
-                 rot0=0, rot1=0, match_q=None, set_q=None, set_flags=0,
+                 rot0=0, rot1=0, match_q=None, set_q=None,
+                 match_r=None, set_r=None, set_flags=0,
                  terminate=False, note=""):
         self.state = state
         self.next_state = next_state
@@ -171,6 +173,8 @@ class Rule:
         self.set_flags = set_flags
         self.match_q = match_q   # require STATE8[2] == this
         self.set_q = set_q       # set STATE8[2]; None leaves it unchanged
+        self.match_r = match_r   # require STATE8[3] == this
+        self.set_r = set_r       # set STATE8[3]
         self.terminate = terminate
         self.note = note
 
@@ -189,6 +193,9 @@ class Rule:
         if self.match_q is not None:
             value |= (self.match_q & 0xFF) << 48
             care |= 0xFF << 48
+        if self.match_r is not None:
+            value |= (self.match_r & 0xFF) << 56
+            care |= 0xFF << 56
         return value, care
 
     def action(self):
@@ -210,6 +217,8 @@ class Rule:
             f["SetFlags"] = self.set_flags
         if self.set_q is not None:
             f["StateOp2"], f["StateValue2"] = 1, self.set_q
+        if self.set_r is not None:
+            f["StateOp3"], f["StateValue3"] = 1, self.set_r
         if self.terminate:
             f["Terminate"] = 1
         return f
@@ -231,8 +240,26 @@ def build_program():
                       match_halfword0=0x0100, match_halfword0_mask=0x0100,
                       set_flags=FLAG_L3_MCST,
                       note="DMAC I/G bit set -> L3_Mcst"))
+    # L3_Bcst needs DMAC == ff:ff:ff:ff:ff:ff, which straddles slices 0 and 1 --
+    # the first 4 octets land in slice 0 and the last 2 in slice 1. No single
+    # rule can see all 48 bits, so slice 0 records "top 32 bits were all ones"
+    # in STATE8[3] and slice 1 completes the comparison.
+    #
+    # This is what the auxiliary state bytes buy: STATE8[0] tracks position,
+    # STATE8[2] carries the IPv6 extension-header verdict, STATE8[3] carries a
+    # partially-evaluated match. A parser that only had a position variable
+    # could not express a comparison wider than its parsing window.
+    rules.append(Rule(S_START, S_DMAC_LO,
+                      match_halfword0=0xFFFF, match_halfword1=0xFFFF,
+                      dest0=CH_DMAC_HI, dest1=CH_DMAC_MID,
+                      set_flags=FLAG_L3_MCST, set_r=1,
+                      note="DMAC[47:16] all ones -> broadcast candidate"))
     rules.append(Rule(S_DMAC_LO, S_SMAC_LO, dest0=CH_DMAC_LO, dest1=CH_SMAC_HI,
                       note="bytes 4-7: DMAC[15:0], SMAC[47:32]"))
+    rules.append(Rule(S_DMAC_LO, S_SMAC_LO, match_halfword0=0xFFFF, match_r=1,
+                      dest0=CH_DMAC_LO, dest1=CH_SMAC_HI,
+                      set_flags=FLAG_L3_BCST, set_r=0,
+                      note="DMAC[15:0] all ones and candidate -> L3_Bcst"))
     rules.append(Rule(S_SMAC_LO, S_ETYPE, dest0=CH_SMAC_MID, dest1=CH_SMAC_LO,
                       note="bytes 8-11: SMAC[31:16], SMAC[15:0]"))
 
