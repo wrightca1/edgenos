@@ -113,12 +113,15 @@ class Rule:
 
     def __init__(self, state, next_state, tag_depth=0, next_tag_depth=None,
                  match_halfword0=None, dest0=None, dest1=None,
+                 match_halfword1=None, match_halfword1_mask=0xFFFF,
                  terminate=False, note=""):
         self.state = state
         self.next_state = next_state
         self.tag_depth = tag_depth
         self.next_tag_depth = tag_depth if next_tag_depth is None else next_tag_depth
         self.match_halfword0 = match_halfword0   # exact 16-bit match on bytes[0:1]
+        self.match_halfword1 = match_halfword1   # masked match on bytes[2:3]
+        self.match_halfword1_mask = match_halfword1_mask
         self.dest0 = dest0                       # FIELDS channel for bytes[0:1]
         self.dest1 = dest1                       # FIELDS channel for bytes[2:3]
         self.terminate = terminate
@@ -131,6 +134,10 @@ class Rule:
         if self.match_halfword0 is not None:
             value |= self.match_halfword0 & 0xFFFF
             care |= 0xFFFF
+        if self.match_halfword1 is not None:
+            m = self.match_halfword1_mask & 0xFFFF
+            value |= (self.match_halfword1 & m) << 16
+            care |= m << 16
         return value, care
 
     def action(self):
@@ -175,9 +182,23 @@ def build_program():
                                   note=f"VLAN 0x{et:04x} at depth {depth}"))
         # IPv4 dispatch also captures the halfword after the EtherType, which is
         # ver/IHL + TOS -- and ch16 bits 7:0 are L3_PRI, so TOS lands correctly.
+        #
+        # ⚠ The walk that follows assumes a 20-byte header. Requiring
+        # ver/IHL == 0x45 here makes that assumption explicit in the hardware
+        # match rather than implicit in our arithmetic: a packet carrying IPv4
+        # options simply does not take this path. Without the guard, options
+        # shift every subsequent field and the parser reports a source address
+        # read from the middle of the option area -- wrong, and silently so.
         rules.append(Rule(here, S_IP4_LEN, tag_depth=depth, match_halfword0=ET_IPV4,
+                          match_halfword1=0x4500, match_halfword1_mask=0xFF00,
                           dest0=CH_ETHERTYPE, dest1=CH_L3_PRI,
-                          note=f"IPv4 at depth {depth}; TOS -> L3_PRI"))
+                          note=f"IPv4 (ver/IHL=0x45) at depth {depth}; TOS -> L3_PRI"))
+        # IPv4 WITH options: record the EtherType and stop rather than mis-parse.
+        # Placed after the guarded rule so the TCAM prefers the specific match.
+        rules.append(Rule(here, S_DONE_OTHER, tag_depth=depth,
+                          match_halfword0=ET_IPV4,
+                          dest0=CH_ETHERTYPE, terminate=True,
+                          note=f"IPv4 with options at depth {depth}: L2 only"))
         for et, nxt in ((ET_IPV6, S_DONE_IPV6), (ET_ARP, S_DONE_ARP)):
             rules.append(Rule(here, nxt, tag_depth=depth, match_halfword0=et,
                               dest0=CH_ETHERTYPE,
@@ -223,13 +244,30 @@ def reachable_slices(rule):
 
 
 def place(rules):
-    """Assign rules to (slice, entry). Returns {slice: [(entry, rule)]}."""
+    """Assign rules to (slice, entry), general first and specific last.
+
+    ★ ORDER IS LOAD-BEARING, and in the opposite direction to the obvious
+    guess. Measured across EOS's own program: of 2,349 overlapping
+    specific/general entry pairs, the MORE SPECIFIC rule sits at the HIGHER
+    index in 2,349 of them -- 100%, never once the other way. The parser CAM
+    therefore resolves to the LAST matching entry, not the first.
+
+    The datasheet does not state this anywhere we can find, so it rests on that
+    measurement. It is not cosmetic: the IPv4 walk is guarded by a ver/IHL==0x45
+    match that overlaps a general "IPv4 with options" fallback. Emitted in the
+    intuitive order -- specific first -- the fallback would win every time and
+    IPv4 would never be walked at all, while every structural check still
+    passed.
+
+    Sorting by care-bit count puts general rules first and specific ones last.
+    """
     out = {}
     for r in rules:
         for s in reachable_slices(r):
             out.setdefault(s, []).append(r)
     placed = {}
     for s, rs in sorted(out.items()):
+        rs = sorted(rs, key=lambda r: bin(r.cam()[1]).count("1"))
         placed[s] = list(enumerate(rs))
     return placed
 
