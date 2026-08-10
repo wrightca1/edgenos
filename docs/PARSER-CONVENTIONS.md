@@ -371,6 +371,57 @@ toward ours a piece at a time, or instrument the chip — the FFU exposes scenar
 and rule-hit state, and reading what the silicon computes for a live frame would
 show where classification diverges rather than leaving it to be reasoned about.
 
+### ★★ ROOT CAUSE: CPU-injected frames carry an 8-byte F64 ISL tag
+
+Found by bisection plus the asymmetry the earlier runs kept showing.
+
+Three measurements decomposed it:
+
+| parser | routes | ping |
+|---|---:|---|
+| EOS, all 28 slices | 35 | **works** |
+| EOS, truncated to slices 0–15 | **35** | fails |
+| ours, slices 0–15 | 2 | fails |
+
+Truncated EOS forms a full adjacency, so **slice depth is not what blocks OSPF**
+— our program fails at something EOS's does within the same slices. (Depth does
+matter for ping, which is a second and separate defect.)
+
+The decisive clue was that `et1` rx kept growing under our parser while no
+adjacency ever formed: we were *receiving* fine and failing to *transmit*.
+`asic/fm6000/fm6000_txinline.c` says why:
+
+```
+DMAC        SMAC        <---- F64 tag, 8 bytes ---->        ethertype
+```
+
+CPU-injected frames carry an 8-byte F64 ISL tag **between the SMAC and the
+EtherType**. Our program assumes DMAC + SMAC + EtherType, so at slice 3 it reads
+the tag's first bytes as an EtherType, matches nothing, and falls through to the
+terminate rule. Every frame the switch itself sends is mis-parsed and dropped —
+the neighbour never hears our hellos, so no adjacency, and ARP never resolves,
+so no ping.
+
+Frames arriving from the wire are untagged and parse correctly, which is exactly
+why `rx` grew and made the parse look half-working.
+
+This also explains two things that were puzzling earlier:
+
+- why `ISL_Type0/1` and `ISL_FType0` are in the FFU scenario key at all
+- why EOS dedicates FIELDS channels 3 and 4 to `ISL_SGLORT` / `ISL_DGLORT`
+
+and it retires the reasoning in commit 162bc63 completely: the ISL flags were
+never "correctly left clear because our ports carry no ISL tag". Our ports carry
+no ISL tag *on ingress from the wire*. On the inject path they always do.
+
+### What the fix requires
+
+The parser needs an ISL-tagged path: recognise the F64 tag after the SMAC,
+extract `ISL_SGLORT`/`ISL_DGLORT` into channels 3/4, set `ISL_RX_Tagged` and the
+Type/FType flags, and resume the EtherType dispatch 8 bytes later. That is a
+second entry path into the existing dispatch, not a rewrite — the states after
+the EtherType are unchanged.
+
 ### The open question
 
 Not yet diagnosed. One structural difference stands out for a next look: EOS's
