@@ -321,6 +321,56 @@ Clearing slices 0-15 to all-zero first is required: all-zero is the never-match
 encoding, so it disables stale entries from a previous load that would otherwise
 survive at higher indices and win under last-match-wins.
 
+### ★ The FFU scenario key, read off the chip
+
+`MAPPER_SCENARIO_FLAGS_CFG` (0x123e00, four words; one 6-bit selector per byte —
+an 8-bit stride, per the register header, not the 6 a naive reading gives) says
+exactly which 16 ACTION_FLAGS feed the FFU's SCENARIO_CAM on this box:
+
+```
+0 Unbound0     2 ISL_Type0    3 ISL_Type1   4 ISL_FType0
+8 IsIPv4       9 IsIPv6      13 TTL_Expired 14 HeadFrag
+16 L3_Options 19 L3_Mcst(DIP) 27,28 HdrOffsets[3:4]
+40, 42, 43 — mapper-set, beyond the parser's 38-bit SetFlags
+```
+
+**This retires an earlier wrong conclusion.** This document previously argued the
+ISL flags were "correctly left clear" because our ports carry no ISL tag. The
+scenario key matches on `ISL_Type0/1` and `ISL_FType0` regardless, and the
+datasheet says FType is "specified by the ISL tag **or assigned**". Leaving them
+zero changes the scenario value, which selects different FFU rules.
+
+`TTL_Expired` and `HeadFrag` were also missing and are also in the key.
+
+### ⚠ All of that was implemented, and forwarding still fails
+
+```
+t=30s  routes=34  ping 100% loss     (OSPF routes still aging out)
+t=60s  routes=2   ping 100% loss
+t=120s routes=2   ping 100% loss
+```
+
+Three hypotheses have now been tested on hardware and none fixed it:
+
+| hypothesis | grounding | result |
+|---|---|---|
+| missing `L3_Mcst(DIP)` bit 19 | Table 5-6 + OSPF is 224.0.0.5 | no change |
+| parser off by one slice | EOS's earliest DMAC write | refuted before testing — EOS writes DMAC at slice 0 too |
+| missing scenario-key flags | **read off the chip** | no change |
+
+Each was better grounded than the last, and the third was measured rather than
+inferred. That pattern says the remaining defect is unlikely to be found by
+proposing mechanisms.
+
+### What to do instead
+
+Stop guessing and bisect, which the fast loop now makes practical (~1 minute per
+trial against ~10 for a reboot). EOS's parser works and ours does not, so the
+difference is findable by construction: start from EOS's program and replace it
+toward ours a piece at a time, or instrument the chip — the FFU exposes scenario
+and rule-hit state, and reading what the silicon computes for a live frame would
+show where classification diverges rather than leaving it to be reasoned about.
+
 ### The open question
 
 Not yet diagnosed. One structural difference stands out for a next look: EOS's
