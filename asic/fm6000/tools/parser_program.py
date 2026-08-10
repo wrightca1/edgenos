@@ -260,7 +260,7 @@ class Rule:
                  rot0=0, rot1=0, match_q=None, set_q=None,
                  match_r=None, set_r=None, set_flags=0,
                  isl=0, next_isl=None, bcast=0, next_bcast=None,
-                 terminate=False, note=""):
+                 add0=0, add1=0, terminate=False, note=""):
         self.state = state
         self.next_state = next_state
         self.tag_depth = tag_depth
@@ -278,6 +278,14 @@ class Rule:
         self.next_isl = isl if next_isl is None else next_isl
         self.bcast = bcast
         self.next_bcast = bcast if next_bcast is None else next_bcast
+        # ⚠ CHECKSUM accumulation. Table 5-4: ChecksumError is SET by microcode
+        # to ENABLE the test, and cleared only if the ones-complement sum of the
+        # halfwords marked by Halfword{0,1}Add reaches 0xFFFF. Enabling the test
+        # without marking any halfwords means the sum never reaches it, so every
+        # IPv4 frame reports a bad checksum -- parses perfectly, forwards
+        # nothing. EOS marks them on 341 rules; we marked none.
+        self.add0 = add0
+        self.add1 = add1
         self.match_q = match_q   # require STATE8[2] == this
         self.set_q = set_q       # set STATE8[2]; None leaves it unchanged
         self.match_r = match_r   # require STATE8[3] == this
@@ -319,6 +327,10 @@ class Rule:
         f["StateOp0"], f["StateValue0"] = 1, self.next_state
         f["StateOp1"], f["StateValue1"] = 1, state1(self.next_tag_depth, self.next_isl,
                                                      self.next_bcast)
+        if self.add0:
+            f["Halfword0Add"] = 1
+        if self.add1:
+            f["Halfword1Add"] = 1
         if self.dest0 is not None:
             f["Halfword0Dest"] = self.dest0
             f["Halfword0Rot"] = self.rot0
@@ -452,7 +464,7 @@ def build_program():
                           set_flags=(FLAG_IS_IPV4 | FLAG_CHECKSUM_TEST
                                      | FLAG_ISGLORT_NZ | hdr_offsets(1, 0)
                                      | ((FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE1) if isl else 0)),
-                          dest0=CH_ETHERTYPE, dest1=CH_L3_PRI,
+                          dest0=CH_ETHERTYPE, dest1=CH_L3_PRI, add1=1,
                           note=f"IPv4 (ver/IHL=0x45) at depth {depth}; TOS -> L3_PRI"))
         # IPv4 WITH options: record the EtherType and stop rather than mis-parse.
         # Placed after the guarded rule so the TCAM prefers the specific match.
@@ -493,22 +505,27 @@ def build_program():
 
         # --- IPv4 header walk. One rule per state per tag depth, because the
         # header sits 4 bytes later for each tag in front of it. ---
-        for st, nxt, d0, d1, term, note in (
-            (S_IP4_LEN, S_IP4_TTL, CH_L3_LENGTH, None, False,
-             "IPv4 total length"),
-            (S_IP4_TTL, S_IP4_SIP_HI, None, CH_L3_TTL_PROT, False,
-             "IPv4 TTL + protocol"),
-            (S_IP4_SIP_HI, S_IP4_SIP_LO, None, CH_SIP_HI, False,
-             "IPv4 SIP[31:16]"),
-            (S_IP4_SIP_LO, S_IP4_DIP_LO, CH_SIP_LO, CH_DIP_HI, False,
+        for st, nxt, d0, d1, term, a0, a1, note in (
+            (S_IP4_LEN, S_IP4_TTL, CH_L3_LENGTH, None, False, 1, 1,
+             "IPv4 total length + id"),
+            (S_IP4_TTL, S_IP4_SIP_HI, None, CH_L3_TTL_PROT, False, 1, 1,
+             "IPv4 flags/frag + TTL/protocol"),
+            (S_IP4_SIP_HI, S_IP4_SIP_LO, None, CH_SIP_HI, False, 1, 1,
+             "IPv4 checksum word + SIP[31:16]"),
+            (S_IP4_SIP_LO, S_IP4_DIP_LO, CH_SIP_LO, CH_DIP_HI, False, 1, 1,
              "IPv4 SIP[15:0], DIP[31:16]"),
-            (S_IP4_DIP_LO, S_IP4_L4, CH_DIP_LO, CH_L4_SRC, False,
+            # halfword1 here is the L4 source port, OUTSIDE the IP header, so it
+            # must NOT be accumulated -- the checksum covers the 20-byte header
+            # only and adding a byte past it makes every frame fail.
+            (S_IP4_DIP_LO, S_IP4_L4, CH_DIP_LO, CH_L4_SRC, False, 1, 0,
              "IPv4 DIP[15:0], L4 source port"),
-            (S_IP4_L4, S_DONE_OTHER, CH_L4_DST, None, True,
+            (S_IP4_L4, S_DONE_OTHER, CH_L4_DST, None, True, 0, 0,
              "L4 destination port; done"),
         ):
+            st, nxt, d0, d1, term, a0, a1, note = (st, nxt, d0, d1, term, a0, a1, note)
             rules.append(Rule(st, nxt, tag_depth=depth, isl=isl,
                           match_r=(PORT_STATE3_CPU if isl else PORT_STATE3_WIRE), dest0=d0, dest1=d1,
+                              add0=a0, add1=a1,
                               terminate=term, note=f"{note} (depth {depth})"))
 
         # --- IPv6 header walk. Fixed 40 bytes, so no options problem. ---
@@ -542,6 +559,7 @@ def build_program():
                           match_r=(PORT_STATE3_CPU if isl else PORT_STATE3_WIRE),
                           match_halfword0=0x0000, match_halfword0_mask=0x1FFF,
                           dest1=CH_L3_TTL_PROT, set_flags=FLAG_HEAD_FRAG,
+                          add0=1, add1=1,
                           note="IPv4 fragment offset 0 -> HeadFrag"))
         # TTL_Expired (scenario bit 10): ttl 0 or 1. TTL is byte 22, the high
         # byte of halfword1 in the same state. Two rules -- a TCAM matches
@@ -557,7 +575,7 @@ def build_program():
                           match_r=(PORT_STATE3_CPU if isl else PORT_STATE3_WIRE),
                               match_halfword0=0x0000, match_halfword0_mask=0x1FFF,
                               match_halfword1=ttl << 8, match_halfword1_mask=0xFF00,
-                              dest1=CH_L3_TTL_PROT,
+                              dest1=CH_L3_TTL_PROT, add0=1, add1=1,
                               set_flags=FLAG_TTL_EXPIRED | FLAG_HEAD_FRAG,
                               note=f"IPv4 TTL={ttl}, frag offset 0 -> TTL_Expired + HeadFrag"))
 
@@ -567,7 +585,7 @@ def build_program():
         rules.append(Rule(S_IP4_SIP_LO, S_IP4_DIP_LO, tag_depth=depth, isl=isl,
                           match_r=(PORT_STATE3_CPU if isl else PORT_STATE3_WIRE),
                           match_halfword1=0xE000, match_halfword1_mask=0xF000,
-                          dest0=CH_SIP_LO, dest1=CH_DIP_HI,
+                          dest0=CH_SIP_LO, dest1=CH_DIP_HI, add0=1, add1=1,
                           note="IPv4 DIP multicast (224/4): extraction only"))
         # IPv6 multicast by DIP: ff00::/8. DIP[127:112] is halfword1 in the
         # SIP_S4 state, where the SIP ends and the DIP begins.
