@@ -150,7 +150,7 @@ kept locally on `backup/pre-cleanup-20260806`.
 | `asic/fm6000/fm6000_regs.h` | Register block bases and offsets. These are *facts about the hardware*, independently confirmed against the public FM5000/FM6000 datasheet and live BAR reads. Not a copy of Intel's header. |
 | `asic/fm6000/fm6000_coldreplay.c` | ~272 ops. This is a *bring-up procedure* (clock enables, `BOOT_CTRL` commands 1/2/3, BIST, scheduler init) that follows datasheet Table 4-1. Ours. |
 | `asic/fm6000/fm6000_spico.c` | Our own implementation of the SBus/SPICO **protocol**. Contains no firmware. Now off the critical path but still valid code. |
-| all other `asic/fm6000/*.c` | our own tools |
+| all other `asic/fm6000/*.c` | our own tools — ⚠ **except the five listed in §2.5**, which carry microcode verbatim. This row was a blanket claim and it was wrong. |
 
 ### 2.4 Board data — needs its own derivation
 
@@ -162,6 +162,70 @@ It is **not on the critical path** (only `fm6000_serdes.c` uses it; the working 
 SerDes settings from the replay). Plan: derive polarity empirically (invert, observe whether the
 lane trains) and keep drive/pre/post at datasheet defaults, tuning only where a link fails. That
 yields a table that is ours by measurement.
+
+---
+
+### 2.5 ⚠ AUDIT 2026-08-09 — the microcode is in tracked source
+
+**The microcode *files* were kept out of this repository successfully.** `.gitignore` blocks
+`ucode_*.raw` and `fwd*.txt`, and the GitHub remote contains none of them. That was deliberate and
+it held.
+
+**The microcode *content* is nonetheless committed**, re-encoded as C arrays by our own generators:
+
+| file | non-trivial microcode pairs reproduced exactly |
+|---|---:|
+| `fm6000_parserinit.c` | the whole file — 16,960 pairs, 100% microcode |
+| `fm6000_l2arpre.c` | 12,473 |
+| `fm6000_l2arseq.c` | 12,473 (same rules, different placement) |
+| `fm6000_l3arinit.c` | 3,928 |
+| `fm6000_modinit.c` | 3,626 |
+| `fm6000_l2arinit.c` | 1,878 |
+| + 9 smaller files | ~1,600 |
+
+Counting **distinct, non-trivial** pairs — excluding `0x00000000`/`0xffffffff` fill, which is not
+meaningfully anybody's program — **18,332 of the microcode's 18,984 non-trivial pairs (96.6%) are
+present, across 1,613 distinct values.**
+
+*(A first pass reported 38,416 pairs / 97.5%. That counted 20,084 fill values and overstated it.
+18,332 is the honest figure.)*
+
+This contradicts §1 — "no file in this repository may contain … a verbatim transcription of a
+proprietary program's data tables" — and §2.1, which classifies parser + L2AR + MOD as
+"**no — Intel's program**".
+
+**Clean, for the avoidance of doubt:** `fm6000_eplseq.c` (22,051 writes), `fm6000_ffuinit.c`
+(8,680) and `fm6000_l2linit.c` (24,568) have **zero** microcode overlap. This is confined to the
+blocks §2.1 already identified as microcode.
+
+#### How it happened, because the reasoning is instructive
+
+Not carelessness — it is written into the generated files. `fm6000_l2arseq.c`'s own header states
+the rationale:
+
+> *"No write-count saving: the win is that the block leaves EOS's file."*
+
+The generators treated a block as eliminated once it was no longer read from `fwd4.txt`. For SAF,
+CM, L2F and EPL that is genuinely true: those are configuration we derived. For
+parser/L2AR/L3AR/MOD it is not, because **those blocks are the microcode** — relocating them into
+a `.c` file changed the container, not the provenance. Arguably it made matters worse: an
+operator-supplied file on a switch became source in a public repository.
+
+It was also **unprovable until 2026-08-09**. Nothing in the trace says "these writes are Intel's
+program". It became checkable only once `fm6000Microcode.raw` was recovered from the EOS image and
+could be diffed against the generators. See `EOS-SOURCES.md`.
+
+#### Decision: regenerate
+
+Chosen over deleting the files or amending §1. Parser first — its TCAM/action-SRAM encoding is
+published (datasheet §5.5.1, Table 5-3), §4.1 below already reports it fully legible, and it is
+the single largest transcribed file.
+
+L2AR geometry is now exact (413 rules × 24 words, stride `0x20`) but its 24-word encoding is only
+partly decoded, so L2AR cannot be authored yet. See `L2AR-MICROCODE-STRUCTURE.md`.
+
+**Until a block is regenerated, it is transcription and §1 does not hold for it.** Any new
+generated table must be diffed against `fm6000Microcode.raw` before being committed.
 
 ---
 
