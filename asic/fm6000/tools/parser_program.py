@@ -95,6 +95,16 @@ FLAG_IS_IPV6 = 1 << 9
 FLAG_L3_OPTIONS = 1 << 16
 FLAG_L3_MCST = 1 << 17        # "derives from bit 40 of DMAC" -- the I/G bit
 FLAG_L3_BCST = 1 << 18        # DMAC == ff:ff:ff:ff:ff:ff
+# Table 5-6 bit 19 is a SECOND multicast flag, distinct from bit 17: "hard-coded
+# condition, depends on v4/v6 and top few bits of DIP". Bit 17 is derived from
+# the DMAC, bit 19 from the destination ADDRESS. EOS sets it on 51 rules.
+#
+# Missing this is a concrete candidate for the first forwarding failure: OSPF
+# hellos go to 224.0.0.5, so they are IP multicast by DIP. With only the DMAC
+# flag set, downstream multicast classification sees a unicast IP frame with a
+# multicast MAC. Frames did reach the CPU (rx=18, ~89 bytes each, hello-sized)
+# but no adjacency formed.
+FLAG_L3_MCST_DIP = 1 << 19
 FLAG_IPV6_HOPBYHOP = 1 << 22
 
 
@@ -389,6 +399,22 @@ def build_program():
             rules.append(Rule(st, nxt, tag_depth=depth, dest0=d0, dest1=d1,
                               rot0=r0, terminate=term, **kw,
                               note=f"{note} (depth {depth})"))
+
+        # IPv4 multicast by DIP: 224.0.0.0/4, i.e. the top nibble of DIP[31:16]
+        # is 0xE. DIP[31:16] is halfword1 in the SIP_LO state, so it is matched
+        # there, alongside the same extraction the unqualified rule does.
+        rules.append(Rule(S_IP4_SIP_LO, S_IP4_DIP_LO, tag_depth=depth,
+                          match_halfword1=0xE000, match_halfword1_mask=0xF000,
+                          dest0=CH_SIP_LO, dest1=CH_DIP_HI,
+                          set_flags=FLAG_L3_MCST_DIP,
+                          note="IPv4 DIP is multicast (224/4) -> L3_Mcst(DIP)"))
+        # IPv6 multicast by DIP: ff00::/8. DIP[127:112] is halfword1 in the
+        # SIP_S4 state, where the SIP ends and the DIP begins.
+        rules.append(Rule(S_IP6_S4, S_IP6_D1, tag_depth=depth,
+                          match_halfword1=0xFF00, match_halfword1_mask=0xFF00,
+                          dest0=CH_SIP6[7], dest1=CH_DIP6[0],
+                          set_flags=FLAG_L3_MCST_DIP,
+                          note="IPv6 DIP is multicast (ff00::/8) -> L3_Mcst(DIP)"))
 
         # ⚠ IPv6 extension headers are the same trap as IPv4 options: they sit
         # between the addresses and L4, so the ports are NOT where the fixed
