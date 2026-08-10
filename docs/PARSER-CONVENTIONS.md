@@ -234,6 +234,53 @@ self-consistency, however many round-trips passed.
 Whether a generated parser actually parses is a different question needing L3 extraction, a cold
 boot, and a stock-replay control at the same cadence.
 
+## ★ Our parser ran on the chip (2026-08-09/10)
+
+`parser_program.py` emitted a program, `--splice` put it into a copy of the replay, and the FM6000
+loaded it. Read back from silicon at three separate slices — 0 (DMAC extraction), 3 (EtherType
+dispatch, both VLAN entries) and 7 (IPv4 SIP/DIP) — **every word matched what the generator
+produced.** The bring-up sequence reached `FULLSEQ DONE`, `PIN=0x00000208`, and Et1 trained to
+`0xcc0` with `pcsRx=1`.
+
+### ⚠ The first attempt was an invalid test, and the reason matters
+
+A full cold boot with the spliced replay appeared to succeed: sequence completed, Et1 up. Reading
+the chip showed it was running **EOS's parser, not ours**.
+
+The boot script's own generator chain contains `gen_list_early fm6000_parserinit PARSER`, and
+`fm6000_parserinit.c` is precisely the file carrying EOS's transcribed tables. The splice removed
+EOS's parser writes from the replay; the generator then put them straight back. Nothing in the log
+hinted at it — the run looked like a pass.
+
+**Anything that appears to validate a replacement must be checked by reading the hardware, not by
+whether the sequence completed.** The valid run needed `chmod -x /usr/bin/fm6000_parserinit` so the
+chain skips PARSER entirely, confirmed by `PARSER` being absent from the log.
+
+### What this establishes, and what it does not
+
+| | |
+|---|---|
+| our program loads onto real silicon, bit-exact | **yes**, three slices verified by readback |
+| the chip survives it | **yes** — sequence completed, PIN healthy, no wedge |
+| Et1 trains and holds link | **yes**, `0xcc0`/`pcsRx=1`, same as the control |
+| **frames are parsed correctly** | **NOT TESTED** |
+| forwarding, routing, ping | **NOT TESTED** |
+
+The valid run was an **in-place re-run, not a cold boot**. `SELF-CONTAINED-PLAN.md` is explicit
+that in-place re-runs are good for link-level checks and useless for forwarding — both a modified
+replay and the unmodified control give `et1 rx=0` that way. Neither run had `et1`/`et2` Linux
+interfaces at all, so no traffic test was possible in either.
+
+Et2 read `0x815`/rx=0 on the run with our parser and `0x8c0`/rx=1 on the cold-boot control. That is
+inside the documented pre-existing copper flap (`ET2-COPPER-LINK.md`; the docs' own three-boot
+series shows `0x8c0`, `0x815`, `0x8c0`), and the parser cannot affect SerDes training, which is
+EPL's job and untouched here. It is not attributed to our parser — but it is not cleanly ruled out
+either, because the two runs differed in more than one variable.
+
+**So: the program is real, resident and non-fatal. Whether it parses correctly is still unknown.**
+That needs a cold boot from an image built without `fm6000_parserinit`, since the RAM rootfs
+discards `chmod` on reboot.
+
 ## Reproducing
 
 ```
