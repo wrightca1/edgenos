@@ -493,7 +493,12 @@ def build_program():
         # Extracting the body would only matter for ARP-aware ACLs.
         rules.append(Rule(here, S_DONE_ARP, tag_depth=depth, isl=isl,
                           match_r=(PORT_STATE3_CPU if isl else PORT_STATE3_WIRE), match_halfword0=ET_ARP,
-                          set_flags=(FLAG_ISGLORT_NZ | hdr_offsets(1, 0)
+                          # ARP uses a different HdrOffsets value from IP --
+                          # EOS emits HdrOffsets[2] (L3=4) here, not [0] (L3=1),
+                          # and does not set ISGLORT_NZ on this path. Matched to
+                          # the reference rather than carried over from the IP
+                          # dispatch, which is where both errors came from.
+                          set_flags=(hdr_offsets(4, 0)
                                      | ((FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE1) if isl else 0)),
                           dest0=CH_ETHERTYPE, terminate=True,
                           note=f"ARP at depth {depth}"))
