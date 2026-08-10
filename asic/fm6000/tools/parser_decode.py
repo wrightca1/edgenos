@@ -143,10 +143,26 @@ def action_words(mem, slice_, entry):
 
 
 def ternary(key, keyinvert):
-    """Return (value, care) -- match iff (input & care) == value."""
-    must_one = key & ~keyinvert & 0xFFFFFFFFFFFFFFFF
-    must_zero = ~key & keyinvert & 0xFFFFFFFFFFFFFFFF
-    return must_one, (must_one | must_zero)
+    """Return (value, care, never) -- match iff (input & care) == value.
+
+    Four states per bit, not three. The fourth is real and EOS uses it:
+
+        Key=1 Inv=0   must be 1
+        Key=0 Inv=1   must be 0
+        Key=1 Inv=1   don't care
+        Key=0 Inv=0   NEVER MATCHES -- the entry can never fire
+
+    'never' was found by round-tripping, not by reading: gen_parser --verify
+    reproduced 2,114 of 2,117 entries and the 3 failures all had bit 0 clear in
+    both words. Collapsing that into don't-care loses the distinction and
+    re-encodes a permanently-disabled entry as a live one. Slice 1 entry 4 and
+    slice 3 entries 26 and 37 are disabled this way.
+    """
+    mask = 0xFFFFFFFFFFFFFFFF
+    must_one = key & ~keyinvert & mask
+    must_zero = ~key & keyinvert & mask
+    never = ~key & ~keyinvert & mask
+    return must_one, (must_one | must_zero), never
 
 
 def populated(words):
@@ -163,8 +179,8 @@ def decode_slice(mem, slice_):
             continue
         keyinvert = (w[1] << 32) | w[0]
         key = (w[3] << 32) | w[2]
-        value, care = ternary(key, keyinvert)
-        yield entry, key, keyinvert, value, care, action_words(mem, slice_, entry)
+        value, care, never = ternary(key, keyinvert)
+        yield entry, key, keyinvert, value, care, never, action_words(mem, slice_, entry)
 
 
 def action_value(words):
@@ -253,15 +269,15 @@ def main():
             if not rows:
                 continue
             total += len(rows)
-            avg = sum(bin(c).count("1") for *_, c, _ in rows) / len(rows)
-            names = sorted({n for *_, v, c, _ in rows for n in [describe(v, c)] if n})
+            avg = sum(bin(r[4]).count("1") for r in rows) / len(rows)
+            names = sorted({n for r in rows for n in [describe(r[3], r[4])] if n})
             print(f"  {s:>2}   {len(rows):>6}   {avg:>12.1f}  {', '.join(names)[:60]}")
         print(f"\ntotal populated entries: {total}")
 
     if args.ethertypes:
         found = collections.Counter()
         for s in range(NUM_SLICES):
-            for _, _, _, value, care, _ in decode_slice(mem, s):
+            for _, _, _, value, care, _, _ in decode_slice(mem, s):
                 for shift in (0, 16, 32, 48):
                     if (care >> shift) & 0xFFFF == 0xFFFF:
                         v = (value >> shift) & 0xFFFF
@@ -273,8 +289,10 @@ def main():
 
     if args.slice is not None:
         print(f"=== slice {args.slice} ===")
-        for entry, key, keyinvert, value, care, act in decode_slice(mem, args.slice):
+        for entry, key, keyinvert, value, care, never, act in decode_slice(mem, args.slice):
             note = describe(value, care)
+            if never:
+                note = (note + "; " if note else "") + f"DISABLED (never-match 0x{never:016x})"
             print(f"  entry {entry:>3}  key=0x{key:016x} inv=0x{keyinvert:016x}")
             print(f"             value=0x{value:016x} care=0x{care:016x}"
                   f"  ({bin(care).count('1')} bits){'  <- ' + note if note else ''}")
