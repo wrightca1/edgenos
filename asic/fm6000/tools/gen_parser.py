@@ -170,11 +170,12 @@ def self_test():
     except ValueError:
         pass
 
+    # Terminate is bit 105 per the register header (FM6000_PARSER_RAM_b_Terminate).
     w = encode_action({"Terminate": 1})
-    if w[3] >> (108 - 96) & 1 != 1:
-        fails.append("Terminate must land at bit 108")
+    if (w[3] >> (105 - 96)) & 1 != 1:
+        fails.append("Terminate must land at bit 105")
 
-    w = encode_action({"Halfword0Dest": 0x3F})
+    w = encode_action({"Halfword0Dest": 0x3F})  # bits 38-43
     off = ACTION_OFFSET["Halfword0Dest"][0]
     acc = w[0] | (w[1] << 32) | (w[2] << 64) | (w[3] << 96)
     if (acc >> off) & 0x3F != 0x3F:

@@ -54,77 +54,51 @@ ENTRIES_PER_SLICE = 128
 WORDS_PER_ENTRY = 4
 NUM_SLICES = 28
 
-# Action SRAM field list and widths, datasheet Table 5-3. Sums to 109 bits.
+# Action SRAM layout, taken from the FM6000 register header's PARSER_RAM field
+# definitions (FM6000_PARSER_RAM_l_/h_/b_*). AUTHORITATIVE -- these are exact bit
+# positions, not inference.
 #
-# ############################################################################
-# ⚠⚠ THE OFFSETS BELOW ARE WRONG. The field LIST and WIDTHS are datasheet
-# facts; the assumption that they are packed LSB-first in table order is NOT,
-# and it has been REFUTED. Do not trust action_render() output.
+# ⚠ HISTORY, kept because both wrong answers were arrived at honestly and the
+# second looked convincing:
 #
-# Refuted by datasheet Table 5-5 (Parser Fixed Mapping), which fixes in
-# hardware which FIELDS channel carries which header:
+#   1. Table 5-3's field order packed LSB-first from bit 0. WRONG. It put
+#      Halfword0Dest at 80, yielding channels {0,1,2,3,4,5,8,60,62} -- never
+#      the 5/6/7 and 12/13/14 that Table 5-5 fixes for DMAC and SMAC.
+#   2. Scanning offsets for a 6-bit field hitting those channels gave a unique
+#      hit at bit 45, with a compelling slice progression. ALSO WRONG -- 38 was
+#      in the candidate list too and was discarded for hitting 6 of 7 documented
+#      channels rather than 7 of 7.
 #
-#     FIELDS[5,6,7]    = L2_DMAC[15:0], [31:16], [47:32]
-#     FIELDS[12,13,14] = L2_SMAC
-#     FIELDS[15]       = L2_TYPE
+# The header says 38. The lesson is that a semantic scan over 2,117 samples can
+# produce a unique, plausible, wrong answer; only the register definition
+# settles it. Check the header BEFORE inferring a layout.
 #
-# Any real parser must write those channels. Under the LSB-first layout,
-# Halfword0Dest sits at bit 80 and yields {0,1,2,3,4,5,8,60,62} -- never 6, 7,
-# 12, 13 or 14, and 60/62 do not exist in a table that stops at 43.
-#
-# Scanning every offset for a 6-bit field that hits the documented channels
-# gives exactly ONE candidate, bit 45, and it is unambiguous:
-#
-#     ch7  L2_DMAC[47:32]  written in slices 1,3,5,6,7...
-#     ch6  L2_DMAC[31:16]  slices 2,4,7,8...
-#     ch5  L2_DMAC[15:0]   slices 6,8,9,10...
-#     ch14 L2_SMAC[47:32]  slices 7,8,9...
-#     ch15 L2_TYPE         slices 10,11,12...
-#
-# That is a parser walking an Ethernet header in wire order, deeper with each
-# slice. So Halfword0Dest is at bit 45 (see HALFWORD0_DEST_OFFSET), and the
-# whole LSB-first hypothesis falls with it.
-#
-# ⚠ WHY gen_parser --verify DID NOT CATCH THIS, which is the lesson worth
-# keeping: round-tripping decode->encode only proves the packing is SELF-
-# CONSISTENT. Shifted field boundaries re-encode to the identical bits and pass
-# perfectly. A round-trip validates an encoder, never an interpretation. Only an
-# external fact -- here Table 5-5 -- can do that.
-#
-# Consequently the earlier "every field lands inside its documented range"
-# corroboration was weak evidence and should not have been treated as
-# confirmation; several fields are narrow enough that a wrong offset still
-# yields plausible values.
-#
-# Halfword1Dest is NOT located. Bit 65 produces the right kind of pairing with
-# bit 45 -- (7,6), (13,12), (11,10), i.e. the two halves of one frame word --
-# but on only 2.2% of entries, which is not good enough to claim.
-#
-# TODO: re-derive the full layout against Table 5-3 field by field, anchored on
-# bit 45, before any generated parser is emitted.
-# ############################################################################
-ACTION_FIELDS = [
-    ("StateOp0", 2), ("StateOp1", 2), ("StateOp2", 2), ("StateOp3", 2),
-    ("StateValue0", 8), ("StateValue1", 8), ("StateValue2", 8), ("StateValue3", 8),
-    ("StateFrameRot", 2), ("SetFlags", 38),
-    ("Halfword0Dest", 6), ("Halfword1Dest", 6),
-    ("Halfword0Rot", 2), ("Halfword1Rot", 2),
-    ("Byte0Enable", 1), ("Byte1Enable", 1), ("Byte2Enable", 1), ("Byte3Enable", 1),
-    ("Halfword0Add", 1), ("Halfword1Add", 1),
-    ("ShiftNextSlice", 3), ("LegalPadding", 2),
-    ("TerminateAllowed", 1), ("Terminate", 1),
+# The header also resolves what the inference could not:
+#   Terminate IS used -- 344 entries, at bit 105 (not 108, and not unused)
+#   TerminateAllowed is bit 104 (518 entries)
+#   LegalPadding 102-103 is always 0, StateOp3 90-91 always 0
+#   the entry is 110 bits with bit 109 reserved
+ACTION_LAYOUT = [
+    ("SetFlags", 0, 37), ("Halfword0Dest", 38, 43), ("Halfword1Dest", 44, 49),
+    ("Halfword0Rot", 50, 51), ("Halfword1Rot", 52, 53),
+    ("Byte0Enable", 54, 54), ("Byte1Enable", 55, 55),
+    ("Byte2Enable", 56, 56), ("Byte3Enable", 57, 57),
+    ("Halfword0Add", 58, 58), ("Halfword1Add", 59, 59),
+    ("StateOp0", 60, 61), ("StateValue0", 62, 69),
+    ("StateOp1", 70, 71), ("StateValue1", 72, 79),
+    ("StateOp2", 80, 81), ("StateValue2", 82, 89),
+    ("StateOp3", 90, 91), ("StateValue3", 92, 99),
+    ("StateFrameRot", 100, 101), ("LegalPadding", 102, 103),
+    ("TerminateAllowed", 104, 104), ("Terminate", 105, 105),
+    ("ShiftNextSlice", 106, 108),
 ]
 
-ACTION_OFFSET = {}
-_p = 0
-for _n, _w in ACTION_FIELDS:
-    ACTION_OFFSET[_n] = (_p, _w)
-    _p += _w
-ACTION_WIDTH = _p
+ACTION_FIELDS = [(n, h - l + 1) for n, l, h in ACTION_LAYOUT]
+ACTION_OFFSET = {n: (l, h - l + 1) for n, l, h in ACTION_LAYOUT}
+ACTION_WIDTH = 110
 
-# The one action field located by external evidence rather than assumption:
-# datasheet Table 5-5's hardware-fixed channel map. See the block comment above.
-HALFWORD0_DEST_OFFSET = 45
+# From the register header, corroborated by Table 5-5's channel map.
+HALFWORD0_DEST_OFFSET = 38
 HALFWORD0_DEST_WIDTH = 6
 
 # Table 5-5 Parser Fixed Mapping -- which FIELDS channel carries which header.
@@ -254,13 +228,12 @@ def action_field(value, name):
 def action_render(value):
     """Render an action as the non-default fields only.
 
-    ⚠ Everything except the Halfword0Dest line is derived from the REFUTED
-    LSB-first offsets and is not to be trusted. See the block comment above.
+    All fields now come from the register header's exact bit positions.
     """
     if value is None:
         return "(unreadable)"
     ch = halfword0_dest(value)
-    trusted = f"[VERIFIED] Halfword0->FIELDS[{ch}] {FIELDS_CHANNEL.get(ch, '(generic)')}" if ch else ""
+    lead = f"Halfword0->FIELDS[{ch}] {FIELDS_CHANNEL.get(ch, '(generic)')}" if ch else ""
     out = []
     for n in range(4):
         op = action_field(value, f"StateOp{n}")
@@ -299,7 +272,7 @@ def action_render(value):
     if action_field(value, "Terminate"):
         out.append("TERMINATE")
     body = "; ".join(out) if out else "(no-op)"
-    return (trusted + " | UNTRUSTED: " + body) if trusted else ("UNTRUSTED: " + body)
+    return (lead + "; " + body) if lead else body
 
 
 def describe(value, care):

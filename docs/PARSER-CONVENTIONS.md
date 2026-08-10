@@ -61,31 +61,48 @@ hardware and documented. **Table 5-5, Parser Fixed Mapping:**
 So a generated parser does not have to guess where to put the DMAC. It has to put it in channels
 5/6/7 because the hardware reads it there.
 
-## ⚠⚠ CORRECTION: the earlier FIELDS map in this document was wrong
+## ⚠⚠ THE ACTION LAYOUT IS SETTLED — and both earlier answers here were wrong
 
-A previous revision reported only four channels written (0, 5, 15, 60) and flagged the discrepancy
-as unresolved. It is now resolved, and the resolution is that **the action field offsets were
-wrong**, not the byte-enable reading.
-
-Table 5-5 is what caught it. Any real parser must write channels 5/6/7 and 12/13/14 — under the
-old layout `Halfword0Dest` sat at bit 80 and produced `{0,1,2,3,4,5,8,60,62}`: never 6, 7, 12, 13
-or 14, and channels 60/62 do not exist in a table that stops at 43. Scanning every bit offset for a
-6-bit field that hits the documented channels yields exactly one candidate, **bit 45**, and it is
-unambiguous:
+The register header defines every PARSER_RAM field's exact bit position
+(`FM6000_PARSER_RAM_l_/h_/b_*`). That is authoritative and ends the guessing:
 
 ```
-ch7  L2_DMAC[47:32]  written in slices 1,3,5,6,7...
-ch6  L2_DMAC[31:16]  slices 2,4,7,8...
-ch5  L2_DMAC[15:0]   slices 6,8,9,10...
-ch14 L2_SMAC[47:32]  slices 7,8,9...
-ch15 L2_TYPE         slices 10,11,12...
+SetFlags       0-37    Byte0-3Enable   54-57   StateOp2/Value2   80-89
+Halfword0Dest 38-43    Halfword0/1Add  58-59   StateOp3/Value3   90-99
+Halfword1Dest 44-49    StateOp0/Value0 60-69   StateFrameRot   100-101
+Halfword0Rot  50-51    StateOp1/Value1 70-79   LegalPadding    102-103
+Halfword1Rot  52-53                            TerminateAllowed    104
+                                               Terminate           105
+                                               ShiftNextSlice  106-108
 ```
 
-That is an Ethernet header being walked in wire order, deeper with each slice. The corrected map
-also shows the parser writing L2_VID1/2, ISL_SGLORT/DGLORT, L3_LENGTH, L3_TTL/PROT and SIP/DIP —
-a far wider surface than the four channels previously reported.
+**Two wrong answers preceded it, and both were reached honestly:**
 
-### Why the round-trip test did not catch it
+1. *Table 5-3 order packed LSB-first.* Put `Halfword0Dest` at bit 80 → channels
+   `{0,1,2,3,4,5,8,60,62}`, never the 5/6/7 and 12/13/14 that Table 5-5 fixes for DMAC/SMAC, and
+   60/62 do not exist in a table stopping at 43. Refuted.
+2. *Scanning offsets for a 6-bit field hitting those channels.* Gave a unique hit at **bit 45**
+   with a compelling slice progression — DMAC high-to-low, then SMAC, then EtherType, deeper each
+   slice. **Also wrong.** Bit 38 was in the candidate list and was discarded for hitting 6 of 7
+   documented channels instead of 7 of 7.
+
+The lesson worth keeping: a semantic scan over 2,117 samples can produce a unique, plausible and
+wrong answer. Check the register header before inferring a layout.
+
+### What the authoritative layout shows
+
+| | |
+|---|---|
+| entries writing FIELDS | **1,455 of 2,117** (the broken layout said 131) |
+| `Terminate` | **used — 344 entries** (the broken layout said never) |
+| `TerminateAllowed` | 518 entries |
+| `LegalPadding`, `StateOp3` | always 0 |
+| channels written | all within the documented 0–43 range |
+
+Channels seen at `Halfword0Dest`: L2_DMAC[15:0] and [47:32], L2_SMAC[31:16], L2_TYPE, L3_TTL/PROT,
+L3_LENGTH, L3_FLOW, L3_SIP/DIP, L4_SRC, L2_VID1, ISL_SGLORT and the generic FIELD16 channels.
+
+### Why the round-trip test caught none of this
 
 `gen_parser --verify` reproduces all 2,117 entries bit-identically and still passes with the wrong
 offsets. **A decode→encode round-trip proves only that the packing is self-consistent.** Shifted
@@ -96,10 +113,8 @@ The earlier corroboration — "every field lands inside its documented range" �
 treated as confirmation. Several of these fields are narrow enough that a wrong offset still yields
 plausible-looking values.
 
-**Only `Halfword0Dest` (bit 45) is externally confirmed.** The rest of the Table 5-3 layout is
-unverified and `action_render()` marks its output UNTRUSTED. `Halfword1Dest` is not located: bit 65
-gives the right kind of pairing with bit 45 — `(7,6)`, `(13,12)`, `(11,10)`, the two halves of one
-frame word — but on only 2.2% of entries, which is not enough to claim.
+Both wrong layouts round-tripped 2,117/2,117 entries perfectly. The layout is now taken from the
+register header rather than inferred, so `action_render()` no longer marks anything untrusted.
 
 ## What is still needed before authoring
 
@@ -108,9 +123,9 @@ frame word — but on only 2.2% of entries, which is not enough to claim.
 | key split (state / frame) | **derived** |
 | entry state = `0x0` | **derived** |
 | state-machine shape per slice | **derived** (shape, not meaning) |
-| FIELDS channels written | **corrected** — see the correction above; `Halfword0Dest` is bit 45 |
-| which FIELDS channel carries which header | **SOLVED** — Table 5-5, fixed in hardware |
-| rest of the Table 5-3 action layout | **unverified** — offsets refuted, needs re-derivation |
+| FIELDS channels written | **solved** — 1,455 entries, all channels in range |
+| which FIELDS channel carries which header | **solved** — Table 5-5, fixed in hardware |
+| full action field layout | **solved** — exact bit positions from the register header |
 | *meaning* of each state value | not derived — which state means "seen one VLAN tag", etc. |
 | slice budget per protocol | not derived |
 
@@ -123,10 +138,12 @@ Table 5-5 and nothing more.
 
 What now gates authorship is narrower and more tractable:
 
-1. **Re-derive the Table 5-3 action layout**, anchored on the one offset external evidence fixes
-   (`Halfword0Dest` = bit 45). Without it we cannot emit correct actions at all.
-2. **The meaning of state values** — which state encodes "one VLAN tag seen", etc.
-3. **The MAPPER's configuration**, since it decides how FIELDS become the IDs L3AR matches on.
+1. **The meaning of state values** — which state encodes "one VLAN tag seen", etc. This is the
+   last parser-side unknown.
+2. **The MAPPER's configuration**, since it decides how FIELDS become the IDs L3AR matches on.
+
+Both the encoding and the output contract are now settled, so authoring a parser is no longer
+blocked on format questions.
 
 ## Reproducing
 
