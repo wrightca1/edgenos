@@ -207,6 +207,33 @@ What now gates authorship is narrower and more tractable:
 Both the encoding and the output contract are now settled, so authoring a parser is no longer
 blocked on format questions.
 
+## ★ Hardware validation (2026-08-09)
+
+The first piece of this work to meet silicon. `parser_program.py` generated a CAM entry, and it was
+written to the real FM6000 on the 7150 (`0000:02:00.0`) and read back:
+
+```
+slice 0, entry 127 (0x1001fc-0x1001ff)
+  baseline    00000000 00000000 00000000 00000000
+  written     7ffff7ff ffffffeb 7fff0800 ffff0014   <- gen_parser.encode_cam() output
+  read back   7ffff7ff ffffffeb 7fff0800 ffff0014   <- byte-identical
+  restored    00000000 00000000 00000000 00000000
+  PIN 0x1c021 0x00000208 before and after
+```
+
+Chosen for zero risk: entry 127 already read all-zero, which is the *never-match* encoding, and the
+written entry carried a never-match bit at 31 (outside its care mask) so it could not fire whatever
+the traffic. The slot was restored afterwards.
+
+**What this proves:** the `PARSER_CAM(slice, entry, word)` address arithmetic is right against real
+hardware, the `words[1:0]=KeyInvert / words[3:2]=Key` ordering is right, and our encoder's bit
+patterns survive a write/read round trip through the chip. None of that could be established by
+self-consistency, however many round-trips passed.
+
+**What it does not prove:** anything about behaviour. The entry was deliberately unable to match.
+Whether a generated parser actually parses is a different question needing L3 extraction, a cold
+boot, and a stock-replay control at the same cadence.
+
 ## Reproducing
 
 ```
