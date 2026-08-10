@@ -97,6 +97,27 @@ FLAG_L3_MCST = 1 << 17        # "derives from bit 40 of DMAC" -- the I/G bit
 FLAG_L3_BCST = 1 << 18        # DMAC == ff:ff:ff:ff:ff:ff
 FLAG_IPV6_HOPBYHOP = 1 << 22
 
+
+def hdr_offsets(l3_word, l4_word):
+    """HdrOffsets, Table 5-6 bits 31:24.
+
+    The datasheet hedges -- "MIGHT encode L3 and L4 header offsets (measured in
+    32-bit words)" and "a LIKELY encoding represents the L3 offset with
+    HdrOffsets[2:0] and the L4 offset with HdrOffsets[7:3]". EOS does use it
+    (bits 24, 26, 27, 28), so it is not decorative.
+
+    Its per-rule values cannot be read back directly, because SetFlags ORs into
+    FLAGS -- each rule contributes bits that accumulate along the path, so what
+    a single rule sets is a fragment, not the answer. We do not need to read
+    EOS's: our own geometry is known exactly, so the offsets are computed.
+
+    L3AR muxes these into ACTION_DATA so they can be annotated onto the egress
+    frame. That is an egress-editing feature, not a forwarding decision, so a
+    wrong value here should degrade annotation rather than break forwarding --
+    which is the only reason it is safe to compute rather than copy.
+    """
+    return ((l3_word & 0x7) | ((l4_word & 0x1F) << 3)) << 24
+
 ET_VLAN_C = 0x8100
 ET_VLAN_S = 0x88A8
 ET_IPV4 = 0x0800
@@ -294,7 +315,7 @@ def build_program():
         # read from the middle of the option area -- wrong, and silently so.
         rules.append(Rule(here, S_IP4_LEN, tag_depth=depth, match_halfword0=ET_IPV4,
                           match_halfword1=0x4500, match_halfword1_mask=0xFF00,
-                          set_flags=FLAG_IS_IPV4,
+                          set_flags=FLAG_IS_IPV4 | hdr_offsets(3 + depth, 8 + depth),
                           dest0=CH_ETHERTYPE, dest1=CH_L3_PRI,
                           note=f"IPv4 (ver/IHL=0x45) at depth {depth}; TOS -> L3_PRI"))
         # IPv4 WITH options: record the EtherType and stop rather than mis-parse.
@@ -309,10 +330,17 @@ def build_program():
         # ch16[15:12], which is the ">>4 rotation" its note calls for: rot=3
         # (BarrelShiftLeft by 12 == right by 4 in a 16-bit halfword).
         rules.append(Rule(here, S_IP6_FLOW, tag_depth=depth, match_halfword0=ET_IPV6,
-                          set_flags=FLAG_IS_IPV6,
+                          set_flags=FLAG_IS_IPV6 | hdr_offsets(3 + depth, 13 + depth),
                           dest0=CH_ETHERTYPE, dest1=CH_L3_PRI, rot1=3,
                           note=f"IPv6 at depth {depth}; TC/flow -> L3_PRI"))
+        # ARP. The body is deliberately NOT extracted, and that is a conclusion
+        # rather than an omission: Table 5-5 defines no ARP fields, so EOS's
+        # sender/target placement is a microcode choice into generic FIELD16
+        # channels, not a hardware contract. ARP works by being flooded
+        # (L3_Bcst) and punted to the CPU, both of which key on flags we do set.
+        # Extracting the body would only matter for ARP-aware ACLs.
         rules.append(Rule(here, S_DONE_ARP, tag_depth=depth, match_halfword0=ET_ARP,
+                          set_flags=hdr_offsets(3 + depth, 0),
                           dest0=CH_ETHERTYPE, terminate=True,
                           note=f"ARP at depth {depth}"))
         # Anything else: record the EtherType and stop.
