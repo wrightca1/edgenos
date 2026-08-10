@@ -54,6 +54,58 @@ ENTRIES_PER_SLICE = 128
 WORDS_PER_ENTRY = 4
 NUM_SLICES = 28
 
+# Action SRAM layout, datasheet Table 5-3, in table order packed LSB-first.
+# Sums to 109 bits and the entry is 128, so 19 bits are spare.
+#
+# The order is the datasheet's; that it is packed LSB-first is OUR finding, and
+# it is corroborated rather than assumed -- decoding all 2,117 entries under it
+# puts every field inside its documented range:
+#
+#   Halfword0Dest  {0,1,2,3,4,5,8,60,62}   valid 6-bit FIELDS channel indices
+#   Halfword1Dest  {0,1,15}
+#   ShiftNextSlice {0,4}                   documented 0..7
+#   LegalPadding   {0,1}                   documented 0..3
+#   StateFrameRot  {0,1,2,3}               exactly the full 2-bit range
+#   Byte0-3Enable  mostly 0000, then 0111 / 1111
+#
+# and no bit above 107 is ever set anywhere in the image.
+#
+# ⚠ Terminate (bit 108) is never set in EOS's program. That is not evidence the
+# layout is wrong -- it was briefly read that way here and the reading was
+# mistaken. The parser has 28 slices and can end by exhausting them, so a
+# forced terminate is simply unused. TerminateAllowed (bit 107) IS used, and
+# with a very regular shape: exactly 5 entries per slice for slices 3-14, then
+# exactly 2 for slices 15-20, none elsewhere.
+ACTION_FIELDS = [
+    ("StateOp0", 2), ("StateOp1", 2), ("StateOp2", 2), ("StateOp3", 2),
+    ("StateValue0", 8), ("StateValue1", 8), ("StateValue2", 8), ("StateValue3", 8),
+    ("StateFrameRot", 2), ("SetFlags", 38),
+    ("Halfword0Dest", 6), ("Halfword1Dest", 6),
+    ("Halfword0Rot", 2), ("Halfword1Rot", 2),
+    ("Byte0Enable", 1), ("Byte1Enable", 1), ("Byte2Enable", 1), ("Byte3Enable", 1),
+    ("Halfword0Add", 1), ("Halfword1Add", 1),
+    ("ShiftNextSlice", 3), ("LegalPadding", 2),
+    ("TerminateAllowed", 1), ("Terminate", 1),
+]
+
+ACTION_OFFSET = {}
+_p = 0
+for _n, _w in ACTION_FIELDS:
+    ACTION_OFFSET[_n] = (_p, _w)
+    _p += _w
+ACTION_WIDTH = _p
+
+# StateOpN encoding, Table 5-3. M = (N + StateFrameRot) % 4.
+STATE_OP = {
+    0: "STATE8 += ValueN",
+    1: "STATE8 := ValueN",
+    2: "STATE8 := FRAME_DATA[M] + ValueN",
+    3: "STATE8 := FRAME_DATA[M]*2 + ValueN",
+}
+
+# Fixed-function HEADER.FLAGS bits, Table 5-4.
+HEADER_FLAG = {37: "ChecksumError", 38: "IncompleteHeader", 39: "ParityError"}
+
 # EtherTypes worth naming when they turn up in a key. Ours, for reporting only.
 ETHERTYPE = {
     0x0800: "IPv4", 0x0806: "ARP", 0x86dd: "IPv6", 0x8100: "VLAN C-tag",
@@ -115,6 +167,62 @@ def decode_slice(mem, slice_):
         yield entry, key, keyinvert, value, care, action_words(mem, slice_, entry)
 
 
+def action_value(words):
+    """Pack the 4 action words into one 128-bit integer, or None."""
+    if any(w is None for w in words):
+        return None
+    return words[0] | (words[1] << 32) | (words[2] << 64) | (words[3] << 96)
+
+
+def action_field(value, name):
+    off, width = ACTION_OFFSET[name]
+    return (value >> off) & ((1 << width) - 1)
+
+
+def action_render(value):
+    """Render an action as the non-default fields only."""
+    if value is None:
+        return "(unreadable)"
+    out = []
+    for n in range(4):
+        op = action_field(value, f"StateOp{n}")
+        val = action_field(value, f"StateValue{n}")
+        if op or val:
+            out.append(f"State{n}: {STATE_OP[op].replace('ValueN', f'0x{val:02x}').replace('N', str(n))}")
+    rot = action_field(value, "StateFrameRot")
+    if rot:
+        out.append(f"StateFrameRot={rot}")
+    flags = action_field(value, "SetFlags")
+    if flags:
+        named = [HEADER_FLAG[b] for b in HEADER_FLAG if (flags >> b) & 1]
+        out.append(f"SetFlags=0x{flags:010x}" + (f" ({', '.join(named)})" if named else ""))
+    for half in (0, 1):
+        dest = action_field(value, f"Halfword{half}Dest")
+        rot = action_field(value, f"Halfword{half}Rot")
+        add = action_field(value, f"Halfword{half}Add")
+        if dest or rot or add:
+            bits = f"Halfword{half}->FIELDS[{dest}]"
+            if rot:
+                bits += f" rot{rot}"
+            if add:
+                bits += " +CHECKSUM"
+            out.append(bits)
+    en = "".join(str(action_field(value, f"Byte{i}Enable")) for i in range(4))
+    if en != "0000":
+        out.append(f"ByteEnable={en}")
+    shift = action_field(value, "ShiftNextSlice")
+    if shift:
+        out.append(f"ShiftNextSlice={shift}")
+    pad = action_field(value, "LegalPadding")
+    if pad:
+        out.append(f"LegalPadding={pad}")
+    if action_field(value, "TerminateAllowed"):
+        out.append("TerminateAllowed")
+    if action_field(value, "Terminate"):
+        out.append("TERMINATE")
+    return "; ".join(out) if out else "(no-op)"
+
+
 def describe(value, care):
     """Name any exactly-matched 16-bit EtherType-shaped field in the low word."""
     hits = []
@@ -170,9 +278,7 @@ def main():
             print(f"  entry {entry:>3}  key=0x{key:016x} inv=0x{keyinvert:016x}")
             print(f"             value=0x{value:016x} care=0x{care:016x}"
                   f"  ({bin(care).count('1')} bits){'  <- ' + note if note else ''}")
-            if any(a is not None for a in act):
-                print("             action=" + " ".join(
-                    f"0x{a:08x}" if a is not None else "----" for a in act))
+            print(f"             action: {action_render(action_value(act))}")
 
 
 if __name__ == "__main__":
