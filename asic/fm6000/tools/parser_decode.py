@@ -286,6 +286,82 @@ def describe(value, care):
     return ", ".join(hits)
 
 
+def next_state(cur, frame, frame_care, action):
+    """Apply StateOp0..3 to a state. Returns (next_state, determinable).
+
+    Table 5-3: for N in 0..3, M = (N + StateFrameRot) % 4 and
+
+        op0  STATE8[N] += StateValueN
+        op1  STATE8[N] := StateValueN
+        op2  STATE8[N] := FRAME_DATA[M] + StateValueN
+        op3  STATE8[N] := FRAME_DATA[M]*2 + StateValueN     (all mod 256)
+
+    ops 2 and 3 read frame data, so the result is only determinable when the
+    rule's care mask pins that byte. Undeterminable transitions are dropped
+    rather than guessed, which is why a trace reaches fewer states than exist.
+    """
+    rot = action_field(action, "StateFrameRot")
+    out, ok = 0, True
+    for n in range(4):
+        op = action_field(action, f"StateOp{n}")
+        val = action_field(action, f"StateValue{n}")
+        cur_byte = (cur >> (8 * n)) & 0xFF
+        m = (n + rot) % 4
+        fb = (frame >> (8 * m)) & 0xFF
+        fc = (frame_care >> (8 * m)) & 0xFF
+        if op == 0:
+            nb = (cur_byte + val) & 0xFF
+        elif op == 1:
+            nb = val
+        else:
+            if fc != 0xFF:
+                ok, nb = False, 0
+            else:
+                nb = ((fb * (2 if op == 3 else 1)) + val) & 0xFF
+        out |= nb << (8 * n)
+    return out, ok
+
+
+def trace_states(mem):
+    """Walk the parser from state 0, slice 0. Returns (edges, labels, states)."""
+    rules = []
+    for s in range(NUM_SLICES):
+        for entry, key, inv, value, care, never, act in decode_slice(mem, s):
+            a = action_value(act)
+            if a is None or never:
+                continue
+            rules.append((s, value, care, a))
+
+    edges = collections.defaultdict(set)
+    labels = {}
+    frontier, seen = {0}, {0}
+    for s in range(NUM_SLICES):
+        nxt = set()
+        for st in frontier:
+            for rs, value, care, a in rules:
+                if rs != s:
+                    continue
+                sc = (care >> 32) & 0xFFFFFFFF
+                if (st & sc) != ((value >> 32) & 0xFFFFFFFF):
+                    continue
+                fv, fc = value & 0xFFFFFFFF, care & 0xFFFFFFFF
+                ns, ok = next_state(st, fv, fc, a)
+                if not ok:
+                    continue
+                edges[(s, st)].add((s + 1, ns))
+                for shift in (0, 16):
+                    if (fc >> shift) & 0xFFFF == 0xFFFF:
+                        et = (fv >> shift) & 0xFFFF
+                        if et in ETHERTYPE:
+                            labels[((s, st), (s + 1, ns))] = ETHERTYPE[et]
+                nxt.add(ns)
+        frontier = nxt
+        seen |= nxt
+        if not frontier:
+            break
+    return edges, labels, seen
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -293,6 +369,8 @@ def main():
     ap.add_argument("--slice", type=int, help="dump one slice in full")
     ap.add_argument("--summary", action="store_true", help="per-slice entry counts")
     ap.add_argument("--ethertypes", action="store_true", help="protocol set recovered from keys")
+    ap.add_argument("--states", action="store_true",
+                    help="trace the state machine from state 0 and label protocol transitions")
     args = ap.parse_args()
 
     mem = load(args.image)
@@ -322,6 +400,15 @@ def main():
         print("protocol set matched by the parser TCAM:")
         for (v, name), n in sorted(found.items(), key=lambda t: -t[1]):
             print(f"  0x{v:04x}  {name:<16} {n:>4} entries")
+
+    if args.states:
+        edges, labels, seen = trace_states(mem)
+        print(f"states reachable by deterministic trace: {len(seen)}")
+        print(f"transitions: {sum(len(v) for v in edges.values())}")
+        print("\nSTATE8[0] is the primary state -- every rule constrains it.")
+        print("labelled transitions (exact EtherType match):")
+        for (a, b), lab in sorted(labels.items()):
+            print(f"  slice{a[0]:>2} 0x{a[1]:08x} --{lab}--> slice{b[0]:>2} 0x{b[1]:08x}")
 
     if args.slice is not None:
         print(f"=== slice {args.slice} ===")

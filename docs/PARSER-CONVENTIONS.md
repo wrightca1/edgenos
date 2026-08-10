@@ -27,6 +27,38 @@ Care masks bear the split out. On the **state** half the dominant mask is `0x000
 describes. On the **frame** half the dominant mask is `0x00000000` (1,265 entries): **most rules
 do not look at frame data at all** and are pure state transitions.
 
+## ★ The state machine, traced
+
+`parser_decode.py --states` walks the machine from state 0 at slice 0, applying each rule's
+StateOp0..3 to compute the next state. Transitions whose result depends on frame bytes the rule
+does not pin (`StateOp` 2 and 3 read FRAME_DATA) are **dropped rather than guessed**, so a trace
+reaches fewer states than exist — 26 states and 137 transitions, against 60–79 states per slice
+in the raw match data. What it recovers is exact; it is simply partial.
+
+### The four state bytes have distinct roles
+
+| byte | rules constraining it | distinct values | reading |
+|---|---:|---:|---|
+| **STATE8[0]** | **2,114 (100%)** | 63 | the primary parse state — every single rule keys on it |
+| STATE8[1] | 533 (25%) | 15 | auxiliary context |
+| STATE8[2] | 679 (32%) | 12 | auxiliary context |
+| STATE8[3] | 1,016 (48%) | 14 | auxiliary context / flags |
+
+That every rule constrains `STATE8[0]` and only some constrain the rest is the structural fact a
+generated program has to respect: byte 0 is the state variable, bytes 1–3 qualify it.
+
+### Protocol transitions are visible
+
+Tag stacking reads out directly, e.g.
+
+```
+slice3 0x00007f10 --VLAN C-tag--> slice4 0x0000f110 --VLAN C-tag--> slice5 0x0000f1ff
+```
+
+with `STATE8[1]` carrying the tag-depth context (`0x7f` → `0xf1` → …) while `STATE8[0]` stays
+`0x10`. Assigning a human meaning to each of the 63 `STATE8[0]` values is not done, and is the
+remaining parser-side gap.
+
 ## The state machine is legible
 
 Distinct state values matched, per slice:
