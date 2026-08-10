@@ -486,12 +486,80 @@ def check(placed):
     return problems
 
 
+PROGRAM_LO = PARSER_BASE                       # 0x100000
+PROGRAM_HI = PARSER_BASE + SLICE_STRIDE * NUM_SLICES   # 0x107000, exclusive
+
+
+def splice(replay_path, out_path):
+    """Replace a replay's entire parser program with ours.
+
+    ⚠ ALL of EOS's parser program must go, not merely the addresses we happen
+    to write. Their rules match THEIR state encoding, ours match ours, and both
+    would be live in the same CAM: EOS's slice-0 rules key on state 0x00 exactly
+    as ours do, and with last-match-wins whichever sits at the higher index
+    takes the frame. Removing only our own addresses would leave a parser that
+    is half theirs and half ours, which is worse than either.
+
+    Placement follows gen_list_early: our writes go where the parser block's
+    FIRST recorded write was, not at the end of the loop. The boot script's own
+    comment records why -- PARSER/L2AR/MOD/MAPPER are written early, before port
+    bring-up depends on them, and moving them late gave routes=2 and rx=0 while
+    looking fine.
+
+    PARSER_INIT_STATE (0x108000) and PARSER_INIT_FIELDS (0x108200) are left
+    alone: they are all zeros in EOS's image, every port starts at state 0,
+    which is what our program assumes.
+    """
+    lines = []
+    with open(replay_path) as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            lines.append((int(parts[0], 16), int(parts[1], 16)))
+
+    first = None
+    for i, (addr, _) in enumerate(lines):
+        if PROGRAM_LO <= addr < PROGRAM_HI:
+            first = i
+            break
+    if first is None:
+        sys.exit(f"{replay_path}: no parser writes found in "
+                 f"0x{PROGRAM_LO:06x}-0x{PROGRAM_HI - 1:06x}")
+
+    ours = writes(place(build_program()))
+    kept = [(a, v) for a, v in lines if not (PROGRAM_LO <= a < PROGRAM_HI)]
+    head = [(a, v) for a, v in lines[:first] if not (PROGRAM_LO <= a < PROGRAM_HI)]
+    tail = [(a, v) for a, v in lines[first:] if not (PROGRAM_LO <= a < PROGRAM_HI)]
+
+    with open(out_path, "w") as fh:
+        for a, v in head:
+            fh.write(f"{a:08x} {v:08x}\n")
+        for a, v in ours:
+            fh.write(f"{a:08x} {v:08x}\n")
+        for a, v in tail:
+            fh.write(f"{a:08x} {v:08x}\n")
+
+    removed = len(lines) - len(kept)
+    print(f"replay in:   {len(lines)} writes")
+    print(f"  EOS parser writes removed: {removed}")
+    print(f"  our parser writes added:   {len(ours)}")
+    print(f"  spliced at line {first} (the block's first recorded write)")
+    print(f"replay out:  {len(kept) + len(ours)} writes  -> {out_path}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--emit", action="store_true", help="print <addr> <value> writes")
     ap.add_argument("--check", action="store_true", help="structural validation")
     ap.add_argument("--summary", action="store_true", help="what the program does")
+    ap.add_argument("--addresses", action="store_true",
+                    help="print the addresses this program writes (like a generator's -a)")
+    ap.add_argument("--splice", metavar="REPLAY",
+                    help="replace REPLAY's parser program with ours")
+    ap.add_argument("--out", metavar="FILE", help="output file for --splice")
     args = ap.parse_args()
 
     rules = build_program()
@@ -526,11 +594,20 @@ def main():
         print("check " + ("PASS" if not problems else "FAIL"))
         return 1 if problems else 0
 
+    if args.addresses:
+        for addr, _ in writes(placed):
+            print(f"{addr:08x}")
+
+    if args.splice:
+        if not args.out:
+            sys.exit("--splice needs --out")
+        return splice(args.splice, args.out)
+
     if args.emit:
         for addr, val in writes(placed):
             print(f"{addr:08x} {val:08x}")
 
-    if not (args.emit or args.check or args.summary):
+    if not (args.emit or args.check or args.summary or args.addresses or args.splice):
         ap.print_help()
     return 0
 
