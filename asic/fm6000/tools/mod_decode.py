@@ -12,9 +12,23 @@ header, not inferred -- the fourth time that route has been the fast one.
     MOD_VALUE_RAM(profile, step, word) = 0x150000 + 0x9400 + 0x40*profile + 2*step
         Val{A,B,C,D}_Constant (8 bits each), Val{A,B,C,D}_DataSelect (5) + Type (3)
 
-So a MOD "routine" is a profile: up to 32 steps, each a CAM match plus a command
-and four operands. That matches the "~50 small egress-edit routines" the earlier
-docs describe from write-count analysis alone.
+★ THE 32 CAM SLICES HAVE FIXED ROLES -- they are not interchangeable profiles.
+Datasheet 5.21.4:
+
+    slices 0..15   one command each        -> MOD_COMMAND_RAM[0..15]
+    slice  16      commands 16..20         -> MOD_COMMAND_RAM[16..19]
+    slices 17..30  egress data 0..56       -> MOD_VALUE_RAM[0..13]
+    slice  31      stats data 0..3         -> MOD_VALUE_RAM[14]
+
+This tool calls the first index "profile" for continuity with the addressing,
+but a generator MUST respect the roles: emitting a command into a data slice, or
+data into a command slice, produces a table that decodes cleanly and does the
+wrong thing. The earlier "~50 small egress-edit routines" reading was write-count
+analysis and did not see this structure at all.
+
+⚠ Table 5-94 gives MOD_FLAGS as bits 47:23, which overlaps L2_VLAN2_TX_Tagged at
+bit 23. The register header says 24:47 and is authoritative; the datasheet has a
+typo. Same class of defect as Table 5-5's duplicated L3_SIP/L3_DIP rows.
 
 ★ ADDRESS CORRECTION. Earlier work in this repo placed L3AR at 0x158000-0x159fff
 and called 0x010000 "unnamed". Both wrong: FM6000_L3AR_BASE is 0x10000, and
@@ -81,11 +95,45 @@ def command(mem, p, s):
     return mem.get(MOD_BASE + CMD_OFF + 0x20 * p + s)
 
 
-def value(mem, p, s):
-    w = [mem.get(MOD_BASE + VAL_OFF + 0x40 * p + 2 * s + i) for i in range(2)]
+def value_bank(cam_slice):
+    """MOD_VALUE_RAM bank for a CAM slice, or None if the slice carries no data.
+
+    ⚠ The bank index is NOT the CAM slice index. Datasheet 5.21.4: data slices
+    17..30 use MOD_VALUE_RAM[0..13] and slice 31 uses [14]. Pairing them by the
+    same index -- as the first version of this file did -- reports every data
+    slice as having no value words, and every command slice as owning value
+    words that belong to a data slice 17 places away.
+
+    The --verify round-trip passed throughout, because it encodes and decodes raw
+    words and never checks which CAM step a word belongs to. Third time this
+    session a check has passed on something wrong by testing the wrong invariant.
+    """
+    if 17 <= cam_slice <= 30:
+        return cam_slice - 17
+    if cam_slice == 31:
+        return 14
+    return None
+
+
+def value(mem, p, s, raw_bank=False):
+    """Value words for CAM slice p, step s. raw_bank=True indexes banks directly."""
+    bank = p if raw_bank else value_bank(p)
+    if bank is None:
+        return None
+    w = [mem.get(MOD_BASE + VAL_OFF + 0x40 * bank + 2 * s + i) for i in range(2)]
     if any(x is None for x in w):
         return None
     return w[0] | (w[1] << 32)
+
+
+def command_bank(cam_slice):
+    """MOD_COMMAND_RAM bank(s) for a CAM slice. Slices 0..15 map 1:1; slice 16
+    drives banks 16..19; data slices carry no command."""
+    if cam_slice <= 15:
+        return [cam_slice]
+    if cam_slice == 16:
+        return [16, 17, 18, 19]
+    return []
 
 
 def fields(raw, layout):

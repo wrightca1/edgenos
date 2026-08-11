@@ -101,7 +101,7 @@ def verify(image):
                     cbad += 1
                     if len(failures) < 10:
                         failures.append(f"  CMD p{p} s{s}: 0x{raw:08x}")
-            v = value(mem, p, s)
+            v = value(mem, p, s, raw_bank=True)   # every bank, regardless of role
             if v is not None:
                 want = [v & 0xFFFFFFFF, (v >> 32) & 0xFFFFFFFF]
                 if encode_value(fields(v, VAL_LAYOUT)) == want:
