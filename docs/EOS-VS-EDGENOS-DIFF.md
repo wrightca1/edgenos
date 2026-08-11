@@ -73,8 +73,45 @@ specific:
 | `0xe3804` | `0x00002a00` | `0x00003b87` | lane-0 block |
 | `0xe3821` | `0x00402003` | `0xffc0c79a` | lane-0 block |
 
-Three bits in `EPL_CFG_A`/`EPL_CFG_B` are the most promising leads for the egress fault, and they
-are cheap to test: write EOS's values under EdgeNOS and see whether Et1 starts forwarding.
+### …and reading the field names killed that lead too, productively
+
+Before writing anything, look up what those bits are:
+
+```
+EPL_CFG_A bit 20      = Active_1        (EPL port 1 active)
+EPL_CFG_B bits 4-7    = Port1PcsSel     (PCS select for EPL port 1)
+EPL_IP                = interrupt pending — status, not config
+```
+
+EPL "port 1" is **lane 1**, which `fm6000_serdes_ports.h` maps to front-panel **port 3**. EOS has
+those bits set because the test host is plugged in; EdgeNOS does not because it never brought that
+lane up.
+
+`Active_0` and `Port0PcsSel` — the bits that govern **Et1**, lane 0 — are **identical on both
+sides.** So Et1's entire EPL configuration matches a working EOS system, and the forwarding fault
+is not in the EPL.
+
+The same check disposed of the eight lane-0 block differences: the header names them `LINK_IP`,
+`RX_SEQUENCE`, `MAC_CODE_ERROR_COUNTER`, `MAC_LINK_COUNTER`, `DISPARITY_ERROR_8B10B`,
+`SERDES_STATUS`, `SERDES_IP`, `LANE_DEBUG` — **every one a counter or status register.** Writing
+EOS's values into them would have "tested" nothing while looking like an experiment.
+
+★ **But the lead converts into the port-3 recipe.** Bringing up front-panel port 3 needs exactly:
+
+```
+EPL_CFG_A (0xe3b01)  |= 1<<20        Active_1
+EPL_CFG_B (0xe3b02)  Port1PcsSel = 0x3   (bits 4-7)
+```
+
+derived from a configuration that demonstrably works, rather than from `fm6000_serdes_enable`
+guesswork. That is what A4 and B1 need for transit traffic.
+
+### So where is the Et1 fault?
+
+By elimination the EPL is clean, the forwarding tables are 25/25 correct, and CM `0x114000` is zero
+on both. What remains from this diff is the **1,746 words of uninitialised memory** — the only
+measured, uncontaminated difference left. That is the next thing to test: zero those regions under
+EdgeNOS so they match EOS, and retest Et1.
 
 ## Result 4 — EOS has your test host's port up, and that is the port-3 reference
 
