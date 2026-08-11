@@ -120,12 +120,51 @@ So port 3 cannot be given its own portd as things stand. Supporting two CPU-atta
 portd extended to demultiplex one ring set across ports — presumably on the ISL tag's source
 GLORT, which is exactly what `PARSER_INIT_FIELDS[port]` stamps on ingress.
 
-### 3. Port 3's ingress reaches the CPU
+### 3. ⚠ RETRACTED: port 3's ingress does NOT reach the CPU
 
-The silver lining in that breakage: those 1,707 frames the et3 portd consumed were **real frames
-from the test host**, delivered by the ASIC to the CPU. Port 3's receive path therefore works end
-to end — link, MAC, parser, punt, DMA — not merely to the MAC as the `PORT_STATUS` measurement
-showed.
+I originally read the 1,707 frames the et3 portd consumed as proof that port 3's receive path
+worked end to end. **That was wrong, and it followed from finding (2).** The DMA rings are shared
+and *not demultiplexed by port*, so an et3 portd reads whatever is in the ring — which was Et1's
+traffic. The count proved the rings were being drained, not where the frames came from.
 
-That makes port 3 immediately usable as an **ingress** source for experiments, provided et1's
-portd is stopped first. Egress remains the open problem.
+Direct check with `fm6000_rxdump` and no portd running, while the test host transmitted: **every
+punted frame carries tag word 1 = `0x03ef`**, Et1's SGLORT. Nothing from port 3 is punted at all.
+
+What is established for port 3 is the MAC-level measurement only: `PORT_STATUS` bit 10 `Receiving`
+tracks the test host's transmission exactly (`0x8c0` idle, `0xcc0` transmitting, six samples each
+way). The MAC receives; the frames go no further, because port 41 is in no forwarding domain.
+
+## The punt frame format, decoded
+
+`fm6000_rxdump` with no portd competing shows the real layout — and it is simpler than portd
+assumes:
+
+```
+33 33 00 00 00 05 | 80 a2 35 81 ca b4 | 07 01  03 ef  00 01  ff ff | 86 dd ...
+DMAC (0..5)         SMAC (6..11)        F64 tag: 4 x 16-bit at 12    ethertype (20)
+```
+
+- **There is no receive prefix.** The frame starts at offset 0 every time. portd scans offsets
+  0..39 for a plausible ethertype because the framing was never characterised; it always finds 0.
+- The **F64 tag is inline at offset 12**, four 16-bit words, exactly where portd puts it on inject.
+- **Tag word 1 is the GLORT: source on RX, destination on TX.** Every punted frame from Et1 carries
+  `0x03ef`, which is precisely `PARSER_INIT_FIELDS[40] >> 16`. portd's TX tag is
+  `{0x0100, 0x03ef, 0xff00, 0x0000}` — same slot, opposite direction.
+- Word 0 varies with frame type (`0x0701` on IPv6/OSPF multicast, `0x0301` on MLD) — a flags or
+  priority field, not yet decoded.
+- Word 3 is `0xffff` on RX, `0x0000` on TX.
+
+**This is the demux key multi-port portd needs**: tag word 1 identifies the ingress port, provided
+each port has a distinct SGLORT.
+
+## ⚠ PARSER_INIT_FIELDS cannot be written after boot
+
+Giving port 41 a unique SGLORT is a single register write —
+`PARSER_INIT_FIELDS[41] = (0x03ed << 16) | 0x103` at `0x1082a4` — and **it does not stick**. The
+register still reads `0x00010103` immediately afterwards. `fm6000reg` writes work fine elsewhere
+(EPL_CFG_A/CFG_B took in this same session), so this is the parser tables specifically.
+
+That is phase 76/78's *writability is a boot state* again: the replay's `PARSER_INIT_FIELDS` writes
+land during fullseq, when the memory subsystem is writable, and post-boot writes do not. So port
+41's SGLORT has to be set **in the boot path** — in a generator or spliced into the replay — not
+interactively. That is a small, well-defined change and it is the next concrete step.
