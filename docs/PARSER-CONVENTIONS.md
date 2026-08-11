@@ -546,3 +546,46 @@ tags produced identical (absent) egress.
 This is a genuine gap in our parser rather than a misconfiguration, and it is well bounded: one
 rule at `S_ETYPE` under the CPU-port state, matching halfword0 bit 15, setting SetFlags bits 0 and
 3. EOS needs exactly one entry for it.
+
+
+## The full set of F64 frame types — there are exactly three
+
+Enumerating every EOS parser entry at slice 3 that constrains the tag halfword, with the full key
+rather than just `halfword0`:
+
+| entry | hw0 15:14 | hw1[11:0] | SetFlags | meaning |
+|---|---|---|---|---|
+| e27 | `1x` | — | `[0, 3]` | **SPECIAL delivery** + ISL_TYPE1 |
+| e28 | `0x` | — | `[3, 4, 6]` | ISL_TYPE1 + ISL_FTYPE0 + VLAN1_TAGGED |
+| e29 | `00` | `== 0` | `[3]` | ISL_TYPE1 only |
+
+All three require `state1` bit 0 and `state = 0x10` (the EtherType state) — that is what separates
+them from the ethertype dispatch sharing the same state, and it is why last-match-wins does not
+let them swallow ordinary IPv4.
+
+★ **Two bits, not one.** Bit 15 selects special delivery. **Bit 14 also matters**: e29 requires
+both top bits clear *and* `hw1[11:0] == 0` — a DGLORT whose low 12 bits are zero. It is the most
+specific of the three, which is how it wins over e28 for that case despite the overlap.
+
+So the tag's frame-type space is small and now fully enumerated: special, normal-tagged, and a
+bare ISL case with no destination in the low DGLORT bits.
+
+### What our injected frames actually hit
+
+`portd`/`txinline` send `word0 = 0x0100`, `word1 = 0xff00` or `0x03ed`:
+
+```
+hw0 bits 15:14 = 00     -> not e27
+hw1[11:0]      = 0xf00 / 0x3ed, non-zero  -> not e29
+                                          -> e28, SetFlags [3, 4, 6]
+```
+
+Every frame EdgeNOS injects lands on **e28, the ordinary tagged path** — never e27 and never e29.
+Setting `word0 = 0x8100` moves it to e27, which our parser can now express (added 2026-08-11), but
+that alone did not produce egress on an unconfigured port.
+
+### For the ethertype side, for completeness
+
+e3–e26 dispatch the untagged ethertypes at the same state: `0x0800` IPv4, `0x86dd` IPv6, `0x0806`
+ARP, `0x8100`/`0x88a8` VLAN (with tag-depth variants), `0x8808` PAUSE, `0x88f7` PTP, `0x8906` FCoE,
+`0x8926`, plus a `0xbeef` and `0xffff` case in other states.
