@@ -56,6 +56,13 @@ VAL_LAYOUT = [
     ("ValB_Constant", 16, 23), ("ValA_Constant", 24, 31),
     ("ValD_DataSelect", 32, 36), ("ValD_Type", 37, 39),
     ("ValC_DataSelect", 40, 44), ("ValC_Type", 45, 47),
+    # ⚠ These four were missing from the first transcription of the header,
+    # which stopped at bit 47. VALUE_RAM is a full 64 bits: every operand has a
+    # Constant, a DataSelect and a Type, and truncating after ValC silently
+    # dropped ValB's and ValA's selectors. mod_gen --verify caught it -- 262 of
+    # 329 VALUE_RAM words failed to round-trip.
+    ("ValB_DataSelect", 48, 52), ("ValB_Type", 53, 55),
+    ("ValA_DataSelect", 56, 60), ("ValA_Type", 61, 63),
 ]
 
 
