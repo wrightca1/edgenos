@@ -82,7 +82,41 @@ ARP resolved exactly once, immediately after the MAC was corrected, then lapsed 
 put suspicion on the peer's cache holding the random MAC. Waiting it out and flushing did not
 recover it.
 
-So the remaining fault is in **CPU→ASIC→wire egress**, not in the tables and not in the link. The
-untested link in that chain is whether frames portd hands to the ASIC actually reach the wire; the
-next diagnostic is the EPL TX counters for Et1, which distinguish "never transmitted" from
-"transmitted and ignored".
+So the remaining fault is in **CPU→ASIC→wire egress**, not in the tables and not in the link.
+
+## What the egress diagnosis established
+
+Frames are not being dropped on the way out, and the tables are almost entirely correct:
+
+- `CM_PORT_TX_DROP_COUNT` for port 40 (Et1) stays **0** across a ping — congestion management is
+  not discarding them. portd has handed the ASIC 400+ frames.
+- `GLORT_CAM` at `0x0e000` is programmed, EPL FIFO error status is clean, TX FIFO pointers cycle.
+- A 150-address audit of the replay against the live chip: **parser, L3AR, L2AR and FFU are 25/25
+  correct.** The replay applies cleanly to every forwarding table we care about.
+
+★ **But two memory classes do not accept plain MMIO writes, and the replay is plain MMIO.**
+
+| region | symptom |
+|---|---|
+| CM `0x113800`–`0x114500` | replay writes real values (`0x3fff`, `0x15f5`, `0xd6`); chip reads `0x00000000` |
+| MOD CAM | `want=0xffffffff got=0x0000ffff` — the upper 16 bits never land |
+
+The MOD pattern is a write-width problem, which is what `fm6000_wr128` exists for. The CM one is
+harder: re-running the **full** replay (373,345 ops, `PIN=ok`) left `0x114000` at zero, and
+`fm6000_cmfill` — written specifically to fill these "instead of via the (stuck) CRM" — reports its
+own readback failing:
+
+```
+CM_0x115000  @0x115000 x912  <- 0xffffffff ... done (readback[0]=0xffffffff)   <- takes
+CM_0x114000  @0x114000 x1280 <- 0x00003fff ... done (readback[0]=0x00000000)   <- REJECTS
+```
+
+Three of the four CM fills stick; `0x114000` refuses writes in the chip's current state. So that
+memory needs either the CRM Memory Set walk (`fm6000_crm`) or some enabling state that PROBE MODE
+never established. **Whether this is the cause of the forwarding failure is not established** — it
+is a real defect found while looking, not a confirmed root cause.
+
+## Getting the lab working again
+
+`boot-config` is already `SWI=flash:/EOS-4.16.8M.swi`, so **a plain reboot returns the box to EOS
+and to working forwarding.** Nothing here is destructive; the EdgeNOS state is entirely in RAM.
