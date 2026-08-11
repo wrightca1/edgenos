@@ -57,7 +57,18 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
       **`0x10000`**, 5 slices × 32 rules × 4 segments, 256-bit key matching Table 5-30; `RAM1`
       `0x11200`, `RAM2` `0x11400`. Validated — RAM words are 2× the declared rule counts on every
       slice (64/64/64/64/50 vs 32/32/32/32/25).
-- [ ] **A4. MOD generator.** One unknown left: the 8-bit `Command` packs an opcode **and** its
+- [ ] **A4. MOD generator — BLOCKED ON A CAPTURE PATH, not on analysis.** The command split has
+      five converging lines of evidence for `opcode[7:5]:operand[4:0]`, length = operand+1
+      (see `mod_decode.py`), but 3 opcode bits give 8 slots for 9 documented commands and EOS
+      never uses `0x60-0x7F`, so the data cannot choose between the remaining readings.
+      **Settling it needs to observe emitted bytes, and the 7150 currently has no egress capture
+      point:** one front port (et1), no tcpdump, peer `10.101.101.25` refuses SSH, no routed
+      destination answers. A binary ping pass/fail cannot discriminate — every wrong encoding
+      corrupts the frame, so "it broke" identifies nothing. Unblock by either (a) TX-mirror to
+      the CPU port, which needs the mirror table and therefore lands in A2, (b) a second
+      connected port, or (c) a capture host on the et1 segment. **Do not write the generator on
+      the strength of the five clues.**
+- [ ] ~~**A4-old. MOD generator.**~~ One unknown left: the 8-bit `Command` packs an opcode **and** its
       operand, and that split is not in the datasheet sections read. EOS uses 47 distinct values.
       Each command's required value-byte count is documented, which constrains the split — a step's
       value words must match its opcode's arity. Tractable without more archaeology.
