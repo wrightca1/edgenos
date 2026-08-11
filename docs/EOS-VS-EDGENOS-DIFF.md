@@ -249,6 +249,38 @@ MOD is the **egress** modifier, and the fault was egress-only:
 It also explains why ARP resolved *once*, immediately after the MAC was corrected, and then lapsed:
 whatever garbage MOD held happened to leave that one frame intact.
 
-⚠ **Not yet confirmed on hardware.** The fix is a two-number change and has not been booted. The
-test is: boot EdgeNOS, verify `0x153000` and `0x157000` read `0x00000000`, and see whether Et1
-forwards.
+## Tested on hardware: the fix is correct, and it did NOT restore forwarding
+
+Rebuilt the SWI with the corrected `fm6000_memfill` (unzip → gunzip/cpio the initrd → swap
+`usr/bin/fm6000_memfill` → repack, `zip -X -0`; EOS has zip/unzip/cpio/gzip so it can be done on
+the box) and booted it as `edgenos-memfix.swi`.
+
+Every predicted effect landed:
+
+| check | before | after |
+|---|---|---|
+| memfill total | 1,138,476 words | **1,146,668** — exactly +8,192 |
+| `0x153000`, `0x157000` | garbage | **`0x00000000`** |
+| reading MOD | **off-bused the chip** | safe, `PIN=0x208` throughout |
+| MOD vs EOS | 6,143 differing | **0 differing of 65,536** |
+
+MOD is now byte-identical to a working EOS system.
+
+**And Et1 still does not forward — 100% loss, ARP FAILED.**
+
+So the memfill gap was a real defect, is fixed, and was not the cause of the presenting symptom.
+Worth keeping separate: the fix is validated by measurement (the fill count, the zeros, the
+byte-exact match, the vanished off-bus hazard), not by the thing we were hoping it would cure.
+
+★ It also explains the off-bus hazard mechanically: uninitialised SRAM carries invalid ECC, so
+*reading* it faults the chip. That is why `memfill` is the "CRM **ECC**-fill", why the boot log
+says `SKIP MOD 0x150000-0x15ffff = the off-bus block`, and why a single `fm6000reg 0x153000`
+wedged the box earlier in this session. With the region filled, the same read is safe.
+
+## Still open
+
+Regions not yet diffed against EOS: **L2AR** (`0x120000`) and **FFU** (`0x300000`). The parser
+differs 25.7% but that is expected — ours is authored, not EOS's. The CM uninitialised regions
+remain, and still reject writes (phase 76's wall).
+
+The next move is the same method one more time: dump L2AR and FFU under both and diff.
