@@ -213,3 +213,68 @@ RX silently zero, no adjacency, and it looks precisely like a dataplane defect. 
 single consumer restored `routes=35, et1 rx=33`.
 
 So: **capture with `rxdump`, or run portd — not both in one boot.** Reboot between them.
+
+
+---
+
+## Port 41 now has a real SGLORT — done, and it changes nothing yet
+
+### What the replay actually does
+
+The replay **does** write `PARSER_INIT_FIELDS[41]`, nine times, ending at `0x00010103`. (An earlier
+note here said it never did; that was a `tail`-truncated grep, the same mistake that hid port 0
+from the `PARSER_INIT_STATE` scan. Both are corrected.)
+
+Reading the two ports side by side shows exactly what EOS does and does not do:
+
+```
+port 40 (Et1)   0 -> 0x00010000 -> 0x00010001 -> 0x03ef0001 -> 0x03ef0101
+port 41 (p3)    0 -> 0x00010000 -> 0x00010003 -> 0x00010103
+                                                 ^ never gets an SGLORT
+```
+
+EOS assigns `0x03ef` to Et1 because it configured that port up, and leaves port 41 on the default
+`0x0001` because it never did. Nothing is special about port 41 — it is simply unconfigured.
+
+### The change
+
+One line of the operator-supplied replay, at its final write for that register:
+
+```
+312646:  001082a4 00010103   ->   001082a4 03ed0103
+```
+
+Backed up as `/mnt/flash/fwd4-preport3.txt`. Verified across a reboot:
+
+```
+PARSER_INIT_FIELDS[41] = 0x03ed0103    (was 0x00010103)
+PARSER_INIT_FIELDS[40] = 0x03ef0101    (Et1, untouched)
+```
+
+This is the surgical option from the previous section — a single value, not the wholesale table
+move that `fm6000_tbl3init.c` records as a measured reliability regression. It also sidesteps the
+post-boot writability wall, because the write happens inside the replay where the memory is
+writable.
+
+### And it produces no new behaviour, as expected
+
+With port 3 enabled and the test host transmitting continuously:
+
+```
+lane1 PORT_STATUS = 0x00000cc0     Receiving — the MAC has the frames
+et1 capture, 40 frames            0 with the host's MAC, 0 with its payload pattern
+```
+
+So the SGLORT does what it says — it stamps an identity on frames ingressing port 41 — and that is
+all it does. **Punting is a separate decision**, made by the forwarding tables, and port 41 is in
+no VLAN or forwarding domain. This was stated in advance rather than discovered afterwards, and
+the measurement confirms it.
+
+What the change buys is that *when* port-3 frames do start reaching the CPU, they will be
+identifiable by tag word 1 = `0x03ed`, which is the demux key multi-port portd needs. It is a
+prerequisite that is now satisfied and verified, not a fix.
+
+### Next
+
+Port 41's VLAN/forwarding-domain membership. That is where the frames are being discarded, and it
+is the last thing between here and transit traffic.
