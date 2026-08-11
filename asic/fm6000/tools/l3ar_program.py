@@ -42,6 +42,29 @@ from l3ar_decode import (  # noqa: E402
 
 KEY_POS = {n: (lo, hi) for n, lo, hi in KEY_LAYOUT}
 
+# ★ THE 52-BIT ACTION_FLAGS MAP, datasheet Table 5-35. This is what makes the
+# rules authorable from intent instead of copied as bit patterns:
+#
+#   23:0    from HEADER_FLAGS; these BECOME MOD_FLAGS, so anything egress needs
+#           to do must be flagged here
+#   32:24   scratch, become FORWARD_FLAGS (scheduler fixed-function)
+#   33      StrictDestGlort
+#   35:34   PAUSE reception
+#   39:36   parser error status (39 ParityError, fixed pipeline-wide)
+#   51:40   set by fixed-function circuitry in the mapper, FFU or next-hop
+#
+# The action is  ACTION_FLAGS' = ACTION_FLAGS & Mask | Value  (datasheet 5.10.5),
+# rippling stage to stage -- so anything not overwritten survives.
+#
+# RAM1 carries bits 25:0 (Mask_LO/Set_LO), RAM2 bits 51:26 (Mask_HI/Set_HI).
+#
+# Read that way EOS's rules explain themselves:
+#   UnicastRoutingWithoutLoopbackSuppress sets Set_LO=0x4000 -- bit 14, inside
+#   the MOD_FLAGS range -- i.e. it tells the egress modifier to perform the
+#   routing edits (TTL decrement, MAC rewrite). That is the L3AR->MOD handoff.
+#   Loopback suppress is Set_HI bit 25 = ACTION_FLAGS bit 51, in the
+#   fixed-function range the mapper/FFU/next-hop stages own.
+#
 # Flag bits in the L3AR view of ACTION_FLAGS. Only the ones we act on are named;
 # the rest of the 52 are passed through by the mask.
 FLAG_BROADCAST = 12          # matched by EOS's SwitchBroadcast* rules
