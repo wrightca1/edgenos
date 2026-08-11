@@ -284,3 +284,61 @@ differs 25.7% but that is expected — ours is authored, not EOS's. The CM unini
 remain, and still reject writes (phase 76's wall).
 
 The next move is the same method one more time: dump L2AR and FFU under both and diff.
+
+
+---
+
+# Result 6 — the fault is not in ANY table, and here is the proof
+
+After closing every measured register difference, forwarding still failed. So instead of hunting
+more differences, run the decisive A/B: **apply EOS's complete stock replay to a live EdgeNOS
+chip** — EOS's parser, EOS's every table, 389,809 ops — and test.
+
+```
+DONE: 389809 ops, mmio=296086 sbus=31241 timeouts=0, PIN=0x00000208
+parser marker = 0xffffffff   (EOS's, not our 0x94ffffeb)
+PORT_STATUS   = 0x00000ec0   (healthy)
+ping          = 100% packet loss, ARP FAILED
+```
+
+**With EOS's entire forwarding configuration resident, the box still does not forward.** That
+eliminates, in one experiment, everything this session had been picking at one region at a time:
+
+- not our parser (25.7% different, and it does not matter)
+- not our L3AR, MOD, FFU or MAPPER generators
+- not the replay's content, spliced or stock
+- not the memfill gaps (real defects, fixed, and not the cause)
+- not the GLORT mapping: `PARSER_INIT_FIELDS[40] = 0x03ef0101`, and portd tags with `0x03ef`
+
+## Therefore: the fault is in the CPU→ASIC inject path
+
+That is the one part of the system the replay does not describe and EOS does not share. Under EOS
+the CPU path is EOS's own driver; under EdgeNOS it is `fm6000dma.ko` + `fm6000_portd` building an
+F64 ISL tag and pushing frames through the DMA rings.
+
+Everything observed fits that and nothing contradicts it:
+
+| observation | consistent with |
+|---|---|
+| peer's OSPF/ND arrive normally | **ingress** path is fine end to end |
+| our frames appear correct at the TAP | the kernel side is fine |
+| `CM_PORT_TX_DROP_COUNT` = 0 | nothing is discarding them inside the chip |
+| link healthy, `PORT_STATUS=0xec0` | the wire is fine |
+| EOS forwards on identical tables | the tables are fine |
+| nothing we send is ever answered | frames are not reaching the wire intact |
+
+## Where to look next
+
+`fm6000_portd.c` and `fm6000dma.ko`, not the tables:
+
+1. **The F64 tag.** portd inserts 8 bytes at offset 12; `PORTD_TXFCS=1` appends an FCS placeholder.
+   Both were correct in a previously-forwarding configuration, so compare a captured
+   portd→ASIC frame against the parser's expected CPU-port layout (`PARSER_INIT_STATE` 0x6b3f0000
+   for the CPU port vs 0x61c70000 for wire ports — see PARSER-CONVENTIONS.md).
+2. **The DMA rings.** `fpdma: rings up (tx=8 rx=64)`. RX demonstrably works; TX is unproven beyond
+   "portd counted it".
+3. **Egress scheduling for the CPU-injected GLORT**, which the replay configures for EOS's own
+   inject mechanism and may not match ours.
+
+⚠ Box left on EdgeNOS with EOS's stock replay applied over it — a deliberate test state, not a
+configuration anyone should keep. `boot-config` reads EOS, so a reboot returns a clean working lab.

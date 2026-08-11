@@ -158,6 +158,36 @@ static const struct { uint32_t base; int words; uint32_t val; const char *blk; }
  {0x006000,    192,0x00000000,"EACL"},
  {0x006100,    152,0x00000000,"EACL"},
  {0x014000,     76,0x00000000,"LBS"},
+ /* ⚠ MAPPER FILL GAPS — same defect class as the MOD runs above, found the same
+  * way. The MAPPER fill list is not contiguous: measured against a working EOS
+  * boot, 2,253 words inside 0x121000-0x124400 that EOS holds at 0x00000000 were
+  * covered by no fill run at all, and EdgeNOS held garbage in them. Every
+  * garbage run observed on hardware fell exactly inside one of these holes:
+  *
+  *   observed dirty            fill-list hole
+  *   0x123138-0x12313e         0x123130-0x12313f
+  *   0x123170-0x12317e         0x123170-0x12317f
+  *   0x1231ec-0x1231fe         0x1231e0-0x1231ff
+  *   0x123330-0x12333e         0x123330-0x12337f
+  *   0x1233e0-0x1233fe         0x1233e0-0x1233ff
+  *
+  * WHICH words come up dirty varies per boot, so every hole is filled, not only
+  * the ones seen dirty once. Runs are coalesced across short covered stretches:
+  * memfill runs BEFORE the replay (fullseq STEP3 vs STEP5), so re-zeroing a word
+  * the replay later writes is harmless.
+  *
+  * Derived from measurement — addresses EOS reads as zero and no fill run
+  * covered — not from the elided doc summary that produced the original holes. */
+ {0x123098,    232,0x00000000,"MAPPER(gap)"},
+ {0x1231e3,     29,0x00000000,"MAPPER(gap)"},
+ {0x123240,    320,0x00000000,"MAPPER(gap)"},
+ {0x1233e0,     64,0x00000000,"MAPPER(gap)"},
+ {0x123480,    896,0x00000000,"MAPPER(gap)"},
+ {0x123cd0,     48,0x00000000,"MAPPER(gap)"},
+ {0x123e04,    252,0x00000000,"MAPPER(gap)"},
+ {0x123f98,    104,0x00000000,"MAPPER(gap)"},
+ {0x124098,    488,0x00000000,"MAPPER(gap)"},
+ {0x124340,    192,0x00000000,"MAPPER(gap)"},
  {0x144000,   4096,0x00000000,"L2AR"},
  {0x010000,   2560,0x00000000,"L3AR"},
  {0x00e000,   1024,0x00000000,"GLORT"},
