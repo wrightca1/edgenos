@@ -85,7 +85,18 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
       - The **38-bit CAM key** is composed per slice by `SLICE_SCENARIO_CFG`: `ByteMux_0..3`
         (4×8 = 32 bits) + `Top4Mux` (6) = exactly 38. Sources are the parser's halfword channels
         — slices select `L3_SIP`, `L4_SRC`, `L3_LENGTH`, `L3_DIP`, which is what an ACL matches.
-      - ⚠ **Generator blocked on the same missing capture path as A4.** ByteMux 53/58/60 are not
+      - ⛔ **THE HARDWARE EXPERIMENT WAS RUN AND CANNOT WORK ON THIS BOX.** Attempted: program an
+        unused slice-2 CAM entry, match-all, `ActionData=0x10`, strobe `ATOMIC_APPLY` bit 0.
+        Writes land, `MASTER_VALID=0x3`, scenario decodes correctly, and L3AR rule 31 genuinely
+        matches `FFU_DATA_W8A` bit 4 — yet nothing observable changes, at entry 1000 or entry 100,
+        with or without L3AR rule 31's action zeroed. **The reason is topological: the 7150 has
+        one connected front port (et1), so no traffic transits it.** Every frame we can generate
+        terminates on the CPU, and CPU-terminated frames never exercise the FFU→L2AR/L3AR→MOD
+        forwarding decision. A second connected port (or transit traffic) is required — the same
+        prerequisite as A4, for the same underlying reason.
+      - Also learned: **`ffuFlagDropFrame` does not drop.** Its L3AR action is the baseline mask
+        with no set bits, on EOS's image and ours. The drop lives downstream in L2AR (A2).
+      - ⚠ Generator also blocked on naming ByteMux sources. ByteMux 53/58/60 are not
         parser channels — a scan of all 2,145 of EOS's parser actions shows it writes channels
         **0..42 only**. Two readings survive and the shipped configurations refute neither:
         (a) direct channel index into a 64-channel space where 44..63 come from another block,
@@ -199,6 +210,13 @@ a table must be tested against what it removes, not only against what it writes.
 *selects* them (`ByteMux` values come in pairs, one per byte of a halfword), and MOD *reads* them
 (`DataSelect` feeds two consecutive bytes). Naming a channel once names it everywhere — which is
 why `L3_SIP`/`L4_SRC` fell out of the FFU scenario config for free.
+
+**Run the control BEFORE the experiment, and let it fail loudly.** The FFU ByteMux test had a
+clean discriminating design — reading (a) predicts a match on `L3_SIP` bytes, reading (b) does
+not — and it would have produced a confident wrong answer. The trial's null result would have
+read as "reading (b) confirmed" when in fact the apparatus was inert. The control (match
+everything, same action) caught that in one run. A discriminating experiment is only
+discriminating if a positive result is reachable.
 
 **Ping is not useless — but it needs a control.** D5 makes ping fail for unrelated reasons, so a
 bare failure proves nothing. Alternating our program against EOS's in the same minute (A/B/C/A)
