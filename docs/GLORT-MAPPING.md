@@ -80,3 +80,44 @@ hard-coded `0x03ef`.
 — and a good first slice of it, because the tables are small, the CAM format is understood, and it
 is independently testable: program our own GLORT for Et1, send a tagged frame, confirm it still
 egresses on Et1.
+
+
+---
+
+## ⚠ 2026-08-11 CORRECTION: `GLORT_CAM` does not resolve `0x03ef`
+
+The model above — "GLORT_CAM at 0x0e000 … entry *i* matches GLORT block 0x30xx + i … one
+256-entry block per port, entirely predictable" — is **incomplete, and following it directly does
+not work.**
+
+Measured on a live chip with Et1 forwarding normally. `FM6000_GLORT_CAM` has **1024** entries (the
+header says so; an earlier scan of only 64 was the first mistake). Dumping all 1024:
+
+- 51 entries are non-zero
+- they cover `0x00xx` (e0, must0=0xff80), `0xffxx` (e1, e3), an exact `0x004c` (e4), and the
+  `0x30xx`–`0x5dxx` block series (e5+) exactly as the doc describes
+- **no entry matches `0x03ef` or `0x03ee`** — the GLORTs Et1 and Et2 actually use
+
+So the CAM is real and the block series is real, but the GLORTs that portd puts in the F64 tag are
+resolved by some other path. A CPU-injected frame carrying an ISL/F64 header egresses Et1 with
+DGLORT `0x03ef` while nothing in `GLORT_CAM` matches that value.
+
+**Tested, and it fails as predicted:** a second portd on `et3` with DGLORT `0x03ed` (adjacent to
+Et1's `0x03ef`, same nominal block) produced **no egress at all** — `tcpdump` on the test host
+captured nothing and its `rx_packets` counter never moved, while the switch-side TAP counted 18
+frames transmitted. Picking an unused GLORT near a working one is not sufficient.
+
+### What this means for owning the allocation
+
+The plan in "How to make it stable" above is still the right shape, but it is missing a step: find
+what actually maps an ISL DGLORT to a physical port for CPU-injected frames. Candidates worth
+checking in the header before any more experiments:
+
+- `FM6000_GLORT_DEST_TABLE` / DMask indirection via `GLORT_RAM.DMaskBaseIdx` (e0 → 1, e1 → 257,
+  e4 → 266 — these are indices into a destination-mask table, not port numbers)
+- the ISL/F64 tag's own DGLORT semantics, which may bypass the CAM by design
+- `PARSER_INIT_FIELDS[port]` logical id (`0x101` Et1, `0x102` Et2, `0x103` port 41) — a systematic
+  per-port number that the GLORT is *not*
+
+Until that is settled, port 3 cannot be used as a routed CPU-attached port. **Ingress on port 3
+already works** (see `PORT3-BRINGUP.md`) — it is only egress selection that is unresolved.
