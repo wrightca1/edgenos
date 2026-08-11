@@ -190,3 +190,65 @@ The next steps are concrete rather than speculative:
 **Provenance.** The dumps are register *state* read from hardware at runtime and are kept outside
 the tree, like `fwd4.txt`. What is recorded here are the addresses, the register names from the
 header, and the deltas — facts about the chip, not a copy of anyone's configuration.
+
+
+---
+
+# Result 5 — the actual root cause: two memfill runs were 4,096 words short
+
+The CM/EPL diff above narrowed things but did not close them. Extending the same method to the
+**forwarding tables** did, and it exposed a gap in my own earlier verification: I had checked
+EdgeNOS's tables against **the replay** (25/25 correct) and never against **EOS**. Those are not
+the same question — our generators can write valid-but-different values, and the replay does not
+cover everything.
+
+Dumped L3AR (`0x10000`), parser (`0x100000`) and MOD (`0x150000`), 147,456 words, under each OS:
+
+| region | differing |
+|---|---|
+| L3AR | **3** of 16,384 — our generator is right |
+| parser | 16,815 of 65,536 — expected, our parser is authored, not EOS's |
+| MOD | 6,143 of 65,536 — **and these are not by design** |
+
+The MOD differences are two clean runs with the uninitialised-memory signature:
+
+```
+0x153000-0x153ffe   3072 words   eos=0x00000000  edge=0xdedeed23
+0x157000-0x157ffe   3071 words   eos=0x00000000  edge=0x5210d2b4
+```
+
+Neither range is touched by the replay — **0 of 4096 addresses in each appear in `fwd4.txt`** — so
+nothing but a memory fill was ever going to initialise them. Every MOD region the replay *does*
+cover matched EOS exactly, 0 differing words.
+
+## The bug, in two numbers
+
+`asic/fm6000/fm6000_memfill.c`:
+
+```c
+{0x150000, 12288, 0x00000000, "MOD"},   /* 0x150000+12288 = 0x153000 */
+{0x154000, 12288, 0x00000000, "MOD"},   /* 0x154000+12288 = 0x157000 */
+```
+
+Both runs stop exactly one 4096-word bank early, leaving precisely the two ranges measured as
+garbage. The file's own header note says why: *"Two doc-elided runs (#71-88 L2AR, #108-112 MOD) are
+reconstructed from the doc's summary lines."* The MOD fills were reconstructed rather than read,
+and the reconstruction assumed 3 banks where the hardware has 4. Fixed to `16384`, which covers
+`0x150000-0x153fff` and `0x154000-0x157fff` exactly.
+
+## Why this explains everything we saw
+
+MOD is the **egress** modifier, and the fault was egress-only:
+
+- frames left the TAP correctly formed, with the right MACs and IPs
+- `CM_PORT_TX_DROP_COUNT` stayed 0 — nothing discarded them
+- ingress was perfect: the peer's OSPF hellos and ND arrived normally
+- the peer never answered, because what reached the wire had been mangled by a modifier running on
+  uninitialised SRAM
+
+It also explains why ARP resolved *once*, immediately after the MAC was corrected, and then lapsed:
+whatever garbage MOD held happened to leave that one frame intact.
+
+⚠ **Not yet confirmed on hardware.** The fix is a two-number change and has not been booted. The
+test is: boot EdgeNOS, verify `0x153000` and `0x157000` read `0x00000000`, and see whether Et1
+forwards.

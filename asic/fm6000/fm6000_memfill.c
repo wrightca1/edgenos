@@ -126,8 +126,25 @@ static const struct { uint32_t base; int words; uint32_t val; const char *blk; }
  {0x260000,  32768,0x00000000,"MCAST_POST"},
  {0x003000,    912,0x00000000,"MONITOR"},
  {0x003c00,   1024,0x00000000,"MONITOR"},
- {0x150000,  12288,0x00000000,"MOD"},
- {0x154000,  12288,0x00000000,"MOD"},
+ /* ⚠ THESE TWO WERE 12288 AND THAT LEFT 8,192 WORDS OF SRAM UNINITIALISED.
+  * 0x150000+12288 = 0x153000 and 0x154000+12288 = 0x157000, so the runs stopped
+  * exactly one 4096-word bank early and left 0x153000-0x153fff and
+  * 0x157000-0x157fff never filled. Measured against a working EOS boot: EOS
+  * reads 0x00000000 across all 8,192 of those words; EdgeNOS held garbage
+  * (0xdedeed23, 0x5210d2b4) in 6,143 of them. The replay does not cover them
+  * either -- 0 of 4096 addresses in each range appear in fwd4.txt -- so nothing
+  * else was going to initialise them.
+  *
+  * This is an EGRESS-only fault, which is exactly what we saw: frames left the
+  * TAP correctly formed, CM dropped none, ingress worked, and the peer never
+  * answered because MOD mangled what reached the wire. Every MOD region the
+  * replay DOES cover matched EOS exactly (0 differing words).
+  *
+  * These are the "#108-112 MOD" runs the header note flags as reconstructed from
+  * the doc's summary lines rather than read directly -- the reconstruction
+  * assumed 3 banks where the hardware has 4. */
+ {0x150000,  16384,0x00000000,"MOD"},
+ {0x154000,  16384,0x00000000,"MOD"},
  {0x15a000,   4096,0x00000000,"MOD(elided)"},
  {0x15b000,   4096,0x00000000,"MOD(elided)"},
  {0x15c000,   4096,0x00000000,"MOD(elided)"},
