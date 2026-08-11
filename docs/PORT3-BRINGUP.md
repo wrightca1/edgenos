@@ -168,3 +168,48 @@ That is phase 76/78's *writability is a boot state* again: the replay's `PARSER_
 land during fullseq, when the memory subsystem is writable, and post-boot writes do not. So port
 41's SGLORT has to be set **in the boot path** — in a generator or spliced into the replay — not
 interactively. That is a small, well-defined change and it is the next concrete step.
+
+
+---
+
+## Two constraints that shape the fix
+
+### `PARSER_INIT_FIELDS` cannot simply be moved into a generator — already tried, already backed out
+
+The obvious fix for "post-boot writes don't stick" is to have our own code write
+`PARSER_INIT_FIELDS` during boot, via the `gen_list` mechanism that already strips replay writes
+in favour of a generator. **That was tried and reverted on measured evidence.** From
+`fm6000_tbl3init.c`'s own header:
+
+> `PARSER_INIT_FIELDS` 970 writes. Passed its first boot 7/8 rounds clean, then a 3-boot soak gave
+> 2 clean and 1 at 90-100% loss. TBL3 alone soaks 3 of 3 clean, so this looks like a reliability
+> regression rather than variance.
+>
+> 970 writes is not worth degrading a platform that already fails 1 boot in 6.
+
+(`ESCHED_DRR_Q` was backed out the same way: OSPF up at 35 routes, RX alive, 100% ping loss on 8
+of 8 rounds, bisected to that register alone.)
+
+So "own the GLORT allocation" cannot be done by lifting this table wholesale. The options left are
+a **single-value edit** to the operator-supplied replay (one register, not a table move), or a
+targeted write **inside `fm6000-fullseq.sh`** immediately after STEP5, while the memory subsystem
+is still writable. The second is ours and does not touch the replay; both need an SWI rebuild.
+
+⚠ And note the SGLORT alone is **necessary but not sufficient**: port 41 is in no forwarding
+domain, so its frames are not punted at all. A unique SGLORT makes port-3 frames *identifiable* in
+the punt stream; it does not make them *appear* there.
+
+### One DMA-ring consumer per boot — and that includes `fm6000_rxdump`
+
+`edgenos-up.sh` warns that restarting portd wedges the rings. The same applies to **any** tool that
+opens them. Running `fm6000_rxdump` to capture the punt format and then starting portd via
+`edgenos-up.sh` produced exactly the documented symptom:
+
+```
+[up]  t=96s  kernel routes=2  et1 rx=0
+```
+
+RX silently zero, no adjacency, and it looks precisely like a dataplane defect. A reboot and a
+single consumer restored `routes=35, et1 rx=33`.
+
+So: **capture with `rxdump`, or run portd — not both in one boot.** Reboot between them.
