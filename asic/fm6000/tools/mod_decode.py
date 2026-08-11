@@ -87,11 +87,45 @@ them, the two edits routing requires. Every other command carries a flag saying
 whether it contributes to the checksum accumulator, which is cleared after a
 CHECKSUM or at end of frame.
 
-⚠ The 8-bit Command field encodes an opcode AND its operand (repeat count,
-length, or dybble mask); the split is not given in the sections read so far. EOS
-uses 47 distinct Command values, and each command's required value-byte count is
-documented above, which is a strong constraint for recovering the split: the
-number of value bytes a step supplies must match its opcode.
+⚠ THE COMMAND SPLIT: A HYPOTHESIS WITH EVIDENCE, NOT A SETTLED FACT.
+
+The 8-bit Command encodes an opcode AND its operand, and the split is in none of
+the sections read, nor in the register header (which defines Command[7:0] as one
+flat field), nor in the SDK Python (AltaLib.py / fm6000Hal.py are a high-level
+API -- decompiled, with uncompyle grammar tables still in them -- and contain no
+MOD opcodes). So it has to be inferred, and inference in this project has a bad
+record: six wrong guesses, each settled in minutes by an external fact.
+
+WORKING HYPOTHESIS -- Command = opcode[7:5] : operand[4:0], length/count =
+operand + 1. Evidence, from EOS's 302 valid steps and 47 distinct Command bytes:
+
+  1. 0x00-0x1F is densely populated -- 17 of the 32 values. SKIP is documented
+     with a repeat count of 1..32, which needs exactly 5 bits and no more.
+  2. EVERY value in 0x40-0x5F is odd. All thirteen: 41 43 45 47 49 4b 4d 53 55
+     57 59 5b 5f. With length = operand+1 that permits only EVEN lengths, which
+     is what MAC (6), VLAN tag (4) and ethertype (2) edits need.
+  3. Why even: the value slices show each DataSelect channel feeding TWO
+     consecutive bytes -- "A:t2/d23 B:t2/d23" -- so channel-sourced data arrives
+     as 2-byte halfwords, the same halfword channels the parser writes. Odd
+     lengths are not expressible from channel data at all.
+  4. Steps whose CAM requires MOD_FLAGS bit 14 -- our MOD_DO_ROUTE, the L3AR
+     handoff -- carry Command 0x05 and 0x85, operand 5 in both, i.e. length 6.
+     That is the MAC length.
+  5. And the value banks supply it: banks 3 and 4 write constants 0x11 0x22 0x33
+     0x44 0x55, a system MAC as literal bytes -- the SMAC rewrite a routed frame
+     needs. Type 1 = constant, Type 2 = data from channel.
+
+WHAT THIS DOES NOT ESTABLISH. Which opcode number is which command, beyond SKIP
+almost certainly being 0 and a REPLACE-family sitting at 2 and 4. And there is an
+unresolved tension: 3 opcode bits give 8 slots for 9 documented commands, so
+either one command is encoded differently, or the operand is 4 bits for some
+opcodes with bit 4 acting as a sub-opcode, or SKIP/DELETE share an opcode. EOS
+never uses 0x60-0x7F, so the evidence cannot distinguish these.
+
+THE DECISIVE TEST IS HARDWARE, and it is cheap now that the loop exists: program
+one MOD step with a candidate command, send a frame, and look at what comes out.
+That is what settled L3AR after --diff had been green and wrong. Do not write a
+MOD generator on the strength of the five points above.
 
 PROVENANCE. Reads the image at runtime, embeds nothing.
 
