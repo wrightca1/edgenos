@@ -86,3 +86,46 @@ Link is up; forwarding through it is not configured.
 `routes=34` is the reliable health metric here, not ping. Ping collapses to 100% loss on this box
 for unrelated reasons (checklist D5) — it did so during this very session while OSPF was converged
 with 34 routes and the FIB programmed. Do not read a ping failure as a forwarding failure.
+
+
+---
+
+## 2026-08-11, pulling the egress thread: three findings
+
+### 1. The DGLORT→DestMask path is not populated at all
+
+`GLORT_RAM.DMaskBaseIdx` indexes `FM6000_MCAST_DEST_TABLE` (`0x240000`, 4096 entries × 4 words,
+`DestMask[75:0]` — one bit per port, so bit 40 = Et1, bit 41 = port 3).
+
+Dumped all 4096 entries on a live chip with Et1 forwarding: **every word is zero.** No entry
+selects port 40, or any port. So the chain GLORT_CAM → GLORT_RAM.DMaskBaseIdx → MCAST_DEST_TABLE
+is not how a CPU-injected frame reaches Et1 — it cannot be, because the table is empty.
+
+Combined with the earlier result that no `GLORT_CAM` entry matches `0x03ef` at all, the conclusion
+is firm: **the ISL/F64 DGLORT does not resolve through the GLORT/DMask machinery.** Whatever
+carries a CPU-injected frame to its egress port is something else, and both of the obvious
+candidates are now eliminated by measurement rather than argument.
+
+### 2. portd instances share DMA rings — you cannot run two
+
+Running a second portd for `et3` alongside the `et1` one broke the dataplane: `routes` fell
+34 → 3 while the et3 instance consumed **1,707 frames**. Killing it restored `routes=35`
+immediately.
+
+`edgenos-up.sh` warns about this for a *second run of the script*; the same hazard applies to a
+second portd on a **different port**, because the rings are shared and **not demultiplexed by
+port**. The second instance simply steals frames the first one needed.
+
+So port 3 cannot be given its own portd as things stand. Supporting two CPU-attached ports needs
+portd extended to demultiplex one ring set across ports — presumably on the ISL tag's source
+GLORT, which is exactly what `PARSER_INIT_FIELDS[port]` stamps on ingress.
+
+### 3. Port 3's ingress reaches the CPU
+
+The silver lining in that breakage: those 1,707 frames the et3 portd consumed were **real frames
+from the test host**, delivered by the ASIC to the CPU. Port 3's receive path therefore works end
+to end — link, MAC, parser, punt, DMA — not merely to the MAC as the `PORT_STATUS` measurement
+showed.
+
+That makes port 3 immediately usable as an **ingress** source for experiments, provided et1's
+portd is stopped first. Egress remains the open problem.
