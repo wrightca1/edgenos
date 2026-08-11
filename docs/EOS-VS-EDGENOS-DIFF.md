@@ -106,12 +106,59 @@ EPL_CFG_B (0xe3b02)  Port1PcsSel = 0x3   (bits 4-7)
 derived from a configuration that demonstrably works, rather than from `fm6000_serdes_enable`
 guesswork. That is what A4 and B1 need for transit traffic.
 
-### So where is the Et1 fault?
+### So where is the Et1 fault? — and it lands on a wall already mapped
 
 By elimination the EPL is clean, the forwarding tables are 25/25 correct, and CM `0x114000` is zero
-on both. What remains from this diff is the **1,746 words of uninitialised memory** — the only
-measured, uncontaminated difference left. That is the next thing to test: zero those regions under
-EdgeNOS so they match EOS, and retest Et1.
+on both. What remained was the **1,746 words of uninitialised memory**. Tested it: generated a
+715-word zero-fill from the EOS reference, applied it under EdgeNOS, and the writes **did not
+stick** —
+
+```
+sample before: 0x111780=0xdb9954f2
+fmload: 715 writes
+sample after : 0x111780=0xdb9954f2      <- unchanged
+```
+
+★ **This is not a new problem. It is phase 76, rediscovered from the other end.**
+`arista-reverse-engineering/notes/analysis/phase76-cold75-crm-fill-still-offbuses-writability-is-boot-state.md`
+established it by disassembly:
+
+> bank writability is a boot-state, not the descriptor/clock … On the golden/EOS chip the CRM fill
+> WORKS. Our cold path never reaches that state. The difference is the part of `fm6000BootSwitch`
+> BEFORE the fills that makes the banked memory writable.
+
+That note also records that the CRM is *not* a bypass — a CRM write to a banked memory faults the
+same way a direct write does — and that there is no CRM engine setup step being missed. So every
+write failure hit today (`0x114000`, `0x111780`, the 715-word fill, `fm6000_cmfill`'s own readback)
+is one symptom of one known cause: **the banked memories are not writable in the state our boot
+leaves the chip in.**
+
+The new information this diff adds is *which* memories are affected and by how much — 1,746 words
+across `0x111780`-`0x111917`, `0x112942`-`0x112afb`, `0x112b42`-`0x112b8b` — and that EOS holds
+them at zero.
+
+### The practical consequence
+
+Our boot **cannot warm-inherit** EOS's initialised chip, because it resets it on the way past:
+
+```
+[FM6UP] COLD87 SOFT_RESET=0x00000000 CAM0=0x37a74ed0 (MSB released; loading full microcode)
+[FM6UP] COLD90 PROBE MODE: chip left ALIVE (microcode loaded, no CRM fill).
+```
+
+Rebooting EOS→EdgeNOS leaves the chip powered, so the memory subsystem *would* still be in EOS's
+writable state — but `COLD87` releases SOFT_RESET itself and the fills never run. Phase 76's option
+3 was "accept warm-inherit as the shipped path (it lets EOS run the full boot)", and that is
+exactly the path this boot forecloses.
+
+So the ranked options are unchanged from phase 76, and this session adds evidence for option 2:
+
+1. Disassemble `fm6000BootSwitch` end-to-end for the memory-subsystem enable before the fills.
+2. **Diff the memory-subsystem enable registers EOS-vs-cold** — which is precisely the method that
+   worked here, now pointed at BM/SRBM/SBus/JSS state instead of CM/EPL.
+3. Warm-inherit: skip `COLD87`'s SOFT_RESET so EdgeNOS keeps the chip state EOS established.
+
+Option 3 is a small change to the boot path and is testable in one reboot.
 
 ## Result 4 — EOS has your test host's port up, and that is the port-3 reference
 
