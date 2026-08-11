@@ -178,7 +178,22 @@ moves whenever that box reboots. Probe, do not trust the number.** `ttyUSB0` is 
 
 ---
 
-## Current blocker: EdgeNOS forwarding, and how it is being approached
+## 2026-08-11 status: forwarding restored, port 3 up
+
+**Forwarding was never broken** — the fault was a hand-reconstructed bring-up that omitted
+`ip link set et1 address`. `edgenos-up.sh` ships in the image at
+`/usr/lib/edgenos/platform/edgenos-up.sh` and does it correctly; run it, do not reconstruct it.
+Verified: OSPF adjacency in 8s, `routes=34`, hardware FIB sync programming 14 routes.
+
+**Front-panel port 3 is now up** (`PORT_STATUS` lane1 `0x15` → `0x8c0`, stable), brought up from
+EOS's captured lane-1 configuration — see `PORT3-BRINGUP.md`. That is the second connected port
+A4 and B1 have been waiting on.
+
+Two real defects were found and fixed on the way, by diffing the live chip against a working EOS
+boot: **MOD memfill** short by 8,192 words (MOD vs EOS: 6,143 differing → **0 of 65,536**) and
+**MAPPER memfill** holes totalling 2,253 words. Both cause intermittent boot-dependent failures.
+
+## Historical: the forwarding hunt, and how it was approached
 
 **2026-08-11.** After a reboot EdgeNOS came up with tables correct and link healthy but no
 forwarding. Long direct debugging (see `M1-BRINGUP-SEQUENCE.md`) narrowed it to CPU→ASIC→wire
