@@ -85,9 +85,13 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
       - The **38-bit CAM key** is composed per slice by `SLICE_SCENARIO_CFG`: `ByteMux_0..3`
         (4×8 = 32 bits) + `Top4Mux` (6) = exactly 38. Sources are the parser's halfword channels
         — slices select `L3_SIP`, `L4_SRC`, `L3_LENGTH`, `L3_DIP`, which is what an ACL matches.
-      - ⚠ Generator still needs: ByteMux values 53/58/60 are past the parser's 0..43 channel map,
-        so the source space is larger than the parser channels and is not yet fully named.
-        Muxes and key must be programmed together — reading either alone is meaningless.
+      - ⚠ **Generator blocked on the same missing capture path as A4.** ByteMux 53/58/60 are not
+        parser channels — a scan of all 2,145 of EOS's parser actions shows it writes channels
+        **0..42 only**. Two readings survive and the shipped configurations refute neither:
+        (a) direct channel index into a 64-channel space where 44..63 come from another block,
+        or (b) a byte address into the 32 halfword channels (`v//2`, byte `v%2`). Settling it
+        needs to observe which frame bytes affect a match. Muxes and key must be programmed
+        together — reading either alone is meaningless.
 - [ ] **B2. ~~Group 3~~** — closed. Those "unnamed" writes at `0x010000` are **L3AR**, so this
       completes with A3.
 - [ ] **B3. `MAPPER_SRC_PORT_TABLE`** (634 writes). Per-case, lowest priority.

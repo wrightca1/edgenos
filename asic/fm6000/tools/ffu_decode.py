@@ -156,10 +156,26 @@ def mux_name(v):
     (writes) -> FFU (selects) -> MOD (reads), and the named values fit: slices
     select L3_SIP, L4_SRC, L3_LENGTH, L3_DIP -- what an ACL matches on.
 
-    But ByteMux is 6 bits and EOS uses 53, 58 and 60, past the end of the
-    parser's 0..43 channel map. So the source space is strictly LARGER than the
-    parser channels, and this naming is corroboration, not proof. Anything above
-    43 is reported as unmapped rather than guessed at.
+    ⚠ AND IT IS NOT SETTLED. EOS uses ByteMux 53, 58 and 60, and a scan of all
+    2,145 of EOS's parser actions shows the parser writes channels 0..42 ONLY
+    (max destination 42, across both Halfword0Dest and Halfword1Dest). So those
+    three values cannot be parser channels, and two readings survive:
+
+      (a) DIRECT CHANNEL INDEX into a 64-channel space, where 44..63 are written
+          by some other block (mapper, next-hop, or FFU remap) rather than the
+          parser. Favoured by the pairing: [17,17] is then channel 17 feeding
+          both bytes of a halfword, exactly like MOD's "A:t2/d23 B:t2/d23".
+      (b) BYTE ADDRESS into the 32 halfword channels: value v -> channel v//2,
+          byte v%2. Then 53 -> ch26 byte1, 58 -> ch29 byte0, 60 -> ch30 byte0,
+          all of which the parser DOES write. Favoured by nothing else, and it
+          makes [17,17] select the same byte twice.
+
+    Neither reading is refuted by the configurations EOS ships: both explain
+    [32,32,32,32] as redundant, so that pattern discriminates nothing. Values
+    above 42 are reported unmapped rather than guessed at, and a generator must
+    not assume either reading. The decisive test is to program one scenario with
+    a known ByteMux and observe which frame bytes change the match -- hardware,
+    which is currently blocked on the same missing capture path as MOD (A4).
     """
     n = FIELDS_CHANNEL.get(v)
     return f"{v}={n}" if n else f"{v}=?"
