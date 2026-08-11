@@ -26,6 +26,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+#include <net/if_arp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +83,47 @@ static int tap_open(const char *name)
     snprintf(ifr.ifr_name, IFNAMSIZ, "%s", name);
     if (ioctl(fd, TUNSETIFF, &ifr) < 0) { perror("TUNSETIFF"); close(fd); return -1; }
     return fd;
+}
+
+/* ⚠⚠ THE MAC ARGUMENT USED TO BE ACCEPTED AND SILENTLY IGNORED, AND THAT COST A
+ * DAY. usage advertised "<ifname> <glort-hex> [mac] [seconds]", argv[3] was never
+ * read, and tap_open left the TAP with the random MAC the kernel assigns. Frames
+ * then egressed with a source MAC that changes every boot, while the ASIC's punt
+ * tables are programmed for the real one -- so the peer answered into a black
+ * hole, ARP hung INCOMPLETE, and the box looked like a forwarding-plane failure.
+ * It was diagnosed only by dumping the injected bytes (PORTD_DEBUG=4) and seeing
+ * SMAC 0a:2f:38:c1:32:6f where 44:4c:a8:31:5d:ab belonged.
+ *
+ * Setting it here makes the documented argument real. Passing "x" (or anything
+ * without a colon) keeps the kernel's random MAC, which is what the old callers
+ * did in practice. */
+static int tap_set_mac(const char *name, const char *mac)
+{
+    struct ifreq ifr;
+    unsigned m[6];
+    int s, i;
+
+    if (!mac || !strchr(mac, ':'))
+        return 0;                      /* no MAC requested */
+    if (sscanf(mac, "%x:%x:%x:%x:%x:%x",
+               &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != 6) {
+        fprintf(stderr, "portd: cannot parse MAC '%s'\n", mac);
+        return -1;
+    }
+    s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) { perror("socket"); return -1; }
+    memset(&ifr, 0, sizeof ifr);
+    snprintf(ifr.ifr_name, IFNAMSIZ, "%s", name);
+    ifr.ifr_hwaddr.sa_family = ARPHRD_ETHER;
+    for (i = 0; i < 6; i++)
+        ifr.ifr_hwaddr.sa_data[i] = (char)m[i];
+    if (ioctl(s, SIOCSIFHWADDR, &ifr) < 0) {
+        perror("SIOCSIFHWADDR"); close(s); return -1;
+    }
+    close(s);
+    printf("portd: %s MAC set to %02x:%02x:%02x:%02x:%02x:%02x\n",
+           name, m[0], m[1], m[2], m[3], m[4], m[5]);
+    return 0;
 }
 
 /* ASIC -> TAP. The frame may be offset by a receive prefix and may still carry
@@ -242,6 +284,7 @@ int main(int argc, char **argv)
     time_t t0;
 
     if (argc > 2) TAG[1] = (uint16_t)strtoul(argv[2], 0, 16);
+    const char *want_mac = argc > 3 ? argv[3] : NULL;
     { const char *d = getenv("PORTD_DEBUG"); if (d) dbg = atoi(d); }
     { const char *d = getenv("PORTD_TXFCS"); if (d) tx_fcs = atoi(d); }
     printf("portd: tx_fcs=%d\n", tx_fcs);
@@ -257,6 +300,9 @@ int main(int argc, char **argv)
     if (fpdma_init(&fp, &dev, &back, 8, 64) < 0) { fprintf(stderr, "fpdma init failed\n"); return 1; }
 
     tapfd = tap_open(ifname);
+    if (tapfd >= 0 && tap_set_mac(ifname, want_mac) < 0)
+        fprintf(stderr, "portd: WARNING continuing with the kernel's random MAC;"
+                        " the ASIC punt tables expect a specific one\n");
     if (tapfd < 0) return 1;
 
     signal(SIGINT, on_signal);

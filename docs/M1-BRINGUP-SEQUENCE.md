@@ -26,7 +26,46 @@ tables are loaded. Verify rather than assume:
 ⚠ `fm6000reg` parses its address as **decimal** unless you write `0x`. `fm6000reg <bdf> 100c01`
 silently reads register 100.
 
-## What you must do by hand
+## ⛔ DO NOT HAND-ROLL THIS. RUN THE SCRIPT.
+
+```sh
+/usr/lib/edgenos/platform/edgenos-up.sh
+```
+
+It ships in the image (source: `build/arista-7150/m1/payload/edgenos-up.sh`) and does the whole
+job: modules and device nodes, loopback, portd, **the MAC**, **MTU 1600**, zebra + ospfd, the OSPF
+wait, and the hardware FIB sync. It also refuses to run twice, because restarting portd without a
+chip reset wedges the DMA rings and RX silently goes to zero — which looks exactly like a
+dataplane defect.
+
+**This document previously contained a hand-reconstructed sequence, and that sequence was wrong.**
+It omitted two lines:
+
+```sh
+ip link set et1 address 44:4c:a8:31:5d:ab     # <-- omitted
+ip link set et1 mtu 1600                       # <-- omitted; peer runs 1600
+```
+
+Missing the MAC cost a full day of debugging. The TAP comes up with a random kernel-assigned MAC
+(observed: `0a:2f:38:c1:32:6f`, different every boot). The ASIC's punt tables are programmed for
+`44:4c:a8:31:5d:ab`, so the peer answers into a black hole: ARP hangs INCOMPLETE→FAILED, no echo
+replies, no OSPF adjacency, `routes=2`. Every symptom points at the forwarding plane and none of
+it is the forwarding plane.
+
+⚠ `fm6000_portd`'s third argument is a MAC and **it used to be accepted and ignored** — `tap_open`
+never called `SIOCSIFHWADDR`. `edgenos-up.sh` worked because it sets the MAC with `ip link` right
+afterwards. Passing the MAC to portd now actually applies it (see `tap_set_mac`), but the script
+remains the supported path.
+
+## What the boot does NOT do
+
+Nothing on flash runs `edgenos-up.sh`; it must be invoked once per cold boot. That is the real
+content of "PROBE MODE" — the chip is fully brought up and the Linux side waits for an operator.
+
+## The hand sequence, for reference only
+
+If you must do it manually, this is what the script does — but prefer the script.
+
 
 ```sh
 insmod /mnt/flash/fm6000dma.ko            # portd needs /dev/fm6000dma

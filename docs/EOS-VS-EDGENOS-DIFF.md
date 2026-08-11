@@ -342,3 +342,59 @@ Everything observed fits that and nothing contradicts it:
 
 ⚠ Box left on EdgeNOS with EOS's stock replay applied over it — a deliberate test state, not a
 configuration anyone should keep. `boot-config` reads EOS, so a reboot returns a clean working lab.
+
+
+---
+
+# Result 7 — RESOLVED: the dataplane was never broken
+
+Dumped the bytes portd actually injects (`PORTD_DEBUG=4`):
+
+```
+33 33 00 00 00 16    DMAC
+0a 2f 38 c1 32 6f    SMAC  <-- random, not 44:4c:a8:31:5d:ab
+01 00 03 ef ff 00 00 00    F64 tag at offset 12, correct
+```
+
+The tag was right. The **source MAC was random**. Setting it —
+
+```sh
+ip link set et1 down; ip link set et1 address 44:4c:a8:31:5d:ab; ip link set et1 up
+```
+
+— and forwarding came straight up: **25/25 pings, 0% loss, ARP REACHABLE.**
+
+## What actually happened
+
+`edgenos-up.sh` ships in the image at `/usr/lib/edgenos/platform/edgenos-up.sh` and sets the MAC
+and MTU. I never ran it. After the reboot I hand-reconstructed the bring-up from
+`M1-BRINGUP-SEQUENCE.md`, which recorded the module loads, `PORTD_TXFCS=1`, the addresses and the
+daemons — but not the MAC or the MTU. Everything downstream followed from that omission.
+
+So the entire hunt — CM watermarks, phase 76's writability wall, EPL config, the FFU runtime
+entries, the stock-replay A/B — was chasing a fault that did not exist in any of those places.
+The register diffs were real; the conclusion drawn from them ("the tables must be wrong") was not.
+
+## What the hunt was nonetheless worth
+
+Two genuine defects, both found by the EOS-diff method, both fixed and validated:
+
+- **MOD memfill**: two runs 4,096 words short, 8,192 words of uninitialised SRAM. MOD went from
+  6,143 differing words against EOS to **0 of 65,536**.
+- **MAPPER memfill**: fill list riddled with holes, 2,253 uninitialised words. Every garbage run
+  observed on hardware fell inside one.
+
+Both would have caused intermittent, boot-dependent failures — which words come up dirty varies
+per boot — and neither would have been found by chasing the presenting symptom. It also
+established that **reading uninitialised SRAM off-buses the chip** (invalid ECC), which is why MOD
+was previously untouchable for diagnostics and now is not.
+
+## The lesson
+
+The stock-replay A/B — "put EOS's entire configuration on the chip and see if it forwards" — was
+the right experiment and it was run hours too late. It returned 100% loss, which should have
+immediately ruled out every table and pointed at the host side. Instead I read it as one more
+mystery. **When a known-good reference is available, test the whole hypothesis class before
+narrowing within it.**
+
+And: when a procedure exists, run it before reconstructing it.
