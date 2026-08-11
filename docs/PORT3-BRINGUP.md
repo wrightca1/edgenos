@@ -489,3 +489,49 @@ confirmed by readback, none sufficient.
 The honest conclusion has not changed and is now better supported: **CPU-inject to a port EOS never
 configured needs state we cannot yet enumerate**, and the two candidates left from the replay
 (NEXTHOP, SWEEPER) plus the undecoded L2AR are where it must live.
+
+
+---
+
+## ★ The positive control, which should have been run first
+
+Injecting to **Et1** with the same tool, same boot, same moment:
+
+```
+lane0 before inject:  0x00000cc0
+lane0 after inject:   0x00000ac0     <- bit 9, Transmitting, SET
+lane1 (port 41):      0x000008c0     <- never sets Transmitting
+```
+
+**The inject path works.** `fm6000_txinline` reaches the wire on Et1 and does not on port 41, in
+the same configuration seconds apart. That validates every negative result above: the failures are
+about port 41 specifically, not about the injection mechanism, the DMA rings, or the tag.
+
+This control was cheap and available from the beginning, and running it earlier would have saved
+several rounds of "did that even do anything". A negative result is only worth the positive control
+that frames it.
+
+## Where the port-41 egress question now stands
+
+Verified identical to a working reference and still not transmitting:
+
+- link up, `lane1 = 0x8c0`, MAC receiving (`0xcc0` under host traffic)
+- SGLORT `0x03ed` in `PARSER_INIT_FIELDS[41]`
+- `GLORT_CAM[8]` → `GLORT_RAM[8]` → `DMaskBaseIdx 16` → `L2F[16].w1 = 0x200` = port 41
+- `EVID1`/`IVID1`/`EVID2`/`IVID2` for our GLORT, matching Et1's pattern
+- parser frame type: all three F64 types now expressible, e27 live
+- tried DGLORT `0xff00`, `0x03ed`, `0xf000`; ftype normal and special; e29 shape
+
+⚠ Also learned along the way: **`0x03ed` was never resolvable at all** — no `GLORT_CAM` entry
+matches `0x03xx`, so those injections had no destination. Only `0xff00` and `0xf000` were ever
+real tests.
+
+Since the inject path demonstrably reaches the wire on one port and not the other, what remains
+must be **per-port egress enablement** that Et1 has and port 41 does not — the scheduler/CM per-port
+configuration, or a MOD egress-side per-port entry. Neither is in the GLORT-referencing set the
+replay writes, which is why copying that set was not enough.
+
+The two replay-derived tables still unreplicated (`NEXTHOP_TABLE`, `L2L_SWEEPER`) remain worth
+doing, but the control makes a per-port egress enable the stronger hypothesis: a destination mask
+that names a port the egress pipeline has not been told to serve is exactly what "queued, completed,
+never transmitted" looks like.
