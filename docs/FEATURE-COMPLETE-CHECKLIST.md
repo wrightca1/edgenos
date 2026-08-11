@@ -131,6 +131,22 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
 
 ## E. Build and packaging
 
+- [x] ~~**E0. Dataplane watchdog.**~~ **Written and validated** (`asic/fm6000/fm6000_wdog.c`).
+      The box already survives a CPU hard lockup — the kernel cmdline carries `nmi_watchdog=panic`
+      and `reboot=p`, which is why an ASIC wedge on 2026-08-11 rebooted the switch onto EOS by
+      itself rather than needing physical access. What was missing is the EdgeNOS failure mode:
+      **Linux healthy, dataplane dead**, which nothing watched (there is no `/dev/watchdog`; the
+      `scd` driver exposes only `interrupt_mask_watchdog5/6/7`).
+      Checks `PIN_STRAP == 0x208` (unambiguous: a downed device reads `0xffffffff`) on a 3-strike
+      fuse, and kernel route count on a fuse 4× longer. **Ping is deliberately not a signal** — D5
+      would reboot a healthy switch. `/mnt/flash/wdog.off` disables it; create that file before any
+      experiment that deliberately downs the dataplane.
+      Validated on hardware in dry-run: healthy → exit 0; forced route floor → `BELOW FLOOR`,
+      exit 1; disable file honoured; logs to `/mnt/flash/wdog.log`.
+      - [ ] **E0a. Start it at boot.** Currently must be launched by hand; needs to go in the SWI
+            alongside E1. Until then a wedge is only self-healing if the watchdog was started.
+
+
 - [ ] **E1. Fold the image edit into the build.** Proven by hand: a SWI is a zip containing a gzip
       cpio initrd, so removing a binary and repacking takes about a minute (`zip -X -0`). Needs to
       live in `build-m1-rootfs.sh`.
