@@ -41,6 +41,33 @@ MOD_CAM key, 48 bits of the 64 (FM6000_MOD_CAM_KEYS):
     L2_VID_EQUAL(8) MCAST_TAG(9) TX_PORT_Tag(11:10) DST_PORT_Tag(21:12)
     L2_VLAN1_TX_Tagged(22) L2_VLAN2_TX_Tagged(23) MOD_FLAGS(47:24)
 
+SEMANTICS, datasheet 5.21.4.2 / 5.21.4.3:
+
+  * 16 command slices, each a 32x48-bit CAM and a 32x16-bit RAM, producing at
+    most one command. Fields: Command, Jitter, Valid, and a Drop flag.
+  * 15 value slices producing up to 60 bytes of frame data -- 4 bytes per slice,
+    56 to the egress modifier and 4 to stats. Each byte has DataSelect (one of 24
+    source channels), Type (validity/transformation) and Constant.
+  * Bytes are A..D with A sent FIRST and D last. Type zero means invalid and the
+    byte is omitted from the stream -- so ordering is load-bearing, not cosmetic.
+  * Jitter accumulates across all 16 slices.
+  * Drop: the frame is forwarded if and ONLY if every matching entry's drop flag
+    is zero. Any slice can veto.
+  * ⚠ Commands are not guaranteed to run: the modifier skips trailing commands
+    if the frame ends first. "Skip to byte 72 then insert 4 bytes" does nothing
+    on a 64-byte frame.
+
+⚠ The datasheet lists a Drop flag that the register header does not define --
+the header stops at Valid (bit 14). Bit 15 is never set in any of EOS's 369
+command words, and nothing above 15 is either, so Drop is most likely bit 15 and
+simply unused here. Left out of CMD_LAYOUT rather than guessed at; a generator
+that needs drop behaviour must confirm the position first.
+
+★ Match priority is STATED here, not inferred: "the highest matching entry is
+selected". That is the same last-match-wins rule we had to establish for the
+parser CAM by measuring 2,349 overlapping rule pairs. It was in the datasheet
+all along, in a different section.
+
 PROVENANCE. Reads the image at runtime, embeds nothing.
 
 Usage:
