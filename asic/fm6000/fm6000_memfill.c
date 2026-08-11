@@ -85,7 +85,15 @@ static const struct { uint32_t base; int words; uint32_t val; const char *blk; }
  {0x037000,   4096,0x00000000,"L2L"},
  {0x00d200,    512,0x00000000,"L2L_SWEEPER"},
  {0x180000,  98304,0x00000000,"L2F"},
- {0x1a0000,   3072,0x00000000,"L2F"},
+ /* ⚠ THIRD memfill gap of the same class, found the same way (diff against a
+  * working EOS boot). 3072 words covers 0x1a0000-0x1a0bff, and the uninitialised
+  * words start at 0x1a0c08: measured garbage runs 0x1a0c08-0x1a0c4e,
+  * 0x1a0cc0-0x1a0cce and 0x1a0d30-0x1a0ffe, 602 words in total, all zero on EOS.
+  * One of them (L2F_256[3,2]) decoded as a "destination mask" naming 51 scattered
+  * ports -- pure SRAM noise presented as a forwarding decision.
+  * 4096 covers 0x1a0000-0x1a0fff. Same lesson as the MOD and MAPPER runs: these
+  * fill lengths were reconstructed, and reconstructed lengths run short. */
+ {0x1a0000,   4096,0x00000000,"L2F"},
  {0x00e800,   2048,0x00000000,"GLORT"},
  {0x130000,  16384,0x00000000,"POLICERS"},
  {0x134000,   1024,0x00000000,"POLICERS"},

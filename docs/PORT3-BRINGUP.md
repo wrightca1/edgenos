@@ -326,3 +326,65 @@ stage refusing a port it has no configuration for.
 
 That is the current edge. Worth noting the same tag with `03ef` egresses Et1 perfectly, so the
 inject path itself is sound and the difference is entirely port 41's configuration.
+
+
+---
+
+## Looking at EOS for the egress config — what it gave us
+
+EOS has `Et3 connected 10GBASE-SR`, so it is a valid reference for port 41's egress. Dumped
+`L2F_TABLE_256` (`0x1a0000`, 64K words) under both.
+
+### EOS's masks that include port 41
+
+```
+L2F_256[0,2] [1,2] [2,2]   ports {0, 41}              CPU + port 3
+L2F_256[3,0] [3,1] [3,3]   ports {0, 3, 20, 40, 41}   CPU + every configured port
+```
+
+EdgeNOS had **none** of them. Its only entry with bit 41 set was `[3,2]`, listing 51 scattered
+ports — SRAM noise presented as a forwarding decision.
+
+### Exactly three words differ
+
+```
+0x1a0009  eos=0x00000200   L2F_256[0,2].w1   bit 41
+0x1a0409  eos=0x00000200   L2F_256[1,2].w1   bit 41
+0x1a0809  eos=0x00000200   L2F_256[2,2].w1   bit 41
+```
+
+### ★ Wide entries commit on the last word
+
+Writing `0x1a0009` alone **did nothing** — readback unchanged, which looks exactly like the
+post-boot writability wall and is not. Writing the *whole* entry (w0, w1, w2 in order) took
+immediately:
+
+```
+before  0x1a0008: 0x00000001 0x00000000 0x00000000
+after   0x1a0008: 0x00000001 0x00000200 0x00000000
+```
+
+**L2F_TABLE_256 is a 3-word-wide entry and commits on the last word; a single-word write is
+discarded.** This is worth remembering generally: a table that appears unwritable may simply be
+wide. `fm6000_l2.c` always writes full entries, which is why its writes have always worked.
+
+### And a third memfill gap
+
+The garbage in `[3,2]` is another short fill run — the same defect as MOD and MAPPER:
+
+```
+{0x1a0000, 3072, ...}   covers to 0x1a0bff
+garbage begins at       0x1a0c08   (602 words, all zero on EOS)
+```
+
+Fixed to 4096. Three of these now, all from fill lengths that were reconstructed rather than read.
+
+### Still no egress
+
+With the masks matching EOS, port 3 link up and traffic flowing, the test host still receives
+nothing and `lane1` shows no Transmitting bit. The masks are correct but **nothing we generate
+resolves to them** — the remaining unknown is which lookup selects `L2F_256[0..2, 2]`, i.e. what
+`GLORT_RAM[i].DMaskBaseIdx` values point at those gids and which DGLORT reaches them.
+
+That is now a small, well-posed question against a known-good reference, which is a much better
+place than where this started.
