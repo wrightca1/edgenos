@@ -45,7 +45,15 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
       Its actions index `DMT_PROFILE`, `SetCpuCode` and `SetMirror` — tables configured elsewhere,
       so authoring "trap to CPU" means knowing which CPU-code entry that is. `--keymap` shows the
       shape: `ACTION_FLAGS` in 346 of 407 rules, `SMASK` in 103, ten key fields never constrained.
-- [ ] **A3. L3AR decoder + generator.** Mechanical now: `L3AR_CAM(slice, rule, seg, word)` at
+- [x] ~~**A3. L3AR generator.**~~ **Done, hardware-validated.** `l3ar_program.py` authors 13 rules
+      as named intents; `--c` emits 640 writes (242 non-zero) replacing 3,928 transcribed pairs.
+      All 13 match EOS exactly. On the 7150: full slice-0 replacement forwards at 0% loss over
+      et1, 640/640 readback, routes 34. Scope is **slice 0 only** — slices 1-4 are csGlort,
+      policers, storm control and L3 QoS, left in the replay.
+      ⚠ 242 of 242 non-zero writes coincide with EOS, against 1 of 1,568 for the parser. L3AR has
+      almost no encoding freedom, so agreement is expected and is NOT the evidence of
+      independence it was for the parser. Audit the process, not the diff.
+- [ ] ~~**A3-old. L3AR decoder + generator.**~~ Mechanical now: `L3AR_CAM(slice, rule, seg, word)` at
       **`0x10000`**, 5 slices × 32 rules × 4 segments, 256-bit key matching Table 5-30; `RAM1`
       `0x11200`, `RAM2` `0x11400`. Validated — RAM words are 2× the declared rule counts on every
       slice (64/64/64/64/50 vs 32/32/32/32/25).
@@ -141,3 +149,27 @@ asserting the wrong invariant:
 
 A round-trip proves self-consistency, never interpretation. Only an external fact settles
 interpretation — the register header, EOS's own program, or the silicon.
+
+**The fourth wrong invariant, and the worst.** L3AR's `read_rule` treated an all-`0xFFFFFFFF`
+CAM as empty. All-ones is Key=1/KeyInvert=1 on every bit — *don't-care everywhere*, the
+**universal match**. Rule 0 of slices 0-3 is exactly that: the default rule carrying the baseline
+flag resolution and `LoopbackSuppress`. We decoded the most important rule in every slice as
+blank. It survived because:
+
+- the declared count is 32 rules/slice and we decoded 31 — and the "RAM words are 2× the rule
+  count" check was **recorded as passing** while 64 RAM words sat against 31 rules
+- the mask baseline looked like a statistical mode over 149 rules; it is not a mode, it is rule
+  0's action applied to every frame
+- it made the LoopbackSuppress naming asymmetry look backwards: the default sets it ON, so
+  `With…` rules need do nothing and `Without…` rules must actively clear it
+
+Only hardware found it: replacing slice 0 without rule 0 gave 100% packet loss, and leave-one-out
+over all 20 unauthored rules showed rule 0 was the only one that mattered.
+
+**And a blind spot in `--diff` itself.** It compares the rules we author. It cannot see the rules
+we *delete*, so it read 12/12 green while the program did not forward. A generator that replaces
+a table must be tested against what it removes, not only against what it writes.
+
+**Ping is not useless — but it needs a control.** D5 makes ping fail for unrelated reasons, so a
+bare failure proves nothing. Alternating our program against EOS's in the same minute (A/B/C/A)
+turned it into a reliable signal: EOS 0%, ours-overlaid 0%, ours-with-deletions 100%, EOS 0%.

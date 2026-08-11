@@ -102,18 +102,43 @@ def ram_addr(s, r, w, second=False):
 
 
 def read_rule(mem, s, r):
-    segs, live = [], False
+    """Decode one rule, or None if the rule can never match.
+
+    ⚠⚠ THE LIVENESS TEST USED TO BE `any word not in (0, 0xFFFFFFFF)`, AND THAT
+    DISCARDED THE MOST IMPORTANT RULE IN EVERY SLICE. All-ones is Key=1,
+    KeyInvert=1 on every bit -- don't-care everywhere, i.e. the UNIVERSAL MATCH.
+    Rule 0 of slices 0-3 is exactly that: a default rule carrying the baseline
+    flag resolution (Mask_LO 0x3febf3f, Mask_HI 0x3ff7f7b) and Set_HI bit 25,
+    LoopbackSuppress. It matched every frame and we decoded it as empty.
+
+    Consequences, all of which looked fine at the time:
+      - slice rule counts came out 31/31/31/31/25 against the 32/32/32/32/25 the
+        name file declares. The "RAM words are 2x the rule count" validation was
+        recorded as PASSING; 64 RAM words against 31 decoded rules should have
+        failed it. Fourth wrong-invariant in this project.
+      - the per-rule mask baseline looked like a statistical mode across 149
+        rules. It is not a mode, it is rule 0's action, applied to everything.
+      - the LoopbackSuppress naming asymmetry got the causality backwards: the
+        default sets it ON, so ...WithLoopbackSuppress rules need do nothing and
+        ...WithoutLoopbackSuppress rules must actively clear it.
+      - zeroing slice 0 broke forwarding on hardware, which is how this surfaced.
+
+    Correct test: a rule is dead iff some bit is in the never-match state
+    (Key=0, KeyInvert=0), which is what an all-zero word pair encodes.
+    """
+    segs, never_any = [], False
     for seg in range(SEGMENTS):
         w = [mem.get(cam_addr(s, r, seg, i)) for i in range(4)]
         if any(x is None for x in w):
             segs.append(None)
             continue
-        if any(x not in (0, 0xFFFFFFFF) for x in w):
-            live = True
         keyinvert = (w[1] << 32) | w[0]
         key = (w[3] << 32) | w[2]
-        segs.append((key, keyinvert) + ternary(key, keyinvert))
-    if not live:
+        dec = ternary(key, keyinvert)
+        if dec[2]:
+            never_any = True
+        segs.append((key, keyinvert) + dec)
+    if never_any or all(x is None for x in segs):
         return None
     a1 = [mem.get(ram_addr(s, r, i)) for i in range(2)]
     a2 = [mem.get(ram_addr(s, r, i, True)) for i in range(2)]
