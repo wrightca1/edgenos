@@ -29,8 +29,19 @@ The remaining L2AR pages — `0x144000` (864), `0x145000` (1110), `0x146000` (53
 — have irregular run lengths and are **not** rules. They are L2AR configuration and need separate
 treatment.
 
-**L3AR does not share this geometry.** `0x158000`–`0x159fff` gives 111 runs of mixed lengths
-(2, 52, 84, 100) against 153 named rules. Its layout is a separate problem.
+⚠⚠ **ADDRESS CORRECTION.** The claim that L3AR lives at `0x158000`–`0x159fff` is **wrong**, and
+it was wrong from the first analysis. `FM6000_L3AR_BASE` is **`0x10000`**; `0x158000` is
+`MOD_CAM`. So:
+
+- the 111 mixed-length runs at `0x158000` are MOD, not L3AR — and MOD's real structure is
+  32 profiles × 32 steps, which is why run-length analysis made no sense of it
+- **L3AR is the `0x010000` page** that `REPLAY-TRIAGE.md` group 3 called "unnamed" and that
+  `EOS-SOURCES.md` then reclassified as generic "microcode". It is 5,095 writes across
+  `0x010000` (2,448), `0x011000` (1,577), `0x012000` (95), `0x014000` (12), `0x018000` (963).
+
+Two documents carried the wrong address for months because the region was identified by clustering
+writes rather than by reading `FM6000_L3AR_BASE`. Same lesson as the field layouts, at the level of
+whole blocks.
 
 ## ★★ SOLVED: the geometry and the action layout came from the register header
 
