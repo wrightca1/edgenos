@@ -433,3 +433,59 @@ have verified is *upstream* of it (parser, GLORT resolution, destination mask) o
 The honest read is that CPU-inject to an arbitrary port needs L2AR configuration we have not
 decoded, and that A2 is therefore not merely the next item on the list but a prerequisite for
 this one.
+
+
+---
+
+## Following the replay's own recipe for Et1
+
+Rather than decode L2AR, ask what the replay already does to make Et1 forward, and copy it. Every
+replay write whose value contains Et1's GLORT `0x03ef` — 30 in total:
+
+| page | n | table | Et1's value |
+|---|---:|---|---|
+| `0x00d000` | 12 | `L2L_SWEEPER` | `0x03ef3333` |
+| `0x108000` | 7 | `PARSER_INIT_FIELDS` | `0x03ef0101` |
+| `0x160000` | 5 | `NEXTHOP_TABLE` | `0x03ef80a2` |
+| `0x034000` | 2 | `L2L_IVID1_TABLE[0x3ef]` | `0x020003ef` |
+| `0x032000` | 2 | `L2L_EVID1_TABLE[0x3ef]` | `0x020043ef` |
+| `0x037000` | 1 | `L2L_IVID2_TABLE[0x3ef]` | `0x000003ef` |
+| `0x036000` | 1 | `L2L_EVID2_TABLE[0x3ef]` | `0x000003ef` |
+
+That is the complete list of tables the working port's GLORT appears in — a much better target than
+"decode L2AR", and it came straight out of the replay.
+
+### The VID tables were genuinely missing
+
+```
+EVID1[0x3ef] = 0x020043ef      EVID1[0x3ed] = 0x000003ed
+IVID1[0x3ef] = 0x020003ef      IVID1[0x3ed] = 0x000003ed
+```
+
+Et1 carries a `0x0200` prefix (bit 25, the `ET_IDX`/`IT_IDX` field) and `ETAG1 = 2`; our GLORT had
+neither — only the identity value the replay writes across the whole table. Programmed
+`EVID1[0x3ed] = 0x020043ed` and `IVID1[0x3ed] = 0x020003ed`, verified by readback.
+
+### And still nothing egresses
+
+Tried all three combinations — SPECIAL with DGLORT `0xff00`, SPECIAL with our own `0x03ed`, NORMAL
+with `0x03ed`. Every one queues and completes; `lane1` never sets Transmitting; the test host's
+`rx_packets` does not move.
+
+### Remaining unreplicated
+
+Two of the seven tables are still untouched for our GLORT: **`NEXTHOP_TABLE`** (5 writes, e.g.
+`0x160015 = 0x03ef80a2` — the GLORT paired with a MAC, so this is the routed-next-hop binding) and
+**`L2L_SWEEPER`** (12 writes, `0x03ef3333` — MAC aging). Neither is obviously required for a
+special-delivery inject, which is why they were left, but "not obviously required" has been wrong
+repeatedly in this session and they are the only replay-derived items left.
+
+## Where this stands
+
+Verified against a working reference and still not forwarding: link, SGLORT, GLORT_CAM, GLORT_RAM,
+L2F destination mask, parser frame type, EVID1/IVID1/EVID2/IVID2. Seven prerequisites, each
+confirmed by readback, none sufficient.
+
+The honest conclusion has not changed and is now better supported: **CPU-inject to a port EOS never
+configured needs state we cannot yet enumerate**, and the two candidates left from the replay
+(NEXTHOP, SWEEPER) plus the undecoded L2AR are where it must live.
