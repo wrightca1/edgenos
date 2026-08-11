@@ -26,14 +26,24 @@ file. This list counts what is *ours*.
 
 - [ ] **A1. Delete `fm6000_parserinit.c`** and its `fm6000.mk` entry; make the boot path use the
       generated program. Everything for this is done and validated — this is bookkeeping.
-- [ ] **A2. L2AR generator.** Geometry is exact (413 rules × 24 words, stride `0x20`, one run per
-      named rule). The 24-word encoding is **not** decoded: name tokens do not map to single bits
-      (0 of 20 slice/token combinations discriminate). Needs the L2AR key field layout from the
-      register header, the way `PARSER_RAM` gave the parser's.
-- [ ] **A3. L3AR generator.** 153 named rules, but the geometry does *not* match L2AR's (111 runs
-      of mixed length). Datasheet Tables 5-30 (input keys) and 5-31 (actions) are in hand.
-- [ ] **A4. MOD generator.** ~50 small egress-edit routines. Smallest of the four; the egress tag
-      strip is the piece the datapath already depends on.
+- [x] ~~**A2a. L2AR decode.**~~ Done. Geometry, action RAM and the 384-bit key layout all from
+      `FM6000_L2AR_CAM_*` in the register header; decoder and encoder in
+      `asic/fm6000/tools/l2ar_{decode,gen}.py`, encoder round-trips EOS's 2,442 segments and 407
+      actions bit-identically.
+- [ ] **A2b. L2AR generator.** Blocked on a second decode, not on format: the actions reference
+      `DMT_PROFILE`, `SetCpuCode` and `SetMirror`, which are indices into tables configured
+      elsewhere. Authoring "trap to CPU" means knowing which CPU-code entry that is.
+      `--keymap` shows the shape: `ACTION_FLAGS` in 346 of 407 rules, `SMASK` in 103, and ten key
+      fields never constrained at all.
+- [x] ~~**A3a. L3AR decode.**~~ Geometry and key confirmed. `L3AR_CAM(slice, rule, seg, word)` at
+      **`0x10000`** — 5 slices × 32 rules × 4 segments, 256-bit key; `RAM1` at `0x11200`, `RAM2` at
+      `0x11400`. Key layout matches datasheet Table 5-30 exactly. Validated: RAM words are 2× the
+      declared rule counts on every slice, 64/64/64/64/50 against 32/32/32/32/25.
+- [ ] **A3b. L3AR decoder/generator.** Ordinary work now; no unknowns in the format.
+- [x] ~~**A4a. MOD decode.**~~ Done. 32 profiles × 32 steps at `0x158000`, `COMMAND_RAM` at
+      `0x159000`, `VALUE_RAM` at `0x159400`; 48-bit key from `FM6000_MOD_CAM_KEYS`. Decoder in
+      `asic/fm6000/tools/mod_decode.py`; 684 of 1024 steps populated.
+- [ ] **A4b. MOD generator.** The smallest block and the least entangled — the best next target.
 - [ ] **A5. The 9 smaller files.** Mostly incidental overlap; likely fall out of A2–A4.
 
 ## B. `fwd4.txt` — the last operator-supplied file
@@ -90,10 +100,14 @@ file. This list counts what is *ours*.
 | | |
 |---|---|
 | **done** | parser — decoded, generated, cold-boot validated, no EOS table involved |
-| **tractable, understood** | FFU CAM strobe pairing (B1); MOD (A4) |
-| **needs a decode we do not have** | L2AR (A2), L3AR (A3) — the largest remaining block by far |
+| **decoded, generator outstanding** | L2AR, L3AR, MOD — all four blocks are now structurally understood |
+| **best next target** | MOD (A4b): smallest, least entangled with the rest of the pipeline |
+| **blocked on a second decode** | L2AR (A2b) — needs DMT profile and CPU-code table semantics |
 | **needs a decision, not code** | copper/SPICO (C1) |
 | **not ours, still broken** | the ping defect (D5) |
+
+Every remaining block's format came out of `fm6000_api_regs_int.h` in minutes once we stopped
+inferring it. The structural phase is finished; what is left is authoring and testing.
 
 One block of five is done. It took the whole toolchain — decoder, encoder, simulator, differential
 oracle against EOS, and a one-minute hardware loop — and that toolchain transfers directly to L2AR,
