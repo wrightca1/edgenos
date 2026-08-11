@@ -49,6 +49,22 @@ PORT_STATUS(EPL14, lane1) = 0xe3880
 Et1 is unaffected throughout (`lane0` alternating `0x8c0`/`0xec0`, which is the Receiving bit
 toggling on live traffic), `routes=34`, `PIN_STRAP=0x208`.
 
+## Ingress is proven working
+
+Controlled measurement — the test host given `10.99.99.2/24` on eth1 and made to transmit, while
+`PORT_STATUS(EPL14, lane1)` is sampled once a second:
+
+```
+host idle:          0x8c0 0x8c0 0x8c0 0x8c0 0x8c0 0x8c0
+host transmitting:  0xcc0 0xcc0 0xcc0 0xcc0 0xcc0 0xcc0     <- bit 10, Receiving
+```
+
+Six consecutive samples each way. The ASIC receives the test host's frames on port 3. The RX half
+of the path is done.
+
+**Nothing egresses yet**: `tcpdump -i eth1` on the test host captured 0 packets over 12s, and its
+`rx_packets` counter did not move. Port 3 has link and receives, but is in no forwarding domain.
+
 ## What is still needed for transit traffic
 
 Link is up; forwarding through it is not configured.
