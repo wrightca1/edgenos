@@ -178,6 +178,23 @@ moves whenever that box reboots. Probe, do not trust the number.** `ttyUSB0` is 
 
 ---
 
+## Current blocker: EdgeNOS forwarding, and how it is being approached
+
+**2026-08-11.** After a reboot EdgeNOS came up with tables correct and link healthy but no
+forwarding. Long direct debugging (see `M1-BRINGUP-SEQUENCE.md`) narrowed it to CPU→ASIC→wire
+egress and turned up two real defects, then stalled.
+
+What broke the stall was **diffing the live chip under EOS against the live chip under EdgeNOS**
+(`EOS-VS-EDGENOS-DIFF.md`). EOS forwards on this exact hardware, so the candidate set is exactly
+what differs. It immediately killed the leading hypothesis — CM `0x114000`, which I had spent an
+hour on, is **zero on EOS too** — and produced three concrete leads instead: 1,746 words of
+uninitialised memory (the measured "no CRM fill" gap), three config bits in EPL14's
+`EPL_CFG_A`/`EPL_CFG_B`/`EPL_IP`, and EOS's complete working configuration for **port 3**, which
+is up under EOS as `Et3 connected 10GBASE-SR`.
+
+That last one also unblocks A4 and B1: the transit traffic they need no longer requires deriving a
+SerDes bring-up from scratch, because a working lane-1 configuration is now captured.
+
 ## The method, which is the transferable part
 
 Six times this session a plausible inference about bit or field order was wrong, and six times
