@@ -68,6 +68,31 @@ selected". That is the same last-match-wins rule we had to establish for the
 parser CAM by measuring 2,349 overlapping rule pairs. It was in the datasheet
 all along, in a different section.
 
+THE COMMAND SET, datasheet 5.21.5. MOD is a byte-serial edit language, not a
+table of opaque opcodes -- nine commands consumed as a stream by a per-port unit:
+
+    SKIP               leave bytes unchanged, repeat count 1..32   [0 value bytes]
+    INSERT             insert 1..16 bytes                          [1..16]
+    DELETE             delete 1..16 bytes                          [0]
+    REPLACE            replace 1..16 bytes                         [1..16]
+    REPLACE_MASKED     replace selected bits, dybble mask in the command byte [1]
+    DECREMENT          decrement a frame byte; 0x00 wraps to 0xFF  [0]
+    DECREMENT_INSERT   insert a byte, decremented first            [1]
+    DECREMENT_REPLACE  replace a byte, decremented first           [1]
+    CHECKSUM           ones-complement fixup:                      [2]
+        egress = ingress + ingress_accumulated - egress_accumulated - delta
+
+DECREMENT is the TTL decrement and CHECKSUM the IP checksum fixup -- between
+them, the two edits routing requires. Every other command carries a flag saying
+whether it contributes to the checksum accumulator, which is cleared after a
+CHECKSUM or at end of frame.
+
+⚠ The 8-bit Command field encodes an opcode AND its operand (repeat count,
+length, or dybble mask); the split is not given in the sections read so far. EOS
+uses 47 distinct Command values, and each command's required value-byte count is
+documented above, which is a strong constraint for recovering the split: the
+number of value bytes a step supplies must match its opcode.
+
 PROVENANCE. Reads the image at runtime, embeds nothing.
 
 Usage:
