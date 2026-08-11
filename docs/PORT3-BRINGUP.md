@@ -278,3 +278,51 @@ prerequisite that is now satisfied and verified, not a fix.
 
 Port 41's VLAN/forwarding-domain membership. That is where the frames are being discarded, and it
 is the last thing between here and transit traffic.
+
+
+---
+
+## The destination-resolution chain, found — and it is not MCAST_DEST
+
+`fm6000_l2_probe` / `fm6000_l2.c` in this tree already implement the path, and reading them
+answers the question the last several sections circled:
+
+```
+DGLORT --> GLORT_CAM[cam_idx] --> GLORT_RAM[cam_idx].DMaskBaseIdx = gid --> L2F_TABLE_256[gid]
+                                                                            = 76-bit port bitmask
+```
+
+**The destination mask lives in `L2F_TABLE_256` (`0x1a0000 + 4*gid`), not `MCAST_DEST_TABLE`.**
+That is why dumping all 4096 `MCAST_DEST_TABLE` entries found them uniformly zero on a chip that
+forwards perfectly — it is simply not the table in use.
+
+### Programmed for port 41 and verified
+
+`fm6000_l2_probe 41 8 16` points the special-delivery GLORT at port 41 instead of the CPU:
+
+```
+GLORT_CAM[8]  = 0xff000000     matches exactly 0xff00
+GLORT_RAM[8]  = 0x00000040     DMaskBaseIdx = 0x40>>2 = 16
+L2F[16]       = w0 0x00000000  w1 0x00000200   <- bit 9 of word 1 = port 41
+```
+
+All three verified by readback. Dataplane stayed healthy throughout (routes 34, both lanes up).
+
+### And injecting still does not egress port 3
+
+```
+fm6000_txinline 20 0100 ff00 ff00 0000
+   frame[0:24]: 80 a2 35 81 ca b4 | 44 4c a8 31 5d ab | 01 00 ff 00 ff 00 00 00 | 08 00
+   tag@12 = 0100 ff00 ff00 0000, queued=60 DONE=60 STATUS=0x00000012
+
+lane1 PORT_STATUS = 0x000008c0     no Transmitting bit
+test host tcpdump  = nothing
+```
+
+Frames are queued and completed by the DMA engine, the GLORT resolves to a mask naming port 41,
+and nothing reaches the wire. So the mask is necessary but something downstream of it still
+discards the frame — egress-port enable, VLAN membership on the egress side, or the MOD/egress
+stage refusing a port it has no configuration for.
+
+That is the current edge. Worth noting the same tag with `03ef` egresses Et1 perfectly, so the
+inject path itself is sound and the difference is entirely port 41's configuration.
