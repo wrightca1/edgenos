@@ -129,6 +129,26 @@ FLAG_L3_MCST_DIP = 1 << 19
 # its program on a tagged frame. Both bits are in the FFU scenario key, so
 # picking the wrong one changes the scenario value and selects different FFU
 # rules. This was a guess; it is now matched to the reference.
+# ★ SPECIAL DELIVERY, ACTION_FLAGS bit 0. Decoded 2026-08-11 from L3AR working
+# backwards: r28 SpecialDelivery requires bit 0 set, r5 IslF64FtypeNormal
+# requires it CLEAR. EOS's parser sets it in exactly one entry, and its two
+# siblings pin the encoding beyond doubt -- all three are identical apart from
+# the halfword0 match and the flags they set:
+#
+#   s3e27  hw0=0x8000/care 0x8000  SetFlags[0,3]    SPECIAL
+#   s3e28  hw0=0x0000/care 0x8000  SetFlags[3,4,6]  normal
+#   s3e29  hw0=0x0000/care 0xc000  SetFlags[3]
+#
+# So BIT 15 OF THE F64 TAG'S FIRST HALFWORD IS THE FRAME TYPE. Set means special
+# delivery, which keeps StrictDestGlort (AF33) downstream and makes the tag's
+# DGLORT authoritative instead of subject to a lookup -- the mechanism
+# fm6000_l2.h refers to as "inject F64 ftype=SPECIAL dglort=0xFF00".
+#
+# ⚠ Until this rule existed our parser had 3,584 actions and NONE set bit 0, so
+# an injected frame with bit 15 set changed nothing: the flag was never set,
+# SpecialDelivery never matched, and the DGLORT was never authoritative. Verified
+# on hardware -- NORMAL and SPECIAL tags produced identical (absent) egress.
+FLAG_SPECIAL_DELIVERY = 1 << 0
 FLAG_ISL_TYPE1 = 1 << 3
 FLAG_ISL_FTYPE0 = 1 << 4
 FLAG_ISGLORT_NZ = 1 << 11
@@ -416,11 +436,22 @@ def build_program():
     # in Table 5-5 but not where this program actually puts the tag's words.
     # ISL_SGLORT is an L3AR input key (Table 5-30), so the placement matters
     # downstream and is not merely cosmetic.
+    # Normal frame type: tag word 0 bit 15 CLEAR. The mask was previously absent,
+    # so this rule matched EVERY tag word 0 and left no room for a special-
+    # delivery sibling -- which is why we had no way to express one.
     rules.append(Rule(S_ETYPE, S_ISL_W2, match_r=PORT_STATE3_CPU,
+                      match_halfword0=0x0000, match_halfword0_mask=0x8000,
                       dest0=CH_ISL_MISC, dest1=CH_VID1, next_isl=1,
                       set_flags=(FLAG_ISL_FTYPE0 | FLAG_ISL_TYPE1
                                  | FLAG_ISGLORT_NZ | FLAG_VLAN1_TAGGED_S),
-                      note="F64 tag w0->ch0, w1->ch1; ISL flags"))
+                      note="F64 tag w0->ch0, w1->ch1; ISL flags, ftype=normal"))
+    # Special delivery: same extraction, same next state, only the frame-type
+    # bit and the flags differ -- exactly as EOS's s3e27 differs from s3e28.
+    rules.append(Rule(S_ETYPE, S_ISL_W2, match_r=PORT_STATE3_CPU,
+                      match_halfword0=0x8000, match_halfword0_mask=0x8000,
+                      dest0=CH_ISL_MISC, dest1=CH_VID1, next_isl=1,
+                      set_flags=(FLAG_SPECIAL_DELIVERY | FLAG_ISL_TYPE1),
+                      note="F64 tag ftype=SPECIAL (w0 bit15); DGLORT authoritative"))
     rules.append(Rule(S_ISL_W2, S_ETYPE, isl=1, dest0=CH_SGLORT,
                       note="F64 tag w2 -> ISL_SGLORT(ch3); EtherType next"))
 
