@@ -65,68 +65,68 @@ Validated two ways before use:
 Decoder: `asic/fm6000/tools/l2ar_decode.py`. 407 of 413 rules decode; the
 shortfall is rules whose key is entirely fill.
 
-## The key composition (Table 5-71), and where the fields sit
+## ★★ The key layout, from the register header — authoritative
 
-The datasheet lists the key fields but not their bit positions. The positions
-follow from the data: **100 rules match seg0's full 64 bits together with
-seg1[11:0]** — exactly 76 — and seg0 carries 6,409 care-bits of which 6,400 are
-those matches. So `DMASK_A` (76 bits, the first entry in Table 5-71) occupies key
-bits [75:0], and the table's order then lays out the rest:
+`FM6000_L2AR_CAM_KEYS` gives exact bit positions. 384 bits, exactly the 6
+segments x 64 key bits a rule provides.
 
-| field | width | key bits | segment |
-|---|---:|---|---|
-| DMASK_A | 76 | 0–75 | seg0 + seg1[11:0] |
-| SMASK | 76 | 76–151 | seg1[63:12] + seg2[23:0] |
-| ACTION_FLAGS | 76 | 152–227 | seg2[63:24] + seg3[35:0] |
-| ACTION_DATA.W8F | 8 | 228–235 | seg3 |
-| POL{1,2}_TAG{1,2}_TOP, POL3_TAG_TOP | 4 each | 236–255 | seg3 |
-| DROP_CODE | 8 | 256–263 | seg4 |
-| L2F_ISTATE | 13 | 264–276 | seg4 |
-| DGLORT_TAG | 1 | 277 | seg4 |
-| ALU13_Z / ALU46_Z | 16 each | 278–309 | seg4 |
-| MA1/MA2_FID2_IVL | 1 each | 310–311 | seg4 |
-| *(~19 bits unaccounted — padding or unlisted fields)* | | 312–330 | |
-| MA1_LOOKUP / HPV / TAG | 1/4/12 | 331–347 | seg5 |
-| MA2_LOOKUP / HPV | 1/4 | 348–352 | seg5 |
-| **MA2_MPV** | 4 | **353–356** | seg5 — **measured** |
-| MA2_TAG, L2L_ETAG1/2, L2L_ITAG1/2 | 12 each | 357–416 | seg5+ |
-| DGLORT, SGLORT | 16 each | 417–448 | |
-| L2_DMAC_ID3, L2_SMAC_ID3, L2_TYPE_ID2 | 5/5/4 | 449–462 | |
-| ISL_USER | 8 | 463–470 | |
+```
+SMASK             0-75      ACTION_DATA_W8F   256-263
+ACTION_FLAGS     76-151     L2_DMAC_ID3       264-268
+L2F_ISTATE      152-164     L2_SMAC_ID3       269-273
+DGLORT_TAG          165     L2_TYPE_ID2       274-277
+MA1_TAG         166-177     POL1_TAG1_TOP     278-281
+MA2_TAG         178-189     POL1_TAG2_TOP     282-285
+reserved0       190-191     POL2_TAG1_TOP     286-289
+L2L_ETAG1       192-203     POL2_TAG2_TOP     290-293
+L2L_ETAG2       204-215     POL3_TAG_TOP      294-297
+ALU13_Z         216-231     DGLORT            298-313
+ALU46_Z         232-247     reserved1         314-319
+ISL_USER        248-255     SGLORT            320-335
+                            DROP_CODE         336-343
+                            MA1_HPV           344-347
+                            MA1_FID2_IVL          348
+                            MA2_FID2_IVL          349
+                            MA1_LOOKUP            350
+                            MA2_LOOKUP            351
+                            MA2_HPV           352-355
+                            MA2_MPV           356-359
+                            L2L_ITAG1         360-371
+                            L2L_ITAG2         372-383
+```
 
-### ⚠⚠ The ordering hypothesis is REFUTED — do not author against that table
+Segment *i* holds key bits `[64i .. 64i+63]`.
 
-Tested, and it fails. `MA2_MPV` is 4 bits and the datasheet says it is "used for
-entry write-back control (**including learning**)", so the rules Arista names
-`…Learn…` should match it. They do match a clean 4-bit group — **seg5 bits
-33–36**, in 11–17 rules each — but the ordering hypothesis predicts `MA2_MPV` at
-seg5 bits **14–17**. A 19-bit discrepancy.
+### This corrected both of my "measured" anchors
 
-Rules *not* named Learn match seg5 bits 0–3, 25–27 and 63 as well, so 33–36 is
-specific to learning rather than a generally-hot region.
+- **bits 0-75 are SMASK, not `DMASK_A`.** The 76-bit field was real and the
+  measurement was sound; the *attribution* came from Table 5-71's ordering, and
+  that ordering is wrong. Same error as before, one level down.
+- **`DMASK_A` is not in this key at all.** It is matched by a separate structure,
+  `FM6000_L2AR_CAM_DMASK` (KeyInvert[37:0], Key[101:64]) — which is exactly why
+  the datasheet gives it bitwise-OR semantics unlike every other field. A
+  generator that tried to place it in the main key would have been wrong in a way
+  no amount of care-mask analysis would have revealed.
 
-Working backwards from `MA2_MPV` at key bit 353 places the continuation-page
-fields 19 bits later than a straight concatenation predicts, i.e. there are ~19
-bits of padding or unlisted fields between the two pages of Table 5-71. That is
-not something to guess at.
+`MA2_MPV` at 356-359 is seg5 bits 36-39; the `…Learn…` rules match seg5 33-36,
+i.e. the top of `MA2_HPV` plus the first bit of `MA2_MPV`. Both are learning
+controls, so that is coherent.
 
-**Two anchors are now measured**, and only two:
+### The rule this establishes
 
-| field | key bits | how |
+Five times now a datasheet table's field order has failed to predict silicon bit
+order, and five times the register header has had the answer:
+
+| | inferred | header said |
 |---|---|---|
-| `DMASK_A` | 0–75 | 100 rules match seg0[63:0]+seg1[11:0] = exactly its 76-bit width |
-| `MA2_MPV` | ~353–356 | the `…Learn…` rules match seg5[33:36], and it is the 4-bit learning-control field |
+| parser action layout, attempt 1 | table order, LSB-first | refuted |
+| parser action layout, attempt 2 | scan for a 6-bit field -> bit 45 | 38 |
+| CAM match priority | first match wins | last match wins (measured) |
+| L2AR key, attempt 1 | Table 5-71 order | refuted |
+| L2AR key, attempt 2 | anchored on DMASK_A | it is SMASK; DMASK_A is elsewhere |
 
-Every other row in the table below is **ordering-derived and now known to be
-unreliable**. Confirm each field the way these two were before authoring against
-it. This is the fourth time in this work that a plausible ordering assumption
-has been wrong — twice for the parser action layout, once for CAM match
-priority, now here.
-
-`DMASK_A` also has **bitwise-OR matching semantics** per the datasheet — if any
-set bit matches, the whole field matches. That is unlike every other field here
-and unlike anything in the parser, and a generator that treats it as a normal
-ternary compare will be wrong.
+**Check the header first.** It has been right every time and cost minutes;
+inference has been wrong every time and cost hours.
 
 ## The encoding is sparse ternary
 
