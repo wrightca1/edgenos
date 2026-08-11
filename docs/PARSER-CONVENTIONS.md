@@ -495,3 +495,54 @@ defect, and outside the scenario key.
 ```
 python3 asic/fm6000/tools/parser_decode.py --image <fm6000Microcode.raw> --slice 4
 ```
+
+
+---
+
+## The F64 frame type: bit 15 of tag word 0 — and we do not implement it
+
+**2026-08-11.** Decoded while trying to make a CPU-injected frame egress port 3. The chain runs
+backwards from L3AR and lands in the parser.
+
+### What the frame type is
+
+L3AR's two ISL rules discriminate on a single ACTION_FLAGS bit:
+
+```
+r28 SpecialDelivery     ACTION_FLAGS bit 0 must be 1
+r5  IslF64FtypeNormal   bits 3 and 10 set, bit 0 must be 0
+```
+
+EOS's parser sets that bit in exactly one place, and three sibling entries make the encoding
+unambiguous:
+
+| entry | halfword0 | care | SetFlags | meaning |
+|---|---|---|---|---|
+| s3e27 | `0x8000` | `0x8000` | `[0, 3]` | **SPECIAL** + ISL_TYPE1 |
+| s3e28 | `0x0000` | `0x8000` | `[3, 4, 6]` | ISL_TYPE1 + FTYPE0 + VLAN1_TAGGED |
+| s3e29 | `0x0000` | `0xc000` | `[3]` | ISL_TYPE1 only |
+
+**Bit 15 of the F64 tag's first halfword is the frame type.** Set → special delivery; clear →
+the normal ISL paths. It fits the semantics: `SpecialDelivery` keeps `StrictDestGlort` (AF33), which
+is what makes the tag's DGLORT authoritative instead of subject to a lookup.
+
+`fm6000_portd` and `fm6000_txinline` both send word 0 = `0x0100` — EOS's captured *normal* tag —
+so every frame EdgeNOS has ever injected has been NORMAL. `fm6000_l2.h`'s instruction to "inject
+F64 ftype=SPECIAL dglort=0xFF00" has never actually been followed.
+
+### ⚠ And our parser cannot act on it
+
+Measured on the live chip running our parser:
+
+```
+our parser: 3,584 actions, 0 set ACTION_FLAGS bit 0
+```
+
+`parser_program.py` contains no rule for it — no mention of SPECIAL, ftype, or `0x8000`. So
+injecting `word0 = 0x8100` changes nothing: the flag is never set, `SpecialDelivery` never matches,
+and the DGLORT is never treated as authoritative. Confirmed by experiment — NORMAL and SPECIAL
+tags produced identical (absent) egress.
+
+This is a genuine gap in our parser rather than a misconfiguration, and it is well bounded: one
+rule at `S_ETYPE` under the CPU-port state, matching halfword0 bit 15, setting SetFlags bits 0 and
+3. EOS needs exactly one entry for it.
