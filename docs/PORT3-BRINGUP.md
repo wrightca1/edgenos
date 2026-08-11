@@ -535,3 +535,45 @@ The two replay-derived tables still unreplicated (`NEXTHOP_TABLE`, `L2L_SWEEPER`
 doing, but the control makes a per-port egress enable the stronger hypothesis: a destination mask
 that names a port the egress pipeline has not been told to serve is exactly what "queued, completed,
 never transmitted" looks like.
+
+
+## Systematic per-port sweep — what is and is not different
+
+With the positive control established, the question narrowed to "what per-port state does Et1 have
+that port 41 lacks". The header lists every per-port table (`ENTRIES = 76`), so this is a bounded
+sweep rather than a hunt. Reading index 40 against index 41 on the live chip:
+
+**Identical** (not the blocker): `ESCHED_CFG_1/2/3` (all `0x00ffffff`, and identical for port 20
+too), `ESCHED_DRR_CFG`, `LAG_PORT_TABLE`, `CM_BSG_MAP`, `CM_TC_PC_MAP`, `CM_PC_RXMP_MAP`,
+`CM_PAUSE_CFG`, `CM_ESCHED_STATE`, `ERL_CFG_IFG`, `MOD_MAP_DATA_W16E/W12A/W8A`, `MOD_TX_PORT_TAG`,
+`MOD_DST_PORT_TAG` (`0x130`), `MOD_MIN_LENGTH` (`0x40`), `STATS_AR_TX_PORT_MAP`.
+
+That rules out the egress scheduler and MOD's per-port configuration outright — both were strong
+candidates for "queued, completed, never transmitted".
+
+**Differed:**
+
+```
+LBS_CAM                  p40 0x0001fffe   p41 0x0003fffc
+MAPPER_SRC_PORT_TABLE.w1 p40 0x00000049   p41 0x00000021
+MCAST_LOOPBACK_SUPPRESS  p40 0xffff0001   p41 0xffff0003
+SAF_MATRIX               p40 w0 0x00000007 w1 0x00000000
+                         p41 w0 0x0010000f w1 0x00000100
+```
+
+Copied port 40's `SAF_MATRIX`, `MCAST_LOOPBACK_SUPPRESS` and `LBS_CAM` onto port 41, verified by
+readback, and injected again: **still no Transmitting bit, still nothing at the test host.**
+
+`MAPPER_SRC_PORT_TABLE` was deliberately left — it is ingress-side (source-port classification) and
+cannot explain an egress failure, and it is checklist item B3 in its own right.
+
+## Honest status
+
+The elimination is now broad and the control is solid: injection reaches the wire on Et1 and not on
+port 41, with link up, destination mask naming port 41, VID tables, GLORT resolution, frame type,
+scheduler, and MOD per-port state all verified equal or correct.
+
+What has *not* been examined is the one block this project has never decoded — **L2AR** — and the
+two replay tables still unreplicated (`NEXTHOP_TABLE`, `L2L_SWEEPER`). Everything cheap and
+enumerable has been checked. That is a reasonable place to stop and take A2 seriously, rather than
+keep sampling registers.
