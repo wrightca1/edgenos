@@ -67,12 +67,47 @@ KEY_POS = {n: (lo, hi) for n, lo, hi in KEY_LAYOUT}
 #
 # Flag bits in the L3AR view of ACTION_FLAGS. Only the ones we act on are named;
 # the rest of the 52 are passed through by the mask.
-FLAG_BROADCAST = 12          # matched by EOS's SwitchBroadcast* rules
-LOOPBACK_SUPPRESS = 25       # set by every EOS rule named WithLoopbackSuppress
+# Bit names are read off the rules that use them: a rule called
+# "...AndDefaultDglort" matching bit 45 tells us bit 45 means "the DGLORT is the
+# default one". That is the same move as naming a parser state from the channels
+# it writes, and it is why the rule-name file matters as much as the header.
+FLAG_BROADCAST = 12          # matched by SwitchBroadcast*
+FLAG_SPECIAL_DELIVERY = 0    # matched by SpecialDelivery
+FLAG_ISL_FTYPE = 3           # matched by IslF64FtypeNormal (0x408/0x409)
+FLAG_ISL_NORMAL = 10         # ditto
+FLAG_ROUTED = 8              # in the Unicast/Multicast routing match (0x100)
+FLAG_DEFAULT_DGLORT = 45     # ...AndDefaultDglort; also SET by IslF64FtypeNormal
+                             # (HI bit 19), which my first guess of
+                             # StrictDestGlort got wrong
+FLAG_MCAST = 13              # in the multicast-route match (0x2000)
 
-# Mask values EOS applies on the switching path. These are the "keep" masks --
-# which flags survive the stage -- and they are a property of the pipeline
-# configuration we are keeping, not a policy choice of ours.
+LOOPBACK_SUPPRESS = 25       # HI bit 25 = ACTION_FLAGS 51; set by every
+                             # ...WithLoopbackSuppress rule
+MOD_DO_ROUTE = 14            # LO bit 14, inside the MOD_FLAGS range: tells the
+                             # egress modifier to do the routing edits -- TTL
+                             # decrement and MAC rewrite. The L3AR -> MOD handoff.
+MOD_TUNNEL = 6               # LO bit 6, set by the IP-tunnel rules (not authored)
+STRICT_DEST_GLORT = 7        # HI bit 7 = ACTION_FLAGS 33, Table 5-35
+
+# ⚠⚠ THE KEEP-MASKS ARE PER-RULE, NOT GLOBAL. These three constants are the
+# common values on the switching path, and the first four rules authored here
+# matched EOS exactly using them -- which made them look like pipeline-wide
+# settings. Extending the rule set showed they are not:
+#
+#   UnicastRoutingWithoutLoopbackSuppress   EOS Mask_LO 0x3FFBF3F, keeps bit 14
+#   UnicastNoARPWithoutLoopbackSuppress     EOS Mask_LO 0x3FEBF3B, clears bit 2
+#   ffuFlagDropFrame                        EOS Mask_HI 0x3FF7F7B
+#   SwitchNormal...AndDefaultDglort         EOS Mask_HI 0x3F77F7B, clears bit 19
+#
+# Since ACTION_FLAGS' = FLAGS & Mask | Value, a rule's mask says which flags it
+# CLEARS -- which is semantic information, not boilerplate. "Route this frame"
+# and "punt it for ARP" differ partly in what they clear, and a generator that
+# applies one global mask gets that wrong while still looking plausible.
+#
+# Deriving each rule's clear-set from its intent is the remaining work here.
+# Until then --diff reports the difference honestly rather than the constants
+# being tuned per rule to force a match, which would be transcription wearing a
+# generator's clothes.
 MASK_LO = 0x3FEBF3F
 MASK_HI_SUPPRESS = 0x3FF7F7B
 MASK_HI_PLAIN = 0x1FF7F7B
@@ -126,6 +161,42 @@ def build_program():
     r.append(Rule(0, 4, "SwitchBroadcastWithLoopbackSuppress",
                   match={"ACTION_FLAGS": (1 << FLAG_BROADCAST, 1 << FLAG_BROADCAST)},
                   mask_hi=MASK_HI_SUPPRESS, set_hi=1 << LOOPBACK_SUPPRESS))
+
+    # --- the ISL/F64 path: frames arriving with the tag the CPU port uses ---
+    isl = (1 << FLAG_ISL_NORMAL) | (1 << FLAG_ISL_FTYPE)
+    r.append(Rule(0, 5, "IslF64FtypeNormal",
+                  match={"ACTION_FLAGS": (isl, isl | (1 << FLAG_SPECIAL_DELIVERY))},
+                  mask_hi=MASK_HI_SUPPRESS,
+                  set_hi=(1 << LOOPBACK_SUPPRESS) | (1 << 19)))
+
+    # --- switched unicast where the DGLORT is the default for the VLAN ---
+    dg = 1 << FLAG_DEFAULT_DGLORT
+    r.append(Rule(0, 7, "SwitchNormalWithLoopbackSuppressAndDefaultDglort",
+                  match={"ACTION_FLAGS": (dg, dg)},
+                  mask_hi=MASK_HI_SUPPRESS, set_hi=1 << LOOPBACK_SUPPRESS))
+    r.append(Rule(0, 11, "SwitchNormalWithLoopbackSuppressAndDirectedDglort",
+                  match={"ACTION_FLAGS": (dg, dg)},
+                  mask_hi=MASK_HI_SUPPRESS, set_hi=1 << LOOPBACK_SUPPRESS))
+
+    # --- routing. Set_LO bit 14 is the instruction to MOD: decrement the TTL
+    # and rewrite the MAC. Without it a routed frame egresses unmodified. ---
+    route_v = (1 << FLAG_ROUTED) | 0x490000000000
+    route_m = 0x249000000210
+    r.append(Rule(0, 20, "UnicastRoutingWithoutLoopbackSuppress",
+                  match={"ACTION_FLAGS": (route_v, route_m)},
+                  set_lo=1 << MOD_DO_ROUTE))
+    # Same match, no egress edit: the next hop is unresolved, so the frame is
+    # punted for ARP rather than routed.
+    r.append(Rule(0, 23, "UnicastNoARPWithoutLoopbackSuppress",
+                  match={"ACTION_FLAGS": (route_v, route_m)}))
+
+    # --- FFU-driven trap and drop, matched on the FFU's 8-bit action data ---
+    r.append(Rule(0, 29, "ffuFlagTrapAlwaysFrame",
+                  match={"FFU_DATA_W8A": (0xC0, 0xC0)}))
+    r.append(Rule(0, 30, "ffuFlagTrapFrame",
+                  match={"FFU_DATA_W8A": (0x40, 0xC0)}))
+    r.append(Rule(0, 31, "ffuFlagDropFrame",
+                  match={"FFU_DATA_W8A": (0x10, 0x10)}))
     return r
 
 
