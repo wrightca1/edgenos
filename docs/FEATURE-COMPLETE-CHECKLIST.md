@@ -76,8 +76,18 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
 
 ## B. `fwd4.txt` — the last operator-supplied file
 
-- [ ] **B1. FFU CAM strobe pairing** (5,364 writes). Partition solved: every FFU write belongs to
-      exactly one of 59 `0x3f0000` strobe groups, nothing dangles. Generator not written.
+- [ ] **B1. FFU.** Decoder written (`ffu_decode.py`, `--verify` round-trips 127 CAM entries + 113
+      action words). Measured from the replay — the FFU is **not** in `fm6000Microcode.raw` at all:
+      14,490 writes in the region (5,960 CAM half, 8,450 BST half, 80 scenario), 59 `0x3f0000`
+      strobes of which **43 commit CAM and 16 commit BST** — two independent commit domains.
+      - The **BST is the route table**: bare 32-bit keys + `LPM` + `Route` is a sorted-prefix
+        search, i.e. the same table `ROUTING-FIB.md` decoded and `fm6000_route` drives.
+      - The **38-bit CAM key** is composed per slice by `SLICE_SCENARIO_CFG`: `ByteMux_0..3`
+        (4×8 = 32 bits) + `Top4Mux` (6) = exactly 38. Sources are the parser's halfword channels
+        — slices select `L3_SIP`, `L4_SRC`, `L3_LENGTH`, `L3_DIP`, which is what an ACL matches.
+      - ⚠ Generator still needs: ByteMux values 53/58/60 are past the parser's 0..43 channel map,
+        so the source space is larger than the parser channels and is not yet fully named.
+        Muxes and key must be programmed together — reading either alone is meaningless.
 - [ ] **B2. ~~Group 3~~** — closed. Those "unnamed" writes at `0x010000` are **L3AR**, so this
       completes with A3.
 - [ ] **B3. `MAPPER_SRC_PORT_TABLE`** (634 writes). Per-case, lowest priority.
@@ -180,6 +190,11 @@ over all 20 unauthored rules showed rule 0 was the only one that mattered.
 **And a blind spot in `--diff` itself.** It compares the rules we author. It cannot see the rules
 we *delete*, so it read 12/12 green while the program did not forward. A generator that replaces
 a table must be tested against what it removes, not only against what it writes.
+
+**One halfword-channel bus, three blocks.** The parser *writes* 16-bit channels, the FFU
+*selects* them (`ByteMux` values come in pairs, one per byte of a halfword), and MOD *reads* them
+(`DataSelect` feeds two consecutive bytes). Naming a channel once names it everywhere — which is
+why `L3_SIP`/`L4_SRC` fell out of the FFU scenario config for free.
 
 **Ping is not useless — but it needs a control.** D5 makes ping fail for unrelated reasons, so a
 bare failure proves nothing. Alternating our program against EOS's in the same minute (A/B/C/A)

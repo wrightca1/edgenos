@@ -78,7 +78,7 @@ import collections
 import sys
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
-from parser_decode import load, ternary  # noqa: E402
+from parser_decode import load, ternary, FIELDS_CHANNEL  # noqa: E402
 
 FFU_BASE = 0x300000
 ATOMIC_APPLY = FFU_BASE + 0xF0000
@@ -95,6 +95,19 @@ BST_ACTION_LAYOUT = [
     ("ActionData", 0, 23), ("LPM", 24, 31), ("TagData", 32, 43),
     ("TagCmd", 44, 45), ("Route", 46, 46), ("Precedence", 47, 49),
 ]
+# FM6000_FFU_SLICE_SCENARIO_CFG -- 32 scenarios x 24 slices, 2 words.
+# ★ THIS EXPLAINS THE 38-BIT KEY. ByteMux_0..3 select four source bytes (4 x 8 =
+# 32 bits) and Top4Mux selects a further 6, giving exactly the 38 bits measured
+# off EOS's entries. The header's field structure predicts the width that had to
+# be discovered empirically -- had this been read first, the 64-bit assumption
+# would never have been made.
+SLICE_SCEN_CFG_LAYOUT = [
+    ("ByteMux_0", 0, 5), ("ByteMux_1", 6, 11), ("ByteMux_2", 12, 17),
+    ("ByteMux_3", 18, 23), ("Top4Mux", 24, 28), ("StartCompare", 29, 29),
+    ("StartSet", 30, 30), ("reserved0", 31, 31), ("ActionLength", 32, 33),
+    ("ValidLow", 34, 34), ("ValidHigh", 35, 35), ("Case", 36, 37),
+]
+
 SCEN_CFG1_LAYOUT = [
     ("ByteMux_0", 0, 5), ("ByteMux_1", 6, 11), ("ByteMux_2", 12, 17),
     ("ByteMux_3", 18, 23), ("Top4Mux", 24, 28), ("Reserved", 29, 31),
@@ -123,6 +136,68 @@ def scenario_cam(g, e, w):
 
 def scenario_cfg1(g, e):
     return FFU_BASE + 0x0C040 + 0x10000 * g + e
+
+
+def slice_scen_cfg(s, e, w):
+    return FFU_BASE + 0x81840 + 0x4000 * s + 2 * e + w
+
+
+def slice_master_valid(s):
+    return FFU_BASE + 0x81880 + 0x4000 * s
+
+
+def mux_name(v):
+    """Name a ByteMux source, if the parser channel map knows it.
+
+    ⚠ HYPOTHESIS, not established. ByteMux values come in PAIRS in every
+    configured scenario -- [0,0,17,17], [60,24,18,18], [21,21,8,58] -- the same
+    pattern MOD's value slices show, where a DataSelect feeds two consecutive
+    bytes. That is consistent with one halfword-channel bus running parser
+    (writes) -> FFU (selects) -> MOD (reads), and the named values fit: slices
+    select L3_SIP, L4_SRC, L3_LENGTH, L3_DIP -- what an ACL matches on.
+
+    But ByteMux is 6 bits and EOS uses 53, 58 and 60, past the end of the
+    parser's 0..43 channel map. So the source space is strictly LARGER than the
+    parser channels, and this naming is corroboration, not proof. Anything above
+    43 is reported as unmapped rather than guessed at.
+    """
+    n = FIELDS_CHANNEL.get(v)
+    return f"{v}={n}" if n else f"{v}=?"
+
+
+def show_scenarios(mem):
+    """Which bytes each CAM slice actually composes its key from."""
+    print("=== FFU slice scenario configuration (the key composition) ===")
+    print("ByteMux_n selects source byte n of the 32-bit lower key;"
+          " Top4Mux the upper 6 bits.\n")
+    any_ = False
+    for s in range(CAM_SLICES):
+        mv = mem.get(slice_master_valid(s))
+        rows = []
+        for e in range(32):
+            w0 = mem.get(slice_scen_cfg(s, e, 0))
+            w1 = mem.get(slice_scen_cfg(s, e, 1))
+            if w0 is None and w1 is None:
+                continue
+            raw = (w0 or 0) | ((w1 or 0) << 32)
+            if not raw:
+                continue
+            rows.append((e, fields(raw, SLICE_SCEN_CFG_LAYOUT)))
+        if not rows and mv is None:
+            continue
+        any_ = True
+        print(f"--- slice {s}  MASTER_VALID="
+              + ("absent" if mv is None else f"0x{mv:x}")
+              + f"  {len(rows)} scenarios configured ---")
+        for e, f in rows[:6]:
+            mux = [f.get(f"ByteMux_{i}", 0) for i in range(4)]
+            extra = {k: v for k, v in f.items() if not k.startswith("ByteMux_")}
+            print(f"   scen{e:<3} " + " | ".join(mux_name(m) for m in mux))
+            print("          " + ", ".join(f"{k}={v}" for k, v in extra.items()))
+        if len(rows) > 6:
+            print(f"   ... {len(rows) - 6} more")
+    if not any_:
+        print("  (no slice scenario configuration present in this input)")
 
 
 def load_any(path):
@@ -359,6 +434,7 @@ def main():
     ap.add_argument("--summary", action="store_true")
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--bst", action="store_true")
+    ap.add_argument("--scenarios", action="store_true")
     ap.add_argument("--slice", type=int)
     args = ap.parse_args()
     mem = load_any(args.image)
@@ -369,9 +445,12 @@ def main():
         show_slice(mem, args.slice)
     if args.bst:
         show_bst(mem)
+    if args.scenarios:
+        show_scenarios(mem)
     if args.verify:
         rc = verify(mem)
-    if not (args.summary or args.verify or args.bst or args.slice is not None):
+    if not (args.summary or args.verify or args.bst or args.scenarios
+            or args.slice is not None):
         ap.print_help()
     return rc
 
