@@ -577,3 +577,49 @@ What has *not* been examined is the one block this project has never decoded —
 two replay tables still unreplicated (`NEXTHOP_TABLE`, `L2L_SWEEPER`). Everything cheap and
 enumerable has been checked. That is a reasonable place to stop and take A2 seriously, rather than
 keep sampling registers.
+
+
+---
+
+## ★ Why none of it worked: GLORT is the wrong mechanism for an access port
+
+Asked the question that should have come first — **what DGLORT does EOS itself use to reach Et3?**
+— by walking every `GLORT_CAM` entry on a live EOS, following `GLORT_RAM[i].DMaskBaseIdx` into
+`L2F_TABLE_256`, and checking which masks name port 41. Both plausible indexings of
+`DMaskBaseIdx` were tried (`i1*4+i0` and `i1=flat`).
+
+```
+CAM entries whose mask includes port 41: 0
+```
+
+**None.** On a system where Et3 is `connected` and working, there is no GLORT that resolves to
+port 41.
+
+So EOS does not reach Et3 via a GLORT, and neither can we. `Et3` is a **switched VLAN-1 access
+port**; frames reach it through the L2 destination lookup or a VLAN flood. The
+`GLORT_CAM → GLORT_RAM → L2F` chain is the path for **routed and CPU-directed** traffic — which is
+exactly why Et1 (`routed`, GLORT `0x03ef`) works through it and port 41 never will.
+
+That single fact explains the whole sequence of failures above. Every prerequisite we satisfied —
+SGLORT, GLORT_CAM entry, `DMaskBaseIdx`, `L2F` mask naming port 41, VID tables, frame type, SAF,
+LBS, loopback-suppress — was correct *for a mechanism that does not apply here*. The masks EOS has
+containing port 41 (`{0,41}` and `{0,3,20,40,41}`) are reached by the L2 lookup, not by any DGLORT.
+
+### What to do instead
+
+Two mechanisms actually deliver to a switched port, and both are testable:
+
+1. **Flood.** Inject a broadcast frame into the VLAN and let it flood to every member port.
+   `fm6000_txinline` already supports this — argv[6] is a `bcast` flag — so it is a one-command
+   experiment, and the L2F masks EOS holds are exactly flood masks.
+2. **L2 lookup hit.** Install a MAC→port-41 entry in the L2 table and inject a frame addressed to
+   it.
+
+Both are ordinary switching, and neither needs the GLORT machinery this section spent its time on.
+
+### The lesson
+
+The positive control proved injection reached the wire on Et1 and not port 41, and I read that as
+"port 41 is missing configuration". The other reading — *Et1 and port 41 are reached by different
+mechanisms* — was never tested, and it was the true one. A control that distinguishes two ports
+does not tell you they differ only in degree.
