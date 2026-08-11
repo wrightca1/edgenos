@@ -28,6 +28,31 @@ not stubbed.
 
 ⚠ UNTESTED ON HARDWARE. --diff compares against EOS rule by rule; that is the
 strongest local check available and it is not the same as forwarding.
+
+⚠⚠ READ THIS BEFORE QUOTING "12 of 12 rules match EOS exactly". That number is
+weaker evidence of independence than the equivalent parser number, and the
+difference should be stated rather than glossed:
+
+    parser   1 of 1,568 non-trivial writes coincide with EOS
+    L3AR    61 of    61 non-trivial writes coincide with EOS
+
+The reason is that L3AR has almost no encoding freedom. A rule is a 252-bit
+ternary match plus a 52-bit mask/set; once the intent is fixed ("routed, not
+multicast, next-hop resolved") and the header gives the field positions, the
+words are FORCED. 179 of our 240 writes are structural zeros. Two programs that
+agree on intent cannot disagree on bits here, so agreement is not the
+achievement -- with the parser it was, because there the same intent had many
+legal encodings and ours differed from EOS's in nearly all of them.
+
+What IS ours: each rule is stated as a named intent (loopback_suppress=False,
+default_dglort=False, forces={AF_MOD_DO_ROUTE: True}) and the masks fall out of
+that policy rather than being copied. But honesty requires the other half: which
+bits carry that intent -- AF51, AF45, key bit 167, key bit 174, the next-hop
+group at 40/43/46/49 -- was learned by reading EOS's image and naming the bits
+from the rule-name file and the header. That is fact-extraction about a hardware
+interface, the same move as the parser writing DMAC to channel 7, but it is a
+larger share of the information content here than it was there. Anyone auditing
+this block should weigh it on the process, not on the diff.
 """
 import argparse
 import sys
@@ -89,41 +114,104 @@ MOD_DO_ROUTE = 14            # LO bit 14, inside the MOD_FLAGS range: tells the
 MOD_TUNNEL = 6               # LO bit 6, set by the IP-tunnel rules (not authored)
 STRICT_DEST_GLORT = 7        # HI bit 7 = ACTION_FLAGS 33, Table 5-35
 
-# ⚠⚠ THE KEEP-MASKS ARE PER-RULE, NOT GLOBAL. These three constants are the
-# common values on the switching path, and the first four rules authored here
-# matched EOS exactly using them -- which made them look like pipeline-wide
-# settings. Extending the rule set showed they are not:
+# ★ THE KEEP-MASKS ARE PER-RULE, AND THEY ARE DERIVABLE FROM INTENT.
 #
-#   UnicastRoutingWithoutLoopbackSuppress   EOS Mask_LO 0x3FFBF3F, keeps bit 14
-#   UnicastNoARPWithoutLoopbackSuppress     EOS Mask_LO 0x3FEBF3B, clears bit 2
-#   ffuFlagDropFrame                        EOS Mask_HI 0x3FF7F7B
-#   SwitchNormal...AndDefaultDglort         EOS Mask_HI 0x3F77F7B, clears bit 19
+# The first four rules authored here matched EOS using three fixed mask
+# constants, which made those look like pipeline-wide settings. They are not.
+# Since ACTION_FLAGS' = FLAGS & Mask | Value, each rule has two ways to force a
+# flag and one way to leave it alone, and EOS uses all three deliberately:
 #
-# Since ACTION_FLAGS' = FLAGS & Mask | Value, a rule's mask says which flags it
-# CLEARS -- which is semantic information, not boilerplate. "Route this frame"
-# and "punt it for ARP" differ partly in what they clear, and a generator that
-# applies one global mask gets that wrong while still looking plausible.
+#     force ON    Set bit = 1, mask bit kept    (the OR wins)
+#     force OFF   Set bit = 0, mask bit CLEARED (the AND wins)
+#     undecided   Set bit = 0, mask bit kept    (upstream's value stands)
 #
-# Deriving each rule's clear-set from its intent is the remaining work here.
-# Until then --diff reports the difference honestly rather than the constants
-# being tuned per rule to force a match, which would be transcription wearing a
-# generator's clothes.
-MASK_LO = 0x3FEBF3F
-MASK_HI_SUPPRESS = 0x3FF7F7B
-MASK_HI_PLAIN = 0x1FF7F7B
+# So a rule's mask is not boilerplate: it records which flags the rule decides,
+# and it is recoverable from the rule's own name. Measured over all 149 rules in
+# EOS's L3AR (see --policy):
+#
+#   AF51 LoopbackSuppress   every ...WithoutLoopbackSuppress rule forces it off;
+#                           every ...WithLoopbackSuppress rule forces it on.
+#                           6 and 14 rules, one anomaly (see below).
+#   AF45 DefaultDglort      all 5 ...AndDefaultDglort rules force it off; one
+#                           further rule does (AndMcastNoRoute, s0r9).
+#   AF48 Boundary           the single ...Boundary rule forces it off. A 1:1
+#                           correlation with n=1 is a hint, not a fact.
+#
+# ⚠ ANOMALY, recorded rather than smoothed over: s0r24
+# MulticastRouteWithLoopbackSuppress forces AF51 OFF, contradicting its name.
+# s0r25 MulticastRoutingWithoutLoopbackSuppress does the same and is named for
+# it. Either the name is wrong or EOS has a bug here; we do not author s0r24, so
+# nothing here depends on the answer.
+#
+# ⚠ AF33 is NOT the tunnel flag. 25 rules whose names lack "Tunnel" decide it
+# off, and 19 rules that HAVE "Tunnel" pass it through. What distinguishes the
+# IPTUN rules is that they PRESERVE AF33 and AF41 where the baseline clears
+# them. An earlier note in this repo called AF33 a tunnel flag; that was
+# backwards, and STRICT_DEST_GLORT below is retained only as the header's name
+# for the bit, not as a claim about who sets it.
+
+# Flags this stage always resolves, whatever the rule -- the baseline clear-set,
+# read off the mask value common to all 149 rules. A rule may opt back out of any
+# of these via preserves=.
+BASELINE_DECIDES = frozenset({6, 7, 14, 16, 28, 33, 41})
+
+AF_LOOPBACK_SUPPRESS = 51
+AF_DEFAULT_DGLORT = 45
+AF_BOUNDARY = 48
+AF_MOD_DO_ROUTE = 14
+AF_ARP_RESOLVED = 2          # unnamed in the header; the bit that distinguishes
+                             # UnicastNoARP (forces it off) from UnicastRouting
+                             # (leaves it). Named from that contrast alone, so
+                             # treated as provisional.
+ALL_FLAGS = (1 << 52) - 1
 
 
 class Rule:
-    """One L3AR rule: a match over named key fields, and a flag rewrite."""
+    """One L3AR rule: a match over named key fields, and a flag rewrite.
+
+    Flag policy is stated as intent, not as mask constants. Each keyword takes
+    True (force on), False (force off) or None (this rule does not decide it),
+    and the encoder picks the spelling the hardware needs.
+    """
 
     def __init__(self, slice_, index, name, match=None,
-                 mask_lo=MASK_LO, mask_hi=MASK_HI_PLAIN, set_lo=0, set_hi=0):
+                 loopback_suppress=None, default_dglort=None, boundary=None,
+                 forces=(), preserves=()):
         self.slice = slice_
         self.index = index
         self.name = name
         self.match = match or {}      # {key field: (value, mask)}
-        self.mask_lo, self.mask_hi = mask_lo, mask_hi
-        self.set_lo, self.set_hi = set_lo, set_hi
+        self.policy = dict(forces)
+        for af, want in ((AF_LOOPBACK_SUPPRESS, loopback_suppress),
+                         (AF_DEFAULT_DGLORT, default_dglort),
+                         (AF_BOUNDARY, boundary)):
+            if want is not None:
+                self.policy[af] = want
+        self.preserves = frozenset(preserves)
+
+    def flags(self):
+        """(mask, set) over the 52-bit ACTION_FLAGS, from the policy above."""
+        decides = (BASELINE_DECIDES - self.preserves) | {
+            af for af, want in self.policy.items() if want is False}
+        mask = ALL_FLAGS & ~sum(1 << af for af in decides)
+        setv = sum(1 << af for af, want in self.policy.items() if want)
+        return mask, setv
+
+    @property
+    def mask_lo(self):
+        return self.flags()[0] & 0x3FFFFFF
+
+    @property
+    def mask_hi(self):
+        return (self.flags()[0] >> 26) & 0x3FFFFFF
+
+    @property
+    def set_lo(self):
+        return self.flags()[1] & 0x3FFFFFF
+
+    @property
+    def set_hi(self):
+        return (self.flags()[1] >> 26) & 0x3FFFFFF
 
     def key(self):
         value = care = 0
@@ -149,52 +237,79 @@ def build_program():
     # frame content, which is what SRC_PORT_ID4 and MAP_VID2 are for.
     r.append(Rule(0, 1, "SwitchNormalWithoutLoopbackSuppress",
                   match={"SRC_PORT_ID4": (1, 1), "MAP_VID2": (1, 1)},
-                  mask_hi=MASK_HI_PLAIN))
+                  loopback_suppress=False))
     # The ISIS control-plane MACs, classified by the mapper into DMAC_CAM3 IDs.
     # Both suppress loopback: an ISIS hello must not be reflected to its sender.
     for idx, dmac_id, nm in ((2, 0xC, "SwitchIsisP2PWithLoopbackSuppress"),
                              (3, 0xB, "SwitchIsisLanWithLoopbackSuppress")):
         r.append(Rule(0, idx, nm, match={"L2_DMAC_ID3": (dmac_id, 0x1F)},
-                      mask_hi=MASK_HI_SUPPRESS, set_hi=1 << LOOPBACK_SUPPRESS))
+                      loopback_suppress=True))
     # Broadcast, matched on the pipeline's broadcast flag rather than on the
     # DMAC -- by this stage the mapper has already made that determination.
     r.append(Rule(0, 4, "SwitchBroadcastWithLoopbackSuppress",
                   match={"ACTION_FLAGS": (1 << FLAG_BROADCAST, 1 << FLAG_BROADCAST)},
-                  mask_hi=MASK_HI_SUPPRESS, set_hi=1 << LOOPBACK_SUPPRESS))
+                  loopback_suppress=True))
 
     # --- the ISL/F64 path: frames arriving with the tag the CPU port uses ---
     isl = (1 << FLAG_ISL_NORMAL) | (1 << FLAG_ISL_FTYPE)
     r.append(Rule(0, 5, "IslF64FtypeNormal",
                   match={"ACTION_FLAGS": (isl, isl | (1 << FLAG_SPECIAL_DELIVERY))},
-                  mask_hi=MASK_HI_SUPPRESS,
-                  set_hi=(1 << LOOPBACK_SUPPRESS) | (1 << 19)))
+                  loopback_suppress=True, default_dglort=True))
 
     # --- switched unicast where the DGLORT is the default for the VLAN ---
+    # The DGLORT pair is discriminated by FFU_DATA_W24_TOP bit 3, not by an
+    # ACTION_FLAGS bit: the FFU has already classified the frame and hands the
+    # answer down in its 24-bit data word. Default = 1, directed = 0.
     dg = 1 << FLAG_DEFAULT_DGLORT
+    FFU_W24_DEFAULT_DGLORT = 0x8
+    # "AndDefaultDglort" in the name is the rule RESOLVING that flag, and it
+    # resolves it off -- the DGLORT has been chosen by now, so the "use the
+    # default" hint must not survive into the next stage.
     r.append(Rule(0, 7, "SwitchNormalWithLoopbackSuppressAndDefaultDglort",
-                  match={"ACTION_FLAGS": (dg, dg)},
-                  mask_hi=MASK_HI_SUPPRESS, set_hi=1 << LOOPBACK_SUPPRESS))
+                  match={"ACTION_FLAGS": (dg, dg),
+                         "FFU_DATA_W24_TOP": (FFU_W24_DEFAULT_DGLORT,
+                                              FFU_W24_DEFAULT_DGLORT)},
+                  loopback_suppress=True, default_dglort=False))
+    # Directed, not default: this one leaves AF45 alone.
     r.append(Rule(0, 11, "SwitchNormalWithLoopbackSuppressAndDirectedDglort",
-                  match={"ACTION_FLAGS": (dg, dg)},
-                  mask_hi=MASK_HI_SUPPRESS, set_hi=1 << LOOPBACK_SUPPRESS))
+                  match={"ACTION_FLAGS": (dg, dg),
+                         "FFU_DATA_W24_TOP": (0, FFU_W24_DEFAULT_DGLORT)},
+                  loopback_suppress=True))
 
     # --- routing. Set_LO bit 14 is the instruction to MOD: decrement the TTL
     # and rewrite the MAC. Without it a routed frame egresses unmodified. ---
+    # Routed, NOT multicast, and the three fixed-function flags the next-hop
+    # stage sets on a resolved L3 lookup -- with bit 49 required clear.
     route_v = (1 << FLAG_ROUTED) | 0x490000000000
-    route_m = 0x249000000210
+    route_m = (1 << FLAG_ROUTED) | (1 << FLAG_MCAST) | 0x2490000000000
+    # Same per-port and per-VLAN enables rule 1 uses, one bit up; and the frame
+    # must not be carrying the FFU trap flag, which rules 29/30 handle instead.
+    route_gate = {"SRC_PORT_ID4": (2, 2), "MAP_VID2": (2, 2),
+                  "FFU_DATA_W8A": (0, 0x20)}
+    # NEXTHOP_TAG bit 2 is the next-hop lookup reporting "no ARP entry". That is
+    # the ONLY thing separating rules 20 and 23 -- both match identically
+    # otherwise -- and it is exactly where an unresolved next hop should be
+    # reported from. Rule 20 leaves it unconstrained; 23 requires it.
+    NEXTHOP_NO_ARP = 0x4
     r.append(Rule(0, 20, "UnicastRoutingWithoutLoopbackSuppress",
-                  match={"ACTION_FLAGS": (route_v, route_m)},
-                  set_lo=1 << MOD_DO_ROUTE))
+                  match={"ACTION_FLAGS": (route_v, route_m), **route_gate},
+                  loopback_suppress=False,
+                  forces={AF_MOD_DO_ROUTE: True}, preserves={AF_MOD_DO_ROUTE}))
     # Same match, no egress edit: the next hop is unresolved, so the frame is
     # punted for ARP rather than routed.
     r.append(Rule(0, 23, "UnicastNoARPWithoutLoopbackSuppress",
-                  match={"ACTION_FLAGS": (route_v, route_m)}))
+                  match={"ACTION_FLAGS": (route_v, route_m), **route_gate,
+                         "NEXTHOP_TAG": (NEXTHOP_NO_ARP, NEXTHOP_NO_ARP)},
+                  loopback_suppress=False,
+                  forces={AF_ARP_RESOLVED: False}))
 
     # --- FFU-driven trap and drop, matched on the FFU's 8-bit action data ---
     r.append(Rule(0, 29, "ffuFlagTrapAlwaysFrame",
-                  match={"FFU_DATA_W8A": (0xC0, 0xC0)}))
+                  match={"FFU_DATA_W8A": (0xC0, 0xC0)}, loopback_suppress=False))
     r.append(Rule(0, 30, "ffuFlagTrapFrame",
-                  match={"FFU_DATA_W8A": (0x40, 0xC0)}))
+                  match={"FFU_DATA_W8A": (0x40, 0xC0)}, loopback_suppress=False))
+    # A dropped frame is never egressed, so loopback suppression is moot and this
+    # rule declines to decide it -- which is exactly what EOS's mask says.
     r.append(Rule(0, 31, "ffuFlagDropFrame",
                   match={"FFU_DATA_W8A": (0x10, 0x10)}))
     return r

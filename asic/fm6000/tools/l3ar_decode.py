@@ -57,13 +57,36 @@ RAM_SLICE_STRIDE = 0x40
 SEGMENTS, NUM_SLICES, RULES_PER_SLICE = 4, 5, 32
 MASK64 = 0xFFFFFFFFFFFFFFFF
 
-# FM6000_L3AR_CAM_KEYS -- exact positions, 256 bits over 4 segments x 64.
+# FM6000_L3AR_CAM_KEYS -- exact positions, 252 used of 256 over 4 segments x 64.
+#
+# ⚠ THIS LIST STOPPED AT BIT 147 FOR MOST OF ITS LIFE. Everything from
+# FFU_DATA_W8B upward was missing, and the omission was invisible: key_fields()
+# only prints fields it knows, so rules whose ONLY distinguishing bit lived above
+# 147 decoded as identical to each other. Two real pairs did:
+#
+#   s0r7  ...AndDefaultDglort  vs s0r11 ...AndDirectedDglort  differ at bit 167
+#                                          (FFU_DATA_W24_TOP bit 3)
+#   s0r20 UnicastRouting       vs s0r23 UnicastNoARP          differ at bit 174
+#                                          (NEXTHOP_TAG bit 2)
+#
+# NEXTHOP_TAG is the semantically satisfying one: "no ARP entry" is the next-hop
+# lookup tagging the frame as unresolved, which is exactly where that fact should
+# come from. --verify passed throughout, because it only checked that the named
+# fields tile upward from bit 0 -- never that every care bit lands inside a named
+# field. That is the third time in this project a green test asserted the wrong
+# invariant (see FEATURE-COMPLETE-CHECKLIST.md), so verify() now checks coverage.
 KEY_LAYOUT = [
     ("ACTION_FLAGS", 0, 51), ("SRC_PORT", 52, 58), ("SRC_PORT_ID4", 59, 66),
     ("ISL_SGLORT", 67, 82), ("QOS_ISL_PRI", 83, 86), ("L2_TYPE_ID2", 87, 90),
     ("L2_DMAC_ID3", 91, 95), ("L2_SMAC_ID3", 96, 100), ("L3_DIP_ID3", 101, 105),
     ("L3_SIP_ID3", 106, 110), ("L3_PROT_ID2", 111, 114), ("MAP_VID1", 115, 126),
     ("reserved0", 127, 127), ("MAP_VID2", 128, 139), ("FFU_DATA_W8A", 140, 147),
+    ("FFU_DATA_W8B", 148, 155), ("FFU_DATA_W16A_TOP", 156, 159),
+    ("FFU_DATA_W16B_TOP", 160, 163), ("FFU_DATA_W24_TOP", 164, 171),
+    ("NEXTHOP_TAG", 172, 179), ("FFU_DATA_TAG1A", 180, 191),
+    ("FFU_DATA_TAG1B", 192, 203), ("FFU_DATA_TAG2A", 204, 215),
+    ("FFU_DATA_TAG2B", 216, 227), ("FFU_DATA_W8C", 228, 235),
+    ("L3_HASH", 236, 251),
 ]
 RAM_LAYOUT = [("Mask_LO", 0, 25), ("Set_LO", 32, 57)]
 RAM2_LAYOUT = [("Mask_HI", 0, 25), ("Set_HI", 32, 57)]
@@ -182,8 +205,26 @@ def verify(mem):
         if lo != pos:
             prob.append(f"KEY_LAYOUT gap at {n}: expected {pos}, got {lo}")
         pos = hi + 1
+    # ⚠ THE CHECK THAT WAS MISSING. Tiling from bit 0 says nothing about how far
+    # the layout reaches; a list truncated at 147 tiles perfectly. Every care bit
+    # EOS sets must land inside a named field, or the layout is incomplete and
+    # key_fields() is silently discarding the bits that distinguish rules.
+    named = 0
+    for _, lo, hi in KEY_LAYOUT:
+        named |= ((1 << (hi - lo + 1)) - 1) << lo
+    uncovered = 0
+    for s in range(NUM_SLICES):
+        for r in range(RULES_PER_SLICE):
+            res = read_rule(mem, s, r)
+            if res:
+                uncovered |= rule_key(res[0])[1] & ~named
+    if uncovered:
+        bits = [b for b in range(256) if (uncovered >> b) & 1]
+        prob.append(f"care bits outside every named field: {bits}")
     for p in prob:
         print("  " + p)
+    print(f"key coverage: {pos} bits named, "
+          f"{'no' if not uncovered else len(bits)} care bits fall outside them")
     good = bad == 0 and rbad == 0 and not prob
     print("\nVERIFY " + ("PASS - the encoder reproduces a program it did not write"
                          if good else "FAIL"))
