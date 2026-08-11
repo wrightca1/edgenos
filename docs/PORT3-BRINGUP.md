@@ -388,3 +388,48 @@ resolves to them** — the remaining unknown is which lookup selects `L2F_256[0.
 
 That is now a small, well-posed question against a known-good reference, which is a much better
 place than where this started.
+
+
+---
+
+## Frame type implemented and live — still no egress
+
+The parser now carries the special-delivery rule, verified on the running chip:
+
+```
+LIVE: slice 3 entry 2   hw0=0x8000/care=0x8000   SetFlags[0,3]
+EOS:  slice 3 entry 27  hw0=0x8000/care=0x8000   SetFlags[0,3]
+one entry sets ACTION_FLAGS bit 0, same count as EOS
+```
+
+With every element below now verified against EOS on the same boot:
+
+| element | state |
+|---|---|
+| port 3 link | up, `lane1 = 0x8c0` |
+| port 41 SGLORT | `0x03ed` in `PARSER_INIT_FIELDS[41]` |
+| `GLORT_CAM[8]` | matches `0xff00` |
+| `GLORT_RAM[8]` | `DMaskBaseIdx = 16` |
+| `L2F[16]` | `w1 = 0x200` = port 41 |
+| parser SPECIAL rule | live, matching EOS's encoding |
+| inject | `tag@12 = 8100 ff00 ff00 0000` |
+
+**Nothing egresses.** `lane1` never sets Transmitting, the test host's `rx_packets` does not move,
+and a NORMAL/SPECIAL A/B gives identical results.
+
+So the frame type was necessary to decode and implement — our parser genuinely could not express
+it, and now can — but it is **not sufficient**, exactly as the SGLORT and the L2F mask were not.
+Three prerequisites satisfied in a row without reaching the goal.
+
+### What that pattern suggests
+
+Each fix has been verified in isolation and none has changed the outcome, which points at
+something structural rather than another missing table entry. The untested link in the chain is
+**L2AR** — the block that makes the actual forwarding decision, and the one this project has never
+decoded (checklist A2, blocked on `DMT_PROFILE` / CPU-code / mirror semantics). Every element we
+have verified is *upstream* of it (parser, GLORT resolution, destination mask) or *downstream*
+(MOD egress). L2AR sits in the middle and is the one thing we cannot currently inspect.
+
+The honest read is that CPU-inject to an arbitrary port needs L2AR configuration we have not
+decoded, and that A2 is therefore not merely the next item on the list but a prerequisite for
+this one.
