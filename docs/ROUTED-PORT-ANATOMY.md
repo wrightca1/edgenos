@@ -239,16 +239,52 @@ Tree 3 holds 97 boundaries against the box's ~39 routes, ≈2.5 per route, which
 `.0 / .1 / .255` triple observed for `10.99.99.0/24` (network, local address, broadcast). Tree 2
 holds 9. Capacity is 4 × 16 × 1024 = 65,536 boundaries.
 
-**Open, and deliberately not guessed:** `FFU_BST_ROOT_KEYS` has exactly one populated entry per
-tree, at index 15 — tree 2 `{0x0a010100, 0x00000f1e}`, tree 3 `{0x00000000, 0x00000e1e}`. The
-word-0 value `0x0a010100` is `10.1.1.0`, a plausible search root; the `0x0f1e`/`0x0e1e` word is
-not a key count (the counts are 9 and 97) and its encoding is unknown. Why two trees are in use,
-and whether they are double-buffered, per-precedence or parallel engines, is also unresolved.
+### Updates are double-buffered, and the root key says which half is live
 
-The **insertion algorithm is therefore not yet specified**, and `fm6000_fibd` cannot program routes
-until it is. What is specified is the storage: sorted, right-aligned, paired 1:1 with
-`FFU_BST_ACTION_ROUTE`. Inserting a boundary means shifting the array, which is consistent with the
-replay's very large write counts in this region.
+`FFU_BST_ROOT_KEYS` has exactly one populated entry per engine, at index 15 (right-aligned, the
+same convention as the key arrays). The header gives its fields:
+
+```
+Key[31:0]   Top4KeyInvert[35:32]   Top4Key[39:36]   Partition[43:40]
+```
+
+which decodes the two observed words immediately:
+
+| engine | `Top4Key`/`Invert` | `Partition` |
+|---|---|---|
+| 2 | `0x1`/`0xe` — ternary `0b0001` exactly | 15 |
+| 3 | `0x1`/`0xe` — same | 14 |
+
+`Partition` is the block index, and the two populated blocks per engine are an **active/standby
+pair**. The occupancy is the tell: the active block held one *more* key than the standby in both
+engines (5 vs 4, 49 vs 48), as if the last update had added a boundary to the half that then went
+live.
+
+**Tested by prediction rather than assumed.** Adding `ip route 192.0.2.0/24 Null0` on the live box:
+
+| | before | after add | after remove |
+|---|---|---|---|
+| root word 1 | `0x0e1e` → partition **14** | `0x0f1e` → partition **15** | `0x0e1e` → partition **14** |
+| block 14 keys | 49 | 49 — untouched | 49 |
+| block 15 keys | 48 | **50** | 50 — stale, left alone |
+
+The active block is never written. The standby is rebuilt in full, then one field in one root key
+flips to publish it. The new key `c0000200` = `192.0.2.0` appeared at `0x33bfff`, i0 = 1023 — the
+top slot, because it had become the highest boundary in the table.
+
+So the insertion algorithm is:
+
+1. Read `Partition` from `FFU_BST_ROOT_KEYS[engine][15]` — that is the live block.
+2. Build the full sorted boundary array for the new route set.
+3. Write it into **the other** block, right-aligned against i0 = 1023, with the paired
+   `FFU_BST_ACTION_ROUTE` entries.
+4. Flip `Partition[43:40]` in the root key to the block just written.
+
+That is a hitless update, it explains the replay's very large write counts in this region (every
+change rewrites a whole partition), and it is everything `fm6000_fibd` needs to program routes.
+Note that the standby half is left holding stale keys — 50 above, after the route that produced
+them was removed — so a reader must follow `Partition` and must not assume the other half is empty
+or current.
 
 ### Method note
 
