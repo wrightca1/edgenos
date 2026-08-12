@@ -311,3 +311,42 @@ The extension library is nonetheless a find in its own right. `FM_PORT_DEF_VLAN`
 none appear in the main SDK, and `fm6000SetUcVlanAttribute` / `fm6000SetUcSwitchAttribute` are the
 VLAN and switch equivalents — which is where the forwarding-domain configuration most plausibly
 lives, and which no part of this project has looked at before.
+
+
+## Port bring-up, mapped completely — and it never touches the forwarding mask
+
+`fm6000UpdatePortMask` has exactly six call sites. All six are now attributed:
+
+| call site | reached from | trigger |
+|---|---|---|
+| `+0x796` | `fm6000SetPortAttributeInt` | `FM_PORT_MASK_WIDE` |
+| `+0x9ed` | `fm6000SetPortAttributeInt` | `FM_PORT_INTERNAL` |
+| `+0x1c77` | `fm6000SetPortAttributeInt` | `FM_PORT_LOOPBACK_SUPPRESSION` |
+| `0x3d1acd` | static helper | LAG membership |
+| `0x3d1ddc` | static helper | LAG membership |
+| `0x3d1e5e` | static helper | LAG membership |
+
+The three static call sites sit in unnamed helpers in the `0x3d1xxx` region whose only callers are
+`fm6000AddPortToLag`, `fm6000DeletePortFromLag` and `fm6000SetPortLAGConfig`. They call
+`fmIsCardinalPort`, `fmGetLAGMemberPorts` and `fm6000UpdatePortMask` under `fmCaptureLock` /
+`fmReleaseLock` — a recompute-the-masks routine for link aggregation.
+
+### The conclusion
+
+**A port mask is written on exactly two occasions: an explicit attribute set, or a LAG membership
+change. Nothing else.** In particular:
+
+- `fm6000InitPort` does not write one (traced end to end: an all-ports software mask, VLAN tagging,
+  switch priority source, pause parsing).
+- **There is no link-state path.** No handler recomputes masks when a port comes up. The presence
+  of `fmPortMaskLogicalToLinkUpMask` suggested one might exist; it does not — that helper filters a
+  mask by link state for a caller that already has one, it is not a trigger.
+
+So "bring the port up and it joins the forwarding domain" is not how this SDK works, and no amount
+of port-level configuration will make port 41 forward. Membership is **explicit configuration
+performed by whatever owns the VLAN**, and in EOS that is an agent calling into
+`libFocalPoint_AWM_switch.so`.
+
+That closes the port bring-up line of enquiry with a definite answer rather than another
+"necessary but not sufficient". The remaining target is `fm6000SetUcVlanAttribute` in the extension
+library — the VLAN-side equivalent, in the binary this project has never opened.
