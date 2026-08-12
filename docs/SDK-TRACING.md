@@ -164,3 +164,61 @@ table that is not in its first 0x400 bytes. Locating that table gives the specif
 for these three cases — i.e. exactly which attribute to set. That is the next step, and it is
 bounded: find the `jmp *table(,%reg,4)`, read the table, map the three call-site offsets back to
 their case indices.
+
+
+## ★ The answer: `FM_PORT_MASK_WIDE`
+
+Read the attribute dispatch table to name the three cases that write the port mask.
+
+**The dispatch**, at `0x419287`:
+
+```
+cmpl $0x85,0x18(%ebp)              ; attribute ID, valid 0..0x85
+ja   <default>
+mov  0x18(%ebp),%eax
+shl  $0x2,%eax
+mov  -0xb5e38(%eax,%ebx,1),%eax    ; table[attr], PIC-relative offsets
+add  %ebx,%eax
+jmp  *%eax
+```
+
+PIC base is `0x418bf7 + 0x1eb615 = 0x60420c`, so the table sits at `0x54e3d4` and each entry is an
+offset from that base. Mapping the three `fm6000UpdatePortMask` call sites back to their cases:
+
+| call site | attribute | name |
+|---|---|---|
+| `+0x796` | `0x16` (22) | **`FM_PORT_MASK_WIDE`** |
+| `+0x9ed` | `0x5a` (90) | `FM_PORT_INTERNAL` |
+| `+0x1c77` | `0x59` (89) | `FM_PORT_LOOPBACK_SUPPRESSION` |
+
+**The attribute name table** is a 28-byte record array at `0x408d40` (file offset), each record
+holding the attribute ID followed by a pointer to its `FM_PORT_*` string. 81 records parse cleanly,
+and the low IDs check out against the published FocalPoint ordering — `MIN_FRAME_SIZE=0`,
+`MAX_FRAME_SIZE=1`, `LEARNING=6`, `TAGGING=7`, `SPEED=20`.
+
+### What this means
+
+**`FM_PORT_MASK_WIDE` is the forwarding-domain membership.** Setting it on a port takes a port
+*list*, converts it with `fmBitArrayToPortMask`, and writes a 3-word entry into `L2F_TABLE_256`.
+That is the operation the entire port-3 investigation was looking for and never found, because it
+looked for it under "VLAN membership" — which on this SDK writes nothing.
+
+It also matches the shape of the masks EOS holds: `{0,41}` and `{0,3,20,40,41}` are exactly
+"which ports may this source port forward to", not flood groups as I had assumed.
+
+⚠ And `FM_PORT_LOOPBACK_SUPPRESSION` being a *separate attribute* writing `LBS_BASE` confirms
+these are two independent operations — and that copying port 40's `LBS_CAM` value onto port 41 in
+the port-3 experiments was wrong, since the SDK derives it per port.
+
+### Next
+
+For Et1 (port 40) to forward to port 41, **port 40's `FM_PORT_MASK_WIDE` must include bit 41**. The
+remaining unknown is the index computation into `L2F_TABLE_256`:
+
+```
+((value_at[ptr+0xb30] - 8) << 8) + entry_index + 0x68000, then << 2
+```
+
+The `<<8` group term comes from a switch-struct field, so which `L2F` entry corresponds to which
+source port still has to be pinned — most cheaply by reading `L2F` on EOS with both ports up and
+correlating, which is a dump we already have.
