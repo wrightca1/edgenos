@@ -57,7 +57,7 @@ for t in fm6000_coldreplay fm6000_initsbus fm6000_memfill fm6000_fullreplay \
          fm6000_safinit fm6000_cminit fm6000_sweepinit fm6000_l2finit fm6000_eplinit fm6000_ffuinit fm6000_l2linit fm6000_eplseq fm6000_l2arseq fm6000_l2arpre fm6000_mapperpre fm6000_mgmt2pre fm6000_tbl3init fm6000_crmdrop \
          fm6000_mgmt2init fm6000_sweeperinit fm6000_cmminit fm6000_monitorinit fm6000_statsarinit fm6000_eaclinit fm6000_laginit fm6000_glortinit \
          fm6000_l2arinit fm6000_parserinit fm6000_modinit fm6000_l3arinit fm6000_hashinit fm6000_mapperinit \
-         fm6000_route fm6000_fibd fm6000_rport fm6000_bst fm6000_fibgen fm6000_lanelink; do
+         fm6000_route fm6000_fibd fm6000_rport fm6000_bst fm6000_fibgen fm6000_lanelink fm6000_sbusdump; do
     [ -f "$A/$t.c" ] || continue
     cc -O2 -I"$A" -o "$P/$t" "$A/$t.c" 2>/dev/null && built=$((built+1)) \
         || echo "    WARN: $t failed to build"
