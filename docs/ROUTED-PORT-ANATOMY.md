@@ -344,6 +344,37 @@ This also explains why unused slots matter at all: with zeros below it, a right-
 array is still globally sorted (`0,0,…,0,k₁,k₂,…`) and binary search works. With garbage or stale
 entries it is not sorted, and the search is undefined.
 
+### What boundaries to emit — the rule, read off a live table
+
+Correlating all 49 boundaries of a converged EOS FIB against `show ip route` and `show ip arp`
+gives the complete construction rule. `lpm` is `32 − len` in every single case, and the nexthop
+index encodes the entry's *kind*:
+
+| nexthop | kind | precedence | examples |
+|---|---|---|---|
+| 5 | **glean** — a connected subnet's network and broadcast addresses | 2 | `10.1.1.0`, `10.99.99.255`, `10.101.101.31` |
+| 7 | **local** — an address belonging to this box | **3** | `10.99.99.1`, `10.101.101.26`, `10.101.255.1` |
+| 11, 12, 13 | **resolved neighbour**, one entry each | 2 | `10.99.99.2`, `10.101.101.25`, `10.101.101.33` |
+| 16 | **the gateway** — every remote route shares it | 2 | all the OSPF `/24`s and `/29`s |
+| 6 | loopback | 2 | `127.0.0.1` |
+
+So for each route in the RIB, emit one boundary at its network address with `len` = the route's
+prefix length and the gateway's nexthop. For each **connected** subnet additionally emit `/32`
+boundaries: the network address and the broadcast as glean, this box's own address as local
+(precedence 3), and each resolved neighbour pointing at its own nexthop entry. That is why
+`10.101.101.24`, a `/29` connected subnet, carries `lpm 0` — the entry is the `/32` network-address
+boundary, not the subnet route.
+
+`0.0.0.0/0` is **not** a boundary. Its action sits in the slot immediately below the lowest key,
+whose key is zero, because a binary search for anything below the first boundary lands there. On
+the captured table that is index 974, one below the 975 where the boundaries start.
+
+`fm6000_bst -p` implements exactly this array construction and is validated byte-for-byte against
+the live table above. What remains for `fm6000_fibd` is the policy half: walking the kernel RIB and
+neighbour table to produce the boundary list, and allocating the `NEXTHOP_TABLE` entries it refers
+to. Both are now fully specified — the next-hop encoding is in the section above, and the boundary
+rule is here.
+
 ### Method note
 
 **Searching for a known value beats capturing a second state.** The two-state diff found the
