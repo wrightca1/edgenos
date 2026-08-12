@@ -117,6 +117,41 @@ ops, every SBus op hardcoded to device `0x49` and every MMIO address to `0xe38xx
 Parameterising it by lane (device `0x49 + lane`, MMIO offset `+ 0x80 * lane`) and replaying the
 captured lane-1 values is now a well-defined job rather than an investigation.
 
+### `fm6000_lanelink`: built, validated, and it does not link the lane
+
+`fm6000_lanelink` implements exactly that generalisation — the 52 EPL-lane MMIO ops and 37 SBus ops
+held lane-relative, with addresses, SBus device and TX equalisation all derived. Offline it is
+exact: **port 1 reproduces `fm6000_linkup` 89/89 ops identically**, and port 3 produces lane-1
+addresses, device `0x4a`, SPICO reg-0x03 payload `0x4a` and `SERDES_TX_CFG` `c0001580`/`c0001581`
+— every one matching the Et3 capture and the live-chip measurement.
+
+Two bugs surfaced only because the check was a *full-sequence* diff, not a spot check:
+
+- `EPL_BASE` written `0x0E000` instead of `0xE0000` — every address wrong by 16×.
+- **16 of the 89 SBus ops target `0xfd`, the SPICO broadcast, not the lane's SerDes.** Retargeting
+  the broadcast *device* is wrong; what moves is its *payload*, because its reg-0x03 write carries
+  the target device as data. Confirmed against the capture, which writes `dev=0xfd reg=0x03
+  data=0x4a`. Spot checks passed while those 16 ops were silently corrupt.
+
+**On hardware it runs cleanly and the lane stays dark.** All 89 ops execute, `PIN` stays `0x208`,
+**Et1 is completely unaffected** (`0x8c0`/`0xcc0`, `pcsRx=1`) — and lane 1 remains `PORT_STATUS=0x15`,
+`pcsRx=0`.
+
+The SerDes is not the problem. A raw SBus read of core register `0x00` returns the same ID `0x5a`
+from `0x49`, `0x4a` and `0x45`, so device `0x4a` is alive and reachable; registers `0x03`/`0x06`
+differ between the three, i.e. they are simply in different states.
+
+**What is actually wrong is the source sequence.** `fm6000_linkup`'s window is a *cold Et1* capture:
+52 EPL writes, 21 SBus ops to the lane, 16 to SPICO. The live Et3 down→up capture is materially
+bigger — **79 EPL writes, 43 SBus ops to `0x4a`, and 112 to `0xfd`** — so the live bring-up does
+substantially more SPICO work than the cold window contains. Parameterising the wrong sequence
+faithfully still gives the wrong sequence.
+
+⇒ Next: build the lane bring-up from **the lane-1 capture itself**
+(`fm6000-et3-noshut-LIVE-trace.txt`) rather than by transposing the lane-0 cold window. The capture
+is already in hand and `fm6000_lanelink`'s structure — lane-relative ops, derived addresses, derived
+equalisation, the two SBus device classes — carries over unchanged; only the op table is replaced.
+
 ---
 
 **2026-08-11.** Front-panel port 3 is now up under EdgeNOS. This is the second connected port, and
