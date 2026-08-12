@@ -80,8 +80,52 @@ The function that *is* named for the job makes exactly three CSR calls:
 per-port tables that differed between working Et1 (port 40, `0x0001fffe`) and port 41
 (`0x0003fffc`) in the port-3 investigation.
 
-**Next:** resolve the third call's target — it uses a different accessor and is the one write in
-this function not yet attributed.
+### The third call writes L2F_TABLE_256 — and corrects my earlier dismissal
+
+Following the arithmetic all the way through rather than stopping at the immediate:
+
+```
+mov  0x23e70(%eax),%eax        ; struct pointer
+add  $0xb30,%eax
+mov  0x4(%eax),%edx            ; 64-bit value
+mov  (%eax),%eax
+add  $0xfffffff8,%eax          ; minus 8
+adc  $0xffffffff,%edx
+shl  $0x8,%edx                 ; group << 8
+lea  (%edx,%eax,1),%eax        ; + entry index
+add  $0x68000,%eax             ; + base, IN ENTRY UNITS
+shl  $0x2,%eax                 ; << 2  ->  0x68000 * 4 = 0x1A0000
+movl $0x3,0x8(%esp)            ; count = 3 words
+call *%edx                     ; multi-word write via 0x3cc6c
+```
+
+`0x1A0000` is **`L2F_TABLE_256`**, and `count = 3` is exactly `FM6000_L2F_TABLE_256_WIDTH`.
+
+⚠ **This corrects the "0x68000 is a struct offset" conclusion above.** It *is* a register address —
+the SDK addresses this table in **entry units** and shifts left by 2 to get words. Dumping
+`0x68000` returned zeros because the table is at `0x1a0000`, not because the immediate was
+meaningless. The `adc` I took as proof of struct arithmetic belongs to an unrelated 64-bit
+subtraction three instructions earlier.
+
+The lesson survives in a sharper form: **an immediate is only meaningful once you follow it to the
+accessor call.** Neither "it's big so it's an address" nor "there's an adc so it isn't" is sound;
+the deciding evidence is what reaches the `call *%reg`.
+
+### So the SDK's port-mask update touches two tables
+
+`fm6000UpdatePortMask` writes:
+
+1. **`LBS_BASE` (`0x14000`)**, twice, via write32 — loopback suppression, per port
+2. **`L2F_TABLE_256` (`0x1a0000`)**, one 3-word entry — the destination/port mask
+
+That independently confirms what the port-3 work found empirically: the destination mask lives in
+`L2F_TABLE_256` and is a 3-word atomic entry. It also says adding a port to a forwarding domain is
+**two** operations, not one — the mask *and* loopback suppression.
+
+⚠ And it flags an error in the port-3 experiments: `LBS_CAM` was set on port 41 by **copying port
+40's value verbatim** (`0x0001fffe`). LBS is per-port — port 41's own value was `0x0003fffc`,
+which is port 40's shifted left by one. Copying it was almost certainly wrong, and the SDK computing
+it per port confirms the value is positional rather than global.
 
 ## Practical notes
 
