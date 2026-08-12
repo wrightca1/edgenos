@@ -660,3 +660,28 @@ resolves to port 41 — which needs the MAC table programmed, not the inject pat
 
 That is ordinary L2 switching and it is the same A2/L2AR territory this document keeps arriving at,
 but from a clearer direction: what is needed is a MAC→port-41 entry, not more GLORT plumbing.
+
+
+## MAC-table route: structure known, entry placement blocked
+
+`FM6000_L2L_MAC_TABLE` (`0x280000`, 4096 buckets x 16 ways x 4 words):
+
+```
+MAC[47:0]  FID1[59:48]  FID2[71:60]  Prec[73:72]  GLORT[95:80]  TAG[107:96]  DATA[115:108]
+```
+
+So the L2 lookup's destination **is a GLORT** — the lookup feeds back into the same
+`GLORT_CAM -> L2F` chain, just reached from the wire instead of from the CPU. That is coherent with
+everything above and means a MAC entry pointing at a GLORT that resolves to port 41 would work.
+
+Two obstacles, both practical rather than conceptual:
+
+1. **Placement needs the hash.** Entries are hash-bucketed; writing one requires the L2 hash
+   function (`HASH_BASE 0xb000`, `fm6000_hashinit`), which is not decoded.
+2. **Learning would place it for us, but port 41 cannot learn.** Learning requires the port to be
+   in a VLAN with learning enabled — the forwarding-domain membership this whole document is about.
+   Scanning the first 4 buckets after sustained host traffic found **no entries at all**, and
+   `fmdump` cannot sparsely scan the remaining 4,092 (stride `0x4000`, 64 words used per bucket).
+
+So the MAC route is circular with the original problem: it needs the VLAN membership that would
+also have made flooding work.
