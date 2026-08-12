@@ -42,6 +42,11 @@ Consequence: **nothing reports PSU presence, power-good, input/output voltage, o
 or removed supply would go completely unnoticed. On a redundant-PSU box that is precisely the
 failure you most want to know about.
 
+**The device is a UCD9012.** Booting EOS shows `/var/log/agents/Ucd9012-*` alongside `Xcvr-*` and
+`ZeroTouch-*`, so EOS runs a dedicated agent for it — which both names the part and confirms the
+`ucd9000` driver already loaded on our side is the right one. What is missing is only the
+instantiation and whatever address it sits at.
+
 The board-management buses that carry it are already declared — `scd-sfp-topology.sh` documents
 `new_smbus_master 0x8000 0 8` and `0x8080 1 8` as "accel 0/1 = board mgmt (temp/psu/cpld/Si5338)" —
 so the missing piece is instantiating the PSU device on the right bus/address and exposing it,
