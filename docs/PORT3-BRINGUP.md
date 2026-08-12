@@ -15,6 +15,59 @@
 > The link bring-up in this document (§ *The port*, the lane-1 EPL configuration) is correct and
 > still current. The forwarding-path work is not.
 
+## 2026-08-12: why lane 1 does not link, and where the gap actually is
+
+Under `edgenos-special.swi`, `PORT_STATUS(EPL14, lane1)` sits at `0x15` while lane 0 (Et1) reaches
+`0x8c0`/`0xcc0`. Diffing the whole EPL14 block (`0xe3800`, 256 words) between a live EOS with both
+ports up and a live EdgeNOS localises it precisely.
+
+**Three leads that looked good and were wrong**, recorded so nobody re-walks them:
+
+- `AN_37_CFG` (offset `0x28`) is written for lane 0 and never for lane 1 — by our generators *and*
+  by the replay. But it reads **zero on both lanes of a working EOS**, so it is not configuration
+  that matters here.
+- `SERDES_IP` (offset `0x41`) is likewise lane-0-only, and the live chip has `0x4b0` on both lanes.
+  That looked like a missing write. **`IP` is "interrupt pending", not "IP config"** — `0x40` is
+  `SERDES_IM` (mask) and `0x41` is `SERDES_IP` (pending), both written `0x3fff` as write-1-to-clear.
+  The value is status.
+- The **SFP laser**. `fm6000-fullseq.sh` STEP6 clears bit 6 of SCD `0x5010` for one port, and
+  nothing enables port 3's. But every register in `0x5010`–`0x503c` already reads `0x180` with bit 6
+  clear, so the lasers are on.
+
+Equally, the differences at offsets `0x26`, `0x38`, `0x3e`, `0x3f`, `0x41`, `0x42` are all **status**
+registers — `PCS_10GBASER_RX_STATUS`, `LANE_STATUS`, `SERDES_STATUS`, `SERDES_IP`, `LANE_DEBUG` —
+which the replay writes for neither lane. They report a dead lane; they do not cause one.
+
+**What is real: the replay captured lane 1 half-configured.** Its own final values are
+
+| offset | lane 0 (11 writes) | lane 1 (**5** writes) | EOS live lane 1 |
+|---|---|---|---|
+| `0x39` `SERDES_RX_CFG` | `002a0281` | `00280280` | `002a0281` |
+| `0x3a` `SERDES_TX_CFG` | `c0000581` | `80000080` | `c0001581` |
+| `0x3b` | `00000c83` | `00000803` | `00000c83` |
+| `0x3c` | `000001fe` | `000001ee` | `000001fe` |
+
+EdgeNOS reproduces those byte for byte, so this is **not** a generator defect — the capture window
+missed lane 1's SerDes bring-up. (Note EOS's lane 1 `0x3a` is `c0001581`, genuinely different from
+lane 0's `c0000581`, so the values are per-lane and cannot be copied across.)
+
+**But writing EOS's values does not bring the lane up.** All seven config-looking registers
+(`0x04`, `0x10`, `0x21`, `0x39`–`0x3c`) were set to EOS's exact values on the live chip; lane 0 was
+unaffected and lane 1 stayed at `PORT_STATUS=0x15`, `pcsRx=0`, `LANE_STATUS=0`.
+
+⇒ **The gap is below the EPL register block, in the SerDes/SBus lane bring-up** — the `sbus=30752`
+half of `fullseq`, a different address space (`SERDES_ETH_READ/WRITE`, SPICO). The EPL block is now
+provably identical to a working one and the lane is still dark, which rules that layer out.
+
+Also worth knowing: **nothing in the boot scripts mentions `0xe3880` at all.** `fm6000-fullseq.sh`'s
+STEP7 is purely observational (sleep and report) and every address in it is lane 0's.
+
+The cheapest route to a fix is a **fresh replay captured with Et3 configured and linked from the
+start** — the capture would then contain lane 1's full SerDes sequence, SBus ops included, rather
+than the 5 stray writes it has now.
+
+---
+
 **2026-08-11.** Front-panel port 3 is now up under EdgeNOS. This is the second connected port, and
 it is what unblocks the transit traffic that A4 (MOD command split) and B1 (FFU ByteMux) need —
 neither can be settled with CPU-terminated traffic alone.
