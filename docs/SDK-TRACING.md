@@ -264,3 +264,50 @@ every port, they are not part of the documented API, and they are not in the dis
 handles everything else. Finding where `fm6000SetPortAttribute` (the outer wrapper, distinct from
 `...Int`) routes IDs above `0x85` would name them — and they are the only remaining candidates for
 per-port state EOS configures that we have never replicated.
+
+
+## The three unnamed attributes: resolved, and they are not the answer
+
+`fm6000SetPortAttribute` bounds its own dispatch at `attr - 0x21 <= 0x5a` (attributes `0x21`-`0x7b`)
+and sends everything else down a default path that ends at `fm6000SetPortAttributeInt`, whose
+dispatch bounds at `0x85`. So where do `0x8b`, `0x8c` and `0x9f` go? `SetPortAttributeInt`'s
+default path answers it:
+
+```
+call fmLoadDynamicLoadLibrary@plt   ; load a plugin
+cmpl $0x0,-0x1c(%ebp)               ; check the handle
+mov  0x18(%ebp),%eax                ; the attribute id
+call *%edx                          ; dispatch INTO the loaded library
+```
+
+**Attributes above `0x85` are handled by a dynamically loaded library**, named in the SDK's strings
+as `libFocalPoint_AWM_switch.so` and present in the EOS rootfs. It exports `fm6000SetUcPortAttribute`
+and carries its own name table (28-byte records, same layout as the main one).
+
+The two ID spaces **dovetail rather than collide** — the extension defines `FM_PORT_DEF_VLAN = 0x09`,
+filling a gap the main table leaves — so the two libraries split one enum.
+
+Resolving `fm6000InitPort`'s three unknowns there:
+
+```
+0x8b (139) = FM_PORT_PARSE_PAUSE
+0x8c (140) = FM_PORT_PARSE_CBP_PAUSE
+0x9f (159) = not among the 35 records parsed
+```
+
+### The honest conclusion
+
+**They are pause-frame parsing, not forwarding state.** The thread was worth pulling — it was the
+last unexamined thing in the port bring-up path — but it does not contain the missing piece. The
+full picture of `fm6000InitPort` is now: build an all-ports software mask, set VLAN tagging, switch
+priority source, and pause parsing. Nothing that grants a port membership of a forwarding domain.
+
+Combined with the earlier finding that `fm6000InitPort` never sets `FM_PORT_MASK_WIDE`, the
+conclusion is consistent and worth stating plainly: **in this SDK, bringing a port up and making it
+forward are entirely separate concerns, and nothing in the port-init path touches the second.**
+
+The extension library is nonetheless a find in its own right. `FM_PORT_DEF_VLAN`,
+`FM_PORT_SWITCHING_REFLECT`, `FM_PORT_ROUTING_REFLECT` and `FM_PORT_MLAG_PEER_LINK` all live there,
+none appear in the main SDK, and `fm6000SetUcVlanAttribute` / `fm6000SetUcSwitchAttribute` are the
+VLAN and switch equivalents — which is where the forwarding-domain configuration most plausibly
+lives, and which no part of this project has looked at before.
