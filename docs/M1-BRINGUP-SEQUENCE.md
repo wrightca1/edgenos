@@ -26,6 +26,19 @@ tables are loaded. Verify rather than assume:
 ⚠ `fm6000reg` parses its address as **decimal** unless you write `0x`. `fm6000reg <bdf> 100c01`
 silently reads register 100.
 
+⚠ **`fullseq` runs for minutes after SSH comes up, and a chip mid-fill reads all zeros.** SSH is
+answering long before the tables exist. Probed at 1 minute of uptime, every register above reads
+`0x00000000` while `PIN_STRAP` is a healthy `0x208` — which looks exactly like "the boot never
+loaded the tables" and is really "you are early". Check first, then probe:
+
+```sh
+ps w | grep "[f]m6000-fullseq"      # still running?
+tail -3 /mnt/flash/fullseq.log      # STEP5 counts down "N writes remain"
+```
+
+Wait for the process to exit. `dmesg | grep -i fullseq` finds nothing either way — the script logs
+to `/mnt/flash/fullseq.log`, not the kernel ring — so an empty dmesg grep is not evidence.
+
 ## ⛔ DO NOT HAND-ROLL THIS. RUN THE SCRIPT.
 
 ```sh
@@ -37,6 +50,29 @@ job: modules and device nodes, loopback, portd, **the MAC**, **MTU 1600**, zebra
 wait, and the hardware FIB sync. It also refuses to run twice, because restarting portd without a
 chip reset wedges the DMA rings and RX silently goes to zero — which looks exactly like a
 dataplane defect.
+
+### ⚠ Run it DETACHED, or the watchdog will reboot the box
+
+```sh
+setsid nohup /usr/lib/edgenos/platform/edgenos-up.sh >/tmp/up.log 2>&1 </dev/null &
+```
+
+Running it over a foreground `ssh` with a client-side timeout kills it: when `ssh` dies the script
+takes SIGHUP partway through. **The script starts `fm6000_wdog -g 180` near the end**, so a run
+that is interrupted after the watchdog starts but before the dataplane is up leaves the box with a
+dead dataplane and an armed watchdog — and ~180 s later it reboots.
+
+Observed 2026-08-12: `timeout 280 ssh ... edgenos-up.sh` cut the script off; management went away
+a few minutes later and the box came back on **EOS**. Nothing was wrong with the switch. The
+watchdog did exactly what it was written to do.
+
+Two things make this harmless instead of alarming:
+
+- **Set `boot-config` back to `EOS-4.16.8M.swi` as soon as EdgeNOS is up.** EdgeNOS lives entirely
+  in RAM, so an unexpected reboot then lands on a working switch rather than stranding it in PROBE
+  MODE. Do this *first*, before any experiment.
+- **`touch /mnt/flash/wdog.off`** while debugging, so a half-finished bring-up cannot reboot the
+  box under you. Remember to remove it when you want the watchdog back.
 
 **This document previously contained a hand-reconstructed sequence, and that sequence was wrong.**
 It omitted two lines:
