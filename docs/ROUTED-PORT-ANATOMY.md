@@ -212,6 +212,46 @@ The action paired with the 10.99.99.0 key reads `0x0800000f / 0x00014000` →
 `NextHopBaseIndex = 15`, `Route = 1`, `Precedence = 2`. Index 15 is the glean entry above, which
 is exactly right for a connected subnet.
 
+### The BST is a sorted boundary array, right-aligned
+
+Dumping whole blocks and counting shows the layout directly:
+
+| tree / block | keys | occupies | |
+|---|---:|---|---|
+| tree 2, block 14 | 4 | i0 1020–1023 | |
+| tree 2, block 15 | 5 | i0 1019–1023 | |
+| tree 3, block 14 | 49 | i0 975–1023 | |
+| tree 3, block 15 | 48 | i0 976–1023 | |
+
+Every block is **sorted ascending and right-aligned against i0 = 1023**, ending at `7f000001`
+(127.0.0.1) — the top of the IPv4 space the box has a route for:
+
+```
+... 0a656518  0a656519  0a65651a  0a65651f  0a656520 ...
+    0a660100  0a680100  0a690100  0a6b0100  0ac70100  0ac80100  47b54400  7f000001
+```
+
+So this is **interval-based LPM**: the sorted boundaries partition the address space and each
+boundary carries the action for the range it opens. "BST" describes the search, not the storage —
+there are no child pointers, just a sorted array to binary-search.
+
+Tree 3 holds 97 boundaries against the box's ~39 routes, ≈2.5 per route, which matches the
+`.0 / .1 / .255` triple observed for `10.99.99.0/24` (network, local address, broadcast). Tree 2
+holds 9. Capacity is 4 × 16 × 1024 = 65,536 boundaries.
+
+**Open, and deliberately not guessed:** `FFU_BST_ROOT_KEYS` has exactly one populated entry per
+tree, at index 15 — tree 2 `{0x0a010100, 0x00000f1e}`, tree 3 `{0x00000000, 0x00000e1e}`. The
+word-0 value `0x0a010100` is `10.1.1.0`, a plausible search root; the `0x0f1e`/`0x0e1e` word is
+not a key count (the counts are 9 and 97) and its encoding is unknown. Why two trees are in use,
+and whether they are double-buffered, per-precedence or parallel engines, is also unresolved.
+
+The **insertion algorithm is therefore not yet specified**, and `fm6000_fibd` cannot program routes
+until it is. What is specified is the storage: sorted, right-aligned, paired 1:1 with
+`FFU_BST_ACTION_ROUTE`. Inserting a boundary means shifting the array, which is consistent with the
+replay's very large write counts in this region.
+
+### Method note
+
 **Searching for a known value beats capturing a second state.** The two-state diff found the
 per-port configuration; it would never have found the route, because the route is present in only
 one state and a diff of the wrong address range reports `differs=0` — which is indistinguishable
