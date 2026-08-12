@@ -222,3 +222,45 @@ remaining unknown is the index computation into `L2F_TABLE_256`:
 The `<<8` group term comes from a switch-struct field, so which `L2F` entry corresponds to which
 source port still has to be pinned — most cheaply by reading `L2F` on EOS with both ports up and
 correlating, which is a dump we already have.
+
+
+## `fm6000InitPort`: what EOS does, in order, to bring a port up
+
+Traced end to end. Stripping logging, the whole function is:
+
+```
+fmPortMaskEnableAll(mask, n)      x2      build an all-ports bitmask in software
+memset / fmLoadDynamicLoadLibrary
+fm6000GetPortMacCount
+fm6000SetPortAttribute(... 0x9f ...)      Arista extension, unnamed
+fm6000SetPortAttribute(... 0x07 ...)      FM_PORT_TAGGING
+fm6000SetPortAttribute(... 0x08 ...)      FM_PORT_TAGGING2
+fm6000SetPortAttribute(... 0x30 ...)      FM_PORT_SWPRI_SOURCE
+fm6000SetPortAttribute(... 0x8b ...)      Arista extension, unnamed
+fm6000SetPortAttribute(... 0x8c ...)      Arista extension, unnamed
+```
+
+`fmPortMaskEnableAll` is a pure software helper — it fills a 3-word (96-bit) mask with the low
+`n` bits set, looping words 0..2. It produces the port *list* that `fmBitArrayToPortMask` later
+converts.
+
+### Two things this settles
+
+**`fm6000InitPort` does not set `FM_PORT_MASK_WIDE`.** Port bring-up and forwarding-mask membership
+are separate operations in this SDK; the mask is set by whoever owns the forwarding domain, not by
+port init. So "bring the port up" was never going to make it forward, which is consistent with
+everything the port-3 work observed.
+
+**Three of the six attributes are outside the stock FocalPoint set.** The name table at
+`0x408d40` holds 81 records topping out at `0x85` (`FM_PORT_PARSE_L3_QinQinQ`), and
+`fm6000SetPortAttributeInt`'s dispatch bounds at the same `0x85`. IDs `0x8b`, `0x8c` and `0x9f` are
+therefore **Arista extensions** handled before or outside that dispatch — three attributes EOS sets
+on every port that have no public name and no entry in the table.
+
+### Next thread
+
+Those three unnamed attributes are the most interesting thing found so far: they are set by EOS on
+every port, they are not part of the documented API, and they are not in the dispatch table that
+handles everything else. Finding where `fm6000SetPortAttribute` (the outer wrapper, distinct from
+`...Int`) routes IDs above `0x85` would name them — and they are the only remaining candidates for
+per-port state EOS configures that we have never replicated.
