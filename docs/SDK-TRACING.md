@@ -134,3 +134,33 @@ it per port confirms the value is positional rather than global.
 - `movl $0x80000,(%esp)` and `movl $0x2f32,0x18(%esp)` patterns are logging arguments (a category
   mask and a string offset), not register work. They are dense in this library and easy to mistake
   for data.
+
+
+## The call path into the port mask
+
+`fm6000UpdatePortMask` has six call sites. Three resolve to **`fm6000SetPortAttributeInt`**
+(`+0x796`, `+0x9ed`, `+0x1c77`); three are in an unnamed local function around `0x3d1acd`.
+
+The sequence immediately before each call is the informative part:
+
+```
+41935d:  call fmBitArrayToPortMask@plt   ; port LIST -> port MASK
+419362:  mov  %eax,-0x1c(%ebp)
+419365:  cmpl $0x0,-0x1c(%ebp)           ; error check
+419369:  jne  <error>
+41937c:  call fm6000UpdatePortMask@plt
+```
+
+So the SDK's route to a hardware port mask is: **set a port attribute whose value is a port list**,
+which `fmBitArrayToPortMask` converts to a mask, which `fm6000UpdatePortMask` then writes into
+`L2F_TABLE_256` (3-word entry) and `LBS_BASE`.
+
+That is the API-level answer to "how does a port get added to a forwarding domain": not through
+`fm6000SetVlanMembership` (which touches no hardware), but through a **port attribute** carrying a
+port list.
+
+**Next:** `fm6000SetPortAttributeInt` is ~68 KB and dispatches on the attribute ID through a jump
+table that is not in its first 0x400 bytes. Locating that table gives the specific attribute IDs
+for these three cases — i.e. exactly which attribute to set. That is the next step, and it is
+bounded: find the `jmp *table(,%reg,4)`, read the table, map the three call-site offsets back to
+their case indices.
