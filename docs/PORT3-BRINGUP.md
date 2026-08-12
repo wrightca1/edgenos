@@ -199,11 +199,49 @@ capture by construction* — which is why replaying it faithfully still leaves t
 It is the same shape of error as transposing the cold lane-0 window: the sequence is authentic, and
 it is the wrong sequence.
 
-⇒ **What is needed is a COLD-boot trace with Ethernet3 configured**, using the
-`payload/fpcoldwatch.sh` recipe (arm `fmPlatformTraceRegOps` at the first `fmPlatformWriteCSR` from
-`rc.eos`, collect `/var/log/agents/FocalPointV2-*` only after the links are up). That capture would
-contain lane 1's RX calibration, and it is also exactly the capture that would give a `fwd4.txt`
-with both ports routed — the one artifact that unblocks the FIB proof, A4 and B1 as well.
+⇒ **What is needed is a COLD-boot trace with Ethernet3 configured.** Two attempts with the
+`fpcoldwatch.sh` harness both failed, and the reason is now measured rather than guessed.
+
+### The cold capture cannot be armed in time by this method
+
+Attempt 1 armed at **219 s** into boot. Attempt 2 added `set auto-solib-add off` to skip
+shared-library symbol resolution and armed at **211 s**. Both produced the same useless signature:
+
+```
+distinct lane-1 addresses written: 33
+   204 0x000e3890      200 0x000e3892      198 0x000e3893      198 0x000e3891
+```
+
+33 addresses hit ~200 times each is EOS's port agent **polling**, not a one-shot calibration. The
+SBus histogram agrees — `0x49`/`0x4a`/`0x45` at 73/73/74 ops, symmetric, where a real cold bring-up
+would put one device far ahead.
+
+⚠ **"Contains `0x000e38xx` writes" is not a sufficient completeness test.** Attempt 1 passed it with
+7,206 EPL writes and was worthless. The test that discriminates is **configuration vs polling**:
+many distinct addresses written once or twice, versus few addresses written ~100×.
+
+The timing makes the cause plain:
+
+| | |
+|---|---|
+| FocalPointV2 process appears | **167.9 s** |
+| gdb finishes attaching and arms | **211.4 s** |
+| gdb attach cost | **~44 s** |
+
+FocalPointV2 does not exist before ~168 s, so nothing can arm earlier than that; and the agent
+completes the whole ASIC bring-up inside the 44 s gdb needs to attach and plant the breakpoint on
+`fmPlatformWriteCSR`. Skipping solib symbols saved only ~8 s — the cost is elsewhere.
+
+**So the breakpoint approach cannot win this race.** Arming has to happen *without* attaching a
+debugger after the fact — options, none yet tried:
+
+- an EOS knob that starts FocalPointV2 with reg-op tracing already enabled (the function exists;
+  something must set it);
+- `LD_PRELOAD` a constructor into the agent that calls `fmPlatformTraceRegOps(1)` before `main`;
+- start the agent under gdb rather than attaching to it, so the breakpoint exists before it runs.
+
+Until one of those works, `fwd4.txt` remains the only cold artifact, and it captured Et3 as an
+access port with lane 1 half-configured.
 
 ---
 
