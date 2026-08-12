@@ -623,3 +623,40 @@ The positive control proved injection reached the wire on Et1 and not port 41, a
 "port 41 is missing configuration". The other reading — *Et1 and port 41 are reached by different
 mechanisms* — was never tested, and it was the true one. A control that distinguishes two ports
 does not tell you they differ only in degree.
+
+
+---
+
+## Broadcast inject does not flood — tested, with the control in the same run
+
+The cheap test the mechanism argument implied: inject a broadcast and let the VLAN flood deliver
+it. Port 3 enabled, and port 41 added to the three L2F flood masks EOS uses (full-entry writes,
+verified by readback).
+
+```
+frame: ff ff ff ff ff ff | 44 4c a8 31 5d ab | 01 00 f0 00 ff 00 00 00 | 08 00
+
+A  bcast, DGLORT 0xf000   lane0 0xcc0 (no TX)   lane1 0x8c0 (no TX)
+B  bcast, DGLORT 0x03ef   lane0 0xac0 TRANSMIT  lane1 0x8c0 (no TX)
+C  bcast, DGLORT 0x0000   lane0 0x8c0 (no TX)   lane1 0x8c0 (no TX)
+```
+
+**B is the control and it passes** — the same broadcast frame egresses Et1 when the tag names Et1.
+So the inject path works, the frame is well formed, and the DMAC is genuinely broadcast.
+
+**A CPU-injected frame is delivered by its DGLORT, not by a MAC lookup.** A broadcast destination
+MAC changes nothing; the tag decides. That is consistent with the ISL tag's purpose — it exists
+precisely to bypass the lookup — and it disproves the flood hypothesis for injected traffic.
+
+Case C is the `e29` shape (DGLORT low 12 bits zero) and produces no egress anywhere, so "no
+destination in the tag" does not fall back to a lookup either.
+
+### What that leaves
+
+Flooding to port 41 would have to be triggered by a frame that goes through the **L2 lookup**, and
+a CPU-injected tagged frame never does. The remaining route to observing egress on port 3 is
+therefore traffic that *ingresses from the wire* — i.e. a frame arriving on Et1 whose destination
+resolves to port 41 — which needs the MAC table programmed, not the inject path.
+
+That is ordinary L2 switching and it is the same A2/L2AR territory this document keeps arriving at,
+but from a clearer direction: what is needed is a MAC→port-41 entry, not more GLORT plumbing.
