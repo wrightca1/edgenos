@@ -6,3 +6,10 @@ CFLAGS  ?= -Wall -Wextra -O2 -g
 # Static link: the cross-compiler's glibc (Ubuntu 2.35) and the target rootfs glibc
 # (Buildroot, varies) differ; edged needs symbols that may be absent in the target.
 LDFLAGS ?= -static -lpthread -lrt
+
+# Lets non-make consumers single-source a value instead of hardcoding it:
+#   CROSS_COMPILE=$(make -sf arch/powerpc/toolchain.mk print-CROSS_COMPILE)
+# A pattern rule never becomes the default goal, so including this fragment from
+# a board Makefile cannot hijack its `all` target.
+print-%:
+	@echo '$($*)'
