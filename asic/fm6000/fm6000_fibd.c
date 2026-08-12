@@ -9,21 +9,45 @@
  * programs the ASIC so the traffic is forwarded in silicon rather than punted.
  * Any daemon that installs to the kernel (OSPF, BGP, static) is covered.
  *
- * Structures (recovered by tracing EOS; see docs/ROUTING-FIB.md):
- *   prefix array   0x33bxxx  sorted, ONE WORD per prefix, shadow copy 0x400 below
- *   action array   0x337xxx  two words per entry (fields NOT decoded)
- *   adjacency      NEXTHOP 0x160000 + 10*idx
- *   commit         0x33c09e <- 0, 0x33c09f <- key, 0x3f0000 <- 2
+ * Structures. These were originally guessed from the replay's shape; they are
+ * now named and decoded -- see docs/ROUTED-PORT-ANATOMY.md.
+ *
+ *   prefix array   FFU_BST_KEY(engine, block, i)   0x10000*e + 0x400*b + i + 0x308000
+ *   action array   FFU_BST_ACTION_ROUTE(e, b, i,w) 0x10000*e + 0x800*b + 2*i + 0x300000
+ *   adjacency      NEXTHOP_TABLE[idx]              0x160000 + 2*idx   (WIDTH 2)
+ *   root keys      FFU_BST_ROOT_KEYS(e, 15, w)     0x10000*e + 0x0c080 + 0x300000
+ *
+ * The old note here said "shadow copy 0x400 below" and "adjacency + 10*idx".
+ * The first is right about the address and wrong about the meaning: 0x400 words
+ * is exactly one block, and the two populated blocks are an ACTIVE/STANDBY pair.
+ * FFU_BST_ROOT_KEYS[e][15] holds Partition[43:40], which names the live one.
+ * EOS updates by rebuilding the standby in full and then flipping that field --
+ * verified by adding a route on a live box and watching partition 14 -> 15 with
+ * the live block untouched. The second is simply wrong; the stride is 2 words.
+ *
+ * Keys are sorted ASCENDING and right-aligned against i = 1023. This is
+ * interval-based LPM: boundaries partition the address space and each carries
+ * the action for the range it opens (~2.5 boundaries per route -- a connected
+ * /24 contributes network, local address and broadcast).
+ *
+ * FFU_BST_ACTION_ROUTE fields, from the register header:
+ *   NextHopBaseIndex[15:0]  NextHopRange[22:16]  NextHopEntryType[23]  LPM[31:24]
+ *   TagData[43:32]  TagCmd[45:44]  Route[46]  Precedence[49:47]
  *
  * *** LIMITATION -- read this before trusting it ***
- * The action-array fields are not decoded, so fibd cannot create a *new*
- * prefix->nexthop binding. It REUSES existing slots: it overwrites the prefix
+ * The CODE BELOW still does the old thing, and has not yet been rewritten to
+ * use any of the above. It REUSES existing slots: it overwrites the prefix
  * word of slots that the boot-time configuration already pointed at the egress
  * we want, which changes WHICH destination uses that adjacency. That is enough
  * to program OSPF-learned routes that share a next hop (the common case on a
  * two-port box), and it is exactly how the hardware-routing test was validated.
  * It is NOT a general FIB: it cannot add a route to a next hop the table does
  * not already contain, and it does not manage the sort order.
+ *
+ * What has changed is that the blocker is gone -- the action fields and the
+ * commit semantics are known, so a real implementation is now possible:
+ * read Partition, rebuild the sorted array into the other block with paired
+ * actions, flip Partition. That work is not done here yet.
  *
  * usage: fm6000_fibd [-i secs] [-s first:last] [-g gateway] [-n] [-v]
  *   -i  poll interval (default 5)
