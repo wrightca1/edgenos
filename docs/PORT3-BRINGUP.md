@@ -66,6 +66,57 @@ The cheapest route to a fix is a **fresh replay captured with Et3 configured and
 start** — the capture would then contain lane 1's full SerDes sequence, SBus ops included, rather
 than the 5 stray writes it has now.
 
+### …and that capture has now been taken
+
+`fmPlatformTraceRegOps` armed on the running EOS, then `interface Ethernet3 / shutdown / no
+shutdown`, then disarmed. The recipe is the one `ET2-COPPER-LINK.md` proposed for Et2, and for a
+*live* arm it is much simpler than the cold-boot watcher:
+
+```sh
+gdb -batch -p $(pgrep -x FocalPointV2) \
+    -ex 'call (void)fmPlatformTraceRegOps(1)' -ex detach -ex quit
+# ... toggle the port, wait for link ...
+gdb -batch -p $(pgrep -x FocalPointV2) \
+    -ex 'call (void)fmPlatformTraceRegOps(0)' -ex detach -ex quit
+```
+
+⚠ **Disarm afterwards.** The noise floor is ~9,000 lines/second of JSS/SBus polling reads; `/var/log`
+is a 389 MB tmpfs and fills in about twenty minutes. Mark the log line count before and after and
+`sed` out the window — a 160,518-line window held the whole bring-up.
+
+The capture is clean: **79 writes to EPL14 lane 1 and zero to lane 0**.
+
+**The answer: lane 1's SerDes is SBus device `0x4a`.**
+
+| device | ops | what |
+|---|---:|---|
+| `0xfd` | 112 | SPICO firmware broadcast (reloaded during bring-up) |
+| **`0x4a`** | **43** | **EPL14 lane 1 — port 3** |
+| `0x49` | 4 | EPL14 lane 0, incidental |
+| `0x45` | 4 | EPL16 lane 0 (Et2), incidental |
+
+So the mapping is **+1 per lane**: EPL14 lane0 = `0x49`, lane1 = `0x4a`. The two devices that get a
+full bring-up in the older cold-boot trace, `0x49` and `0x45`, are Et1 and Et2 — which is why no
+existing trace contained a lane-1 sequence, and why this had to be captured.
+
+The sequence itself mirrors lane 0 step for step, at lane-1 addresses, with values differing only
+where they are genuinely per-lane:
+
+```
+lane 0:  0xe3837 <- 018c0002   0xe3839 <- 002a0280   0xe383a <- c0000580   0xe3840 <- 00003fdf
+lane 1:  0xe38b7 <- 018c0002   0xe38b9 <- 002a0280   0xe38ba <- c0001580   0xe38c0 <- 00003fdf
+                                                              ^^^^ bit 12
+```
+
+Raw trace: `notes/reference/scd-dumps/fm6000-et3-noshut-LIVE-trace.txt` (568 lines: all EPL14 lane-1
+writes plus every SBus op in the window). It is EOS-derived and lives in the notes repo, never in
+this tree.
+
+**What this unblocks:** `fm6000_linkup.c` is a working lane-0 bring-up — 422 MMIO ops and 37 SBus
+ops, every SBus op hardcoded to device `0x49` and every MMIO address to `0xe38xx` lane 0.
+Parameterising it by lane (device `0x49 + lane`, MMIO offset `+ 0x80 * lane`) and replaying the
+captured lane-1 values is now a well-defined job rather than an investigation.
+
 ---
 
 **2026-08-11.** Front-panel port 3 is now up under EdgeNOS. This is the second connected port, and
