@@ -313,6 +313,41 @@ kernel resolves ARP, and step 8 is what it should be writing when a route appear
 generator work of the same kind already done for L3AR, and both are now specified by observation
 rather than by transcription.
 
+## Applying it under EdgeNOS
+
+`fm6000_rport 41 0x3f0 -v`, run on EdgeNOS (`edgenos-special.swi`) after `FULLSEQ DONE`:
+
+```
+  00123052 02000000 -> 02000000   MAPPER_SRC_PORT_TABLE w0
+  00123053 00000021 -> 00000049   MAPPER_SRC_PORT_TABLE w1
+  001213f0 00000000 -> 00010000   MAPPER_VID1_TABLE
+  001223f0 00000000 -> 0000001b   MAPPER_VID2_TABLE
+  000327e0 000003f0 -> 020003f0   L2L_EVID1_TABLE w0
+  00150fc0 00000000 -> 00000001   MOD_L2_VLAN1_TX_TAGGED w0
+  VERIFY PASS (9 words)
+```
+
+**The before-state is itself a result.** `0x123053 = 0x21`, `0x327e0 = 0x3f0`, and VID1 / VID2 /
+TX_TAGGED all zero is *exactly* the access-port state measured on EOS. `fwd4.txt` really does
+capture Et3 as a VLAN-1 access port, now confirmed from the EdgeNOS side without reference to the
+EOS capture at all.
+
+### What this does and does not establish
+
+It establishes that the recipe is complete, correctly addressed, and lands on a chip programmed by
+our own boot. It does **not** establish that port 41 forwards, and two things stand in the way:
+
+- **The port-3 link is down under EdgeNOS** — `PORT_STATUS(EPL14, lane1)` at `0xe3880` reads
+  `0x15`, the wire-init state, and `0xe3884` holds `0x1002` where Et1's lane holds `0x9b87`. The
+  bring-up recorded in `PORT3-BRINGUP.md` applies EOS's captured lane-1 block (`lane1.txt`, 30
+  non-zero words), and that file is not on flash. Hand-rolling SerDes configuration on a remote
+  box is how this box was wedged once already, so it was not attempted.
+- **Transit needs routes.** Static per-port state is only half the recipe; the FIB entries and
+  next-hop still have to be programmed, and `fm6000_fibd` cannot yet do it (see its header). The
+  decode above removes the blocker but the implementation is not written.
+
+So: recipe validated on both operating systems, forwarding not yet demonstrated on EdgeNOS.
+
 ## Lab state as left
 
 `Ethernet3` is configured as a routed port with `10.99.99.1/24`, advertised into OSPF area 0 as
