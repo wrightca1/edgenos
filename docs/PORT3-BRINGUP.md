@@ -730,3 +730,46 @@ link, SGLORT, `GLORT_CAM`, `GLORT_RAM`, `L2F` destination mask, `L2F` per-port p
 `EVID1`/`IVID1`/`EVID2`/`IVID2`, F64 frame type (all three expressible), `SAF_MATRIX`,
 `MCAST_LOOPBACK_SUPPRESS` — each verified by readback against a working EOS reference. Egress on
 port 41 remains at zero, while the same injection reaches the wire on Et1 in the same breath.
+
+
+---
+
+## ★ The framing error: Et1 and Et3 were never in the same forwarding domain
+
+From EOS's own `show interfaces status`, captured early in this investigation and not read closely
+enough:
+
+```
+Et1   to-Edgecore5610-port6   connected   routed   10GBASE-SR
+Et2   to-Edgecore5610-port7   connected   routed   10GBASE-CR
+Et3                           connected   1        10GBASE-SR
+```
+
+**Et1 is a routed port. Et3 is an access port in VLAN 1.** They are in different forwarding domains
+*on the working EOS system*. A frame arriving on Et1 is routed, not switched; it reaches Et3 only if
+routed to a next hop on VLAN 1's subnet, and nothing is.
+
+So the goal this document has been chasing — "get a frame that ingresses Et1 to egress port 3" — was
+never achievable in the captured configuration, on EOS or on EdgeNOS. And `fwd4.txt` is a capture of
+precisely that configuration, so the forwarding tables contain **no path to port 41 by
+construction**. Every "necessary but not sufficient" result above is explained by this: the
+individual pieces were right, and the path they were meant to complete does not exist in the data.
+
+### What this means for the transit-traffic goal
+
+A4 (MOD command split) and B1 (FFU ByteMux) need traffic that transits the switch. That requires
+two ports in a forwarding relationship, and the cheapest way to get one is **not** to decode it:
+
+1. Configure EOS so Et1 and port 3 are in the same domain — both access ports in one VLAN, or a
+   routed path between two SVIs.
+2. Confirm on EOS that traffic actually transits.
+3. **Capture a new replay from that configuration.**
+4. Boot EdgeNOS on the new replay; the tables now describe a path that exists.
+
+That is hours of work rather than weeks, uses tooling that already exists, and sidesteps the entire
+`FM_PORT_MASK_WIDE` / VLAN-membership decode — which becomes an optimisation rather than a blocker.
+
+⚠ It also means the mask edits made during this investigation (`L2F` per-port masks set to `0x300`,
+`GLORT_CAM[8]` repointed, `EVID1`/`IVID1` for glort `0x3ed`, the `0x03ed` SGLORT in `fwd4.txt`) were
+attempts to hand-build a forwarding path the rest of the configuration has no notion of. They should
+be reverted rather than carried forward — `fwd4-preport3.txt` is the pre-edit replay.
