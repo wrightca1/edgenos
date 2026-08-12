@@ -243,6 +243,38 @@ debugger after the fact — options, none yet tried:
 Until one of those works, `fwd4.txt` remains the only cold artifact, and it captured Et3 as an
 access port with lane 1 half-configured.
 
+### The SerDes core: the boot leaves it asleep, and waking it is still not enough
+
+`fm6000_sbusdump` (new, read-only) reads the SerDes core over the SBus — the layer the EPL block
+says nothing about. Comparing **the same device `0x4a`, working-on-EOS versus dead-on-EdgeNOS**
+rather than lane against lane:
+
+**Register `0x00` — the device ID — reads `0x5a` on EOS and on both lane 0s, but `0x00000000` on
+EdgeNOS's lane 1.** The boot never brings that SerDes core out of reset. Nothing above it could
+have worked.
+
+`fm6000_lanelink` **does** wake it — ID goes `0x00` → `0x5a` — which is the first demonstration that
+the tool does real work. The link still does not come up.
+
+⚠ **A control group is essential here and it is easy to skip.** Lane 0 works under *both* operating
+systems, yet **29 of its 256 core registers differ** between them: the core is full of adaptation
+state and counters that drift. A raw EOS-vs-EdgeNOS diff of lane 1 therefore shows 23–35
+differences that mean nothing. Only registers that differ on lane 1 **and not** on lane 0 are
+candidates.
+
+With the core awake that filter leaves exactly **two**, `0x0b` and `0x0c` — and both are volatile.
+Re-reading them before writing showed them already holding EOS's values, and writing `0x00` to
+`0x0b` read back `0x20`. They fluctuate between reads; they are status, not configuration.
+
+⇒ **With the core awake, every stable SerDes core register on lane 1 already matches a working
+lane, and the receiver still will not lock.** Combined with the earlier result that every EPL
+configuration register matches too, the conclusion is that **nothing is missing as a register
+*value*.** What is missing is a *procedure* — the SPICO's per-lane RX adaptation, which is an action
+the cold bring-up performs, not a state it leaves behind. That cannot be recovered by diffing
+register files, only by capturing or reimplementing the routine.
+
+So the cold-trace problem is not a detour around the SerDes question; it **is** the SerDes question.
+
 ---
 
 **2026-08-11.** Front-panel port 3 is now up under EdgeNOS. This is the second connected port, and
