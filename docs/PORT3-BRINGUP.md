@@ -152,6 +152,59 @@ faithfully still gives the wrong sequence.
 is already in hand and `fm6000_lanelink`'s structure — lane-relative ops, derived addresses, derived
 equalisation, the two SBus device classes — carries over unchanged; only the op table is replaced.
 
+### Half the link now works: our TX is good, our RX never locks
+
+The op table was rebuilt from the Et3 capture, segmented to that lane by the SPICO broadcast's
+reg-0x03 payload: **168 ops** (79 EPL, 43 SBus to `0x4a`, 46 SPICO-for-`0x4a`), excluding the 66
+SPICO ops belonging to other ports in the same window. The generator reproduces the capture
+168/168 identically.
+
+Run on hardware it executes cleanly, leaves Et1 untouched, and afterwards **every configuration
+register on lane 1 matches a working EOS lane 1 exactly**:
+
+```
+off  EdgeNOS    EOS-working
+0x37 000c0002   000c0002     0x3a c0001581   c0001581
+0x39 002a0281   002a0281     0x3b 00000c83   00000c83
+0x3c 000001fe   000001fe
+```
+
+The two that still differ, `0x04` and `0x21`, are `LINK_IP` (interrupt pending) and
+`MAC_LINK_COUNTER` — status, not configuration. Writing EOS's values into them changes nothing, as
+expected.
+
+**And yet:** `PORT_STATUS = 0x15`, `pcsRx = 0`, and SerDes core registers `0x22`/`0x26` read `0x00`
+where the working lane reads `0x6c`/`0x4c`.
+
+The decisive measurement is at the far end. The test host reports:
+
+```
+Speed: 10000Mb/s
+Link detected: yes
+```
+
+**It locks onto our transmitter.** Our TX is fine, the fibre is fine, the optics are fine, and SCD
+`0x5030` bit 0 (rxlos) is clear so light is arriving. What fails is only our receiver locking to it.
+
+That is exactly the asymmetry recorded for Et2 in `ET2-COPPER-LINK.md` — "the far end reports Link
+detected: yes while our pcsRx stays 0; our receiver never locks" — reached here from a completely
+different direction, on a different port, with different media (SR, not CR). So it is not a
+copper-specific problem.
+
+### Why a live capture cannot fix this
+
+A `shutdown`/`no shutdown` on a running EOS toggles a SerDes that is **already calibrated**. The RX
+adaptation that a cold lane needs happened at EOS's boot and is therefore *absent from the live
+capture by construction* — which is why replaying it faithfully still leaves the receiver unlocked.
+It is the same shape of error as transposing the cold lane-0 window: the sequence is authentic, and
+it is the wrong sequence.
+
+⇒ **What is needed is a COLD-boot trace with Ethernet3 configured**, using the
+`payload/fpcoldwatch.sh` recipe (arm `fmPlatformTraceRegOps` at the first `fmPlatformWriteCSR` from
+`rc.eos`, collect `/var/log/agents/FocalPointV2-*` only after the links are up). That capture would
+contain lane 1's RX calibration, and it is also exactly the capture that would give a `fwd4.txt`
+with both ports routed — the one artifact that unblocks the FIB proof, A4 and B1 as well.
+
 ---
 
 **2026-08-11.** Front-panel port 3 is now up under EdgeNOS. This is the second connected port, and
