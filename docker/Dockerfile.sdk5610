@@ -1,0 +1,32 @@
+# sdk5610build:1 — PowerPC cross toolchain for the full OpenBCM SDK build.
+#
+# Used by:
+#   build/build-sdk-5610.sh    159 SDK libs + static PPC bcm.user (~40 min, incremental)
+#   build/build-bcmd-5610.sh   incremental socdiag.o + relink with the BDE adapter
+#
+# This one was NOT really lost: build-sdk-5610.sh carries the same recipe inline and
+# auto-builds the image if it is missing (see its step 1). This file just makes the
+# definition explicit and version-controlled; the inline copy in that script is the
+# fallback and the two are deliberately kept identical in content.
+#
+# docs/full-sdk-port-5610.md describes the image as "debian:bullseye + PPC toolchain".
+# The SDK is from the gcc-4.x era, so build-sdk-5610.sh passes a pile of -Wno-error*
+# flags rather than pinning an ancient compiler.
+FROM debian:bullseye
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Under rootless docker apt drops privileges to uid 65534 (_apt/nobody), which is
+# outside the subuid range mapped into the build container -- setgroups() then
+# fails with EINVAL and every download dies ("Method http has died unexpectedly").
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/00-no-sandbox
+
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      gcc-powerpc-linux-gnu \
+      g++-powerpc-linux-gnu \
+      make \
+      perl \
+      file \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /sdk
