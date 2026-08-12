@@ -116,8 +116,35 @@ NEXTHOP_TABLE       NextHop[63:0]           (WIDTH 2, ENTRIES 65536)
 - `MAPPER_VID2_TABLE[1]`: VLAN 1's `MAP_VID2` 1025 → 1 — the port leaving the access VLAN.
 - `MAPPER_SRC_PORT_TABLE[41]` word 1: only `QOS_TAG[38:34]` moves, 8 → 18. Despite the name this
   behaves as a **per-port profile selector**; the four `SRC_PORT_ID` bytes in word 0 do not change.
-- `L2L_EVID1_TABLE[1008]`: `0x3f0` → `0x020003f0` — bit 25 set, the VLAN body unchanged.
-- `MOD_L2_VLAN1_TX_TAGGED[1008]`: 0 → 1, egress tagging for the internal VLAN.
+- `L2L_EVID1_TABLE[1008]`: `0x3f0` → `0x020003f0` — sets `ET_IDX` (bits 32:25) to 1, leaving
+  `MA1_FID1[11:0]` = the VLAN.
+- `MOD_L2_VLAN1_TX_TAGGED[1008]`: 0 → 1 — bit 0 of a 76-bit `PortMask[75:0]`.
+
+⚠ **Both of these are strided, and reading them at stride 1 gives a wrong and very convincing
+answer.** The header is explicit:
+
+```
+L2L_EVID1_TABLE(index, word)         = 0x2*index + 0x32000 + word    WIDTH 2
+MOD_L2_VLAN1_TX_TAGGED(index, word)  = 0x4*index + 0x150000 + word   WIDTH 3, PortMask[75:0]
+```
+
+Read at stride 1, Et1's `L2L_EVID1_TABLE` appears to be `0x00000000` (it is really word 1 of its
+own entry) and `MOD_L2_VLAN1_TX_TAGGED` appears to differ between Et1 and Et3 — leading to
+"these two registers are inconsistent across routed ports, so they can't be load-bearing." At the
+correct stride all three routed ports are **identical**:
+
+| register | Et2 (1006) | Et1 (1007) | Et3 (1008) |
+|---|---|---|---|
+| `L2L_EVID1_TABLE` w0 | `0x020043ee` | `0x020043ef` | `0x020003f0` |
+| `MOD_L2_VLAN1_TX_TAGGED` w0 | `0x00000001` | `0x00000001` | `0x00000001` |
+
+Every one carries `ET_IDX = 1` with `MA1_FID1 = V`. (Et1/Et2 additionally set `ETAG1 = 1`, an
+egress tag id; Et3 has `ETAG1 = 0` and routes correctly, so it is not part of the recipe.)
+
+This is the same class of error as indexing `L2F`'s second dimension 0..3 when the SDK indexes it
+by port number. **Check `_WIDTH` in the header before reading any table.** The generated init files
+show the stride too — `fm6000_l2linit.c` emits `0x327da=0x3ed, 0x327db=0, 0x327e0=0x3f0` and the
+alternating zeros are the giveaway.
 - L2AR `0xfffffeff` → `0xfffffcff` clears one more bit in an action mask at three addresses.
 
 ### The next-hop entry, and glean → resolved
