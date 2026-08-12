@@ -286,6 +286,64 @@ Note that the standby half is left holding stale keys — 50 above, after the ro
 them was removed — so a reader must follow `Partition` and must not assume the other half is empty
 or current.
 
+### `LPM[31:24]` is 32 − prefix length
+
+Dumping the live block with decoded actions settles the field I had recorded as unknown:
+
+| key | `lpm` | prefix | 32 − len |
+|---|---|---|---|
+| `10.101.255.1` loopback | `0x00` | /32 | 0 |
+| `10.101.101.40` | `0x03` | /29 | 3 |
+| `10.102.1.0` | `0x08` | /24 | 8 |
+| `71.181.68.0` | `0x0a` | /22 | 10 |
+
+It is the **host-bit count of the route that owns the interval**. That is what an interval scheme
+needs: a boundary opens a range that may extend past the end of its own prefix, so the hardware
+still has to check the address actually falls inside. My earlier reading — "0x00 on connected,
+0x08 on OSPF-learned, both /24s, so not a prefix length" — compared a /32 *boundary entry* against
+a /24 *route entry* and concluded the field was something else. Both were prefix lengths.
+
+### The EdgeNOS BST is not a valid sorted array
+
+Two separate defects, both measured with `fm6000_bst -d` on the box.
+
+**1. Engine 3's key memory is never zeroed.** The live block reports 1008 non-zero "boundaries" of
+which only ~57 are real routes; the rest read as raw SRAM (`0x1b45cd91`, `0x53feb7c2`). The BST is
+four engines strided `0x10000`, and `fm6000_memfill`'s fills were sized for one:
+
+```
+BST_ACTION 0x300000 x131072 -> 0x300000-0x31ffff    engines 0,1
+BST_KEY    0x308000 x 65536 -> 0x308000-0x317fff    engine 0
+engine 3's keys live at        0x338000-0x33bfff    <- no fill at all
+```
+
+Engine 3 is the one holding the IPv4 unicast table. EOS's replay writes every *action* entry but
+only the *populated* keys, because it expects CRM to have zeroed the array; PROBE MODE does no CRM
+fill. Fixed by one 262144-word fill covering all four engines (fourth instance of this defect
+class — a reconstructed fill sized for one copy of a structure the chip has several of).
+
+**2. Even the written entries are a superposition of two EOS generations.** The array is
+right-aligned, so a smaller table occupies only the top N slots and leaves the older, larger
+table's lower entries in place. The result is non-monotonic:
+
+```
+0033bfef 0a65651f   10.101.101.31
+0033bff0 0a656520   10.101.101.32
+0033bff1 0a030100   10.3.1.0        <- decreases
+...
+0033bfff 7f000001   127.0.0.1
+```
+
+`0x33bff1`–`0x33bfff` is one coherent generation; `0x33bfec`–`0x33bff0` are leftovers from an
+earlier one. Zeroing at boot is necessary but **not sufficient** — a replay that captures several
+generations of EOS rebuilding this table leaves the union of them, since only the last write to
+each address survives. A correct load must write all 1024 slots of the block it publishes,
+including the zeros, which is what EOS itself does.
+
+This also explains why unused slots matter at all: with zeros below it, a right-aligned sorted
+array is still globally sorted (`0,0,…,0,k₁,k₂,…`) and binary search works. With garbage or stale
+entries it is not sorted, and the search is undefined.
+
 ### Method note
 
 **Searching for a known value beats capturing a second state.** The two-state diff found the
