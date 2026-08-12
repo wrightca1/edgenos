@@ -2,6 +2,12 @@
 # Cold-trace watcher (v2). Arms fmPlatformTraceRegOps at the FIRST fmPlatformWriteCSR so the whole
 # cold boot is traced to /var/log/agents/FocalPointV2-<pid>.
 #
+# v3 (2026-08-13): arm SPEED is the whole game. See the gdb script below --
+# without `set auto-solib-add off` the attach takes ~3.6 minutes and misses the
+# ASIC bring-up entirely. Completeness test after any change: the capture must
+# contain lane writes that are CONFIGURATION (many distinct addresses, written
+# once or twice) and not POLLING (few addresses, written ~100x).
+#
 # v1 TRUNCATED THE CAPTURE and that cost a lot of wasted analysis:
 #   sleep 25            -> snapshotted long before port bring-up ran
 #   grep ... | head -50000 -> hard 50k-line cap
@@ -17,6 +23,13 @@ done
 if [ -z "$P" ]; then echo "no FPV2 seen" >> "$OUT"; exit 0; fi
 echo "caught FPV2 pid=$P at $(cat /proc/uptime)" >> "$OUT"
 cat > /tmp/fpc.gdb <<'GDB'
+set pagination off
+# v3: DO NOT load shared-library symbols. FocalPointV2 is huge and gdb spent
+# ~219s of a v2 run resolving them -- by which time fm6000BootSwitch had already
+# finished and the arm caught only steady-state polling (34 distinct lane
+# addresses hit 90-200x each, i.e. the port agent refreshing config).
+# The breakpoint we need is in the main binary, so solib symbols are dead weight.
+set auto-solib-add off
 set pagination off
 set breakpoint pending on
 break fmPlatformWriteCSR
