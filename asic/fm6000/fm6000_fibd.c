@@ -44,10 +44,22 @@
  * It is NOT a general FIB: it cannot add a route to a next hop the table does
  * not already contain, and it does not manage the sort order.
  *
- * What has changed is that the blocker is gone -- the action fields and the
- * commit semantics are known, so a real implementation is now possible:
- * read Partition, rebuild the sorted array into the other block with paired
- * actions, flip Partition. That work is not done here yet.
+ * *** SUPERSEDED -- use fm6000_fibgen | fm6000_bst -p instead ***
+ * That real implementation now exists as two tools:
+ *
+ *     fm6000_fibgen --map et1=0x3ef,et3=0x3f0 --nh-out /tmp/nh | fm6000_bst -p /dev/stdin
+ *     fm6000_bst -N /tmp/nh
+ *
+ * fibgen walks the kernel RIB/neighbours/addresses and emits the boundary list
+ * plus its NEXTHOP entries; fm6000_bst -p sorts, right-aligns, writes all 1024
+ * slots of the standby and flips Partition. Both are validated against a live
+ * EOS FIB (see docs/ROUTED-PORT-ANATOMY.md): the block reproduces byte for byte
+ * from shuffled input, and the boundary list matches 46 for 46.
+ *
+ * This daemon is kept because it is what the hardware-routing test was
+ * validated with, and because it polls -- neither new tool does. Wiring the
+ * poll loop here to the new pair is the remaining work; do that rather than
+ * extending the slot-reuse code below.
  *
  * usage: fm6000_fibd [-i secs] [-s first:last] [-g gateway] [-n] [-v]
  *   -i  poll interval (default 5)

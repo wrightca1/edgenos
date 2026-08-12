@@ -369,11 +369,44 @@ boundary, not the subnet route.
 whose key is zero, because a binary search for anything below the first boundary lands there. On
 the captured table that is index 974, one below the 975 where the boundaries start.
 
-`fm6000_bst -p` implements exactly this array construction and is validated byte-for-byte against
-the live table above. What remains for `fm6000_fibd` is the policy half: walking the kernel RIB and
-neighbour table to produce the boundary list, and allocating the `NEXTHOP_TABLE` entries it refers
-to. Both are now fully specified — the next-hop encoding is in the section above, and the boundary
-rule is here.
+### Both halves, and how they compose
+
+```sh
+fm6000_fibgen --map et1=0x3ef,et3=0x3f0 --nh-out /tmp/nh | fm6000_bst -p /dev/stdin
+fm6000_bst -N /tmp/nh
+```
+
+`fm6000_fibgen` is the **policy** half — it walks `/proc/net/route`, `/proc/net/arp` and the
+interface addresses and emits the boundary list plus the `NEXTHOP_TABLE` entries it refers to.
+`fm6000_bst -p` is the **mechanism** half — sort, right-align, write all 1024 slots of the standby,
+flip `Partition`.
+
+Both are validated against the live EOS FIB, and neither validation is circular:
+
+- `fm6000_bst -p`: fed EOS's own 49 boundaries **in reverse order**, it reproduces EOS's block byte
+  for byte — 0 key mismatches, 0 action mismatches, base index 975 = 1024−49, every slot below the
+  table zero.
+- `fm6000_fibgen`: fed EOS's routing state converted into kernel formats, it produces **46
+  boundaries against EOS's 46, 0 missing, 0 extra**, with no difference in prefix length or
+  precedence, and next-hop entries whose contents match EOS's byte for byte.
+
+Two differences from EOS are deliberate:
+
+- EOS puts its **management** subnet in the hardware FIB (`10.1.1.0/24` on `Management1`, three
+  boundaries). `fibgen` ignores any interface absent from `--map`, and management is not an ASIC
+  port on EdgeNOS. That is the entire difference between 49 and 46.
+- EOS allocates a **separate next-hop index for the gateway role** (16) that duplicates the
+  neighbour's entry (12) byte for byte. `fibgen` dedups by `(mac, logical id)`, so remote routes
+  share the neighbour's entry. Functionally identical, one entry fewer.
+
+⚠ The **glean, local and loopback** next-hops are referenced by index, not built. They carry logical
+id `0x4fff` with trap codes `0xff15`/`0xff16` in the pseudo-MAC, and those codes are not decoded.
+The defaults 5/7/6 are EOS's allocation *on this box* and are command-line options — depending on
+someone else's allocation is precisely the mistake that produced the wrong `0x3ed` for port 3.
+
+⚠ Also unverified: none of this has yet moved a packet. It reproduces a known-good table exactly,
+which is strong evidence the encoding is right, but "writes the same bytes EOS writes" is not the
+same claim as "forwards". That needs a boot with the `memfill` BST fix and transit traffic.
 
 ### Method note
 
