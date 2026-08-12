@@ -1,5 +1,20 @@
 # Bringing up front-panel port 3 on EdgeNOS
 
+> ## ⚠ SUPERSEDED IN PART — read `ROUTED-PORT-ANATOMY.md` first
+>
+> **2026-08-12.** The egress hunt recorded below chased the wrong mechanism from end to end.
+> Configuring `Ethernet3` as a **routed** port on EOS and diffing the live chip against its
+> access-port state shows the whole difference is **ten words**, none of them in `GLORT_CAM`,
+> `GLORT_RAM`, `L2F`, `SAF_MATRIX`, `LBS_CAM` or `L3AR` — every structure this document programs.
+> Those regions diff to **exactly zero**.
+>
+> The real recipe is `MAPPER_SRC_PORT_TABLE[41]`, `MAPPER_VID1_TABLE/VID2_TABLE`,
+> `L2L_EVID1_TABLE`, `MOD_L2_VLAN1_TX_TAGGED`, `NEXTHOP_TABLE` and the FFU BST. Also: port 3's
+> logical id is **`0x03f0`**, allocated in configuration order, not the `0x03ed` guessed here.
+>
+> The link bring-up in this document (§ *The port*, the lane-1 EPL configuration) is correct and
+> still current. The forwarding-path work is not.
+
 **2026-08-11.** Front-panel port 3 is now up under EdgeNOS. This is the second connected port, and
 it is what unblocks the transit traffic that A4 (MOD command split) and B1 (FFU ByteMux) need —
 neither can be settled with CPU-terminated traffic alone.
