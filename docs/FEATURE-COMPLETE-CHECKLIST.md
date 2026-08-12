@@ -94,6 +94,15 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
         terminates on the CPU, and CPU-terminated frames never exercise the FFU→L2AR/L3AR→MOD
         forwarding decision. A second connected port (or transit traffic) is required — the same
         prerequisite as A4, for the same underlying reason.
+      - ✅ **2026-08-12: that prerequisite is now satisfiable.** The reason there was only one
+        connected front port was a *configuration* fact, not a wiring one: `Et3` was an access
+        port in VLAN 1 while `Et1` was routed, so they were never in one forwarding domain.
+        `Ethernet3` is now configured routed (`10.99.99.1/24`, in OSPF area 0) with the test host
+        on it, and **transit is demonstrated on EOS** — the test host reaches the switch loopback
+        `10.101.255.1`, which is traffic ingressing Et3 and routed to a non-connected destination.
+        Capturing a replay from *this* EOS configuration is what unblocks both A4 and B1. See
+        `ROUTED-PORT-ANATOMY.md`; the five-register recipe that makes a port routed is implemented
+        in `fm6000_rport` and verified on both operating systems.
       - Also learned: **`ffuFlagDropFrame` does not drop.** Its L3AR action is the baseline mask
         with no set bits, on EOS's image and ours. The drop lives downstream in L2AR (A2).
       - ⚠ Generator also blocked on naming ByteMux sources. ByteMux 53/58/60 are not
