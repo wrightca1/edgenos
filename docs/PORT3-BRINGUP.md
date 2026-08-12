@@ -685,3 +685,48 @@ Two obstacles, both practical rather than conceptual:
 
 So the MAC route is circular with the original problem: it needs the VLAN membership that would
 also have made flooding work.
+
+
+---
+
+## FM_PORT_MASK_WIDE located and fixed — necessary, still not sufficient
+
+The SDK trace (`docs/SDK-TRACING.md`) named the attribute and gave the index arithmetic:
+
+```
+address = 0x1a0000 + (group-8)*0x400 + port*4        3-word entry
+```
+
+⚠ That corrects an error in the earlier L2F analysis here: I scanned the second index as `0..3`
+(from `ENTRIES_1 = 4`) when the SDK indexes it by **port number**. The per-port masks live at
+`port*4` within a block — offsets `0xa0` and `0xa4` for ports 40 and 41 — and I had never looked
+there.
+
+Reading the correct offsets, EOS versus EdgeNOS:
+
+```
+EOS      block 3, ports 0/3/20/40/41:  {0, 3, 20, 40, 41}
+EdgeNOS  block 3, port 40:             {0, 3, 20, 40}      <- 41 absent
+         block 3, port 41:             {0, 3, 20, 40}      <- 41 absent
+```
+
+**No port's forwarding mask included port 41.** In word terms `w1 = 0x100` where EOS has `0x300`.
+That is a genuine, measured defect and it is now fixed on the live chip (all of ports 0, 3, 20, 40,
+41 set to `0x300`, verified by readback, dataplane healthy at 35 routes).
+
+### And still nothing egresses
+
+With masks permitting port 41, `GLORT_CAM[8]` → `DMaskBaseIdx 16` → `L2F[16]` naming port 41, port 3
+linked, and injection in both normal and SPECIAL frame types: no Transmitting bit, nothing at the
+test host.
+
+`FM_PORT_MASK_WIDE` is a **permission** mask — "may this source port forward to that destination
+port" — not a destination selector. It gates delivery but does not cause it. So it joins the list
+of things that had to be right and were not, without being the thing that makes a frame come out.
+
+### Count of prerequisites now satisfied
+
+link, SGLORT, `GLORT_CAM`, `GLORT_RAM`, `L2F` destination mask, `L2F` per-port permission mask,
+`EVID1`/`IVID1`/`EVID2`/`IVID2`, F64 frame type (all three expressible), `SAF_MATRIX`,
+`MCAST_LOOPBACK_SUPPRESS` — each verified by readback against a working EOS reference. Egress on
+port 41 remains at zero, while the same injection reaches the wire on Et1 in the same breath.
