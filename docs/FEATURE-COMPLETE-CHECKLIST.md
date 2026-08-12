@@ -178,6 +178,56 @@ moves whenever that box reboots. Probe, do not trust the number.** `ttyUSB0` is 
 
 ---
 
+## 2026-08-12: ONE BLOCKER GATES THREE ITEMS
+
+The list below has accumulated "blocked on X" notes that all turn out to be the same X. Stating it
+plainly:
+
+```
+        port 3 forwarding  ──gates──>  transit traffic  ──gates──>  A4 (MOD split)
+                                                          └───────>  B1 (FFU ByteMux)
+                     ^
+                     └── needs: the port-attribute that programs L2F_TABLE_256
+                                (route found 2026-08-12, ID not yet extracted)
+```
+
+**A4 and B1 are not independently blocked.** Both need to observe how a frame is transformed, which
+needs traffic that *transits* the switch, which needs a second forwarding port. The test host is
+physically connected to port 3 and the link is up; what is missing is putting port 41 into a
+forwarding domain.
+
+**And that now has a known route.** `docs/SDK-TRACING.md` decodes how the FocalPoint SDK writes
+registers (function pointers at switch-struct offsets `0x3cc54` write32 / `0x3cc58` read32 /
+`0x3cc6c` multi-word), verified against a known answer. Applying it:
+
+- `fm6000SetVlanMembership` / `AddVlanPortList` / `CreateVlan` touch **no hardware at all** — which
+  is why the port-3 work never found a "VLAN membership register".
+- `fm6000UpdatePortMask` writes **`L2F_TABLE_256`** (one 3-word entry) **and `LBS_BASE`** (twice).
+- It is reached from `fm6000SetPortAttributeInt` via `fmBitArrayToPortMask` — i.e. **the operation
+  is "set a port attribute whose value is a port list"**.
+
+**Next concrete step:** `fm6000SetPortAttributeInt` is ~68 KB and dispatches on attribute ID through
+a jump table. Locate `jmp *table(,%reg,4)`, read the table, map the three `UpdatePortMask` call-site
+offsets (`+0x796`, `+0x9ed`, `+0x1c77`) back to case indices. That yields the attribute IDs, hence
+what to program.
+
+⚠ Two corrections to earlier entries in this file, both from the same session:
+- "the 7150 has one connected front port" (A4, B1) is **out of date** — there are two, and port 3's
+  link is up. The blocker moved from *topology* to *forwarding-domain membership*.
+- `LBS_CAM` was set on port 41 by copying port 40's value. LBS is **per-port and positional**
+  (`0x0001fffe` vs `0x0003fffc`, a one-bit shift); the SDK computes it per port. That copy was wrong.
+
+### Also completed since the last update
+
+- **Three memfill defects**, all the same class (reconstructed fill lengths running short), all
+  found by diffing a live EdgeNOS chip against a live EOS chip, all fixed:
+  MOD (8,192 words), MAPPER (2,253), L2F (1,024). MOD went from 6,143 differing words against EOS
+  to **0 of 65,536**.
+- **The F64 frame type decoded** — bit 15 of tag word 0, with all three types enumerated — and the
+  special-delivery rule added to `parser_program.py` and verified live.
+- **`edgenos-up.sh` documented** as the supported bring-up (`docs/M1-BRINGUP-SEQUENCE.md`); a
+  forwarding outage was root-caused to a hand-rolled sequence omitting `ip link set et1 address`.
+
 ## 2026-08-11 status: forwarding restored, port 3 up
 
 **Forwarding was never broken** — the fault was a hand-reconstructed bring-up that omitted
