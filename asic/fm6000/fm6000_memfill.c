@@ -63,12 +63,23 @@ static const struct { uint32_t base; int words; uint32_t val; const char *blk; }
  {0x1242c0,     64,0x00000000,"MAPPER"},
  {0x124300,     32,0x00000000,"MAPPER"},
  {0x124320,     32,0x00000000,"MAPPER"},
- {0x300000, 131072,0x00000000,"FFU(BST_ACTION)"},
- {0x308000,  65536,0x00000000,"FFU(BST_KEY)"},
- {0x30c000,    256,0x00000000,"FFU(BST_SCEN_CAM)"},
- {0x30c040,    128,0x00000000,"FFU(BST_SCEN_CFG1)"},
- {0x30c060,    128,0x00000000,"FFU(BST_SCEN_CFG2)"},
- {0x30c080,    128,0x00000000,"FFU(BST_ROOT_KEYS)"},
+ /* The BST is FOUR engines strided 0x10000, each holding action (+0x0000),
+  * key (+0x8000) and scenario/root (+0xc000) arrays. The old per-array fills
+  * were sized as if there were one:
+  *
+  *   BST_ACTION 0x300000 x131072 -> 0x300000-0x31ffff   engines 0,1 only
+  *   BST_KEY    0x308000 x 65536 -> 0x308000-0x317fff   engine 0 only
+  *
+  * Engine 3 -- the one that actually holds the IPv4 unicast table -- was left
+  * unfilled, so its key array came up as raw SRAM. Measured on the box: the
+  * live block reported 1008 "boundaries" of which only 57 were real routes,
+  * the rest values like 0x1b45cd91. EOS's replay writes every action entry but
+  * only the POPULATED keys, because it expects CRM to have zeroed the array;
+  * PROBE MODE does no CRM fill, so nothing did. A binary search over that is
+  * searching random data.
+  *
+  * One fill covers all four engines and every array in them. */
+ {0x300000, 262144,0x00000000,"FFU(BST all 4 engines)"},
  {0x381000,  49152,0x00000000,"FFU(SLICE_ACTION)"},
  {0x380000,  98304,0x00000000,"FFU(SLICE_CAM)"},
  {0x381800,   1536,0x00000000,"FFU(SLICE_SCN_CAM)"},
