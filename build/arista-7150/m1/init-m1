@@ -94,6 +94,13 @@ if [ -d /sys/class/net/eth0 ]; then
     # like a dead switch. The build host is on 10.22.1.0/24, so this is the
     # difference between mgmt SSH working and needing the serial console.
     ip route add default via "${MGMT_GW:-10.1.1.1}" 2>/dev/null
+    # ...and pin the admin network to eth0 with a better metric. The default
+    # alone is NOT enough: once ospfd is up it installs ~35 routes via et1,
+    # and one of them covers the admin subnet (10.22.1.0/24 via 10.101.101.25),
+    # which is more specific than the default. Replies then leave by the front
+    # panel and never come back -- mgmt dies the moment edgenos-up.sh runs.
+    ip route add "${MGMT_PEER:-10.22.1.0/24}" via "${MGMT_GW:-10.1.1.1}" \
+        dev eth0 metric 5 2>/dev/null
     echo "    eth0 up, ${MGMT_IP:-10.1.1.77}/24 via ${MGMT_GW:-10.1.1.1}  PHY: $(readlink -f /sys/class/net/eth0/phydev/driver 2>/dev/null | sed 's#.*/##')"
     sleep 2
     # real SSH (dropbear, root pw 'arista') + telnet + scripted nc-shell (2323)

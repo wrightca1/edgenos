@@ -392,6 +392,35 @@ loop is now shared by both tables, so the device retargeting is applied identica
 verified by dry-running port 2 (EPL16 lane 0), where **no `0x4a` survives anywhere in either
 table** and all ten SPICO reg-0x03 payloads carry `0x45`.
 
+### ⛔ Tested on hardware — the lane stays dark. DFE is not the missing procedure.
+
+**2026-08-13, alpha9 (`d4d5555`), cold boot, FULLSEQ complete, Et1 forwarding.**
+
+| | port 3 lane (`0xe3880`) | Et1 lane (`0xe3800`) |
+|---|---|---|
+| control, before | `PORT_STATUS=0x15`, `+0x04=0x1002`, `pcsRx=0` | `0xcc0`, `0x9b87`, `pcsRx=1` |
+| after 262 ops | `PORT_STATUS=0x15`, `+0x04=0x0000`, `pcsRx=0` | unchanged, still forwarding |
+
+All 262 ops completed — no SBus failure, no off-bus, `262 ops done`. The sequence runs correctly and
+**does not link the lane**. `+0x04` moved `0x1002`→`0`, consistent with a W1C status register rather
+than with progress.
+
+**The external fact that interprets this:** the test host on the other end of port 3 reports
+`Link detected: yes, Speed: 10000Mb/s`. **Our TX reaches it; our RX never locks.** That is the same
+split recorded earlier in this document, unchanged by DFE.
+
+**Why this should have been predicted.** The capture was taken by calling
+`fm6000StartSerDesDfeTuning` on a port that was already **up** — DFE *adapts an existing signal*.
+It cannot originate lock. Folding it in after the link ops was, at best, necessary-but-not-
+sufficient; the gap is whatever brings RX/CDR to lock in the first place, and DFE runs after that.
+The "missing procedure is DFE tuning" hypothesis is refuted in this form.
+
+⚠ SerDes regs `0x20`–`0x27` (the block the DFE trace polls) differ between the two lanes —
+e.g. `0x21` = `0x0e` on Et1 vs `0x4c` on port 3, `0x25` = `0x0e` vs `0xcc`. Et1's `0x20`–`0x23`
+mirror its `0x24`–`0x27`; port 3's do not. **No before/after was captured on port 3**, so this is
+not attributable to the DFE run — it may equally be the dark lane's resting state. Read the
+register header before drawing anything from it.
+
 ⚠ Two things this does **not** do, both worth knowing before the hardware test:
 
 - **It issues the procedure; it does not wait for it.** The polls are replayed as fixed reads. The

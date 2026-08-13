@@ -195,3 +195,33 @@ is a real defect found while looking, not a confirmed root cause.
 
 `boot-config` is already `SWI=flash:/EOS-4.16.8M.swi`, so **a plain reboot returns the box to EOS
 and to working forwarding.** Nothing here is destructive; the EdgeNOS state is entirely in RAM.
+
+---
+
+## ⚠ `edgenos-up.sh` kills mgmt SSH unless the admin network is pinned
+
+**2026-08-13.** The bring-up completes (`=== UP ===`, adjacency in ~16 s, 35 routes, FIB sync) and
+the box goes unreachable *at step 4*, mid-run. It is not a crash and not a dataplane fault: the
+console shows a healthy shell throughout.
+
+`ospfd` installs ~35 routes via `et1`, and one of them covers the admin subnet:
+
+```
+10.22.1.0/24 via 10.101.101.25 dev et1  metric 20
+```
+
+That is **more specific than the default route**, so replies to the build host leave by the front
+panel instead of `ma1` and never return. Requests still arrive, which is what makes it look like
+the box died rather than like a routing change.
+
+Fix — a static route for the admin network, pinned to `eth0` with a better metric:
+
+```sh
+ip route add 10.22.1.0/24 via 10.1.1.1 dev eth0 metric 5
+```
+
+`init-m1` now does this at boot (`MGMT_PEER`, `MGMT_GW`), before ospfd exists, and the lower metric
+keeps it winning afterwards. A plain default route is **not** sufficient — that was tried first and
+OSPF's more-specific route beat it.
+
+Verify with `ip route get <admin-host>`; it must name `dev eth0`.
