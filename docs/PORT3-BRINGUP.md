@@ -1356,3 +1356,63 @@ control the MMIO bit could not provide; issuing a SPICO interrupt at lane 1 and 
 to see whether its micro-controller answers for that lane at all; and re-running the lane-1 RX
 start-up by hand. `fm6000_sbusdump` is deliberately read-only and should stay that way — this wants
 a separate, single-purpose tool with the device address as an explicit argument.
+
+### ★★ PORT_STATUS decoded: `SerXmit=0` — the lane is not transmitting either
+
+**2026-08-13.** `FM6000_PORT_STATUS` is in the header, and reading it settles what this document has
+assumed since it was started. Fields at `EPL_BASE + 0x400*epl + 0x80*lane`:
+
+```
+b0-1 LinkFaultDebounced   b6  RxLinkUp     b9  Transmitting
+b2-3 LinkFaultMac         b7  HeartbeatOk  b10 Receiving
+b4-5 LinkFaultRx          b8  HiBer        b11 SerXmit
+```
+
+| field | Et1 `0x0ec0` | Et2 `0x08c0` | **Et3 `0x0015`** |
+|---|---|---|---|
+| LinkFaultDebounced | 0 | 0 | **1** |
+| LinkFaultMac | 0 | 0 | **1** |
+| LinkFaultRx | 0 | 0 | **1** |
+| RxLinkUp | 1 | 1 | **0** |
+| HeartbeatOk | 1 | 1 | **0** |
+| **SerXmit** | **1** | **1** | **0** |
+
+Stable across repeated samples (`Transmitting`/`Receiving` fluctuate with traffic and are activity
+bits, not state).
+
+### ⚠ This overturns "our TX works, our RX never locks"
+
+That framing appears throughout this document and it is **wrong**. `SerXmit=0` says the lane's
+serializer is not transmitting at all. The two pieces of evidence that built the old story both
+fail on inspection:
+
+- **"The far end reports `Link detected: yes, 10000Mb/s`."** That was read from `eth1` on the test
+  system — which is a **veth inside an LXC container** (`eth1@if11`, `veth addrgenmode`, and it
+  reports `Port: Twisted Pair` on a fibre link). A veth reports link-up at 10 Gb/s whenever its
+  container peer is up. It says nothing about the wire. The physical NIC is on the LXC host.
+- **"The SFP is emitting 589 µW."** Laser bias current is on (`txdisable=0`), which produces light
+  regardless of whether the serializer is feeding it valid 10GBASE-R. Optical output power is not
+  evidence of transmission.
+
+So the failure is not RX adaptation, and never was — **the whole lane is down, TX included**, which
+is exactly what "the boot leaves lane 1's SerDes core asleep" said earlier in this document. The DFE
+work, the polarity check, the loopback attempt and the optical measurements were all aimed at an RX
+problem that is a *symptom*.
+
+**What this redirects the work to:** whatever starts a lane's serializer. `SerXmit` is the thing to
+watch — it is a single bit that says yes or no, it is stable, and neither `fm6000_lanelink`'s 168
+link ops nor its 94 DFE ops move it. Any future attempt should be judged on `SerXmit` first and
+`pcsRx` second, rather than on ping.
+
+### Et3's forwarding config is now applied under EdgeNOS
+
+Separately from the link: `fm6000_rport 41 0x3f0` was run on alpha9 and reports **VERIFY PASS
+(9 words)**, with the before-state reading the documented access-port values (`0x123053=0x21`,
+`0x327e0=0x3f0`, VID1/VID2/TX_TAGGED zero). Et3 is now a routed port at the ASIC level, matching
+what EOS programs. This changes nothing about the link — forwarding config and PCS lock are
+independent layers — but it removes one variable.
+
+⚠ **No `et3` netdev.** `fm6000_portd` is one instance per interface and they share the single punt
+DMA ring, so a second instance would steal Et1's frames and take the OSPF adjacency down.
+`edgenos-up.sh` refuses to run twice for this reason. An `et3` netdev needs portd to learn multiple
+ports, not a second process.
