@@ -1301,3 +1301,58 @@ datasheet's numbering. The consequence: `sbus_dev()`'s `0x49 + lane - 2*(epl-14)
 built on a structure the datasheet contradicts (+4 per interface, not +2), so it should not be
 trusted for any port whose device address has not been observed. The tool already refuses to drive
 unobserved mappings — keep it that way.
+
+### ⛔ The optics are fine — measured, not assumed
+
+The previous section named "is light arriving at all?" as the cheapest untried discriminator and
+said it could not be read on this image. **That was wrong, and the correction matters more than the
+mistake: everything needed is already in the image and already running.**
+
+`scd` + `scd_hwmon` are loaded, `scd-setup.sh` runs at boot, and it had already created **61 I2C
+buses and 468 `sfp*` nodes** before any of this investigation started. The earlier "no device at
+`0x50` on any bus" came from probing `/dev/i2c-2` and `20..26` — a truncated listing I read as the
+whole set. The SFP cages are on **master 3, buses 0–7 = `i2c-9`..`i2c-16` for Ethernet1..8**, so
+port 3 is **`i2c-11`**.
+
+SCD cage GPIOs, read straight out of sysfs:
+
+```
+sfp3_present=1  sfp3_rxlos=0  sfp3_txfault=0  sfp3_txdisable=0
+sfp1_present=1  sfp1_rxlos=0  sfp1_txfault=0  sfp1_txdisable=0
+```
+
+**`rxlos=0` on port 3** — the module itself reports it is receiving light. SFF-8472 A2h confirms it
+with numbers:
+
+| | temp | Vcc | TX bias | TX power | **RX power** |
+|---|---|---|---|---|---|
+| Et1 (working) | 31.8 °C | 3.296 V | 6.28 mA | 596.9 µW (−2.24 dBm) | **469.7 µW (−3.28 dBm)** |
+| Et3 (dark) | 31.4 °C | 3.316 V | 8.65 mA | 589.3 µW (−2.30 dBm) | **527.9 µW (−2.77 dBm)** |
+
+**The dark port receives more optical power than the working one**, and both sit comfortably inside
+10GBASE-SR limits. A2h byte `0x6e` reads `0x30` on both — no soft Rx_LOS, no soft Tx_Fault.
+
+And the modules are the same part class, so a rate or media mismatch is out too — A0h byte 3 =
+`0x10` (10GBASE-SR) and byte `0x0c` = `0x67` (10.3 GBd nominal) on **both**; only the vendor
+differs (`CISCO-AVAGO` on Et1, `CISCO-FINISAR` on Et3).
+
+### Where that leaves it
+
+Everything outside the SerDes RX slicer is now measured good, on both sides:
+
+- correct module, correct rate, healthy light **arriving** (−2.77 dBm) and **leaving** (−2.30 dBm)
+- the far end reports `Link detected: yes, 10000Mb/s`, so our TX is being decoded by a real receiver
+- no LOS, no TX fault, laser enabled, cage present
+- every EPL and SerDes **configuration** register byte-identical to the working lane
+- the only registers that differ anywhere are `_obs` status registers
+
+So the signal reaches the chip and the chip does not lock to it. Port 3 is lane 1 of the same EPL as
+Et1 (`0x49` lane 0, `0x4a` lane 1), which makes this a per-lane failure inside a block whose other
+lane works — the RX analog/CDR for lane 1 is not being started, and the SPICO is what starts it.
+
+**Next step: an SBus write tool.** Three of the remaining questions all need one and none can be
+answered without it — the SBus-side `sbus_near_loopback_en_cntl` (`WRITE_13` b7) to get the positive
+control the MMIO bit could not provide; issuing a SPICO interrupt at lane 1 and reading the response
+to see whether its micro-controller answers for that lane at all; and re-running the lane-1 RX
+start-up by hand. `fm6000_sbusdump` is deliberately read-only and should stay that way — this wants
+a separate, single-purpose tool with the device address as an explicit argument.
