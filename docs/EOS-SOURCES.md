@@ -989,3 +989,52 @@ Four steps remain: **2** (KR training off, an SDK call), **3** (field `0x1b`, bu
 comes from a local this analysis has not resolved), **12** (`0x1f`, field source unresolved), and
 **17** (DFE tuning, which needs a running lane anyway). Step 3 is the interesting one — it is the
 only remaining write whose *register* is unknown, and it carries the other half of the rate pair.
+
+### ★ Step 3 is the clock — and the register base is mode-selected
+
+The step-3 address came from a local built differently from the other ten:
+
+```asm
+cmpl $0x0,0x10(%ebp)         ; a mode argument
+jne  ...
+    mov 0xc(%ebp),%eax ; add $0xb05,%eax ; shl $0x8,%eax    ; base 0xb05, reg 0x00
+else
+    mov 0xc(%ebp),%eax ; add $0xd11,%eax ; shl $0x8,%eax    ; base 0xd11, reg 0x00
+```
+
+Two things fall out.
+
+**The register base is chosen by a mode argument**, `0xb05` or `0xd11`, and since
+`dev = (addr >> 8) & 0xff` those give **`serdes + 5`** and `serdes + 0x11` respectively. The `0xb05`
+branch produces exactly the devices observed on this board — Et1 `0x49`, Et3 `0x4a`, Et2 `0x45` — so
+**the device-numbering conflict recorded earlier is resolved**: `serdes + 5` was right, and the
+`serdes + 0x11` reading came from reading the wrong branch.
+
+**Step 3's register is `0x00`**, because that local is built with no register offset added. And
+`SERDES_ETH_WRITE_0` is the clock control:
+
+```
+b0     sbus_sbus_clk_gate      the SerDes clock gate
+b1-6   sbus_ref_sel_cntl       reference-clock select
+```
+
+So step 3 gates the SerDes clock on and selects its reference — with the first rate constant
+(`0x1b` at 10G) as the select value. A transmitter with no clock cannot transmit, which made this
+the best candidate yet for `SerXmit`.
+
+**It matters, and it is not sufficient.** Both field placements were tried, since the header puts
+`ref_sel` at bits 1-6 (mask `0x7e`) while the SDK masks the insert with `0x3f`:
+
+| `0x00` value | PLL lock | `rx_rdy` reads |
+|---|---|---|
+| `0x1b` (unshifted) | 30 ms | `0x0b` |
+| **`0x37` (shifted)** | **5 ms** | **`0x3f`** — matches a working lane |
+
+The write plainly reaches the PLL: lock time and the status register both change with it, and `0x37`
+produces exactly the `0x3f` both working lanes read. **`PORT_STATUS` stays `0x0015` and `SerXmit`
+stays 0 either way.**
+
+`fm6000_serdes_enable` now implements **13 of 18 steps**. Remaining: 2 (KR training off), 12 (`0x1f`,
+field source unresolved), 17 (DFE tuning, which needs a running lane). None of the three is an
+obvious transmitter gate, so the next question may not be in this function at all — the EPL side owns
+`SerXmit`, and `fm6000EnableSerDes` never touches EPL registers.

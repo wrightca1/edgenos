@@ -27,19 +27,19 @@
  *
  *   1  0x22  clear rx_en, tx_en            8  0x22  SET rx_en, tx_en
  *   2  --    KR training off  (not impl)   9  poll  0x0f b0 rx_rdy  == PLL lock
- *   3  ??    set b0, mask 0x3f (unknown)  10  0x06  set sig_strength_en
- *   4  0x1d  value unknown                11  0x03  set rx_data_gate
- *   5  0x36  value unknown                12  0x1f  mask 0x3f (unknown)
- *   6  0x3b  value unknown                13  0x26  set rx_dfe_gate
+ *   3  0x00  clk gate + ref_sel           10  0x06  set sig_strength_en
+ *   4  0x1d  <- 0                          11  0x03  set rx_data_gate
+ *   5  0x36  [6:0] <- rate field         12  0x1f  mask 0x3f (unknown)
+ *   6  0x3b  [6:0] <- rate field         13  0x26  set rx_dfe_gate
  *   7  0x17  set b4                       14  --    SetTxConfig (EPL side)
  *                                         15  0x0d  set tx_output_en, pre_emph
  *                                         16  poll  0x14 b6 signal detect
  *                                         17  DFE tuning (0x17/0x2a/0x2b)
  *
- * Steps 3, 4, 5, 6 and 12 are NOT implemented -- the disassembly gave their
- * registers but their values come from mode-dependent computation that has not
- * been decoded. Everything else is implemented from intent. That this is a
- * partial sequence is the point: it is honest about which steps are understood.
+ * 13 of the 18 steps are implemented. Not done: 2 (KR training off, an SDK
+ * call), 12 (0x1f, whose field source is unresolved) and 17 (DFE tuning, which
+ * needs a lane that already runs). That this is a partial sequence is the point:
+ * it is honest about which steps are understood.
  *
  * ⚠ It also does not do step 17. DFE adapts a receiver that is already running;
  * get the lane transmitting first, then use fm6000_lanelink's DFE table, whose
@@ -80,6 +80,7 @@
 #define R_ANALOG_GATE   0x17u    /* WRITE b4                                   */
 #define R_ENABLES       0x22u    /* WRITE b0 rx_en, b1 tx_en                   */
 #define R_DFE_GATE      0x26u    /* WRITE b0  sbus_rx_dfe_gate                 */
+#define R_CLK           0x00u    /* WRITE b0 sbus_sbus_clk_gate, b1-6 ref_sel  */
 #define R_1D            0x1du    /* written 0 (immediate, step 4)              */
 #define R_36            0x36u    /* [6:0] rate-dependent field (step 5)        */
 #define R_3B            0x3bu    /* [6:0] rate-dependent field (step 6)        */
@@ -92,10 +93,13 @@
  *     rate <= 6250   -> 0x01 / 0x09
  *     otherwise      -> 0x1b / 0x40     10.3125G   <-- every port on this box
  *
- * The second of each pair is the field written to 0x36 and 0x3b; the first goes
- * to the step-3 register, whose address comes from a local this analysis did not
- * resolve. Both are inserted as bitfields, value = read ^ ((read ^ new) & mask),
- * which is why the shadow matters.
+ * The second of each pair is the field written to 0x36 and 0x3b; the first is
+ * the ref_sel field of step 3's register 0x00. Both are inserted as bitfields,
+ * value = read ^ ((read ^ new) & mask), which is why the shadow matters.
+ *
+ * The register base itself is chosen by a mode argument: 0xb05 or 0xd11, giving
+ * device = serdes + 5 or serdes + 0x11. The 0xb05 branch matches the devices
+ * observed on this board (Et1 = 0x49, Et3 = 0x4a, Et2 = 0x45).
  *
  * ⚠ Hard-coded for 10G. Every front-panel port here is 10.3125 Gbps, so this is
  * correct for this platform and wrong for a 1G SFP. */
@@ -103,6 +107,7 @@
 
 static volatile uint32_t *M;
 static int dry;
+static uint8_t clk_val = 0x1bu;   /* step 3 value; -c overrides */
 static uint8_t shadow[256];      /* our copy of the write registers */
 
 static uint32_t rd(uint32_t w) { uint32_t v = M[w]; __sync_synchronize(); return v; }
@@ -195,9 +200,11 @@ int main(int argc, char **argv)
 
 	for (i = 1; i < argc; i++) {
 		if      (!strcmp(argv[i], "-n")) dry = 1;
+		else if (!strcmp(argv[i], "-c") && i + 1 < argc)
+			clk_val = (uint8_t)strtoul(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "-b") && i + 1 < argc) bdf = argv[++i];
 		else if (argv[i][0] == '-') {
-			fprintf(stderr, "usage: fm6000_serdes_enable [-n] [-b bdf] <port>\n");
+			fprintf(stderr, "usage: fm6000_serdes_enable [-n] [-c clkval] [-b bdf] <port>\n");
 			return 2;
 		} else intf = strtol(argv[i], NULL, 0);
 	}
@@ -234,7 +241,14 @@ int main(int argc, char **argv)
 
 	printf("  --- enable sequence ---\n");
 	rmw(dev, R_ENABLES,      0x00, 0x03, "1  rx_en/tx_en off");
-	/* 2 KR training off, and 3 (register unresolved, field 0x1b at 10G) */
+	/* 2 KR training off -- an SDK call, not implemented.
+	 *
+	 * 3: register 0x00 is the clock control -- b0 sbus_sbus_clk_gate, b1-6
+	 * sbus_ref_sel_cntl. The SDK sets the gate and loads the rate constant
+	 * (0x1b at 10G). ⚠ The field placement is ambiguous: the header puts
+	 * ref_sel at bits 1-6 (mask 0x7e) while the SDK masks the insert with
+	 * 0x3f, so 0x1b may or may not want shifting. -c overrides. */
+	rmw(dev, R_CLK, clk_val, 0x7f, "3  clk gate | ref_sel");
 	rmw(dev, R_1D,           0x00, 0xff, "4  reg 0x1d <- 0");
 	rmw(dev, R_36,     RATE_FIELD, 0x7f, "5  divider field [6:0]");
 	rmw(dev, R_3B,     RATE_FIELD, 0x7f, "6  divider field [6:0]");
