@@ -866,3 +866,53 @@ after a reset. Cheap to settle on `0x4b`, a lane with nothing plugged in.
 register, whose values the disassembly did not yield — plus `SetTxConfig` and the DFE tuning, which
 `fm6000_lanelink` already carries. With the write path proven, those are now worth transcribing
 properly rather than guessing at absolute values.
+
+### DFE tuning is also direct SBus — and the captured tables hold the right registers
+
+`fm6000StartSerDesDfeTuning` (`0x4877a1`, 0x831 bytes) issues **no SPICO interrupt** either. It is
+3 × `WriteSBus`, 1 × `ReadSBus`, one `and $0xffffffe0` (clear bits 0-4), and
+`fm6000SetSerDesRxDataGate(.., 0)`. Its registers:
+
+```
+0x17   0x2a   0x2b
+```
+
+Those are exactly the registers `fm6000_lanelink`'s `SEQ[]` and `DFE[]` write. **The captured tables
+have always held the right operations** — their SBus half was simply inert until the device reset.
+
+### ⛔ And with a live write path, the captured sequence still does not bring the lane up
+
+Full run on Et3: `reset 0x4a`, the enable steps, confirmed `rx_rdy=1` and `sig=3` (maximum), then all
+963 ops of `fm6000_lanelink`:
+
+```
+PORT_STATUS = 0x0015   SerXmit = 0   pcsRx = 0   SPICO lane state = 1
+```
+
+Unchanged, with both working ports untouched. So a working write path is **necessary and not
+sufficient**, which is what the structural argument predicted: the captured tables are absolute
+values recorded from a lane in a different state, and `fm6000EnableSerDes` is read-modify-write plus
+two polls. Replaying results cannot reconstruct decisions.
+
+⚠ Note the run is also self-defeating in its current order — `INIT[]` opens by writing `0x22 = 0x00`,
+which switches the receiver back off after our enable steps switched it on.
+
+### ★ The way to do read-modify-write without a readback path
+
+The blocker on implementing the algorithm was that the read view is different silicon from the write
+view, so a register cannot be read back to modify it. **The device reset solves this.** After
+`op 0x20`, the write registers are at their reset defaults — a known state — so a shadow copy can be
+maintained in software:
+
+```
+reset the device        ->  shadow[] = reset defaults
+RMW reg, set/clear bits ->  shadow[reg] modified, then written whole
+```
+
+That makes every step of the eighteen expressible, including the ones whose absolute values we never
+recovered, because we no longer need them — only the bits each step sets or clears, which the
+disassembly *did* give. The two polls are already decoded (`0x0f` b0, `0x14` b6) and both are
+readable.
+
+**That is `fm6000_serdes_enable`, and it is now buildable.** It should not reuse `fm6000_lanelink`'s
+tables at all.
