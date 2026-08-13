@@ -617,3 +617,49 @@ are the second.
 so all four writes landed and none could show. It is strained — `tx_pattern_gen_en` overridden on a
 live link would be a strange design — but it has not been disproven, and the same four writes on the
 *dark* lane produced no state change either, which is consistent with both.
+
+### Both cheap explanations eliminated — and a better hypothesis
+
+**1. The bus is not reporting an error.** `fm6000_sbus` now prints the command register after each
+transaction. SPICO and SerDes devices are indistinguishable:
+
+```
+reads   cmd=0x1122....  result=4     (0xfd, 0x45, 0x4a alike)
+writes  cmd=0x0521....  result=1     (0xfd, 0x45, 0x4a alike)
+```
+
+And `fm6000_initsbus.c`'s own header already documented what those mean —
+`[28:26]=ResultCode(reset0/write1/read4)`. They are **op-completion codes, not status**. A write to a
+SerDes device completes exactly as a write to the SPICO does. The hardware is not refusing us.
+
+**2. The SBus master is initialised.** `fm6000-fullseq.sh` runs `fm6000_initsbus` at STEP2 of every
+boot. A missing bus init is not the explanation either.
+
+### ★ The SPICO owns these registers
+
+What is left is in our own tree, in `fm6000_spico.c`:
+
+> *without the SPICO running, the SerDes RX equalizer never adapts and ports don't train*
+
+and in `fm6000-fullseq.sh`: the replay uploads the SPICO firmware inline and **later resets and
+starts the SPICO**, which is why a separate early upload gets wiped. So on a booted chip the
+micro-controller is *running* and actively driving the SerDes lanes.
+
+That fits every observation at once:
+
+- writes to device `0xfd` take effect — that is the controller itself, and it is listening;
+- writes to `0x45`/`0x49`/`0x4a` complete on the bus and change nothing — the running SPICO drives
+  those control registers and overwrites, or simply outranks, whatever we put there;
+- EOS gets away with the same writes because the SDK manages the controller around them —
+  `fm6000SetSpicoState` exists for exactly that, and `fm6000EnableSerDes` runs inside a capture lock;
+- and it explains the shape of the DFE work: the procedure that *did* produce a captured effect was
+  invoked as a **SPICO interrupt**, not as register writes.
+
+**Next: read `fm6000SetSpicoState` (`0x491e13`, 0x19e bytes) and the two `fm6000InterruptSpico` call
+sites inside it.** If the lane-enable has to be asked of the SPICO rather than written behind its
+back, that is the shape of the fix — and `fm6000_sbus irq` already speaks that protocol.
+
+⚠ Still unexcluded, and cheap to test alongside: that these controls are inert on a lane whose EPL
+block has not enabled it, so nothing we write to a *dark* lane could show regardless. The Et2
+`tx_pattern_gen_en` result argues against it for a *running* lane, which is why it is not the
+leading reading.

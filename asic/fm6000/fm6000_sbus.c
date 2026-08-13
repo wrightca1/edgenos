@@ -49,6 +49,12 @@
 
 static volatile uint32_t *M;
 
+/* The command register's own verdict on the last transaction. Bit 25 is Busy;
+ * bits 28:26 are a result code that fm6000_lanelink has always treated as
+ * "non-zero means the op failed" -- and which this tool used to discard. If the
+ * bus is refusing writes to a device, this is where it says so. */
+static uint32_t last_status;
+
 static uint32_t rd(uint32_t w) { uint32_t v = M[w]; __sync_synchronize(); return v; }
 static void     wr(uint32_t w, uint32_t v) { M[w] = v; __sync_synchronize(); }
 
@@ -57,21 +63,23 @@ static long sbus(unsigned op, unsigned dev, unsigned reg, uint32_t data)
 {
 	long i;
 
+	last_status = 0xffffffffu;
 	wr(SB_REQ, data);
 	wr(SB_CMD, 0);
 	wr(SB_CMD, (op << 16) | ((dev & 0xff) << 8) | (reg & 0xff) | (1u << 24));
 	for (i = 0; i < 200000; i++) {
 		uint32_t s = rd(SB_CMD);
 		if (s == 0xffffffffu) return -1;
-		if (!(s & (1u << 25))) return (long)rd(SB_RESP);
+		if (!(s & (1u << 25))) { last_status = s; return (long)rd(SB_RESP); }
 	}
 	return -1;
 }
 
 static void show(const char *what, long v)
 {
-	if (v < 0) printf("  %-24s TIMEOUT\n", what);
-	else       printf("  %-24s %08lx\n", what, (unsigned long)v);
+	if (v < 0) { printf("  %-24s TIMEOUT\n", what); return; }
+	printf("  %-24s resp=%08lx  cmd=%08x  result=%u\n", what, (unsigned long)v,
+	       last_status, (last_status >> 26) & 7);
 }
 
 int main(int argc, char **argv)
