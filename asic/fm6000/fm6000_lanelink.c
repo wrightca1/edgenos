@@ -30,12 +30,18 @@
  * a live EOS chip whose lane 1 was up. The one value that differs between the two
  * lanes falls straight out of the tuning table we already had.
  *
+ * A second table follows the link ops: DFE[], the RX adaptation procedure, taken
+ * from a LIVE capture of one fm6000StartSerDesDfeTuning() call on EOS rather than
+ * from a boot window. See the comment on DFE[] and docs/PORT3-BRINGUP.md. Pass
+ * -l to run the link ops alone, which is what this tool did before.
+ *
  * ⚠ PROVENANCE. The 89-op sequence is derived from an EOS capture, the same class
  * of artifact as fwd4.txt, and it was already in this tree inside fm6000_linkup.c.
  * This does not make it clean -- it makes it smaller and parameterised instead of
  * transcribed once per port. Generating it from first principles is still open.
+ * DFE[] is the same class of artifact and carries the same debt.
  *
- *   fm6000_lanelink [-n] [-b <bdf>] [-d <us>] <front-panel-port>
+ *   fm6000_lanelink [-n] [-l] [-b <bdf>] [-d <us>] <front-panel-port>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include <stdio.h>
@@ -231,9 +237,123 @@ static const struct op SEQ[] = {
 };
 #define NSEQ ((int)(sizeof SEQ / sizeof SEQ[0]))
 
+/* RX adaptation (DFE tuning), segmented from the LIVE capture of one
+ * fm6000StartSerDesDfeTuning(0,69,0) call on EOS -- see docs/PORT3-BRINGUP.md.
+ * Same segmentation rules as SEQ: 29 EPL lane writes, 35 SBus ops to the lane's
+ * SerDes, 30 SPICO ops claimed by the reg-0x03 payload rule. The 46 SPICO ops
+ * and 6 SBus ops for lanes 0x45/0x49 in the same window are excluded.
+ *
+ * The capture was disarmed mid-block, so its last two ops -- a SPICO interrupt
+ * opened with reg 0x01/0x02 and never given its reg-0x03 target -- are dropped
+ * rather than replayed half-formed. The table ends on the last complete block.
+ *
+ * ⚠ The SPICO firmware performs the adaptation; these ops start it and poll it.
+ * The polls are replayed as fixed reads, so this does NOT wait for convergence
+ * the way fm6000CheckSerDesDfeTuningState does -- it issues the procedure. And
+ * it is inert on an image built without SPICO (the fibre-only C1 option), since
+ * there is then no firmware to run it. Neither point is yet tested on hardware. */
+static const struct op DFE[] = {
+	{ OP_SBUS, 0x21, 0x00000000u, 0x17, 0x4a },
+	{ OP_SBUS, 0x21, 0x0000000au, 0x2a, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000002u, 0x2b, 0x4a },
+	{ OP_MMIO, 0x02, 0x07ffffffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x04, 0x07ffffffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x02, 0x07fffffeu, 0x00, 0x00 },
+	{ OP_MMIO, 0x02, 0x07ffffffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x04, 0x07ffffffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x02, 0x07fffffeu, 0x00, 0x00 },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x1f, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000008u, 0x2a, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000000u, 0x2b, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000010u, 0x17, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000000u, 0x2a, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000000u, 0x0d, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000000u, 0x26, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000010u, 0x17, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x24, 0x4a },
+	{ OP_MMIO, 0x37, 0x000c0002u, 0x00, 0x00 },
+	{ OP_MMIO, 0x3c, 0x000001eeu, 0x00, 0x00 },
+	{ OP_MMIO, 0x39, 0x003a0281u, 0x00, 0x00 },
+	{ OP_MMIO, 0x41, 0x00000020u, 0x00, 0x00 },
+	{ OP_MMIO, 0x40, 0x00003fdfu, 0x00, 0x00 },
+	{ OP_MMIO, 0x02, 0x07ffffffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x04, 0x07ffffffu, 0x00, 0x00 },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x1f, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x24, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x20, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x21, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x22, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x23, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x24, 0x4a },
+	{ OP_MMIO, 0x37, 0x008c0002u, 0x00, 0x00 },
+	{ OP_MMIO, 0x3c, 0x000001e2u, 0x00, 0x00 },
+	{ OP_MMIO, 0x39, 0x002a0281u, 0x00, 0x00 },
+	{ OP_SBUS, 0x21, 0x00000000u, 0x17, 0x4a },
+	{ OP_SBUS, 0x21, 0x0000000eu, 0x2a, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000002u, 0x2b, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x24, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x20, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x21, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x22, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x23, 0x4a },
+	{ OP_MMIO, 0x02, 0x07fffffeu, 0x00, 0x00 },
+	{ OP_MMIO, 0x02, 0x07ffffffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x04, 0x07ffffffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x40, 0x00003fffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x41, 0x00003fffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x02, 0x07fffffeu, 0x00, 0x00 },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x1f, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x24, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x25, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x26, 0x4a },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x27, 0x4a },
+	{ OP_SBUS, 0x21, 0x0000004au, 0x03, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000018u, 0x0c, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000008u, 0x0c, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x01, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x00, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x02, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x1f, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000000u, 0x01, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000020u, 0x02, 0xfd },
+	{ OP_SBUS, 0x21, 0x0000004au, 0x03, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000018u, 0x0c, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000008u, 0x0c, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x01, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x00, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x02, 0xfd },
+	{ OP_MMIO, 0x37, 0x000c0002u, 0x00, 0x00 },
+	{ OP_MMIO, 0x40, 0x00003fffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x3c, 0x000001feu, 0x00, 0x00 },
+	{ OP_MMIO, 0x39, 0x002a0281u, 0x00, 0x00 },
+	{ OP_MMIO, 0x02, 0x07ffffffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x04, 0x07ffffffu, 0x00, 0x00 },
+	{ OP_MMIO, 0x02, 0x07fffffeu, 0x00, 0x00 },
+	{ OP_SBUS, 0x21, 0x00000000u, 0x01, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000020u, 0x02, 0xfd },
+	{ OP_SBUS, 0x21, 0x0000004au, 0x03, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000018u, 0x0c, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000008u, 0x0c, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x01, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x00, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x02, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000016u, 0x2a, 0x4a },
+	{ OP_SBUS, 0x21, 0x00000000u, 0x01, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000020u, 0x02, 0xfd },
+	{ OP_SBUS, 0x21, 0x0000004au, 0x03, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000018u, 0x0c, 0xfd },
+	{ OP_SBUS, 0x21, 0x00000008u, 0x0c, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x01, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x00, 0xfd },
+	{ OP_SBUS, 0x22, 0x00000000u, 0x02, 0xfd },
+	{ OP_SBUS, 0x21, 0x0000000eu, 0x2a, 0x4a },
+};
+#define NDFE ((int)(sizeof DFE / sizeof DFE[0]))
+
 static volatile uint32_t *M;
 static unsigned DLY = 20;
 static int dry;
+static int link_only;
 
 static void wr(uint32_t w, uint32_t v)
 {
@@ -281,6 +401,48 @@ static uint32_t patch_tx_cfg(uint32_t v, const struct fm6000_serdes_port *p)
 	return v;
 }
 
+/* Run one op table, retargeting every port-dependent field to this lane. */
+static int run_seq(const char *what, const struct op *seq, int n,
+		   uint32_t base, int dev, const struct fm6000_serdes_port *p)
+{
+	int i;
+
+	printf("  %s: %d ops\n", what, n);
+	for (i = 0; i < n; i++) {
+		const struct op *o = &seq[i];
+		if (o->kind == OP_MMIO) {
+			uint32_t v = o->val;
+			if (o->off_or_sbop == SERDES_TX_CFG_OFF) v = patch_tx_cfg(v, p);
+			wr(base + o->off_or_sbop, v);
+		} else {
+			/* Two device classes, and they are NOT interchangeable:
+			 *   0x49 -- the lane's own SerDes; retarget to this lane's device
+			 *   0xfd -- the SPICO broadcast; stays 0xfd, but its reg 0x03 write
+			 *           carries the TARGET device as DATA, so that is what moves.
+			 * Retargeting the broadcast device instead of its payload silently
+			 * corrupted 16 of the 89 ops until a full-sequence diff caught it.
+			 * The payload rule is confirmed against the lane-1 capture, which
+			 * writes dev=0xfd reg=0x03 data=0x4a. */
+			uint32_t d = o->dev == SEQ_DEV ? (uint32_t)dev : o->dev;
+			uint32_t data = o->val;
+			if (o->dev == SPICO_BC && o->reg == 0x03u && data == SEQ_DEV)
+				data = (uint32_t)dev;
+			uint32_t cmd = ((uint32_t)o->off_or_sbop << 16) |
+				       ((d & 0xff) << 8) | o->reg | (1u << 24);
+			int r = sbus(cmd, data);
+			if (r < 0) {
+				fprintf(stderr, "  %s: SBus op %d failed rc=%d\n", what, i, r);
+				return 1;
+			}
+		}
+		if (!dry && (i & 7) == 0 && rd(PIN) != 0x208u) {
+			fprintf(stderr, "  %s: chip went off-bus at op %d\n", what, i);
+			return 1;
+		}
+	}
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *bdf = "0000:02:00.0";
@@ -292,10 +454,12 @@ int main(int argc, char **argv)
 
 	for (i = 1; i < argc; i++) {
 		if      (!strcmp(argv[i], "-n")) dry = 1;
+		else if (!strcmp(argv[i], "-l")) link_only = 1;
 		else if (!strcmp(argv[i], "-b") && i + 1 < argc) bdf = argv[++i];
 		else if (!strcmp(argv[i], "-d") && i + 1 < argc) DLY = strtoul(argv[++i], NULL, 0);
 		else if (argv[i][0] == '-') { fprintf(stderr,
-			"usage: fm6000_lanelink [-n] [-b bdf] [-d us] <front-panel-port>\n"); return 2; }
+			"usage: fm6000_lanelink [-n] [-l] [-b bdf] [-d us] <front-panel-port>\n"
+			"  -l  link ops only, skip the DFE (RX adaptation) sequence\n"); return 2; }
 		else intf = strtol(argv[i], NULL, 0);
 	}
 	if (intf < 0 || !(p = find_port((unsigned)intf))) {
@@ -322,39 +486,24 @@ int main(int argc, char **argv)
 		if (rd(PIN) != 0x208u) { fprintf(stderr, "chip off-bus (PIN=%08x)\n", rd(PIN)); return 1; }
 	}
 
-	for (i = 0; i < NSEQ; i++) {
-		const struct op *o = &SEQ[i];
-		if (o->kind == OP_MMIO) {
-			uint32_t v = o->val;
-			if (o->off_or_sbop == SERDES_TX_CFG_OFF) v = patch_tx_cfg(v, p);
-			wr(base + o->off_or_sbop, v);
-		} else {
-			/* Two device classes, and they are NOT interchangeable:
-			 *   0x49 -- the lane's own SerDes; retarget to this lane's device
-			 *   0xfd -- the SPICO broadcast; stays 0xfd, but its reg 0x03 write
-			 *           carries the TARGET device as DATA, so that is what moves.
-			 * Retargeting the broadcast device instead of its payload silently
-			 * corrupted 16 of the 89 ops until a full-sequence diff caught it.
-			 * The payload rule is confirmed against the lane-1 capture, which
-			 * writes dev=0xfd reg=0x03 data=0x4a. */
-			uint32_t d = o->dev == SEQ_DEV ? (uint32_t)dev : o->dev;
-			uint32_t data = o->val;
-			if (o->dev == SPICO_BC && o->reg == 0x03u && data == SEQ_DEV)
-				data = (uint32_t)dev;
-			uint32_t cmd = ((uint32_t)o->off_or_sbop << 16) |
-				       ((d & 0xff) << 8) | o->reg | (1u << 24);
-			int r = sbus(cmd, data);
-			if (r < 0) { fprintf(stderr, "  SBus op %d failed rc=%d\n", i, r); rc = 1; break; }
+	rc = run_seq("link", SEQ, NSEQ, base, dev, p);
+
+	/* RX adaptation follows the link ops, and only if they completed -- tuning a
+	 * lane whose bring-up aborted would adapt to a link that is not there. */
+	if (!rc && !link_only) {
+		if (!dry) {
+			uint32_t st = rd(base + 0x00);
+			printf("  after link: PORT_STATUS = %08x  pcsRx = %08x\n",
+			       st, rd(base + 0x26));
 		}
-		if (!dry && (i & 7) == 0 && rd(PIN) != 0x208u) {
-			fprintf(stderr, "  chip went off-bus at op %d\n", i); return 1;
-		}
+		rc = run_seq("dfe", DFE, NDFE, base, dev, p);
 	}
 
 	if (!dry) {
 		uint32_t st = rd(base + 0x00);
 		printf("  PORT_STATUS = %08x  pcsRx = %08x\n", st, rd(base + 0x26));
 	}
-	printf("  %d ops %s\n", NSEQ, dry ? "(dry run)" : (rc ? "-- ABORTED" : "done"));
+	printf("  %d ops %s\n", link_only ? NSEQ : NSEQ + NDFE,
+	       dry ? "(dry run)" : (rc ? "-- ABORTED" : "done"));
 	return rc;
 }

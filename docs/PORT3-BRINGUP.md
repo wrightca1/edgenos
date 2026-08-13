@@ -363,6 +363,45 @@ were spent racing gdb's attach against the ASIC init to catch a procedure that c
 Remaining: segment it to serdes 69 (SPICO reg-0x03 payload rule, as for the link sequence), fold it
 into `fm6000_lanelink` after the link ops, and test under EdgeNOS.
 
+### Segmented and folded in — untested on hardware
+
+**2026-08-13.** Done for the first two; the third needs a lab visit.
+
+The segmentation was written as a script rather than done by hand, and **validated against a known
+answer before being trusted**: run over `fm6000-et3-noshut-LIVE-trace.txt` it reproduces the 168-op
+`SEQ[]` already shipping in `fm6000_lanelink.c` **byte-for-byte**. Only then was it pointed at the
+DFE capture. Its rules are the ones the file already documents — an op belongs to the lane if it is
+an SBus op to the lane's own SerDes, a SPICO op whose most recent `dev=0xfd reg=0x03` write named
+that device, or an MMIO write inside `base .. base+0x7f`.
+
+| | trace | kept |
+|---|---:|---:|
+| EPL lane MMIO | 29 | 29 |
+| SBus to `0x4a` | 35 | 35 |
+| SPICO (`0xfd`) | 80 | 30 |
+| other lanes (`0x45`/`0x49`) | 52 | 0 |
+
+**96 ops segmented, 94 kept.** The capture was disarmed mid-block: its last two ops open a SPICO
+interrupt with reg `0x01`/`0x02` and the window ends before the reg-`0x03` write that would name its
+target. Replaying a half-formed interrupt is not something to do to a live SerDes, so the table ends
+on the last complete block.
+
+`DFE[]` runs after `SEQ[]`, and only if `SEQ[]` completed — tuning a lane whose bring-up aborted
+would adapt to a link that is not there. `-l` restores the old link-only behaviour. The op-execution
+loop is now shared by both tables, so the device retargeting is applied identically to each;
+verified by dry-running port 2 (EPL16 lane 0), where **no `0x4a` survives anywhere in either
+table** and all ten SPICO reg-0x03 payloads carry `0x45`.
+
+⚠ Two things this does **not** do, both worth knowing before the hardware test:
+
+- **It issues the procedure; it does not wait for it.** The polls are replayed as fixed reads. The
+  SPICO firmware performs the adaptation, and the real caller
+  (`fm6000CheckSerDesDfeTuningState`) loops until `coarse`/`fine` report complete. If the lane
+  needs more iterations than the captured run took, a verbatim replay walks away early.
+- **It is inert without SPICO firmware.** DFE tuning *runs on* the SPICO, so on the fibre-only
+  build that strips the 30,002 IMEM transactions (C1) there is nothing to execute it. The replay
+  currently on flash retains SPICO, so this is a constraint on the C1 decision, not on the test.
+
 ---
 
 **2026-08-11.** Front-panel port 3 is now up under EdgeNOS. This is the second connected port, and
