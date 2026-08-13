@@ -663,3 +663,58 @@ back, that is the shape of the fix — and `fm6000_sbus irq` already speaks that
 block has not enabled it, so nothing we write to a *dark* lane could show regardless. The Et2
 `tx_pattern_gen_en` result argues against it for a *running* lane, which is why it is not the
 leading reading.
+
+### ⚠ The SPICO-ownership hypothesis is weakened, and one claim retracted
+
+**`fm6000SetSpicoState` decoded.** It is a single interrupt:
+
+```
+fm6000SetSpicoState(sw, state)  ->  fm6000InterruptSpico(sw, code 0x0f, param = !state, 50000)
+```
+
+so **SPICO run-state is interrupt code `0x0f`**, and it takes no lane argument — it is global.
+
+**But nothing in the SDK calls it, and `fm6000EnableSerDes` does not halt the SPICO.** EOS enables a
+lane with direct SBus writes *while the controller is running*, and those writes work for EOS. So
+"the SPICO overwrites what we write" no longer explains the difference between EOS and us. The
+hypothesis is not dead — the controller is still the obvious owner of these registers — but its main
+support is gone.
+
+**Retraction.** The `tx_pattern_gen_en` test was called decisive; as run, it was not. Writing
+`0x0a = 0x80` set the enable while clearing `tx_pattern_gen_sel_cntl` (b4-5) and
+`tx_pattern_gen_ctl_cntl` (b6), so the generator may simply not have been configured to emit.
+
+**Re-run properly, and the conclusion holds.** `0x0a` = `0x90`, `0xd0`, `0xf0` on Et2 — enable plus
+control plus all three select values, four seconds apart:
+
+```
+before      RxLinkUp=1 HeartbeatOk=1 SerXmit=1
+0x90        RxLinkUp=1 HeartbeatOk=1 SerXmit=1
+0xd0        RxLinkUp=1 HeartbeatOk=1 SerXmit=1
+0xf0        RxLinkUp=1 HeartbeatOk=1 SerXmit=1
+```
+
+A configured pattern generator on a live 10GBASE-CR lane would break it. None of the three did.
+
+**And the fine instrument agrees.** The SPICO lane-state readout, the one thing that has ever
+distinguished these lanes, is unmoved by every SerDes write made today:
+
+```
+0x49 Et1 = 2    0x45 Et2 = 2    0x4a Et3 = 1    0x4b empty = 0
+```
+
+Et3 still reads `1` — the state our EPL provisioning put it in — after `rx_en`, `tx_en`,
+`tx_output_en` and the pattern generator were all written to it.
+
+### Where that leaves the question
+
+Writes to a SerDes device complete on the bus, report `result=1` exactly as SPICO writes do, and
+change nothing measurable by any of the four instruments available (PORT_STATUS stable bits, the
+read-space observation registers, a live link's survival, the SPICO lane state). EOS issues
+byte-identical command words and gets working lanes.
+
+**Next, and it needs a decision because it carries risk:** re-run `fm6000_initsbus` on the booted
+chip and repeat one write test. The replay's own SBus writes work at boot; if the master is left in
+a state afterwards where writes are absorbed, a re-init would restore them and that is the whole
+answer. ⚠ It re-initialises the bus that Et1 is running over, and Et1 carries the OSPF adjacency —
+so this is a deliberate step, not a casual one.
