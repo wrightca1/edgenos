@@ -950,3 +950,42 @@ and DFE tuning (17). Any of them could be what `SerXmit` is waiting for — step
 clock or divider setting.
 
 ⚠ And the shadow assumes the reset defaults are zero. Unverified, and the first thing to doubt.
+
+### The rate table — steps 4, 5 and 6 decoded
+
+`fm6000EnableSerDes` dereferences a pointer argument and branches on the line rate (`0x48192f`):
+
+| line rate | first constant | second constant |
+|---|---|---|
+| ≤ 1250 (1.25G) | `0x13` | `0x63` |
+| ≤ 3125 (3.125G) | `0x01` | `0x06` |
+| ≤ 6250 | `0x01` | `0x09` |
+| **otherwise (10.3125G)** | **`0x1b`** | **`0x40`** |
+
+Every front-panel port on this box is 10.3125 Gbps, so `0x1b` / `0x40` are the values that matter.
+
+The second constant is inserted as a **bitfield into `0x36` and `0x3b`**, both masked `0x7f`, using the
+idiom `value = read ^ ((read ^ new) & mask)` — replace the low seven bits, keep the rest. That is
+exactly the read-modify-write a capture cannot express, and it is why the shadow copy exists.
+
+Also decoded: **step 4 writes `0x1d` with an immediate `0`**, and **step 7 replaces `0x17` bits [4:0]
+with `0x10`** (an immediate, not a rate constant) — which confirms the earlier "set bit 4" reading and
+sharpens it.
+
+`fm6000_serdes_enable` now runs **12 of the 18 steps** with decoded values:
+
+```
+1  0x22 <- 0x00      8  0x22 <- 0x03        13 0x26 <- 0x01
+4  0x1d <- 0x00      9  PLL lock       OK   15 0x0d <- 0x11
+5  0x36 <- 0x40     10  0x06 <- 0x08        16 signal detect OK (0xd4)
+6  0x3b <- 0x40     11  0x03 <- 0x01
+7  0x17 <- 0x10
+```
+
+**`PORT_STATUS` is still `0x0015`, `SerXmit` still 0.** Both gates pass, the divider fields are now
+right for 10G, and the port still does not transmit.
+
+Four steps remain: **2** (KR training off, an SDK call), **3** (field `0x1b`, but its register address
+comes from a local this analysis has not resolved), **12** (`0x1f`, field source unresolved), and
+**17** (DFE tuning, which needs a running lane anyway). Step 3 is the interesting one — it is the
+only remaining write whose *register* is unknown, and it carries the other half of the rate pair.

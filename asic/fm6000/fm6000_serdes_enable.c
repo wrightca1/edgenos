@@ -80,6 +80,26 @@
 #define R_ANALOG_GATE   0x17u    /* WRITE b4                                   */
 #define R_ENABLES       0x22u    /* WRITE b0 rx_en, b1 tx_en                   */
 #define R_DFE_GATE      0x26u    /* WRITE b0  sbus_rx_dfe_gate                 */
+#define R_1D            0x1du    /* written 0 (immediate, step 4)              */
+#define R_36            0x36u    /* [6:0] rate-dependent field (step 5)        */
+#define R_3B            0x3bu    /* [6:0] rate-dependent field (step 6)        */
+
+/* fm6000EnableSerDes selects these by line rate, from a pointer argument it
+ * dereferences and compares (0x48192f onwards):
+ *
+ *     rate <= 1250   -> 0x13 / 0x63     1.25G
+ *     rate <= 3125   -> 0x01 / 0x06     3.125G
+ *     rate <= 6250   -> 0x01 / 0x09
+ *     otherwise      -> 0x1b / 0x40     10.3125G   <-- every port on this box
+ *
+ * The second of each pair is the field written to 0x36 and 0x3b; the first goes
+ * to the step-3 register, whose address comes from a local this analysis did not
+ * resolve. Both are inserted as bitfields, value = read ^ ((read ^ new) & mask),
+ * which is why the shadow matters.
+ *
+ * ⚠ Hard-coded for 10G. Every front-panel port here is 10.3125 Gbps, so this is
+ * correct for this platform and wrong for a 1G SFP. */
+#define RATE_FIELD      0x40u
 
 static volatile uint32_t *M;
 static int dry;
@@ -214,8 +234,11 @@ int main(int argc, char **argv)
 
 	printf("  --- enable sequence ---\n");
 	rmw(dev, R_ENABLES,      0x00, 0x03, "1  rx_en/tx_en off");
-	/* 2 KR training, 3-6 unknown values -- see the header */
-	rmw(dev, R_ANALOG_GATE,  0x10, 0x00, "7  analog gate b4");
+	/* 2 KR training off, and 3 (register unresolved, field 0x1b at 10G) */
+	rmw(dev, R_1D,           0x00, 0xff, "4  reg 0x1d <- 0");
+	rmw(dev, R_36,     RATE_FIELD, 0x7f, "5  divider field [6:0]");
+	rmw(dev, R_3B,     RATE_FIELD, 0x7f, "6  divider field [6:0]");
+	rmw(dev, R_ANALOG_GATE,  0x10, 0x1f, "7  analog gate [4:0]<-0x10");
 	rmw(dev, R_ENABLES,      0x03, 0x00, "8  rx_en/tx_en ON");
 	if (wait_bit(dev, R_RX_RDY, 0, "9  PLL lock (rx_rdy)") < 0)
 		printf("    (continuing anyway -- the SDK would abort here)\n");
@@ -229,6 +252,7 @@ int main(int argc, char **argv)
 		printf("    (no signal detected -- nothing on the fibre, or RX not adapting)\n");
 
 	status("after", base, dev);
-	printf("  done -- steps 2,3,4,5,6,12,17 not implemented (see the header)\n");
+	printf("  done -- 12 of 18 steps; 2 (KR training), 3 (register unresolved),"
+	       " 12 (0x1f field), 17 (DFE) not implemented\n");
 	return 0;
 }
