@@ -1630,3 +1630,53 @@ data correctly. The candidates, in order:
 
 `RxRate` is now the instrument to use — it is a six-bit field that reads `0x12` on a working 10G lane
 and `0` here, so any change to the rate path can be judged directly instead of through `SerXmit`.
+
+### ★★★ WHY PORT 3 IS NOT UP: the DFE engine has never run on it
+
+**2026-08-13.** Two measurements close the argument.
+
+**1. Near loopback does not lock either.** With `sbus_near_loopback_en_cntl` (`0x0d` b7) set — the lane
+fed its own transmit — `LANE_STATUS` stayed `0x0001c000`: `BlockLock=0`, `RxRate=0`. If our
+transmitter were running, a loopback has no fibre, no far end and no attenuation to blame; it would
+lock. So `SerXmit=0` is a true report, and **the far end is not the problem** — a hypothesis that had
+been open since the optical measurements.
+
+**2. The DFE registers are empty.** A full SBus dump of the working lane against the dark one, taken
+*after* the enable sequence, leaves 24 differences, and the shape of them is the answer:
+
+```
+0x19 0x0f -> 0      0x1e 0x0b -> 0      0x20 .. 0x27   populated -> ALL ZERO
+0x1a 0x0f -> 0      0x1f 0x25 -> 0      (the DFE taps)
+```
+
+`0x1e`/`0x1f` are `sbus_dfe_scratch_obs` and `0x20`-`0x27` are the DFE tap/state block. On Et1 they
+carry live, changing values. On Et3 **every one of them is zero**. The receiver's equaliser has never
+adapted, because nothing has ever asked it to.
+
+This is exactly what this repository already knew, in `fm6000_spico.c`:
+
+> *without the SPICO running, the SerDes RX equalizer never adapts and ports don't train*
+
+### The chain, end to end
+
+```
+DFE never runs  ->  receiver never adapts  ->  no 10GBASE-R block lock
+                ->  RxRate reads 0         ->  PCS never comes up
+                ->  MAC never transmits    ->  SerXmit = 0  ->  port down
+```
+
+Every earlier symptom sits somewhere on that chain, which is why each fix in turn was necessary and
+none was sufficient. The provisioning, the enables, the clock gate and the reference select all had
+to be right — and they now are, with the PLL locked, `rx_rdy` matching Et1 exactly and signal
+strength at maximum — but the last step was never taken.
+
+### What to build next, precisely
+
+**Step 17, DFE tuning**, which `fm6000StartSerDesDfeTuning` (`0x4877a1`) shows is not a SPICO
+interrupt but three `WriteSBus`, one `ReadSBus`, one `and $0xffffffe0`, and
+`fm6000SetSerDesRxDataGate(.., 0)`, over registers **`0x17`, `0x2a`, `0x2b`** — the same registers
+`fm6000_lanelink`'s captured `DFE[]` table writes, which is a useful cross-check on both.
+
+Judge it on the DFE taps themselves: `0x20`-`0x27` going non-zero is the proof the engine ran, and it
+is visible without waiting for the port to come up. Then `RxRate` (`LANE_STATUS` b7-12, `0x12` on a
+working lane), then `SerXmit`.
