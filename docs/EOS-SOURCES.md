@@ -465,3 +465,56 @@ is one reboot. ⚠ Note Et2 is a **DAC cable, electrical not optical**, so it is
 for Et3's fibre lane in general; for this specific question — do writes to `rx_en`/`tx_en` take
 effect — the mechanism is mode-independent and it is a fair test. Et1 is the only other optical port
 and it carries the OSPF adjacency, so it is not available as a subject.
+
+### ⛔ ANSWERED: our SBus writes do not take effect
+
+**2026-08-13.** The separating experiment, run on Et2 (linked, no netdev, no traffic):
+
+```
+Et2 PORT_STATUS                       0x000008c0   RxLinkUp=1 SerXmit=1
+after write 0x45 reg 0x22 = 0x00      0x000008c0   unchanged
+  (clears sbus_rx_en_cntl + sbus_tx_en_cntl)
+after restoring 0x22 = 0x03           0x000008c0   unchanged
+```
+
+**Clearing the RX and TX enables on a lane that is up changed nothing.** A write that genuinely
+reached `sbus_rx_en_cntl`/`sbus_tx_en_cntl` would drop the link. So the raw
+`cmd = (op<<16) | (dev<<8) | reg | (1<<24)` transaction our tools issue **does not reach these
+SerDes control registers**.
+
+That is the answer to the question the previous entry left open, and it is the more consequential
+of the two possibilities:
+
+- **`fm6000_lanelink`'s 44 SBus ops per run have no effect.** Neither the provisioning table nor the
+  link sequence nor the DFE sequence can have done anything at the SerDes level. Their MMIO halves
+  landed — readback proves that — which is exactly why the lane moved from SPICO state 0 to 1 and no
+  further. The EPL half works; the SerDes half has never worked.
+- **The SPICO path is unaffected** — `fm6000_sbus irq` returns per-lane answers (2/2/1/0/0/0), so
+  interrupt-style access does reach the micro-controller. Whatever is wrong is specific to plain
+  register writes.
+
+⚠ The alternative reading — that the writes land but `PORT_STATUS` does not reflect a mid-flight
+SerDes disable — cannot be excluded from one measurement. It is unlikely (killing the serialiser on
+a live 10G link should show somewhere) but it is not disproven, and a second observable would settle
+it.
+
+### Where the write path probably went wrong
+
+The SDK never issues a bare `(op, dev, reg)`. It computes
+`addr = (serdes << 8) + 0xd11XX`, which decomposes as
+
+```
+bits [23:16] = 0x0d          a ring / space selector
+bits [15:8]  = serdes + 0x11 the device on that ring
+bits [7:0]   = register
+```
+
+so `0x0d` is a field our transaction never sets, and `serdes + 0x11` says the SDK's serdes index is
+not the device number we have been using. Two prefixes exist beside it — `0xd21` in the waits and
+`0xc05` alongside — which is consistent with `0x0d`/`0x0c` selecting a space and `0x11`/`0x21`
+distinguishing the write-register readback from the observation registers. **All of that is
+inference from one arithmetic pattern and must be verified before anything is built on it.**
+
+**Next: disassemble `fm6000WriteSBus` itself.** It is the one function that converts that composite
+address into whatever the hardware actually sees, and it is small. Everything else here is guesswork
+until it is read.
