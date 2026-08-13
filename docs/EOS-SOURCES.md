@@ -916,3 +916,37 @@ readable.
 
 **That is `fm6000_serdes_enable`, and it is now buildable.** It should not reuse `fm6000_lanelink`'s
 tables at all.
+
+### `fm6000_serdes_enable` — the algorithm, run as an algorithm
+
+Built and run on port 3. It resets the device, then walks the decoded sequence as read-modify-write
+against a software shadow of the write registers, with the SDK's two polls:
+
+```
+before   PORT_STATUS=00000015 SerXmit=0 pcsRx=00000000  rx_rdy=1 sig=3
+  1  rx_en/tx_en off        reg 0x22 <- 0x00
+  7  analog gate b4         reg 0x17 <- 0x10
+  8  rx_en/tx_en ON         reg 0x22 <- 0x03
+  9  PLL lock (rx_rdy)      OK  (0x3f)
+  10 sig-strength detect on reg 0x06 <- 0x08
+  11 rx data gate           reg 0x03 <- 0x01
+  13 rx dfe gate            reg 0x26 <- 0x01
+  15 tx_output_en|pre_emph  reg 0x0d <- 0x11
+  16 signal detect          OK  (0xd4 -- strength 3 of 3)
+after    PORT_STATUS=00000015 SerXmit=0 pcsRx=00000000  rx_rdy=1 sig=3
+```
+
+**Both gates that `fm6000EnableSerDes` blocks on are satisfied** — the PLL is locked and the receiver
+sees a full-strength signal — and the EPL block still reports `SerXmit=0` with no PCS lock.
+
+So the SerDes analog side is now demonstrably up on Et3, and the failure has moved to the boundary
+between the SerDes and the EPL/MAC. That is a different problem from the one this document opened
+with, and a smaller one.
+
+⚠ Seven steps are not implemented and are listed in the tool's header: KR training off (2), the four
+whose values come from mode-dependent computation the disassembly did not yield (3, 4, 5, 6, 12),
+and DFE tuning (17). Any of them could be what `SerXmit` is waiting for — steps 4-6 write `0x1d`,
+`0x36` and `0x3b`, which are unexamined, and one of those is the likeliest candidate for a TX-side
+clock or divider setting.
+
+⚠ And the shadow assumes the reset defaults are zero. Unverified, and the first thing to doubt.
