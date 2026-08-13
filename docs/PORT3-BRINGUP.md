@@ -1206,3 +1206,98 @@ That is hours of work rather than weeks, uses tooling that already exists, and s
 `GLORT_CAM[8]` repointed, `EVID1`/`IVID1` for glort `0x3ed`, the `0x03ed` SGLORT in `fwd4.txt`) were
 attempts to hand-build a forwarding path the rest of the configuration has no notion of. They should
 be reverted rather than carried forward — `fwd4-preport3.txt` is the pre-edit replay.
+
+---
+
+## ★ The SerDes SBus register map is in the header — and every difference is a *status* register
+
+**2026-08-13, same boot as the DFE test above.** The previous entry ended by saying the gap is RX
+lock, before adaptation. Chasing that produced a decode that should have been found much earlier.
+
+### The header documents all 256 SBus SerDes registers
+
+`fm6000_api_regs_int.h` defines **`FM6000_SERDES_ETH_WRITE_0..255`** and
+**`FM6000_SERDES_ETH_READ_0..255`** with named bit fields — the read and write views of the SerDes
+core registers reached over the SBus. Every `fm6000_sbusdump` column and every SBus op in
+`fm6000_lanelink` can now be named instead of guessed. There are no address macros because these
+are not MMIO; the register number *is* the SBus register field.
+
+Read-view names for the registers that matter here:
+
+| SBus reg | READ field |
+|---|---|
+| `0x02`–`0x06` | `sbus_rx_prbs_data_obs` |
+| `0x09`, `0x0a` | `sbus_rx_error_count_obs` |
+| `0x12`, `0x13` | `sbus_from_analog_obs` |
+| `0x15` | `sbus_rx_elec_idle_detect_obs` b0, `sbus_tx_detect_rx_result_obs` b1, `sbus_tx_detect_rx_complete_obs` b2 |
+| `0x1e`, `0x1f` | `sbus_dfe_scratch_obs` |
+| write `0x0d` | `sbus_near_loopback_en_cntl` b7 (`SERDES_ETH_WRITE_13`) |
+
+### 21 of 256 registers differ between the lanes, and all 21 are `_obs`
+
+Full dump of the working lane (`0x49`, Et1) against the dark one (`0x4a`, port 3): 21 differences,
+every one an **observation** register — PRBS data, error counts, analog readback, DFE scratch,
+electrical-idle/tx-detect status. **Not one configuration register differs.** The lane is not
+misconfigured; it is not receiving.
+
+Two that read zero on the dark lane are the shape of the problem: `sbus_rx_error_count_obs`
+(`0x06`/`0x04` on Et1, `0x00`/`0x00` on port 3 — a lane that never locks also never counts errors)
+and `0x15` (`0x02` vs `0x00`: `tx_detect_rx_result` set on Et1, clear on port 3, with
+`tx_detect_rx_complete` clear on both, so that result may simply be stale).
+
+⚠ `0x21`–`0x28` change between consecutive reads on both lanes — they are live. Any single-shot
+comparison of those is meaningless.
+
+### The EPL side is provably identical
+
+| register | Et1 | port 3 |
+|---|---|---|
+| `SERDES_CFG` (`0x34`) | `0x0aaa86c0` | `0x0aaa86c0` — PowerDown=0, NearLoopback=0, FarLoopback=0 |
+| `SERDES_RX_CFG` (`0x39`) | `0x002a0281` | `0x002a0281` — RxEn=1, RxPolarityInvEn=0 |
+| `SERDES_TX_CFG` (`0x3a`) | `0xc0000581` | `0xc0001581` — differs only by the intended pre=1 |
+
+**RX polarity was the best remaining hypothesis for a TX-works/RX-dead split, and it is refuted:**
+both lanes have `RxPolarityInvEn` clear. Note also that neither op table in `fm6000_lanelink`
+writes `SERDES_CFG` at all — it is left at its boot value, which happens to be correct.
+
+### ⚠ Readback-vs-EOS-writes is NOT a diagnostic here
+
+Comparing what EOS wrote to `0x4a` during the successful bring-up against what the lane reads back
+shows 7 of 8 registers "wrong" — but **the working lane fails the same comparison**. E.g. EOS wrote
+`0x17=0x00` and both lanes read `0xc0`; wrote `0x2a=0x0e` and both read `0x00`. These are
+command/strobe registers whose read view is different silicon from the write view. The mismatch is
+a property of the register, not of the lane. Discard the method.
+
+### Near loopback: no effect, and the test is not conclusive
+
+`SERDES_CFG` bit 28 `NearLoopbackEn` set on port 3 (readback confirmed `0x1aaa86c0`), link ops
+re-run under it, reverted after: `PORT_STATUS` stayed `0x15` and `pcsRx` stayed `0` throughout. Et1
+was unaffected the whole time.
+
+⚠ **This does not yet prove the RX path is dead.** The MMIO bit's efficacy is unvalidated — the
+header also defines an SBus-side `sbus_near_loopback_en_cntl` (`WRITE_13` b7), and the SPICO may be
+the actual consumer. There is no positive control: Et1 and Et2 are both up and carrying traffic, so
+neither can be used as a loopback test subject without taking a working link down.
+`fm6000_sbusdump` is deliberately read-only, so trying the SBus-side bit needs a new tool.
+
+### What is now the cheapest untried discriminator: is light arriving at all?
+
+Everything inside the chip matches a working lane, and the far end reports `Link detected: yes`.
+That makes a one-directional optical fault — dead strand, dirty connector, failed SFP receiver —
+a live hypothesis that has never been tested, and it is a five-minute check *if* the SFP DOM can be
+read (SFF-8472 page `0xA2`, RX power at bytes 104–105).
+
+**It cannot be read on this image.** `/dev/i2c-2` and `/dev/i2c-20..26` exist and busybox ships
+`i2cget`/`i2cdump`, but **no device answers at `0x50` on any of them** — the SFP cages sit behind
+the SCD's own I2C masters, which `services/scd-setup.sh` configures and this minimal M1 image does
+not. Wiring that up is the next concrete step, and it is worth doing for platform services anyway.
+
+### ⚠ Datasheet Table 9-4 does not agree with `sbus_dev()`
+
+§9.4.3 maps SBus addresses to interfaces in **blocks of four** (PCIe 1–4, then each EPL), listing
+EPL[14] at **41** (`0x29`) — not `0x49`. Our `0x49`/`0x4a`/`0x45` are empirical, taken from EOS's
+own traces, and they work; so the EPL indices in `fm6000_serdes_ports.h` are evidently not the
+datasheet's numbering. The consequence: `sbus_dev()`'s `0x49 + lane - 2*(epl-14)` extrapolation is
+built on a structure the datasheet contradicts (+4 per interface, not +2), so it should not be
+trusted for any port whose device address has not been observed. The tool already refuses to drive
+unobserved mappings — keep it that way.
