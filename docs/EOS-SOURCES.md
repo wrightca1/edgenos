@@ -571,3 +571,49 @@ Both readings survive the evidence. Distinguishing them needs a write whose effe
 a *running* link — the TX pattern generator is the obvious candidate, since a lane transmitting PRBS
 cannot carry traffic — or a way to read back the write-register space, which is what
 `0xd1100 + 0x100*serdes` addressing may exist to provide.
+
+### ⛔ CONFIRMED, and narrowed: writes to a SerDes device do nothing; writes to the SPICO work
+
+The correction above asked for a write whose effect on a running link is unambiguous. Run on Et2:
+
+| write | control | PORT_STATUS over 12 s |
+|---|---|---|
+| `0x22 = 0x00` | clear `rx_en` + `tx_en` | `0x08c0` unchanged |
+| `0x0d = 0x00` | clear `tx_output_en` | stable bits unchanged |
+| `0x07 = 0x80` | `rx_pattern_cmp_en` | `0x0f` stayed `0x3f` (inconclusive by nature) |
+| **`0x0a = 0x80`** | **`tx_pattern_gen_en`** | **`0x08c0` unchanged, RxLinkUp/HeartbeatOk/SerXmit all 1** |
+
+The last is decisive. **A lane transmitting PRBS cannot carry traffic** — had that write landed, the
+Edgecore at the far end of the DAC would have lost sync and the link would have dropped well inside
+twelve seconds. It did not flicker.
+
+**So writes addressed to a SerDes device take no effect** — and this is no longer explicable by bad
+addressing, because `fm6000SerDesRemapTable` confirms our device numbers, the register is the low
+byte of the SDK address, and the command word we build is byte-identical to the ones EOS itself
+issues in `fwd4-stock.txt` (`0x01214a17` = exec | op `0x21` | dev `0x4a` | reg `0x17`).
+
+### ★ The narrowing that matters
+
+**Writes to the SPICO broadcast device `0xfd` DO take effect.** `fm6000_sbus irq` writes regs `0x01`,
+`0x02`, `0x03` and `0x0c` to device `0xfd` and gets back *per-target* answers — `2` for both working
+lanes, `1` for Et3, `0` for lanes with nothing plugged in. Those responses cannot vary by target
+unless the reg-`0x03` write that names the target is landing.
+
+So the split is not read-versus-write, and not our command encoding. It is **which device answers**:
+
+```
+device 0xfd  (SPICO broadcast)   writes land, reads land
+device 0x45 / 0x49 / 0x4a        reads land, writes do not
+```
+
+That is a much sharper question than "why is port 3 dark", and it suggests the individual SerDes
+devices are not accepting bus writes in the state our boot leaves them — needing an unlock, an
+owner, or an SBus-master initialisation that EOS performs and we do not. `fm6000_initsbus` already
+exists in the tree and is the obvious first place to look; `fm6000WriteSBus`'s two
+`fmRegCacheUpdateSingle1D` calls and its unnamed internal at `aristaFmGetNextHopUsed@@Base+0x12a4`
+are the second.
+
+⚠ One reading not excluded: that these particular controls are overridden while a lane is running,
+so all four writes landed and none could show. It is strained — `tx_pattern_gen_en` overridden on a
+live link would be a strange design — but it has not been disproven, and the same four writes on the
+*dark* lane produced no state change either, which is consistent with both.
