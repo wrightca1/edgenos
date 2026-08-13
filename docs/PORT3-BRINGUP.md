@@ -1485,3 +1485,51 @@ is lane N" before generating anything.
 
 **Judge the result on `SerXmit`**, which is bit 11 of `PORT_STATUS`: one bit, stable, currently 0,
 and 1 on both working ports.
+
+### Provisioning applied on hardware — necessary, still not sufficient
+
+**2026-08-13, alpha9, live.** `INIT[]` + `SEQ[]` + `DFE[]` = **963 ops, all clean**, no SBus
+failure, no off-bus, Et1 untouched throughout (`0x0ec0`, routes 35).
+
+Readback afterwards — **every EPL register on Et3 now matches the working lane**:
+
+| | Et1 | Et3 |
+|---|---|---|
+| `SERDES_TX_CFG` | `c0000581` (TxEn=1) | `c0001581` (TxEn=1, port 3's emphasis) |
+| `SERDES_RX_CFG` | `002a0281` (RxEn=1) | `002a0281` (RxEn=1) |
+| `AN_37_CFG` | `00000000` | `00000000` |
+| `SERDES_CFG` | `0aaa86c0` | `0aaa86c0` |
+| **`PORT_STATUS`** | **`0x0ec0`** | **`0x0015` — SerXmit still 0** |
+
+Also tried: `PowerDown=3` on lane 1 (`SERDES_CFG` bits 30:31), back to 0, then the full 963 ops
+again — on the theory that the config needs a power cycle to latch. **No change.**
+
+So enabling the transmitter in the EPL block does not start it. The remaining difference is inside
+the SerDes core, where it was all along:
+
+```
+SBus reg   0x12 from_analog_obs   Et1 0x26   Et3 0xfc
+           0x13 from_analog_obs   Et1 0xe0   Et3 0x80
+           0x15 tx_detect_rx      Et1 0x02   Et3 0x00
+```
+
+### What this says about the approach
+
+The replay sends lane 1 **391 MMIO writes and zero SBus ops** — its SerDes core has never been
+addressed, so it is sitting in power-on state. We retargeted lane 0's 44 SBus and 198 SPICO ops to
+it and that was not enough to bring the core up.
+
+Two candidate explanations, and they need different work:
+
+1. **The SerDes bring-up is not relocatable.** Unlike the EPL block, it may only work inside its
+   original position in chip init — after a particular reset, or in a window where the SPICO is in a
+   known state. "Relocate the sequence" is proven for EPL and CM/L2F; it has never been shown to
+   work for SerDes.
+2. **The SPICO does not answer for lane 1.** The 198 SPICO ops we replay are interrupt-style
+   commands whose responses we write and never read. If its micro-controller was never started for
+   that lane, every one of them is a no-op and nothing downstream can work.
+
+**(2) is testable and (1) is not, so test (2) first** — and it needs the SBus write tool: issue one
+SPICO interrupt at `0x4a`, read the response, and compare against the same interrupt at `0x49`. A
+lane whose SPICO answers and one whose SPICO does not are trivially distinguishable, and that single
+measurement decides whether any amount of register replay can ever work here.
