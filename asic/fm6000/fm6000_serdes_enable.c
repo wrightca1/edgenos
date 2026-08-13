@@ -36,14 +36,9 @@
  *                                         16  poll  0x14 b6 signal detect
  *                                         17  DFE tuning (0x17/0x2a/0x2b)
  *
- * 13 of the 18 steps are implemented. Not done: 2 (KR training off, an SDK
- * call), 12 (0x1f, whose field source is unresolved) and 17 (DFE tuning, which
- * needs a lane that already runs). That this is a partial sequence is the point:
- * it is honest about which steps are understood.
- *
- * ⚠ It also does not do step 17. DFE adapts a receiver that is already running;
- * get the lane transmitting first, then use fm6000_lanelink's DFE table, whose
- * ops are now known to target the right registers (0x17/0x2a/0x2b).
+ * 16 of the 18 steps are implemented. Not done: 2 (KR training off, an SDK
+ * call) and 12 (0x1f, whose field source is unresolved). That this is a partial
+ * sequence is the point: it is honest about which steps are understood.
  *
  * JUDGE IT ON: PORT_STATUS bit 11 (SerXmit), 0 on a dark lane and 1 on both
  * working ports, and on the SPICO lane state (fm6000_sbus irq <dev> 0x20),
@@ -82,6 +77,8 @@
 #define R_DFE_GATE      0x26u    /* WRITE b0  sbus_rx_dfe_gate                 */
 #define R_CLK           0x00u    /* WRITE b0 sbus_sbus_clk_gate, b1-6 ref_sel  */
 #define R_1D            0x1du    /* written 0 (immediate, step 4)              */
+#define R_2A            0x2au    /* DFE tuning, <- 0x08                        */
+#define R_2B            0x2bu    /* DFE tuning, <- 0x02                        */
 #define R_36            0x36u    /* [6:0] rate-dependent field (step 5)        */
 #define R_3B            0x3bu    /* [6:0] rate-dependent field (step 6)        */
 
@@ -265,8 +262,31 @@ int main(int argc, char **argv)
 	if (wait_bit(dev, R_SIG_OBS, 6, "16 signal detect") < 0)
 		printf("    (no signal detected -- nothing on the fibre, or RX not adapting)\n");
 
+	/* 17: DFE tuning, from fm6000StartSerDesDfeTuning @0x4877a1 -- read 0x17,
+	 * write it back with bits [4:0] cleared, then 0x2a <- 0x08 and 0x2b <- 0x02.
+	 * (Its fm6000SetSerDesRxDataGate(.., 0) is deliberately not done here: step
+	 * 11 opens that gate and the argument's polarity is not established.)
+	 *
+	 * This is the step whose absence left every DFE tap at zero on Et3 while a
+	 * working lane carries live values -- see docs/PORT3-BRINGUP.md. */
+	printf("  --- 17 DFE tuning ---\n");
+	rmw(dev, R_ANALOG_GATE, 0x00, 0x1f, "17 0x17 [4:0] cleared");
+	rmw(dev, R_2A,          0x08, 0xff, "17 0x2a <- 0x08");
+	rmw(dev, R_2B,          0x02, 0xff, "17 0x2b <- 0x02");
+	if (!dry) {
+		int t, live = 0;
+		usleep(200000);
+		printf("    DFE taps 0x20-0x27:");
+		for (t = 0x20; t <= 0x27; t++) {
+			long v = sbus(OP_READ, dev, (unsigned)t, 0);
+			printf(" %02lx", v < 0 ? 0xffL : (v & 0xff));
+			if (v > 0) live = 1;
+		}
+		printf("   %s\n", live ? "<-- NON-ZERO: the engine ran" : "<-- all zero: it did not run");
+	}
+
 	status("after", base, dev);
-	printf("  done -- 12 of 18 steps; 2 (KR training), 3 (register unresolved),"
-	       " 12 (0x1f field), 17 (DFE) not implemented\n");
+	printf("  done -- 16 of 18 steps; 2 (KR training) and 12 (0x1f field)"
+	       " not implemented\n");
 	return 0;
 }

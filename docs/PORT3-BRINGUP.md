@@ -1680,3 +1680,44 @@ interrupt but three `WriteSBus`, one `ReadSBus`, one `and $0xffffffe0`, and
 Judge it on the DFE taps themselves: `0x20`-`0x27` going non-zero is the proof the engine ran, and it
 is visible without waiting for the port to come up. Then `RxRate` (`LANE_STATUS` b7-12, `0x12` on a
 working lane), then `SerXmit`.
+
+### ★★ The DFE engine now runs on Et3 — taps populated for the first time
+
+**2026-08-13.** Step 17 implemented from `fm6000StartSerDesDfeTuning` (`0x4877a1`): read `0x17`, write
+it back with bits [4:0] cleared, then `0x2a <- 0x08` and `0x2b <- 0x02`. (Its
+`fm6000SetSerDesRxDataGate(.., 0)` is deliberately left out — step 11 opens that gate and the
+argument's polarity is not established.)
+
+```
+17 0x17 [4:0] cleared    reg 0x17 <- 0x00
+17 0x2a <- 0x08
+17 0x2b <- 0x02
+DFE taps 0x20-0x27:  fe 0e ee 30 7e 0e ee 30   <-- NON-ZERO
+```
+
+Against a working lane's `fe 0e 61 d0 7e 0e 61 d0`: **four of the eight are identical** (`fe 0e` and
+`7e 0e`) and the other four are the adapted coefficients, which are expected to differ per lane and
+per channel. Every one of them was zero on this lane an hour ago.
+
+So the equaliser has run and adapted. `fm6000_serdes_enable` now implements **16 of 18 steps**.
+
+**And the lane still does not lock:** `LANE_STATUS = 0x00018000`, `BlockLock=0`, `RxRate=0`,
+`SerXmit=0`.
+
+### Where that leaves it
+
+The receiver is now, by every measurement available, alive: clock gated on, PLL locked in 5 ms with
+`rx_rdy` identical to Et1, signal strength at maximum, DFE adapted with plausible coefficients. The
+PCS above it still finds no 10GBASE-R block lock and recovers no rate.
+
+Two candidates remain, and they are testable in this order:
+
+1. **DFE completion.** `fm6000CheckSerDesDfeTuningState` exists precisely because tuning is not
+   instantaneous — the earlier gdb session read `coarse=2 fine=1` on working lanes. One pass of the
+   start sequence may not be convergence; the taps being non-zero says it ran, not that it finished.
+2. **Step 12 (`0x1f`)**, the last undecoded write in the enable path — and `0x1f` reads `0x25` on Et1
+   against `0` on Et3, which is now one of the few remaining SerDes differences.
+
+⚠ `0x1f` is `sbus_dfe_a_adv_cntl_*` in the write view and `sbus_dfe_scratch_obs` in the read view —
+DFE registers both. Given that the remaining fault is DFE-adjacent, step 12 is the more interesting
+of the two despite being the harder to decode.
