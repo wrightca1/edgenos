@@ -414,3 +414,54 @@ observable somewhere else.
 
 Until that is settled, `fm6000_lanelink`'s 44 SBus and 198 SPICO ops are of unverified effect — the
 SPICO ones demonstrably work (they return per-lane answers), the plain SBus writes are unproven.
+
+### The enable registers name themselves — and one anomaly dissolves
+
+`SERDES_ETH_WRITE_n` field names for the registers the algorithm touches:
+
+| reg | bits | field |
+|---|---|---|
+| `0x22` | 0, 1 | **`sbus_rx_en_cntl`, `sbus_tx_en_cntl`** — cleared at step 1, set at step 8 |
+| `0x0d` | 4, 0 | **`sbus_tx_output_en_cntl`**, `sbus_tx_pre_emphasis_gate` (b7 = near loopback) |
+| `0x06` | 3 | `sbus_rx_ib_sig_strength_en_cntl` |
+| `0x03` | 0 | `sbus_rx_data_gate` |
+| `0x26` | 0 | `sbus_rx_dfe_gate` |
+| `0x17` | 5, 6, 7 | `sbus_analog_to_core_lsb/msb_gate`, `sbus_from_core_msb_gate` |
+| `0x1f` | 0-3 | `sbus_dfe_a_adv_cntl_0..3` |
+
+So the eighteen steps read as: disable RX/TX, configure the analog gates, **enable RX/TX**, wait for
+the PLL, turn on signal-strength detection, open the RX data gate, configure DFE advance, open the
+DFE gate, set TX config, **enable the TX output**, wait for signal detect, tune.
+
+**And the anomaly that stopped the previous entry dissolves.** `0x14` bit 6 reads 0 on a working
+port because signal-strength observation is *switched on* by `0x06` bit 3 as step 10 of bring-up —
+it is not a resting-state signal, so reading 0 on a settled port is correct, not evidence that we
+are reading the wrong view.
+
+### ⚠ Read-modify-write is impossible through our read path
+
+`WRITE_34` is `rx_en`/`tx_en`; `READ_34` is `sbus_rx_prbs_data_obs`. Reading register `0x22` on the
+dark lane returns `0x00` — the PRBS data, not the enable bits. **Every register in this algorithm
+has this property**, so the SDK's `fm6000ReadSBus` at prefix `0xd11` must reach a *readback of the
+write register*, which our raw `(op 0x22, dev, reg)` transaction does not. Either there is another
+op code for it, or the prefix selects the space.
+
+Consequence: the algorithm cannot be transcribed as read-modify-write with the tooling as it stands.
+Absolute writes are possible where the full field list is known (which it now is, above).
+
+**Tried, no effect:** absolute `0x22 = 0x03` (rx_en|tx_en) then `0x0d = 0x11`
+(tx_output_en|pre_emphasis) on the dark lane. `SerXmit` stayed 0, `pcsRx` stayed 0, both working
+ports untouched. That is consistent with two different things and does not separate them: the writes
+may not be landing, or they may land and be insufficient without the ordered sequence and its waits.
+
+### The experiment that separates them, not yet run
+
+Clear `rx_en`/`tx_en` on a **working** lane and see whether its link drops. If it does, our writes
+land and the dark lane needs the full algorithm; if nothing happens, our write path does not reach
+these registers and everything built on it needs rethinking.
+
+Et2 is the only candidate — it is linked, has no netdev and carries no traffic, so the blast radius
+is one reboot. ⚠ Note Et2 is a **DAC cable, electrical not optical**, so it is an imperfect stand-in
+for Et3's fibre lane in general; for this specific question — do writes to `rx_en`/`tx_en` take
+effect — the mechanism is mode-independent and it is a fair test. Et1 is the only other optical port
+and it carries the OSPF adjacency, so it is not available as a subject.
