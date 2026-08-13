@@ -89,7 +89,12 @@ echo "--- mgmt NIC (eth0) + network access ---"
 if [ -d /sys/class/net/eth0 ]; then
     ip link set eth0 up 2>/dev/null
     ip addr add "${MGMT_IP:-10.1.1.77}/24" dev eth0 2>/dev/null
-    echo "    eth0 up, ${MGMT_IP:-10.1.1.77}/24  PHY: $(readlink -f /sys/class/net/eth0/phydev/driver 2>/dev/null | sed 's#.*/##')"
+    # Without a default route the box answers only 10.1.1.0/24: requests from
+    # another subnet arrive, replies have nowhere to go, and it reads exactly
+    # like a dead switch. The build host is on 10.22.1.0/24, so this is the
+    # difference between mgmt SSH working and needing the serial console.
+    ip route add default via "${MGMT_GW:-10.1.1.1}" 2>/dev/null
+    echo "    eth0 up, ${MGMT_IP:-10.1.1.77}/24 via ${MGMT_GW:-10.1.1.1}  PHY: $(readlink -f /sys/class/net/eth0/phydev/driver 2>/dev/null | sed 's#.*/##')"
     sleep 2
     # real SSH (dropbear, root pw 'arista') + telnet + scripted nc-shell (2323)
     if [ -x /usr/sbin/dropbear ]; then
