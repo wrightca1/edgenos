@@ -363,3 +363,54 @@ wait — and the only faithful way to have it is to implement it.
 this order, poll for PLL lock, poll for signal detect, then run the DFE sequence we already have.
 The pieces are in hand — `fm6000_sbus` can already read and write single SBus registers, and the
 per-lane state readout (`resp reg 0x01`, 0/1/2) gives a way to tell whether it worked.
+
+### The lane-enable algorithm, step by step
+
+Recovered by mapping each `fm6000ReadSBus`/`fm6000WriteSBus` call in `fm6000EnableSerDes` back to
+the local holding its address, and each address back to the `(serdes << 8) + 0xd11XX` computation
+that built it. Low byte = SBus register; the bit operations are between the read and the write.
+
+| # | step | register | operation |
+|---:|---|---|---|
+| 1 | RMW | `0x22` | clear bits 0 and 1 |
+| 2 | — | | `fm6000SetSerDesKrTraining(.., 0)` |
+| 3 | RMW | *(unresolved)* | set bit 0, mask `0x3f` |
+| 4 | write | `0x1d` | value computed elsewhere |
+| 5 | RMW | `0x36` | value computed elsewhere |
+| 6 | RMW | `0x3b` | value computed elsewhere |
+| 7 | RMW | `0x17` | set bit 4 |
+| 8 | RMW | `0x22` | **set bits 0 and 1** — the inverse of step 1 |
+| 9 | **wait** | `0x0f` | poll `sbus_rx_rdy_obs` (b0) and b3 — `fm6000WaitForSerDesPllLock` |
+| 10 | RMW | `0x06` | set bit 3 |
+| 11 | RMW | `0x03` | set bit 0 |
+| 12 | RMW | `0x1f` | mask `0x3f` |
+| 13 | RMW | `0x26` | set bit 0 |
+| 14 | — | | `fm6000SetTxConfig` |
+| 15 | RMW | `0x0d` | set bits 4 and 0 |
+| 16 | **wait** | `0x14` | poll `sbus_rx_ib_sig_strength_obs` b6 — `fm6000WaitForSignalDetection` |
+| 17 | — | | `fm6000StartSerDesDfeTuning(.., 1)`, then `CheckSerDesDfeTuningState` |
+| 18 | — | | `fm6000SetSerDesRxDataGate(.., 0)`, `fm6000SetSerDesNearLoopback(.., 1)` |
+
+**The two waits cross-validate the whole decode.** They were derived from the disassembly alone —
+register `0x0f` tested against `0x1`/`0x8`, register `0x14` tested against `0x40` — and the register
+header, written by neither us nor this analysis, names `0x0f` bit 0 `sbus_rx_rdy_obs` and `0x14`
+bits 6-7 `sbus_rx_ib_sig_strength_obs`. A PLL-lock wait that polls "rx ready" and a
+signal-detection wait that polls "signal strength", at bit positions that match, is not a
+coincidence two independent sources would produce by accident.
+
+### ⚠ Before implementing this: verify that our SBus writes land
+
+Three addressing prefixes appear — `0xd11XX` in the enable path, `0xd21XX` in the waits, `0xc05XX`
+alongside it — and our own tools issue a raw `(op, dev, reg)` transaction instead. Those are not
+obviously the same thing, and one number says be careful: register `0x14` bit 6, which the SDK waits
+on for signal detection, reads **0 on a working port**. Either we are reading a different view, or
+the field only means something mid-bring-up.
+
+⚠ **Do not test this with a write/readback on the same register number.** Tried on `0x1e` and it
+proves nothing: `WRITE_30` is `sbus_rx_k28_7_comma_det_en_cntl` (one control bit) while `READ_30` is
+`sbus_dfe_scratch_obs`. They are different silicon at the same number, exactly as the header says,
+so the value written can never read back. A valid test needs a control bit whose *effect* is
+observable somewhere else.
+
+Until that is settled, `fm6000_lanelink`'s 44 SBus and 198 SPICO ops are of unverified effect — the
+SPICO ones demonstrably work (they return per-lane answers), the plain SBus writes are unproven.
