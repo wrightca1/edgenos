@@ -311,3 +311,55 @@ unnamed static at `0x360a16`), `fm6000EnableSerDes` (`0x48131e`, 10 KB — the r
   in. The SDK enum is software state held in the switch struct; the SPICO response is a different
   namespace. Do not map one onto the other without evidence — that is exactly the class of
   assumption this project keeps having to retract.
+
+### ★★ `fm6000EnableSerDes` disassembled — and it cannot be replayed from a trace
+
+**2026-08-13.** The function that brings a lane up (`0x48131e`, 10 KB) **never issues a SPICO
+interrupt**. It is built from direct SBus access and blocking waits:
+
+```
+12 x fm6000WriteSBus      11 x fm6000ReadSBus       76 x fmLogMessage
+fm6000SetSerDesKrTraining(.., 0)      fm6000SetTxConfig
+fm6000WaitForSerDesPllLock            fm6000WaitForSignalDetection
+fm6000StartSerDesDfeTuning(.., 1)     fm6000CheckSerDesDfeTuningState
+fm6000SetSerDesRxDataGate(.., 0)      fm6000SetSerDesNearLoopback(.., 1)
+```
+
+in that order: read-modify-write pairs, KR training off, more RMW pairs, **wait for PLL lock**, more
+RMW, TX config, **wait for signal detection**, then DFE tuning and its completion check.
+
+The SBus address is computed in the clear:
+
+```asm
+mov  0xc(%ebp),%eax        ; the serdes/lane argument
+shl  $0x8,%eax             ; << 8
+add  $0xd1122,%eax         ; + 0xd11_22
+```
+
+repeated four times in the first block with `0xd1122`, `0xd1126`, `0xd1136`, `0xd113b` — i.e. the
+low byte is the **SBus register** and the lane shifts into bits [15:8]. So this block touches
+registers **`0x22`, `0x26`, `0x36`, `0x3b`**, and every `ReadSBus` result feeds the `WriteSBus` that
+follows it.
+
+### ⚠ Why replaying lane 0's SBus ops onto lane 1 was never going to work
+
+This is the explanation for the negative result in `PORT3-BRINGUP.md`, and it is structural, not a
+detail:
+
+- **The writes are read-modify-writes.** Each value EOS writes is computed from what that lane's
+  register already held. A capture records only the *result*. Replaying lane 0's resulting values
+  onto lane 1 writes numbers derived from lane 0's contents into a lane whose contents differ — the
+  read half of every RMW is missing, and no amount of faithful replay recovers it.
+- **Two of the steps are waits, not writes.** `fm6000WaitForSerDesPllLock` and
+  `fm6000WaitForSignalDetection` poll until the hardware reports ready. A trace of a successful run
+  contains the polls that happened to succeed; it carries no notion of waiting, so a replay races
+  straight past both.
+
+That retires "relocate the sequence" for SerDes bring-up specifically. It worked for EPL and CM/L2F
+because those are state, written absolutely. A lane enable is an **algorithm** — read, decide, write,
+wait — and the only faithful way to have it is to implement it.
+
+**So the next step is not another capture.** It is `fm6000_serdes_enable`: RMW those registers in
+this order, poll for PLL lock, poll for signal detect, then run the DFE sequence we already have.
+The pieces are in hand — `fm6000_sbus` can already read and write single SBus registers, and the
+per-lane state readout (`resp reg 0x01`, 0/1/2) gives a way to tell whether it worked.
