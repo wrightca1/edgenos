@@ -259,3 +259,55 @@ done
 
 Working copy lives at `/home/smiley/eos-work/` — deliberately **outside the repo**, so no
 EOS-derived file can be committed by accident.
+
+---
+
+## The FocalPoint SDK, and the SerDes state machine read out of it
+
+**2026-08-13.** `EOS-4.16.8M.swi` was pulled off the switch's flash and stored **outside every git
+tree** at `../eos-4.16.8M/` (md5 `ed9007a384b93e726b8147b017aba8f1`, verified on both ends; see the
+README there). It is a zip: `version`, `boot0`, `initrd-i386`, `linux-i386`, and a 431 MB
+`rootfs-i386.sqsh` holding 34,731 files.
+
+`usr/lib/libFocalpointSDK.so` — 4.2 MB, ELF 32-bit, **2537 dynamic symbols** (static ones stripped).
+This is the FM6000 SDK, and it is the authority for anything the register header does not cover.
+
+⚠ Nothing from it is copied into EdgeNOS. What we take is **facts about the silicon**, recorded in
+our own words — the same rule `PROVENANCE.md` sets out. `fm6000_spico_code` in there is the SerDes
+firmware itself, i.e. checklist item C, and it stays where it is.
+
+### The SerDes state machine — enum values proven, not guessed
+
+The SDK drives a lane through a named state machine:
+
+| value | state |
+|---:|---|
+| 0 | `FM6000_SERDES_STATE_IDLE` |
+| 1 | `FM6000_SERDES_STATE_PWRDOWN` |
+| 2 | `FM6000_SERDES_STATE_CONFIG` |
+| 3 | `FM6000_SERDES_STATE_PWRUP` |
+| 4 | `FM6000_SERDES_STATE_WAIT_PWRUP` |
+| 5 | `FM6000_SERDES_STATE_WAIT_SIGDETECT` |
+
+The ordering is **not** inferred from where the strings sit in `.rodata` — it is read off an exact
+pointer table at vaddr `0x5ab044` whose six entries point at those six strings in that order. The
+SDK logs transitions as `port=%d epl=%d lane=%d: setting SerDes state to %s`, so a live EOS box can
+be made to narrate its own bring-up.
+
+Entry points: `fm6000SetSerDesState` (a thin wrapper — logs, takes a capture lock, then calls an
+unnamed static at `0x360a16`), `fm6000EnableSerDes` (`0x48131e`, 10 KB — the real bring-up),
+`fm6000InterruptSpico` → `fm6000InterruptSpicoV2` (`0x478eef`), `fm6000LoadSpicoCode`,
+`fm6000SetSpicoState`.
+
+### ⚠ Two things this does NOT establish
+
+- **The SPICO interrupt codes are bare numeric constants.** There is no `FM6000_SPICO_INT_*` enum in
+  the binary, and scraping immediates near the call sites returns neighbouring `fmLogMessage`
+  arguments (log category `0x1000`/`0x80000`, timeouts `0x30d40`/`0xc350`) rather than interrupt
+  numbers, because the real arguments arrive in registers. Getting them means actually
+  disassembling `fm6000EnableSerDes` and following its register allocation. Bounded, but real work.
+- **This enum is almost certainly NOT what `fm6000_sbus irq` reads back.** Our `resp reg 0x01`
+  returns 2 on both working ports, and `2` here is `CONFIG`, which no working port should be sitting
+  in. The SDK enum is software state held in the switch struct; the SPICO response is a different
+  namespace. Do not map one onto the other without evidence — that is exactly the class of
+  assumption this project keeps having to retract.
