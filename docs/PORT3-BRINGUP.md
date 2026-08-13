@@ -275,6 +275,52 @@ register files, only by capturing or reimplementing the routine.
 
 So the cold-trace problem is not a detour around the SerDes question; it **is** the SerDes question.
 
+### The missing procedure has a name: DFE tuning
+
+`notes/reference/fm6000-sdk/AltaLib.py` (SDK reference, read not copied) makes the missing step
+explicit. `AltaSerdes` exposes receiver adaptation as a first-class operation with **readable
+state**:
+
+```python
+_dfeModes  = {'continuous', 'kr', 'one shot', 'static'}
+dfeState   -> fm6000CheckSerDesDfeTuningState(sw, serdes, FM6000_SERDES_TYPE_ETH)
+              returns (coarse, fine) in {not started, in progress, complete, error}
+dfeValue   -> fm6000GetSerDesDfeStatus / fm6000SetSerDesDfeParams
+```
+
+**DFE — the decision-feedback equaliser — is the receiver adaptation.** That is exactly the thing
+that is an *action* rather than a register value, which is why every register on lane 1 can match a
+working lane while the receiver still refuses to lock. On our lane DFE tuning has almost certainly
+never started; on EOS's it is complete.
+
+It also confirms the SerDes numbering independently. SerDes numbers run 0–95 and `fm6000_dump.c`
+calls SBus `0x49` "serdes-68", so **SBus address = SerDes number + 5**:
+
+| port | EPL/lane | SerDes | SBus |
+|---|---|---:|---|
+| Et1 | 14/0 | 68 | `0x49` |
+| **Et3** | **14/1** | **69** | **`0x4a`** |
+| Et2 | 16/0 | 64 | `0x45` |
+
+Every value measured on hardware fits, and it generalises to all 52 ports.
+
+### The experiment this points to
+
+**Do not chase the cold-boot trace.** DFE tuning can be triggered on demand — `dfeMode = 'one shot'`
+is an SDK setter and EOS ships the library implementing it. So:
+
+1. On EOS, arm `fmPlatformTraceRegOps` — the **live** arm works fine; only the cold arm loses the race.
+2. Trigger a one-shot DFE tune on serdes 69 through the SDK.
+3. Disarm and extract.
+
+That isolates **precisely the missing procedure** — the SPICO command sequence for RX adaptation —
+with no boot-timing race at all, using the same targeted-capture method that found the lane-1 SerDes
+address in the first place. Replaying that sequence under EdgeNOS is then the test.
+
+Worth a pre-check on the same visit: read `dfeState` for serdes 68 and 69 on EOS. Both should read
+*complete*. If lane 1 reads anything else while linked, the model above is wrong, and that is much
+better known before building on it.
+
 ---
 
 **2026-08-11.** Front-panel port 3 is now up under EdgeNOS. This is the second connected port, and
