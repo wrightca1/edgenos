@@ -1533,3 +1533,50 @@ Two candidate explanations, and they need different work:
 SPICO interrupt at `0x4a`, read the response, and compare against the same interrupt at `0x49`. A
 lane whose SPICO answers and one whose SPICO does not are trivially distinguishable, and that single
 measurement decides whether any amount of register replay can ever work here.
+
+### ★★ The SPICO answers for lane 1 — and it reports three distinct lane states
+
+**2026-08-13.** `fm6000_sbus irq` issues one SPICO interrupt at a named target and prints the
+response registers. Running the same interrupt (code `0x20`) at every lane:
+
+| target | lane | **resp reg 0x01** | resp reg 0x02 |
+|---|---|---:|---|
+| `0x49` | Et1 — cabled, **working** | **2** | `0x2b` |
+| `0x45` | Et2 — cabled, **working** | **2** | `0x32` |
+| `0x4a` | **Et3 — cabled, dark** | **1** | `0x40` |
+| `0x4b` | EPL14 lane2 — nothing plugged in | **0** | — |
+| `0x4c` | EPL14 lane3 — nothing plugged in | **0** | — |
+| `0x46` | EPL16 lane1 — nothing plugged in | **0** | — |
+
+**The SPICO answers for lane 1.** That retires the second candidate: its micro-controller is alive
+for that lane, so the 198 interrupt-style ops are not no-ops firing into a dead block.
+
+### ★ And the provisioning demonstrably moved the lane — 0 → 1
+
+`reg 0x01` reads **0** on every lane with nothing plugged in, **1** on Et3, **2** on both working
+ports. Et3 is one state short of working, and it did not start there:
+
+- the replay writes EPL14 lanes 1, 2 and 3 **byte-identically** (established above), so after boot
+  those three lanes must be in the same state;
+- lanes 2 and 3 read `0`, and lane 1 reads `1`;
+- therefore the difference was produced by what we applied to lane 1 afterwards — the 963-op
+  provision + link + DFE run.
+
+⚠ Inferred, not directly measured: no reading of `reg 0x01` was taken on lane 1 *before* the
+provisioning ran. The argument rests on the byte-identical replay, which is solid, but a direct
+before/after on a fresh boot would settle it and costs one reboot.
+
+**So the provisioning is not inert — it advances the lane, and `PORT_STATUS` simply cannot show it.**
+`SerXmit` stays 0 across a transition the SPICO reports plainly. This is now the instrument to use:
+one interrupt, one register, three values, and it distinguishes states that every EPL register in
+the chip reports identically.
+
+**What is left is the 1 → 2 transition**, and it is a much better-posed question than "why is the
+lane dark". Two ways at it, in order of preference:
+
+1. **Find the interrupt that performs it.** `libFocalpointSDK.so` in the EOS SWI on flash carries 41
+   DFE/SerDes symbols (found earlier with `grep -ao`; EOS ships no `strings`/`nm`). The interrupt
+   codes are constants in that code. Reading them is analysis, not a live experiment.
+2. **Sweep interrupt codes at `0x4a` and watch `reg 0x01`.** Bounded — the lane is already dead, and
+   the target is named per interrupt. But an unknown code could disturb the shared SPICO and take
+   Et1's adjacency with it, so this is the fallback, not the opener.
