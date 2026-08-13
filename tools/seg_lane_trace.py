@@ -20,9 +20,14 @@ reproduces the 168-op SEQ[] in asic/fm6000/fm6000_lanelink.c byte-for-byte. Do
 that before trusting it on any new trace -- a segmentation rule that is subtly
 wrong still produces a plausible-looking table.
 
-Input lines are the tracer's own format, anything else on the line ignored:
+Two input formats are accepted, detected per line:
 
-    Write: 0x0000f002 <- 0x0000000a
+    Write: 0x0000f002 <- 0x0000000a      the tracer's format
+    0000f002 0000000a                    the replay's format (fwd4.txt)
+
+The second matters because the replay is where a lane's *initial* provisioning
+lives. A no-shut capture is only the delta applied to an already-provisioned
+lane; segmenting the replay gives the provisioning itself.
 
 SPDX-License-Identifier: GPL-2.0-or-later
 """
@@ -34,6 +39,7 @@ SB_CMD, SB_REQ = 0x0F001, 0x0F002
 SPICO_BC = 0xFD
 
 LINE = re.compile(r'Write:\s*0x([0-9a-fA-F]+)\s*<-\s*0x([0-9a-fA-F]+)')
+PLAIN = re.compile(r'^\s*([0-9a-fA-F]{4,8})\s+([0-9a-fA-F]{1,8})\s*$')
 
 
 def parse(path):
@@ -41,7 +47,7 @@ def parse(path):
     raw = []
     with open(path) as fh:
         for ln in fh:
-            m = LINE.search(ln)
+            m = LINE.search(ln) or PLAIN.match(ln)
             if m:
                 raw.append((int(m.group(1), 16), int(m.group(2), 16)))
 
