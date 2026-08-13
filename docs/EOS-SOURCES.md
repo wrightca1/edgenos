@@ -809,3 +809,60 @@ One write is not an enable, so this does not refute the reset hypothesis; it onl
 alone changes nothing observable. **Next: reset `0x4a`, then run the full eighteen-step sequence as
 absolute writes, and judge on `SerXmit` and the SPICO lane state.** That is the first time the
 algorithm would be attempted on a device that has been reset first.
+
+---
+
+## ★★★ RETRACTED: our SBus writes DO take effect
+
+**2026-08-13, later.** Everything above that says writes to a SerDes device do nothing is **wrong**,
+and this is the proof — an enable and its observable, toggled twice on Et3's dark lane:
+
+```
+write 0x06 = 0x08   (sbus_rx_ib_sig_strength_en_cntl)   ->  read 0x14 = 0xd4
+write 0x06 = 0x00   (off)                               ->  read 0x14 = 0x14
+write 0x06 = 0x08   (on)                                ->  read 0x14 = 0xd4
+write 0x06 = 0x00   (off)                               ->  read 0x14 = 0x14
+```
+
+`0x14` bits 7:6 are `sbus_rx_ib_sig_strength_obs`. They follow the enable bit exactly, every time.
+**The write path works.**
+
+### Why every earlier test said otherwise
+
+Not one of them used an enable paired with its own observable:
+
+- `rx_en`/`tx_en`, `tx_output_en` and the pattern generator were all written to a **running** lane and
+  judged by `PORT_STATUS`, which is an EPL/MAC-level view. Those SerDes-level controls evidently do
+  not tear down an established link — or the EPL block holds the port up regardless.
+- The one test with a proper observable — `rx_pattern_cmp_en` against `0x0f` bit 6 — was inherently
+  inconclusive, since a comparator on non-pattern traffic reports no-pass either way.
+- Absolute writes clear the bits they do not set, because the read view cannot be used to
+  read-modify-write. Some of those tests may have disabled something they needed.
+
+Three separate write-effect claims were made today and all three were wrong. The lesson is narrow
+and worth keeping: **on this chip, a write is only testable against a register the datasheet says
+that write drives.** `PORT_STATUS` is not that register.
+
+### What is now known about Et3's lane
+
+After `reset 0x4a` and the enable steps, on the **dark** lane:
+
+```
+rx_rdy      (0x0f b0)   = 1     the PLL-lock condition fm6000WaitForSerDesPllLock waits for
+sig_strength(0x14 b7:6) = 0b11  MAXIMUM -- and it matches the -2.77 dBm measured at the SFP
+PORT_STATUS             = 0x0015, SerXmit still 0
+SPICO lane state        = 1     unchanged
+```
+
+So the receiver is enabled, the PLL is ready, and **the lane is receiving a strong signal** — while
+the EPL block still reports no transmit and the SPICO still rates the lane one state below the
+working ports. The gap has moved from "nothing works" to "the SerDes is alive and the port is not".
+
+⚠ Untested: whether the `reset 0x4a` was necessary for the writes to land, or whether they would
+have worked all along had they been tested against the right observable. The toggle above was run
+after a reset. Cheap to settle on `0x4b`, a lane with nothing plugged in.
+
+**Next:** the remaining steps of the eighteen — `0x1d`, `0x36`, `0x3b`, `0x1f` and the step-3
+register, whose values the disassembly did not yield — plus `SetTxConfig` and the DFE tuning, which
+`fm6000_lanelink` already carries. With the write path proven, those are now worth transcribing
+properly rather than guessing at absolute values.
