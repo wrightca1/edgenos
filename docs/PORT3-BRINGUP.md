@@ -1580,3 +1580,53 @@ lane dark". Two ways at it, in order of preference:
 2. **Sweep interrupt codes at `0x4a` and watch `reg 0x01`.** Bounded — the lane is already dead, and
    the target is named per interrupt. But an unknown code could disturb the shared SPICO and take
    Et1's adjacency with it, so this is the fallback, not the opener.
+
+---
+
+## ★★★ LANE_STATUS names the remaining gap: signal detected, no block lock, RxRate = 0
+
+**2026-08-13, end of session.** A full live diff of the two EPL lane blocks — all 128 words of
+`0xe3800` (Et1) against `0xe3880` (Et3) — leaves only ten differences, and naming them from the
+header settles what they are:
+
+| offset | register | Et1 | Et3 |
+|---|---|---|---|
+| `+0x00` | `PORT_STATUS` | `0x0ec0` | `0x0015` |
+| `+0x04` | (status) | `0xbb87` | `0` |
+| `+0x20` | `MAC_CODE_ERROR_COUNTER` | `0x596` | `0` |
+| `+0x21` | `MAC_LINK_COUNTER` | `0x14803055` | `0x1001` |
+| `+0x26` | pcsRx | `1` | `0` |
+| `+0x36` | `PCS_10GBASER_RX_BER_STATUS` | `0x45` | `0` |
+| `+0x38` | `LANE_STATUS` | `0x000940` | `0x018000` |
+| `+0x3a` | `SERDES_TX_CFG` | `0xc0000581` | `0xc0001581` |
+| `+0x3e` | (unnamed) | `0x00100f0f` | `0x0c100000` |
+| `+0x42` | `LANE_DEBUG` | `0x343` | `0` |
+
+**Every one is a counter or a status register**, except `SERDES_TX_CFG`, which differs only by port 3's
+intended pre-emphasis. So **there is no configuration difference left between the dark lane and the
+working one** — not in the EPL block, and not in the SerDes (PLL locked, `rx_rdy` = `0x3f` matching
+Et1, signal strength 3 of 3).
+
+`LANE_STATUS` decodes the failure exactly:
+
+| field | Et1 | Et3 |
+|---|---|---|
+| `PcsBaserBlockLock` b6 | **1** | **0** |
+| `RxRate` b7-12 | **0x12** | **0** |
+| `RxSignalDetectSample` b13-16 | 0 | **set** |
+
+**The lane sees signal and never achieves 10GBASE-R block lock, and its recovered rate reads zero.**
+
+That is a far sharper statement than "port 3 is dark", and it points at the rate path rather than at
+enables or gates: a receiver that detects light but recovers no rate is not clocking the incoming
+data correctly. The candidates, in order:
+
+1. **The divider fields.** Steps 5 and 6 write `0x36` and `0x3b` with the rate constant `0x40`, taken
+   from the 10G branch of the SDK's rate table. If the field is positioned or scaled differently than
+   assumed, the SerDes runs at the wrong rate and block lock is impossible.
+2. **Step 3's `ref_sel`.** `0x37` made the PLL lock in 5 ms with `rx_rdy` exactly matching Et1, which
+   is encouraging but does not prove the reference is right for 10.3125 Gbps.
+3. **Step 12 (`0x1f`)**, still undecoded, and the one remaining write in the enable path.
+
+`RxRate` is now the instrument to use — it is a six-bit field that reads `0x12` on a working 10G lane
+and `0` here, so any change to the rate path can be judged directly instead of through `SerXmit`.
