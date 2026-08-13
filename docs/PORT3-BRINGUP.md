@@ -321,6 +321,48 @@ Worth a pre-check on the same visit: read `dfeState` for serdes 68 and 69 on EOS
 *complete*. If lane 1 reads anything else while linked, the model above is wrong, and that is much
 better known before building on it.
 
+### …and the experiment worked: the DFE procedure is captured
+
+**A foreign process cannot drive the SDK.** EOS ships the bindings — `import Tac` first, then
+`FmApi`/`DosFmApi` load fine — but calling `fm6000CheckSerDesDfeTuningState` from a standalone
+Python process segfaults inside `fm6000ReadSBus`: a fresh process has its own *uninitialised* SDK
+with no switch opened. (Contained; both ports stayed up.)
+
+**gdb inside the live agent can.** The same mechanism that arms the tracer also calls SDK functions
+against the agent's initialised state:
+
+```sh
+gdb -batch -p $(pgrep -x FocalPointV2) -ex 'set auto-solib-add off'     -ex 'set $c=(int*)malloc(4)' -ex 'set $f=(int*)malloc(4)'     -ex 'call (int)fm6000CheckSerDesDfeTuningState(0,69,0,$c,$f)' ...
+```
+
+Pre-check result — **serdes 68 and 69 both read `coarse=2 fine=1`** on working EOS. The model
+survives: both lanes tuned.
+
+The SDK exposes 41 DFE symbols, found with `grep -ao` on `libFocalpointSDK.so` (EOS has no
+`strings` or `nm`). Among them the trigger: **`fm6000StartSerDesDfeTuning`**, plus
+`fm6000RestartSerDesDfeFineTuning` and `fm6000TriggerDfeTuningRecovery`.
+
+So: arm the trace, `call (int)fm6000StartSerDesDfeTuning(0,69,0)`, disarm. **Et3 stayed up
+throughout**, and the captured window is tightly targeted:
+
+| | |
+|---|---:|
+| EPL lane-1 writes | 29 |
+| SBus ops to **`0x4a`** | **35** |
+| SPICO broadcast (`0xfd`) | 80 |
+| other lanes (`0x49`/`0x45`) | 3 each — incidental |
+
+That is the RX adaptation procedure on its own, with **no boot-timing race and no cold reboot** —
+392 lines, in `notes/reference/scd-dumps/fm6000-et3-dfetune-LIVE-trace.txt`.
+
+**Why this succeeds where two cold captures failed:** the thing we needed was never boot-specific.
+It is an SDK operation with an entry point, and the entry point can be called on demand. Two boots
+were spent racing gdb's attach against the ASIC init to catch a procedure that could simply be
+*asked for*.
+
+Remaining: segment it to serdes 69 (SPICO reg-0x03 payload rule, as for the link sequence), fold it
+into `fm6000_lanelink` after the link ops, and test under EdgeNOS.
+
 ---
 
 **2026-08-11.** Front-panel port 3 is now up under EdgeNOS. This is the second connected port, and
