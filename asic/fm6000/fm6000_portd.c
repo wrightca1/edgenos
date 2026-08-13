@@ -24,6 +24,23 @@
  * usage: fm6000_portd <ifname> <glort-hex> [mac] [seconds]
  *   e.g. fm6000_portd et1 03ef 44:4c:a8:31:5d:ab 0     (0 = run forever)
  *
+ * or, for several ports in ONE process:
+ *        fm6000_portd <if>:<glort>[:<mac>] ... [-t seconds]
+ *   e.g. fm6000_portd et1:03ef:44:4c:a8:31:5d:ab et3:03ed -t 0
+ *
+ * It has to be one process. Every port shares the single punt/inject DMA ring,
+ * so two portd instances would each take descriptors off that ring and each
+ * would see only part of the traffic -- indistinguishable from a dataplane
+ * fault, and the reason edgenos-up.sh refuses to start a second one.
+ *
+ * ⚠ RX demux is the unfinished half. Injection is exact -- each port stamps its
+ * own egress GLORT in tag w1 -- but deciding which TAP a *punted* frame belongs
+ * to needs the source GLORT out of that frame's tag, and which halfword carries
+ * it is not confirmed (see src_word). Frames with no tag, or a tag naming no
+ * configured port, go to the first port, which is what this program did when it
+ * only had one. So multi-port TX is trustworthy today; multi-port RX needs one
+ * capture with PORTD_DEBUG=N on a box with two live ports to confirm.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include <net/if_arp.h>
@@ -54,8 +71,29 @@
 
 static struct fpdma     fp;
 static struct fm6000_dev dev;
-static int      tapfd = -1;
-static uint16_t TAG[4] = { 0x0100, 0x03ef, 0xff00, 0x0000 };
+
+#define MAX_PORTS 8
+
+/* One TAP per ASIC port, all in ONE process. They share the single punt/inject
+ * DMA ring, so a second portd is not an option: both would pull descriptors off
+ * the same ring and each would see a fraction of the traffic, which looks
+ * exactly like a dataplane fault. edgenos-up.sh refuses to start a second one. */
+struct port {
+    char     name[16];
+    int      fd;
+    uint16_t tag[4];              /* w1 = this port's egress GLORT */
+};
+static struct port ports[MAX_PORTS];
+static int nports;
+
+/* Which halfword of a punted frame's F64 tag holds the SOURCE glort.
+ * ⚠ NOT CONFIRMED. On inject we build w1 = DGLORT and w2 = 0xff00, which reads
+ * like the CPU's own SGLORT, so w2 is the natural candidate and is the default.
+ * PORTD_SRCWORD overrides it; PORTD_DEBUG prints the tag of punted frames, so
+ * one run on a box with two live ports settles it. Until then an unmatched
+ * frame goes to port 0 -- byte-for-byte the behaviour of the single-port
+ * version, so a wrong guess here cannot regress a working single-port setup. */
+static int src_word = 2;
 static volatile sig_atomic_t stop_flag;
 static unsigned long n_rx, n_tx, n_rx_drop;
 static int dbg;                      /* PORTD_DEBUG=N -> hexdump first N frames */
@@ -126,6 +164,22 @@ static int tap_set_mac(const char *name, const char *mac)
     return 0;
 }
 
+/* Pick the TAP a punted frame belongs to, from the source glort in its F64 tag.
+ * Falls back to port 0 -- see the src_word note above. */
+static int port_for_tag(const uint8_t *tag)
+{
+    uint16_t g = (uint16_t)((tag[2 * src_word] << 8) | tag[2 * src_word + 1]);
+    int i;
+
+    if (dbg > 0)
+        fprintf(stderr, "portd: punt tag %04x %04x %04x %04x -> src w%d = %04x\n",
+                (tag[0] << 8) | tag[1], (tag[2] << 8) | tag[3],
+                (tag[4] << 8) | tag[5], (tag[6] << 8) | tag[7], src_word, g);
+    for (i = 0; i < nports; i++)
+        if (ports[i].tag[1] == g) return i;
+    return 0;
+}
+
 /* ASIC -> TAP. The frame may be offset by a receive prefix and may still carry
  * the 8-byte F64 tag at offset 12; strip it so the kernel sees clean Ethernet. */
 static void on_punt(void *ctx, const void *data, uint16_t len)
@@ -133,6 +187,7 @@ static void on_punt(void *ctx, const void *data, uint16_t len)
     const uint8_t *raw = data;
     uint8_t clean[MAX_FRAME];
     int off;
+    int tapfd = ports[0].fd;      /* untagged frames carry no source: port 0 */
 
     (void)ctx;
     if (len < 14 || len > MAX_FRAME) { n_rx_drop++; return; }
@@ -154,6 +209,7 @@ static void on_punt(void *ctx, const void *data, uint16_t len)
             if (et2 == 0x0800 || et2 == 0x0806 || et2 == 0x86dd || et2 == 0x8100) {
                 int body = (int)len - off - 20 - FCS_LEN;  /* ditto */
                 if (body < 0 || body + 12 > MAX_FRAME) { n_rx_drop++; return; }
+                tapfd = ports[port_for_tag(raw + off + 12)].fd;
                 memcpy(clean, raw + off, 12);
                 memcpy(clean + 12, raw + off + 20, body);
                 if (dbg > 0) { dbg--;
@@ -223,8 +279,10 @@ static void rx_drain(void)
         fm6000_dma_write(&dev, FM6000_DMA_COMMAND, FM6000_DMA_CMD_RX_POST);
 }
 
-/* TAP -> ASIC. Insert the 8-byte F64 tag inline at offset 12 (after SMAC). */
-static void inject(const uint8_t *frame, int len)
+/* TAP -> ASIC. Insert the 8-byte F64 tag inline at offset 12 (after SMAC).
+ * The tag is the PORT's, not a global: w1 selects which physical port the frame
+ * egresses, so this is what makes one process able to drive several ports. */
+static void inject(const struct port *p, const uint8_t *frame, int len)
 {
     uint8_t out[MAX_FRAME + F64_LEN];
     int w, tlen;
@@ -232,8 +290,8 @@ static void inject(const uint8_t *frame, int len)
     if (len < 14 || len + F64_LEN > (int)sizeof out) return;
     memcpy(out, frame, 12);                                   /* DMAC + SMAC   */
     for (w = 0; w < 4; w++) {                                 /* F64 tag       */
-        out[12 + 2 * w]     = TAG[w] >> 8;
-        out[12 + 2 * w + 1] = TAG[w] & 0xff;
+        out[12 + 2 * w]     = p->tag[w] >> 8;
+        out[12 + 2 * w + 1] = p->tag[w] & 0xff;
     }
     memcpy(out + 12 + F64_LEN, frame + 12, len - 12);         /* ethertype ... */
     if (dbg > 0) { dbg--;
@@ -275,18 +333,57 @@ static void inject(const uint8_t *frame, int len)
     rx_drain();
 }
 
+/* Add one port. mac may be NULL. Returns 0 on success. */
+static int add_port(const char *name, const char *glort, const char *mac)
+{
+    struct port *p;
+
+    if (nports >= MAX_PORTS) { fprintf(stderr, "portd: too many ports\n"); return -1; }
+    p = &ports[nports];
+    snprintf(p->name, sizeof p->name, "%s", name);
+    p->tag[0] = 0x0100;
+    p->tag[1] = (uint16_t)strtoul(glort, 0, 16);
+    p->tag[2] = 0xff00;
+    p->tag[3] = 0x0000;
+
+    p->fd = tap_open(p->name);
+    if (p->fd < 0) return -1;
+    if (tap_set_mac(p->name, mac) < 0)
+        fprintf(stderr, "portd: WARNING %s continuing with the kernel's random MAC;"
+                        " the ASIC punt tables expect a specific one\n", p->name);
+    nports++;
+    return 0;
+}
+
+/* "et3:03ed" or "et3:03ed:44:4c:a8:31:5d:ab" -- the MAC keeps its own colons,
+ * so split on the FIRST two only. */
+static int add_port_spec(char *spec)
+{
+    char *glort, *mac;
+
+    glort = strchr(spec, ':');
+    if (!glort) { fprintf(stderr, "portd: bad port spec '%s'\n", spec); return -1; }
+    *glort++ = '\0';
+    mac = strchr(glort, ':');
+    if (mac) *mac++ = '\0';
+    return add_port(spec, glort, mac);
+}
+
 int main(int argc, char **argv)
 {
-    const char *ifname = argc > 1 ? argv[1] : "et1";
-    unsigned secs = argc > 4 ? (unsigned)strtoul(argv[4], 0, 0) : 0;
+    unsigned secs = 0;
     struct fpdma_backing back;
     uint8_t buf[MAX_FRAME];
+    struct pollfd pfd[MAX_PORTS];
     time_t t0;
+    int i;
 
-    if (argc > 2) TAG[1] = (uint16_t)strtoul(argv[2], 0, 16);
-    const char *want_mac = argc > 3 ? argv[3] : NULL;
     { const char *d = getenv("PORTD_DEBUG"); if (d) dbg = atoi(d); }
     { const char *d = getenv("PORTD_TXFCS"); if (d) tx_fcs = atoi(d); }
+    { const char *d = getenv("PORTD_SRCWORD"); if (d) src_word = atoi(d); }
+    if (src_word < 0 || src_word > 3) {
+        fprintf(stderr, "portd: PORTD_SRCWORD must be 0..3\n"); return 2;
+    }
     printf("portd: tx_fcs=%d\n", tx_fcs);
 
     struct fpdma_kmod *k = NULL;
@@ -299,27 +396,48 @@ int main(int argc, char **argv)
     back = fpdma_kmod_backing(k);
     if (fpdma_init(&fp, &dev, &back, 8, 64) < 0) { fprintf(stderr, "fpdma init failed\n"); return 1; }
 
-    tapfd = tap_open(ifname);
-    if (tapfd >= 0 && tap_set_mac(ifname, want_mac) < 0)
-        fprintf(stderr, "portd: WARNING continuing with the kernel's random MAC;"
-                        " the ASIC punt tables expect a specific one\n");
-    if (tapfd < 0) return 1;
+    /* Two forms. The legacy one is what edgenos-up.sh has always used and it
+     * must keep working verbatim:
+     *     fm6000_portd <ifname> <glort-hex> [mac] [seconds]
+     * The multi-port one takes any number of port specs:
+     *     fm6000_portd et1:03ef:44:4c:a8:31:5d:ab et3:03ed [-t seconds]  */
+    if (argc > 1 && strchr(argv[1], ':')) {
+        for (i = 1; i < argc; i++) {
+            if (!strcmp(argv[i], "-t") && i + 1 < argc) { secs = (unsigned)strtoul(argv[++i], 0, 0); continue; }
+            if (add_port_spec(argv[i]) < 0) return 1;
+        }
+    } else {
+        if (add_port(argc > 1 ? argv[1] : "et1",
+                     argc > 2 ? argv[2] : "03ef",
+                     argc > 3 ? argv[3] : NULL) < 0) return 1;
+        secs = argc > 4 ? (unsigned)strtoul(argv[4], 0, 0) : 0;
+    }
+    if (!nports) { fprintf(stderr, "portd: no ports\n"); return 2; }
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-    printf("portd: %s <-> ASIC, egress GLORT 0x%04x\n", ifname, TAG[1]);
-    printf("  bring it up with:  ip link set %s up; ip addr add <a.b.c.d/len> dev %s\n",
-           ifname, ifname);
+    for (i = 0; i < nports; i++) {
+        printf("portd: %s <-> ASIC, egress GLORT 0x%04x\n", ports[i].name, ports[i].tag[1]);
+        printf("  bring it up with:  ip link set %s up; ip addr add <a.b.c.d/len> dev %s\n",
+               ports[i].name, ports[i].name);
+    }
+    if (nports > 1)
+        printf("portd: punt demux on tag w%d (PORTD_SRCWORD); unmatched -> %s\n",
+               src_word, ports[0].name);
     fflush(stdout);
 
     t0 = time(NULL);
     while (!stop_flag) {
-        struct pollfd pfd = { .fd = tapfd, .events = POLLIN };
-
+        for (i = 0; i < nports; i++) {
+            pfd[i].fd = ports[i].fd; pfd[i].events = POLLIN; pfd[i].revents = 0;
+        }
         /* kernel -> ASIC */
-        if (poll(&pfd, 1, 1) > 0 && (pfd.revents & POLLIN)) {
-            int n = read(tapfd, buf, sizeof buf);
-            if (n > 0) inject(buf, n);
+        if (poll(pfd, nports, 1) > 0) {
+            for (i = 0; i < nports; i++) {
+                if (!(pfd[i].revents & POLLIN)) continue;
+                int n = read(ports[i].fd, buf, sizeof buf);
+                if (n > 0) inject(&ports[i], buf, n);
+            }
         }
         rx_drain();                                       /* ASIC -> kernel */
         fpdma_tx_reclaim(&fp);
@@ -329,6 +447,6 @@ int main(int argc, char **argv)
 
     printf("portd: rx=%lu tx=%lu rx_drop=%lu\n", n_rx, n_tx, n_rx_drop);
     fpdma_shutdown(&fp);
-    close(tapfd);
+    for (i = 0; i < nports; i++) close(ports[i].fd);
     return 0;
 }

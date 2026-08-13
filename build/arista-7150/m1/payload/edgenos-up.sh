@@ -36,7 +36,13 @@ ip addr add 10.101.255.26/32 dev lo 2>/dev/null
 
 say "3. port netdev et1 (PORTD_TXFCS=1: the ASIC expects an FCS placeholder on inject)"
 ip link del et1 2>/dev/null
-PORTD_TXFCS=1 setsid /usr/bin/fm6000_portd et1 03ef x 0 >/tmp/portd.log 2>&1 </dev/null &
+# portd drives every port from ONE process -- they share the punt DMA ring, so a
+# second instance is not an option. PORTD_PORTS overrides the port list; the
+# default is et1 alone, exactly as before. To add Et3 once its lane links:
+#     PORTD_PORTS="et1:03ef et3:03ed -t 0" edgenos-up.sh
+# and add the matching `ip link/addr` lines below for et3.
+PORTD_TXFCS=1 setsid /usr/bin/fm6000_portd ${PORTD_PORTS:-et1 03ef x 0} \
+    >/tmp/portd.log 2>&1 </dev/null &
 sleep 3
 ip link set et1 down 2>/dev/null
 ip link set et1 address 44:4c:a8:31:5d:ab
