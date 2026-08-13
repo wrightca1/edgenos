@@ -45,7 +45,16 @@
 #define SB_RESP 0x0F003u
 #define OP_READ  0x22u
 #define OP_WRITE 0x21u
+#define OP_RESET 0x20u                /* per-device reset; see the note below */
 #define SPICO_BC 0xfdu
+
+/* ⚠ op 0x20 resets ONE SBus device. The replay issues it exactly twice in its
+ * 389,809 lines -- dev 0x45 reg 0x00 and dev 0x49 reg 0x00 -- and those are the
+ * SerDes of the only two ports that come up. The devices it goes on to WRITE
+ * are exactly 0x45, 0x49, 0xfd and 0xfe: the two it reset, plus the SPICO
+ * broadcast and the bus controller. Et3's device 0x4a is never reset and never
+ * written. That is the whole shape of the port-3 problem, and this op is how to
+ * test it. */
 
 static volatile uint32_t *M;
 
@@ -98,10 +107,12 @@ int main(int argc, char **argv)
 	}
 	if (!cmd || (!strcmp(cmd, "read")  && na < 2)
 	         || (!strcmp(cmd, "write") && na < 3)
+	         || (!strcmp(cmd, "reset") && na < 1)
 	         || (!strcmp(cmd, "irq")   && na < 2)) {
 		fprintf(stderr,
 		    "usage: fm6000_sbus [-b bdf] read  <dev> <reg>\n"
 		    "       fm6000_sbus [-b bdf] write <dev> <reg> <data>\n"
+		    "       fm6000_sbus [-b bdf] reset <dev>\n"
 		    "       fm6000_sbus [-b bdf] irq   <target-dev> <code> [arg]\n");
 		return 2;
 	}
@@ -121,6 +132,9 @@ int main(int argc, char **argv)
 	} else if (!strcmp(cmd, "write")) {
 		show("write", sbus(OP_WRITE, a[0], a[1], a[2]));
 		show("readback", sbus(OP_READ, a[0], a[1], 0));
+	} else if (!strcmp(cmd, "reset")) {
+		printf("SBus reset of device 0x%02x\n", a[0]);
+		show("reset", sbus(OP_RESET, a[0], 0x00, 0));
 	} else if (!strcmp(cmd, "irq")) {
 		unsigned target = a[0], code = a[1], arg = a[2];
 

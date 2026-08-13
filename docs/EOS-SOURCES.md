@@ -760,3 +760,52 @@ Two shapes that would explain it, neither tested:
 `fm6000WriteSBus` calls at `aristaFmGetNextHopUsed@@Base+0x12a4` is what converts that composite
 address into a transaction, and reading it settles whether anything besides `(op, dev, reg)` goes
 onto the wire.
+
+### ⛔ No paging in the address — candidate (2) refuted
+
+`fm6000WriteSBus` decomposes its composite address with exactly two operations:
+
+```asm
+shr $0x8,%eax ; and $0xff,%eax     ->  device
+              ; and $0xff,%eax     ->  register
+```
+
+**Nothing else reaches the wire.** The `0x0d` in `0xd11XX` is discarded carry from the base
+constant, not a space selector, and there is no bank or page. Our bare `(op, dev, reg)` transaction
+is the whole protocol.
+
+⚠ That also exposes an unresolved conflict. `dev = (addr >> 8) & 0xff` means the SDK's wire device is
+`serdes + 0x11`, which for remap indices 68/69/64 gives `0x55`/`0x56`/`0x51` — not the `0x49`/`0x4a`/
+`0x45` seen in EOS's own traces. So `device = serdes + 5` was coincidence, and whatever
+`fm6000EnableSerDes` receives as its second argument is **not** the remap-table index. Both device
+ranges answer reads, with different values (`reg 0x0f` = `0x3f` on `0x49`/`0x4a`/`0x45`, `0x0a` on
+`0x51`/`0x55`/`0x56`), and **writes to the second range are just as inert** — `tx_pattern_gen` on
+`0x51` left Et2 untouched.
+
+### ★★ The replay's entire SBus write surface — and what Et3 never gets
+
+Counting every SBus command in `fwd4-stock.txt`:
+
+| op | devices | count |
+|---|---|---|
+| `0x21` write | `0xfd` | 30,266 |
+| `0x21` write | **`0x49`**, **`0x45`** | 30 each |
+| `0x21` write | `0xfe` | 1 |
+| `0x22` read | `0xfd`, `0x01`-`0x04`, `0x45`, `0x49` | — |
+| **`0x20` reset** | **`0x45` reg 0x00, `0x49` reg 0x00** | **1 each — the only two in 389,809 lines** |
+
+**The only SerDes devices the replay ever resets are the only ones it ever writes, and they are the
+only two ports that come up.** Device `0x4a` — Et3's lane — is never reset and never written. The
+devices we *can* write successfully, `0xfd` and `0xfe`, are the SPICO and the bus controller.
+
+That is the sharpest correlation found yet, and it says an SBus device may need its op-`0x20` reset
+before it will accept writes.
+
+**Tested, and it is not sufficient on its own.** `fm6000_sbus reset 0x4a` completes with
+`result=0` — the documented reset code — and a following `0x22 = 0x03` completes with `result=1`,
+but `PORT_STATUS` stays `0x0015` and the SPICO lane state stays `1`. Working ports unaffected.
+
+One write is not an enable, so this does not refute the reset hypothesis; it only shows the reset
+alone changes nothing observable. **Next: reset `0x4a`, then run the full eighteen-step sequence as
+absolute writes, and judge on `SerXmit` and the SPICO lane state.** That is the first time the
+algorithm would be attempted on a device that has been reset first.
