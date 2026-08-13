@@ -1416,3 +1416,72 @@ independent layers — but it removes one variable.
 DMA ring, so a second instance would steal Et1's frames and take the OSPF adjacency down.
 `edgenos-up.sh` refuses to run twice for this reason. An `et3` netdev needs portd to learn multiple
 ports, not a second process.
+
+---
+
+## ★★★ ROOT CAUSE: the replay provisions Et3's lane as an UNUSED lane
+
+**2026-08-13.** Found by grepping the replay, offline, in minutes — no hardware, no new tool. The
+question was simply *does the boot touch lane 1 at all?*, and the answer is worse than "no": it
+touches it exactly as much as it touches the lanes with nothing plugged into them.
+
+Per-lane EPL writes (`EPL_BASE + 0x400*epl + 0x80*lane`), identical in `fwd4-stock.txt` (pure EOS)
+and our spliced `fwd4.txt`, so this is EOS's own doing and not a generator defect:
+
+| lane | writes | distinct offsets |
+|---|---:|---:|
+| EPL14 lane0 — **Et1, links** | 459 | 20 |
+| **EPL14 lane1 — Et3, dark** | **391** | **18** |
+| EPL14 lane2 — nothing plugged in | 391 | 18 |
+| EPL14 lane3 — nothing plugged in | 391 | 18 |
+| EPL16 lane0 — **Et2, links** | 1236 | 20 |
+
+**Et3's lane write sequence is byte-identical to unused lane 2.** Not similar — identical.
+
+### The two enables are off
+
+| register | Et1 lane | **Et3 lane** |
+|---|---|---|
+| `SERDES_TX_CFG` (`0x3a`) | `c0000581` — **TxEn=1** | `80000080` — **TxEn=0** |
+| `SERDES_RX_CFG` (`0x39`) | `002a0281` — **RxEn=1** | `00280280` — **RxEn=0** |
+
+`FM6000_SERDES_TX_CFG_b_TxEn` is bit 0 and `FM6000_SERDES_RX_CFG_b_RxEn` is bit 0, both from the
+header. **That is `SerXmit=0` explained exactly**: the boot never enables the transmitter, so the
+serializer never runs, so there is nothing for the far end to lock to and nothing for our own
+receiver to do either.
+
+The active lanes also get two registers the dark lane never sees at all —
+**`AN_37_CFG` (`0x28`)** written once to `0`, and **`SERDES_IP` (`0x41`)** written three times
+(`0x20`, `0xe0`, `0x3fff`) — plus far more traffic on the shared ones (`0x02`: 20 writes vs 2;
+`0x04`: 10 vs 1, and the dark lane's single write is `0x00000001` where the live lane ends at
+`0x07ffffff`; `0x3c`: 3 vs 1; `0x3b` ends `0x00000c83` vs `0x00000803`).
+
+### ⚠ This explains why `fm6000_lanelink` cannot work, and it is not a bug in the op table
+
+`fm6000_lanelink` replays the **Et3 no-shut window captured on EOS** — and on that machine the lane
+was *already provisioned as an active port* with `TxEn`/`RxEn` set by EOS's own init, merely
+administratively down. `no shut` is a small delta on top of a fully provisioned lane.
+
+Under EdgeNOS the lane starts from the **unused-lane** state. The sequence is being applied to the
+wrong initial state, and no amount of faithfulness in replaying it fixes that. The same applies to
+the DFE window, which was captured on a lane that was up.
+
+That retires, in one stroke, the DFE hypothesis, the RX-polarity hypothesis, the near-loopback
+result and the optical investigation. All of them were downstream of a transmitter that was never
+switched on.
+
+### What to build
+
+**Lane 0's 459-write init sequence, retargeted to lane 1** — the same "relocate the sequence"
+treatment already used for EPL, and `fm6000_lanelink` already has the retargeting machinery
+(`base + 0x400*epl + 0x80*lane`, SBus device, SPICO reg-0x03 payload). Apply it *before* the
+existing link ops, which then find the state they were captured against.
+
+⚠ Retargeting is **not purely mechanical** — some values are legitimately per-lane. `0x10` ends
+`0x2000033c` on lane 0 against `0x2000031c` on lane 1 (one bit), and `SERDES_TX_CFG` carries the
+port's own pre/post emphasis, which `patch_tx_cfg()` already handles. Diff lane 0 against lane 2
+(both fully written, one active one not) to separate "because the lane is active" from "because it
+is lane N" before generating anything.
+
+**Judge the result on `SerXmit`**, which is bit 11 of `PORT_STATUS`: one bit, stable, currently 0,
+and 1 on both working ports.
