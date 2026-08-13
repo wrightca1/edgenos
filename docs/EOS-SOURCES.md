@@ -718,3 +718,45 @@ chip and repeat one write test. The replay's own SBus writes work at boot; if th
 a state afterwards where writes are absorbed, a re-init would restore them and that is the whole
 answer. ⚠ It re-initialises the bus that Et1 is running over, and Et1 carries the OSPF adjacency —
 so this is a deliberate step, not a casual one.
+
+### ⛔ SBus master re-init changes nothing — and a pattern emerges
+
+`fm6000_initsbus 0000:02:00.0` re-run on the booted chip, with both ports live:
+
+```
+[initsbus] start PIN_STRAP=0x00000208 SOFT_RESET=0x00000000 SBUS_CFG=0x00000000
+[initsbus] WriteSBus(0xFE0A,0x4) -> 0   PIN_STRAP=0x00000208
+[initsbus] ResetSBus -> 0               PIN_STRAP=0x00000208
+[initsbus] done: F001=01200000 F003=000000aa PIN=00000208
+```
+
+Harmless — Et1 stayed `0x0ec0`, Et2 `0x08c0`, 35 routes, chip on-bus throughout. And **the write test
+is unchanged**: `tx_pattern_gen` on Et2 still does nothing, and the SPICO lane states still read
+`2 / 2 / 1`. So "the master is left in a state where writes are absorbed" is refuted; a fresh init
+does not restore write capability.
+
+### ★ The pattern: infrastructure devices accept writes, SerDes devices do not
+
+Three device classes have now been written, and they split cleanly:
+
+| device | what it is | writes take effect? |
+|---|---|---|
+| `0xfe` | the SBus controller itself (`initsbus` writes `0xFE0A = 0x4`) | **yes** — reports `0`, and init works |
+| `0xfd` | SPICO broadcast | **yes** — per-target answers prove reg `0x03` lands |
+| `0x45` / `0x49` / `0x4a` | individual SerDes | **no** — nothing, by any instrument |
+
+Reads work on all three. So this is not the bus, not the master's initialisation, not the command
+encoding, and not read-versus-write. **It is specific to SerDes devices as write targets.**
+
+Two shapes that would explain it, neither tested:
+
+1. **The SerDes devices need individual release.** Something takes them out of reset or grants write
+   access per device, which the replay does at boot and nothing re-does afterwards.
+2. **The register window is paged.** The SDK's `0xd1100 + 0x100*serdes + reg` may carry a bank or
+   page selector we are collapsing away when we issue a bare `(op, dev, reg)` — reads would still
+   work if the read path defaults to the right page while writes need it set.
+
+(2) is the more likely of the two and is checkable without touching hardware: the internal function
+`fm6000WriteSBus` calls at `aristaFmGetNextHopUsed@@Base+0x12a4` is what converts that composite
+address into a transaction, and reading it settles whether anything besides `(op, dev, reg)` goes
+onto the wire.
