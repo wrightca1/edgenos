@@ -1038,3 +1038,47 @@ stays 0 either way.**
 field source unresolved), 17 (DFE tuning, which needs a running lane). None of the three is an
 obvious transmitter gate, so the next question may not be in this function at all — the EPL side owns
 `SerXmit`, and `fm6000EnableSerDes` never touches EPL registers.
+
+### ⚠ The live bring-up path is not `fm6000EnableSerDes`
+
+Chasing what actually calls the enable turned up something better: **nothing in the SDK calls
+`fm6000EnableSerDes` at all.** The path EOS really runs is event-driven:
+
+```
+fm6000SetPortState(port, state)
+  -> fmMapLogicalPortToPhysical, fm6000MapPhysicalPortToEplChannel, fm6000MapEplChannelToLane
+  -> fm6000SetSerDesState
+       -> internal @0x360a16 -- allocates an event and posts it to a thread
+            -> fm6000SerDesEventHandler   (0x364a89, 14 KB -- the real state machine)
+```
+
+and `fm6000SerDesEventHandler` calls:
+
+```
+fm6000ResetEthSerDes          fm6000StartPortLaneDfeTuning    fm6000GetEplMacNum
+fm6000InitSerDesSBusConfig    fm6000StopPortLaneDfeTuning     fm6000MapEplLaneToChannel
+fm6000SetPortLaneDfeParams    fm6000DetermineBasePortAndLane  fm6000MapEplLaneToSerDes
+```
+
+**`fm6000EnableSerDes` is not among them.** So the eighteen-step sequence decoded above is a
+different entry point — plausibly a legacy or diagnostic path — and the state machine is what a
+running EOS uses. That does not invalidate the decode (the registers and rate table are real), but
+it does mean matching EOS means implementing *this* instead.
+
+`fm6000InitSerDesSBusConfig` (`0x369692`, 0x2ca bytes) is small and confirms the base question
+outright: two `WriteSBus` and one `ReadSBus`, at **`0xb0506` and `0xb0517`** — registers `0x06` and
+`0x17` at base **`0xb05`**, i.e. device `serdes + 5`. Those are the two registers our tool already
+writes, and the base is the one matching this board's devices.
+
+### What this reframes
+
+The state machine is **asynchronous and DFE-centric**: it resets the SerDes, initialises its SBus
+config, sets DFE parameters, and starts and stops lane DFE tuning explicitly, with `ReadStatus` and
+lock/unlock around the transitions. It walks the enum decoded earlier —
+`IDLE / PWRDOWN / CONFIG / PWRUP / WAIT_PWRUP / WAIT_SIGDETECT` — and the two waits our tool polls
+are the same two conditions those last states are named after.
+
+**Next: decode `fm6000SerDesEventHandler`'s transitions**, in particular what it does on entry to
+`PWRUP` and `WAIT_SIGDETECT`, and which EPL registers it reaches through `fm6000GetEplMacNum`. That
+is the only place seen so far where the SerDes bring-up and the EPL block meet, and `SerXmit` is an
+EPL bit that nothing in the SerDes path has moved.
