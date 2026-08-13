@@ -518,3 +518,56 @@ inference from one arithmetic pattern and must be verified before anything is bu
 **Next: disassemble `fm6000WriteSBus` itself.** It is the one function that converts that composite
 address into whatever the hardware actually sees, and it is small. Everything else here is guesswork
 until it is read.
+
+### ★★ `fm6000SerDesRemapTable` — the addressing, resolved
+
+`fm6000WriteSBus` calls **`fm6000MapSerDesToEplLane`**, which bounds-checks its argument to
+**0..0x5f (96 SerDes**, matching the header's `ENTRIES 96`) and then indexes
+**`fm6000SerDesRemapTable`** at vaddr `0x609ec0` — 96 entries, stride 8, `{epl, lane}`. Extracted
+from `.data`:
+
+| serdes | EPL / lane | our SBus device |
+|---:|---|---|
+| **68** | EPL14 lane0 — Et1 | `0x49` |
+| **69** | EPL14 lane1 — **Et3** | `0x4a` |
+| 70, 71 | EPL14 lanes 2, 3 | `0x4b`, `0x4c` |
+| **64** | EPL16 lane0 — Et2 | `0x45` |
+
+**`device = serdes + 5`, confirmed on three ports.** Serdes 68 and 69 are exactly the indices the
+earlier gdb session passed to `fm6000StartSerDesDfeTuning` — now read off the table rather than
+guessed.
+
+And the SDK's "SBus address" is a flat register map, not a wire-level pair:
+
+```
+addr = 0xd1100 + 0x100 * serdes + register        (SERDES_ETH_WRITE space)
+       0xd2100 + 0x100 * serdes + register        (the observation space the waits poll)
+```
+
+i.e. the same `base + stride*index + offset` shape as every MMIO macro in the header. The earlier
+reading of `0xd11` as "space `0x0d`, device `serdes + 0x11`" was **wrong** — it is a base and a
+stride, and the device number never appears in the SDK address at all.
+
+### ⚠ CORRECTION: "our SBus writes do not take effect" was overclaimed
+
+The previous entry recorded that as answered. **It is not.** Two tests on the working Et2 lane:
+
+| test | PORT_STATUS |
+|---|---|
+| clear `rx_en` + `tx_en` (`0x22 = 0x00`) | `0x08c0` → `0x08c0` — no change |
+| clear `tx_output_en` (`0x0d = 0x00`) | `0x0cc0` → `0x08c0` → `0x08c0` |
+
+That second one *looks* like an effect and is not: bit 10 is `Receiving`, an **activity** bit that
+toggles by itself — Et1 was seen at `0x08c0`, `0x0cc0` and `0x0ec0` within seconds, untouched. The
+stable bits — `RxLinkUp` b6, `HeartbeatOk` b7, `SerXmit` b11 — **did not move in either test**.
+
+So the writes produce no observable effect, but the remap table has now removed the explanation that
+made "the writes are not landing" attractive: **our device numbers were right all along.** The
+competing reading is that these SBus controls simply do not govern a link that is already running —
+the EPL-level `SERDES_RX_CFG.RxEn` / `SERDES_TX_CFG.TxEn` may be the master gate, with the SBus
+enables mattering only during bring-up.
+
+Both readings survive the evidence. Distinguishing them needs a write whose effect is unambiguous on
+a *running* link — the TX pattern generator is the obvious candidate, since a lane transmitting PRBS
+cannot carry traffic — or a way to read back the write-register space, which is what
+`0xd1100 + 0x100*serdes` addressing may exist to provide.
