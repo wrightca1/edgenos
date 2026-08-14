@@ -1721,3 +1721,52 @@ Two candidates remain, and they are testable in this order:
 ⚠ `0x1f` is `sbus_dfe_a_adv_cntl_*` in the write view and `sbus_dfe_scratch_obs` in the read view —
 DFE registers both. Given that the remaining fault is DFE-adjacent, step 12 is the more interesting
 of the two despite being the harder to decode.
+
+### ★★ DFE fine tuning now runs too — coarse and fine both active on Et3
+
+**2026-08-14.** `fm6000CheckSerDesDfeTuningState` (`0x48d9e2`) reads **register `0x1f`** and extracts
+two-bit fields with `>>2 &3` and `>>4 &3` — the `coarse` and `fine` pair the earlier gdb session read
+as `coarse=2 fine=1` on working lanes. That makes `0x1f` the DFE state register, and it gave a
+precise diagnosis:
+
+| | `0x1f` | coarse | fine |
+|---|---|---|---|
+| Et1 (works) | `0x25` | 2 | **1** |
+| Et3 after one DFE pass | `0x21` | 2 | **0** |
+
+**Coarse tuning completed on Et3; fine tuning had not started.** Repeating the start sequence five
+times did not change it — the taps oscillated between `0xcc` and `0xee` while `fine` stayed 0.
+
+`fm6000RestartSerDesDfeFineTuning` (`0x489bef`) is one read and one write, both on register **`0x2a`**,
+modifying it as `(read & ~0x06) | X`. The live DFE capture writes `0x2a = 0x0a`, and
+`(0x08 & ~0x06) | 0x02 = 0x0a`, so `X = 0x02` — bit 1 restarts fine tuning.
+
+Run on Et3:
+
+```
+before   0x1f = 0x21   coarse=2  fine=0
+0x2a <- 0x0a
+after    0x1f = 0x69   coarse=2  fine=2
+```
+
+**Fine tuning now runs on that lane for the first time.** Note Et3 settles at `fine=2` where Et1 reads
+`fine=1`, so the two are in different fine states — `1` may be "converged" and `2` "in progress", or
+the reverse; the field's encoding is not established.
+
+**Still `BlockLock=0`, `RxRate=0`, `SerXmit=0`.**
+
+### The receiver is now fully alive by every available measure
+
+```
+clock gate      on, ref_sel loaded          PLL lock        5 ms, rx_rdy = 0x3f (identical to Et1)
+rx_en/tx_en     set                         signal strength 3 of 3 (maximum)
+tx_output_en    set                          DFE coarse      2 (identical to Et1)
+data + DFE gates open                        DFE fine        running (0 -> 2)
+```
+
+and the PCS above it still finds no 10GBASE-R block lock and recovers no rate. Every layer below the
+PCS now matches or exceeds what a working lane reports.
+
+**Next, in order:** whether `fine` must reach `1` rather than `2` (poll it while re-running the
+restart, and compare against Et1's behaviour under the same operation); then step 12, the last
+undecoded write, which targets `0x1f` itself — the very register this section is reading.
