@@ -2261,3 +2261,50 @@ different in kind:
 (2) is now the more likely, and it is testable: `fm6000SetPortState` → `fm6000SetSerDesState` walks
 `IDLE -> PWRDOWN -> CONFIG -> PWRUP -> WAIT_PWRUP -> WAIT_SIGDETECT`, and we have never driven those
 transitions in order — every attempt has written the final values directly.
+
+### Both hypotheses tested
+
+**(2) Sequence and timing — no lock.** Drove the state machine's transitions in order rather than
+writing end values: `PWRDOWN` (`SERDES_CFG` PowerDown=3), `CONFIG` (device reset, then
+`InitSerDesSBusConfig`'s `0x06=0x00` and `0x17[4:0]=0x11`, then the enables), `PWRUP` (PowerDown=0),
+`WAIT_PWRUP` (`rx_rdy=1` ✓), `WAIT_SIGDETECT`, then DFE. **`BlockLock=0`, `RxRate=0`.**
+
+⚠ This refutes *my emulation* of the state machine, not the hypothesis. The real handler is 14 KB
+and does more than the four operations we can name — DFE parameters, `ReadStatus`, locking, and
+whatever the transitions themselves imply.
+
+**(1) Outside the lane space — checked the obvious region, and it is status.** Diffed the entire
+per-EPL block (`0xe3b00`-`0xe3b7f`, 128 words) between EOS-with-Et3-up and EdgeNOS. 13 differ:
+
+```
+0x300 EPL_IP                    0x30b-0x30e <unnamed>
+0x303 EPL_LED_STATUS            0x313 PCS_10GBASEX_TX_STATUS
+0x305-0x308 TX_FIFO_*_PTR_STATUS  0x315 PCS_40GBASER_RX_STATUS
+                                0x316 EPL_1588_TIMER_STATUS
+```
+
+**Almost every one is status** — interrupt pending, LED state, FIFO pointers, timers — differing
+*because* one link is up and the other is not. The configuration registers in that region
+(`EPL_CFG_A`, `EPL_CFG_B`) already match. Four registers at `0x30b`-`0x30e` are unnamed in the header
+and differ substantially (`0x147`/`0x69c`/`0x9a3`/`0x89f` against `0x31`/`0x3b`/`0x44e`/`0x00`);
+they are the only candidates left in this region and are unidentified.
+
+### Standing back
+
+Two full days of register-level work have produced real, permanent results — the write path, the
+device reset requirement, the SerDes SBus register map, the enable algorithm, the DFE decode, and
+**two genuine configuration gates** (`Active_1` and `Port1PcsSel`) confirmed against a working
+system. Et3 now transmits where it never did.
+
+What has not been achieved is receive lock, and the honest position is that **the difference is no
+longer visible in any register this project can read**. Continuing to diff registers is unlikely to
+find it.
+
+The two remaining routes are both larger pieces of work:
+
+- **Trace EOS bringing Et3 up.** `fmPlatformTraceRegOps` captured the Et3 no-shut window before; doing
+  it again now — with the knowledge of which registers matter — would show the *ordering* and the
+  intermediate states that a static comparison cannot. This is the same technique that produced every
+  op table in `fm6000_lanelink`, applied to the one question left.
+- **Decode `fm6000SerDesEventHandler` properly** (0x364a89, 14 KB), state by state, rather than
+  approximating it.
