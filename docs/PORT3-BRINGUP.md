@@ -2203,3 +2203,61 @@ with a known-good value across four independent working cases** to aim at.
 are the obvious lever; the fact that neither EOS's replay nor our sequence sets them means the value
 arrives some other way, and finding it is now a bounded question about one register rather than an
 open-ended hunt.
+
+### ★★ Every measurable difference is now closed — and it still does not lock
+
+**2026-08-14.** `fm6000InitSerDesSBusConfig` — the live path's SerDes config — does a bitfield insert
+on `0x17`:
+
+```asm
+xor $0x11,%eax ;  and $0x1f,%edx ;  xor     ->  bits[4:0] = 0x11
+```
+
+**It writes `0x11`, not the `0x10` our `serdes_enable` step 7 writes.** Applying `0x17 = 0x11`
+followed by a DFE restart moved `sbus_analog_to_core_obs` from `0x02`/`0xc0` to **`0x0f`/`0x0f`** —
+the exact value every working lane carries, stable across repeated samples.
+
+The remaining stable differences were then closed the same way:
+
+```
+0x0c   working lanes 0x01, ours 0x00   ->  written, now 0x01
+0x48   working lanes 0x2a, ours 0x2b   ->  written, now 0x2a
+0x06   working lanes 0x00, ours 0xe9   ->  sig_strength_en dropped (our own doing)
+```
+
+⚠ `0x0c` and `0x48` are **undocumented** — the header defines no fields for either, and `WRITE_12`
+is entirely "Reserved". They were set purely because every working lane reads those values. That is
+empiricism, not understanding, and is recorded as such.
+
+### The state now
+
+```
+EPL_CFG_A.Active_1 = 1          EPL_CFG_B.Port1PcsSel = 3       (both match EOS)
+every EPL lane register         matches EOS's working lane 1
+analog_to_core_obs = 0x0f/0x0f  matches all four working cases
+0x0c = 0x01, 0x48 = 0x2a        match
+DFE coarse/fine, PLL, signal    match
+SerXmit = 1                     the transmitter runs
+
+BlockLock = 0   RxRate = 0   PCS_10GBASER_RX_STATUS = 0
+```
+
+**Every register this project can read on Et3 now matches a lane that works, and the PCS still does
+not achieve block lock.**
+
+### What that means, honestly
+
+The register-level approach has been taken to its conclusion. Two possibilities remain and they are
+different in kind:
+
+1. **Something not in the SerDes or EPL lane register space.** The per-EPL registers with per-port
+   fields were one such blind spot and yielded two real gates; there may be others — chip-level or
+   MAC-level state, or a register block never enumerated.
+2. **Sequence and timing.** EOS reaches this state through an asynchronous state machine
+   (`fm6000SerDesEventHandler`) driven by interrupts, with waits between transitions. We arrive at
+   the same register values by a different route. Identical end state does not imply identical path,
+   and a PCS that must *observe* a transition may never latch if the transition never happened.
+
+(2) is now the more likely, and it is testable: `fm6000SetPortState` → `fm6000SetSerDesState` walks
+`IDLE -> PWRDOWN -> CONFIG -> PWRUP -> WAIT_PWRUP -> WAIT_SIGDETECT`, and we have never driven those
+transitions in order — every attempt has written the final values directly.
