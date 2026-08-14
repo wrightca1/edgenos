@@ -1964,3 +1964,66 @@ lane was in a different state than assumed.
 (`10.22.1.0/24 via 10.1.1.1 dev eth0 metric 5`) **held through `ospfd` installing its 34 routes** —
 mgmt SSH survived where it previously died. That is the first live confirmation of the fix now in
 `init-m1`, which until this point had only been reasoned about.
+
+---
+
+## ★★★ ROOT CAUSE FOUND: Et3's PCS was never enabled
+
+**2026-08-14, by static analysis.** Going back to the SDK with everything the hardware work had
+taught us found it in minutes — in a register no amount of lane-block diffing could ever have
+surfaced.
+
+`fm6000GetPcsSel` / `fm6000InitPcsSel` led to **`FM6000_EPL_CFG_B`**, which is **per-EPL**, at
+`0x400*epl + 0x302 + EPL_BASE`, and carries a **4-bit PCS mode per port**:
+
+```
+Port0PcsSel b0-3   Port1PcsSel b4-7   Port2PcsSel b8-11   Port3PcsSel b12-15   QplMode b16-18
+```
+
+Read on EPL14, which carries **both** Et1 (lane 0) and Et3 (lane 1):
+
+```
+EPL_CFG_B(14) = 0x00090003
+    Port0PcsSel = 3    <- Et1, works
+    Port1PcsSel = 0    <- Et3, dark
+```
+
+Datasheet §6.8.9: *"PCS can be changed from any mode to any mode on a port-by-port basis and is
+configured in EPL_CFG_B register. The correct method is to first set to **PCS_DISABLE** and then
+change to the desired mode."* **`0` is PCS_DISABLE.** Et3's PCS has been switched off the whole time.
+
+### Setting it turned the transmitter on
+
+```
+EPL_CFG_B(14): 0x00090003 -> 0x00090033      (Port1PcsSel 0 -> 3)
+
+before   PORT_STATUS = 0x0015   SerXmit = 0
+after    PORT_STATUS = 0x0815   SerXmit = 1
+```
+
+**`PORT_STATUS` moved for the first time in this entire investigation, and `SerXmit` went to 1.**
+Et1 was unaffected throughout, routes stayed at 35.
+
+### Why nothing else could have found it
+
+- It is **per-EPL, not per-lane**, at offset `0x302` — outside the `0x80`-word lane blocks that every
+  diff in this document compared. Et1 and Et3 are *fields of the same register*, so "identical
+  configuration" was true of everything examined and false of the one thing that mattered.
+- The replay never writes it for lane 1, consistent with everything else it treats as an unused lane.
+- Every SerDes-level measurement was correct and irrelevant: PLL lock, signal strength, DFE coarse
+  and fine all sit **below** the PCS, so they could be brought to match a working lane exactly while
+  the PCS above them was switched off.
+
+That also retires the near-loopback result: a disabled PCS cannot block-lock on any signal, internal
+or external, so that test could never have succeeded regardless of the loopback bit working.
+
+### Still to do
+
+RX does not lock yet — `BlockLock=0`, `RxRate=0`, and Et3 now sits at `0x0815`, transmitting and not
+receiving, which is **the same state Et2 is in**. With our transmitter finally running, the far end
+should now see carrier for the first time; whether it links is the next thing to check, on the
+Proxmox side (`enp4s0d1`).
+
+⚠ `Port1PcsSel = 3` was chosen by copying what Et1 and Et2 use. The datasheet's mode encoding has not
+been read, and `3` may not be the correct mode for every media type — it is simply what both working
+10G ports on this board are set to.
