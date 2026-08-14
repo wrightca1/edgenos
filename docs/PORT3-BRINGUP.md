@@ -1873,3 +1873,46 @@ The chip-side explanations are exhausted. Two things remain, and neither can be 
 ⚠ The near-loopback attempt was meant to settle (2) and does not, on reflection: it wrote `0x0d`,
 a register **EOS never writes on this path**, so that test may have disturbed the very TX it was
 trying to loop. It should be redone using only registers EOS itself uses.
+
+### ⛔ The cold-boot splice: no effect on Et3 — and ⚠ Et2 is now degraded
+
+**2026-08-14.** The 44 SBus ops the replay issues to Et1's SerDes (`0x49`) were mirrored onto Et3's
+(`0x4a`) and spliced into `fwd4.txt`, so that lane would be provisioned from a chip reset in exactly
+the same context as the working one. The splice is clean — 44 ops mirrored including the op-`0x20`
+reset, every MMIO line byte-identical, no other device touched, `+132` lines.
+
+Cold-booted on it, FULLSEQ complete in 131 s:
+
+```
+Et1  PORT_STATUS=0x0cc0  SerXmit=1  BlockLock=1  RxRate=0x12     works
+Et3  PORT_STATUS=0x0015  SerXmit=0  BlockLock=0  RxRate=0        unchanged
+```
+
+**No effect on Et3.** Provisioning the lane from cold, in context, with EOS's own writes, does not
+bring it up either. Candidate 1 from the previous section is therefore closed.
+
+### ⚠ Et2 regressed, and the splice is not the cause
+
+Et2 read `0x08c0` all evening and now reads **`0x0815`** — `SerXmit=1` but `RxLinkUp=0` with all three
+link-fault bits set. It transmits and does not receive.
+
+**Rolled back**: `fwd4.txt` restored from `fwd4-presplice.txt` (md5 verified against the local copy),
+cold-booted again — and **Et2 stayed at `0x0815`** while Et1 returned to `0x0cc0` and forwards. So the
+splice did not cause it; the state is older and survives a cold boot and a full replay of the
+known-good file.
+
+The likeliest cause is one of this session's own write tests on Et2's SerDes. To settle the "do our
+writes land" question, `0x0a` (`tx_pattern_gen_en`) was set on device `0x45` with four different
+values, and `0x22`/`0x0d` were cleared and restored. At the time each was judged to have "no effect"
+because `PORT_STATUS` did not move — but this session later proved writes *do* land, so that
+judgement was made with the wrong instrument. **A lane transmitting PRBS into an Edgecore port is
+exactly the kind of thing that gets a port err-disabled at the far end**, and `sfp2` still reports
+`rxlos=0`, so the cable is live and the fault is above the physical layer.
+
+⚠ **Et2 needs its far-end port bounced on the Edgecore 5610 to confirm.** That is the test: if the
+link returns after the peer port is shut/no-shut, the damage was to the far end's port state and
+nothing on this switch is broken.
+
+**The lesson is the one this document keeps relearning, in a more expensive form:** a test judged
+against the wrong instrument does not merely fail to inform — it can do damage while reporting
+nothing. `PORT_STATUS` was known by then to be an EPL/MAC view that SerDes-level writes do not move.
