@@ -2156,3 +2156,50 @@ a bring-up-time thing and not a resting state.
 Reboot to EdgeNOS, run the bring-up, retake the SerDes dump, and diff it against
 `fm6000-eos-serdes-0x49-0x4a-UP.txt`. For the first time that diff has a **true** reference on both
 sides, and whatever survives it is the answer.
+
+### ★★ The like-for-like diff, with a control
+
+**2026-08-14.** Rebooted to EdgeNOS, confirmed the cold boot leaves **both gates closed again**
+(`EPL_CFG_A = 0x7e0d7899`, `EPL_CFG_B = 0x00090003`) — so the replay genuinely never sets them and
+they must be added to the boot path. Opened both to the EOS values, ran `lanelink` + `serdes_enable`,
+and dumped all 256 SBus registers of both lanes.
+
+That gives a diff with a **control**: lane 0 works in *both* systems, so any register where the two
+lane 0 columns agree is stable configuration rather than live data, and a lane-1 difference there is
+real. Filtering on that:
+
+| reg | field | EOS l0 | EOS l1 | EDG l0 | **EDG l1** |
+|---|---|---|---|---|---|
+| `0x19` | `sbus_analog_to_core_obs` | `0f` | `0f` | `0f` | **`02`** |
+| `0x1a` | `sbus_analog_to_core_obs` | `0f` | `0f` | `0f` | **`c0`** |
+| `0x1b` | — | `aa` | `aa` | `aa` | **`2a`** |
+| `0x1d` | `sbus_dfe_scratch_obs` | `01` | `01` | `01` | **`09`** |
+| `0x48` | — | `2a` | `2a` | `2a` | **`2b`** |
+| `0x14` | `rx_ib_sig_strength_obs` | `14` | `14` | `14` | **`d4`** |
+
+**`sbus_analog_to_core_obs` is the headline.** It reads `0x0f` on *every* working lane in both
+operating systems — EOS lane 0, EOS lane 1, EdgeNOS lane 0 — and `0x02`/`0xc0` on our dark lane. That
+is the analog block's output *into the core*, and it is the first register found whose working value
+is identical across all four working cases and wrong only on ours.
+
+The gate bits for that path are named in the write view of `0x17`:
+`sbus_analog_to_core_lsb_gate` (b5), `sbus_analog_to_core_msb_gate` (b6), `sbus_from_core_msb_gate`
+(b7) — and **our step 7 writes `0x17` with bits [4:0] set to `0x10` against a zeroed shadow, leaving
+b5-b7 clear**. The replay writes `0x17 = 0x10` then `0x17 = 0x00`, which also leaves them clear, so
+this is not a simple "we forgot the gates" — but it is the register that controls the exact path
+whose observation is wrong, and it is where to look next.
+
+⚠ `0x14 = 0xd4` on our lane against `0x14` everywhere else is **our own doing**: `serdes_enable`
+step 10 sets `sig_strength_en`, which no working lane carries at rest. That write should be dropped —
+the replay sets `0x06 = 0x00`, and EOS's working lanes agree.
+
+### Where this leaves the investigation
+
+Both EPL gates are now known, confirmed against a working system, and reproducible. The remaining
+fault is inside the SerDes analog-to-core path, and for the first time there is a **single register
+with a known-good value across four independent working cases** to aim at.
+
+**Next:** work `0x19`/`0x1a` — find what writes `sbus_analog_to_core_obs` to `0x0f`. The `0x17` gates
+are the obvious lever; the fact that neither EOS's replay nor our sequence sets them means the value
+arrives some other way, and finding it is now a bounded question about one register rather than an
+open-ended hunt.
