@@ -1822,3 +1822,54 @@ plausibility:
 
 The cheapest test of (1) is to run the SerDes sequence **before** applying the EPL lane provisioning,
 rather than after — a reordering, not new decoding.
+
+### All three candidates tested — and the SerDes is now indistinguishable from a working lane
+
+**2026-08-14.**
+
+**Candidate 2 dissolves — `0x1f` is dynamic.** Read across all three lanes in one pass:
+
+```
+dev 0x49 (Et1, works)   0x1f = 0x29   coarse=2 fine=2
+dev 0x45 (Et2, works)   0x1f = 0x29   coarse=2 fine=2
+dev 0x4a (Et3, dark)    0x1f = 0x29   coarse=2 fine=2
+```
+
+**All three identical.** The earlier "Et1 fine=1, Et3 fine=0" was a *moving* register sampled at
+different moments, not a state difference — so no conclusion should have been drawn from it, and the
+"one field away from a working lane" reading was wrong. Et3's DFE state matches both working lanes
+exactly.
+
+**Candidate 1 fails — ordering is not it.** Reset the device, run EOS's SerDes sequence first, then
+the EPL link sequence:
+
+```
+after serdes    LANE_STATUS=0x00018000  BlockLock=0 RxRate=0
+after link ops  LANE_STATUS=0x00018000  BlockLock=0 RxRate=0
+```
+
+No change in either order.
+
+### Where this genuinely stands
+
+Every measurable property of Et3's SerDes now matches a working lane: clock gate, reference select,
+PLL lock time and `rx_rdy`, signal strength at maximum, all ten configuration registers, and now the
+DFE coarse/fine state. Every EPL lane register matches apart from counters. The PCS above it finds
+no 10GBASE-R block lock and recovers no rate, in both orderings, with and without near loopback.
+
+The chip-side explanations are exhausted. Two things remain, and neither can be settled from here:
+
+1. **Provision the lane from a chip reset, exactly as Et1's is.** Every difference tried so far has
+   been applied to a *running* chip. Et1's lane is configured by the replay during a cold boot, in
+   context, from reset. The test is to splice the 30 SerDes writes for device `0x4a` into
+   `fwd4.txt` alongside the existing `0x49` ones and cold-boot — the project already has the
+   splicing tooling for exactly this shape of experiment (`gen_split` / `gen_list`).
+2. **Verify the far end actually transmits valid 10GBASE-R.** The optical measurements prove light
+   arrives at good power, and `RxSignalDetectSample` confirms the lane sees it — but neither proves
+   the *content* is a valid 10G bitstream. The far end is a NIC on the Proxmox host that has never
+   been checked, and a link partner with its laser on but no valid encoding produces exactly this
+   signature: signal present, no block lock, no rate.
+
+⚠ The near-loopback attempt was meant to settle (2) and does not, on reflection: it wrote `0x0d`,
+a register **EOS never writes on this path**, so that test may have disturbed the very TX it was
+trying to loop. It should be redone using only registers EOS itself uses.
