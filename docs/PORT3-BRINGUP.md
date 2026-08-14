@@ -1770,3 +1770,55 @@ PCS now matches or exceeds what a working lane reports.
 **Next, in order:** whether `fine` must reach `1` rather than `2` (poll it while re-running the
 restart, and compare against Et1's behaviour under the same operation); then step 12, the last
 undecoded write, which targets `0x1f` itself — the very register this section is reading.
+
+### ⛔ EOS's own SerDes sequence, replayed exactly, still does not lock
+
+**2026-08-14.** Candidate 2 turned up something better than step 12's value. Extracting **every SBus
+write EOS makes to a working lane's SerDes** from the replay — all 30 to device `0x49` — gives the
+actual bring-up, and it is much smaller than `fm6000EnableSerDes`:
+
+```
+0x01 <- 0x1f      0x17 <- 0x10      0x2a <- 0x0e
+0x02 <- 0x3f      0x06 <- 0x00      0x2b <- 0x02
+                  0x17 <- 0x00      then 0x2a alternating 0x16 / 0x0e, 13 times
+```
+
+**No `0x22`, no `0x0d`, no `0x1d`/`0x36`/`0x3b`, and no `0x1f` at all** — so step 12's value does not
+matter on this path, and several registers our tool writes are ones EOS never touches. It also
+writes `0x01` and `0x02` first, which nothing in our sequence did, and sets `0x06` to **`0`** where
+the `EnableSerDes` decode had us setting `0x08`.
+
+The thirteen alternations of `0x2a` between `0x16` and `0x0e` are the fine-tuning loop — bits 1 and 2
+held while bits 3 and 4 toggle.
+
+Replayed verbatim on Et3 after a device reset:
+
+```
+after setup                    LANE_STATUS=0x00018000  BlockLock=0 RxRate=0  0x1f=0x01
+after 13 tuning iterations     LANE_STATUS=0x00018000  BlockLock=0 RxRate=0  0x1f=0x29
+```
+
+`0x1f` reaches **`0x29`** — coarse 2, fine 2 — against Et1's `0x25` (coarse 2, fine 1). The DFE state
+is now one field away from a working lane, and the PCS still finds no block lock and no rate.
+
+### What that eliminates, and what it leaves
+
+This was the strongest possible version of the replay approach: EOS's exact writes, in EOS's order,
+to a device put in a known state by reset, on hardware where the write path is proven. It is not a
+question of missing registers or wrong values any more.
+
+So the remaining difference is **not in the SerDes register set**. What is left, in order of
+plausibility:
+
+1. **Ordering against the EPL block.** In the replay these SerDes writes happen *inside* a full chip
+   bring-up, interleaved with that lane's EPL configuration. We configure Et3's EPL block by copying
+   a finished state and then run the SerDes sequence — the reverse order, and PCS block lock is an
+   EPL-side function that may need to be started after, or reset alongside, the SerDes.
+2. **The `fine` field.** Et3 sits at 2 where Et1 sits at 1, across every route tried. If `1` means
+   converged, the loop is running and never settling — which would point back at signal quality
+   despite the optical measurements.
+3. **Something the EPL does at boot that we have never replicated**, since Et1's lane was configured
+   by the replay from reset while Et3's was configured by us from a running chip.
+
+The cheapest test of (1) is to run the SerDes sequence **before** applying the EPL lane provisioning,
+rather than after — a reordering, not new decoding.
