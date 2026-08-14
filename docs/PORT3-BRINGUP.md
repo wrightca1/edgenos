@@ -2083,3 +2083,76 @@ this project has ever had, and every value guessed above becomes checkable.
 - Both live in per-EPL registers with per-port fields, a register class this investigation had never
   examined, and which explains how "every register matches a working lane" could be true and useless
   at the same time.
+
+---
+
+## ★★★ THE REFERENCE EXISTS NOW: EOS with Et3 up, captured
+
+**2026-08-14.** Booted EOS. `show interfaces status`:
+
+```
+Et1   to-Edgecore5610-port6      connected   routed   full  10G  10GBASE-SR
+Et2   to-Edgecore5610-port7-DAC  connected   routed   full  10G  10GBASE-CR
+Et3                              connected   routed   full  10G  10GBASE-SR
+```
+
+**Et3 comes up under EOS.** Cabling, optics and far end are all good, and every port-3 failure in
+this document is ours. Et2 links under EOS too, so its degradation is also EdgeNOS-side.
+
+Captures are in the notes repo (`fm6000-eos-epl14-lane{0,1}-UP.txt`, `-cfg-UP`, and
+`fm6000-eos-serdes-0x49-0x4a-UP.txt`) — the first ever taken with **lane 1 actually working**.
+
+**Access:** under EOS, Et3 carries `10.99.99.1/24`, so the test system on that subnet is a fast
+channel — `sshpass -p arista ssh -J lab-console … admin@10.99.99.1` with `enable` piped on stdin,
+since ssh lands in the unprivileged CLI. Far quicker than the 9600-baud console.
+
+### Both hand-set gates were right
+
+```
+EPL_CFG_A(14) = 0x7e1d7899     identical to what was set by hand   (Active_1 = 1)
+EPL_CFG_B(14) = 0x00090033     identical to what was set by hand   (Port1PcsSel = 3)
+```
+
+Guessed by analogy with port 0 and confirmed correct by a working system.
+
+### The EPL side is fully exonerated
+
+With **both** lanes up, EPL14's two lane blocks differ at only **4 of 128 offsets** — `0x04`, `0x21`,
+`0x3a`, `0x42`: status, counters, and the intended TX emphasis. And every EPL register EdgeNOS sets
+on Et3 matches EOS's working values exactly:
+
+```
+SERDES_CFG 0x0aaa86c0    LANE_CFG 0x000c0002    SERDES_RX_CFG 0x002a0281
+SERDES_TX_CFG 0xc0001581 SERDES_IM 0x00003fff   PCS_10GBASER_CFG 0x00000000
+```
+
+### The difference is in the SerDes, and now it is enumerated
+
+EOS's working lane 1 against EdgeNOS's dark lane 1, all 256 SBus registers:
+
+```
+0x19 0x1a   EOS 0x0f 0x0f      EdgeNOS 0x00 0x00
+0x12 0x13   EOS 0x56 0x64      EdgeNOS 0x00 0x00     (from_analog)
+0x1e 0x1f   EOS 0x07 0x29      EdgeNOS 0x00 0x00     (dfe scratch / state)
+0x20-0x27   EOS populated      EdgeNOS mostly 0x00   (DFE taps)
+0x1d        EOS 0x01           EdgeNOS 0x08
+0x28        EOS 0x1f           EdgeNOS 0x64
+0x2b        EOS 0x03           EdgeNOS 0x05
+0x06        EOS 0x00           EdgeNOS 0xe9
+0x14        EOS 0x14           EdgeNOS 0xd4
+```
+
+⚠ The EdgeNOS column is from a dump taken **earlier in the session**, before the last rounds of DFE
+work, so some of those zeros are now populated. The capture must be retaken on EdgeNOS before any of
+these are treated as live differences.
+
+Two are informative regardless. **`0x06` reads `0x00` on a working lane** — the `EnableSerDes` decode
+had us setting `0x08` (`sig_strength_en`), and the replay writes `0x00`; a working lane does not carry
+it. **`0x14` reads `0x14` on a working lane**, bit 6 clear, confirming signal-strength observation is
+a bring-up-time thing and not a resting state.
+
+### Next
+
+Reboot to EdgeNOS, run the bring-up, retake the SerDes dump, and diff it against
+`fm6000-eos-serdes-0x49-0x4a-UP.txt`. For the first time that diff has a **true** reference on both
+sides, and whatever survives it is the answer.
