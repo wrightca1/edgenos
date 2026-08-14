@@ -2308,3 +2308,90 @@ The two remaining routes are both larger pieces of work:
   op table in `fm6000_lanelink`, applied to the one question left.
 - **Decode `fm6000SerDesEventHandler` properly** (0x364a89, 14 KB), state by state, rather than
   approximating it.
+
+## 2026-08-14 (evening): the power-cycle test, and Et2 converging on Et3's fault
+
+A site power outage cold-started everything, which handed us the one experiment we could not
+perform deliberately: Et2 had been stuck at `0x0815` across *warm* reboots, and the open question
+was whether a true power-off would clear it.
+
+**It does not.** Booted `alpha9` after the outage, ran FULLSEQ to completion:
+
+```
+Et1  EPL14 l0  0xe3800 = 0x00000cc0    up, forwarding
+Et3  EPL14 l1  0xe3880 = 0x00000015    dark, as expected
+Et2  EPL16 l0  0xe4000 = 0x00000815    still degraded
+```
+
+### Et2 is not the Et3 problem
+
+The two gates that were closed on Et3 are **open on Et2**, and were never closed:
+
+```
+EPL16   EPL_CFG_A 0xe4301 = 0x7e0d7899   Active_0 = 1
+        EPL_CFG_B 0xe4302 = 0x00090003   Port0PcsSel = 3
+```
+
+Byte-identical to EOS's own values for the same registers, captured the same evening with Et2 up
+(`fm6000-eos-epl16-cfg-Et2-UP.txt`). Whatever is wrong with Et2 is not the EPL provisioning fault.
+
+### The three-column diff, and one bit
+
+With EOS captured showing **all three front ports connected**, the SerDes diff finally has a proper
+control: Et1 works in both operating systems, so any register where Et1 agrees across them is stable
+configuration. **231 of 256 registers qualify**, and among those Et2 differs in exactly three:
+
+| reg | Et2 EdgeNOS | EOS | Et1 (stable) |
+|---|---|---|---|
+| `0x0b` | **`0x40`** | `0x00` | `0x00` |
+| `0x0c` | `0x12` | `0x01` | `0x01` |
+| `0x1f` | `0x25` | `0x29` | `0x29` |
+
+`0x1f` is `sbus_dfe_scratch_obs` — dynamic, a symptom. The interesting one is `0x0b`, where the
+**write** view names bit 6 `sbus_tx_elec_idle_cntl`: transmitter squelch. A single bit, set only on
+the lane a write test damaged, clear on every working lane in both systems.
+
+⚠ **This is suggestive, not proven.** `SERDES_ETH_READ_11` has *no* documented fields — only
+`WRITE_11` does — and read and write views at the same register number are different silicon. The
+argument is empirical (anomalous on exactly the broken lane) plus circumstantial (the write view's
+bit 6 is exactly the function that would produce these symptoms). It is not a decode.
+
+**Cleared it** — `fm6000_sbus write 0x45 0x0b 0x00`, readback `0x00`, stable. No link.
+
+### ⚠ `0x0c` is not a usable signal, and that retracts an earlier fix
+
+Wrote `0x01` to `0x0c` and it read back **`0x77`**. The read view is neither the write view nor
+stable. That makes `0x0c` worthless as a diff target — and it **undermines the empirical
+`0x0c = 0x01` applied to Et3** on 2026-08-14, which was justified purely by "every working lane
+reads `0x01`". That justification is void: what a working lane reads there is not what was written.
+
+### What the outage actually settled
+
+Et2 links under EOS as `10GBASE-CR` **minutes before** each EdgeNOS boot, on the same DAC, with the
+same far end, which has not rebooted in between. So:
+
+- the far end transmits valid 10G — proven, because EOS locks to it
+- under EdgeNOS `LANE_STATUS` reads `0x00000000`: no block lock, no rate, **and no signal detect**
+
+**The fault is our receiver, not the link.** And that is the same symptom Et3 has. Et2 and Et3 now
+fail identically, from opposite directions — Et3 never worked, Et2 worked and regressed — which
+makes Et2 the better subject: its EPL provisioning is correct out of the replay, and its RX
+demonstrably worked under EdgeNOS once.
+
+### Eliminated: the replay, the far end, persistent flash state
+
+- **The replay.** `fwd4.txt` today differs from `fwd4-preport3.txt` (the one running when Et2 last
+  worked) by **exactly one line of 373,345**:
+  `001082a4  00010103 -> 03ed0103`. `0x03ed` is Et3's GLORT — the SGLORT splice. Unrelated to Et2.
+  ⚠ Worth knowing on its own: **the shipped `fwd4.txt` is not a clean baseline**, it carries a
+  hand-edited Et3 GLORT word.
+- **The far end.** `swp7` on the AS5610 (`10.1.1.238`, EdgeNOS on ppc) bounced down and up; it
+  returns to `LOWER_UP` immediately and Et2 does not move. ⚠ Its instant relock means that carrier
+  report is not evidence of PCS lock — the same trap as the veth on Et3. Do not use it as a signal.
+- **Persistent state.** A full power cycle changes nothing, and the only flash difference is the one
+  GLORT word. So Et2's state is *reproducible*, not latched — which contradicts "one write test
+  damaged it permanently" and points instead at EdgeNOS's bring-up leaving Et2's RX off every time.
+
+That last point reopens the question of why Et2 ever worked. The surviving hypothesis is **warm-boot
+inheritance**: EOS left the SerDes receiver configured, our replay never re-established it, and the
+first genuinely cold start exposed a gap that had always been there.
