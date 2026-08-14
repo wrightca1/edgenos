@@ -1916,3 +1916,51 @@ nothing on this switch is broken.
 **The lesson is the one this document keeps relearning, in a more expensive form:** a test judged
 against the wrong instrument does not merely fail to inform — it can do damage while reporting
 nothing. `PORT_STATUS` was known by then to be an EPL/MAC view that SerDes-level writes do not move.
+
+### ⛔ The far end is exonerated — and near loopback proves the fault is ours
+
+**2026-08-14.** The far end of Et3 is `enp4s0d1` on the Proxmox host, bridged to `vmbr1` alongside the
+container's `eth1` veth. `ethtool` reports it a **10G fibre port, administratively up**, supporting
+`10000baseT/Full`, auto-negotiation off, `Link detected: no`. Its module cannot be read — the `cxgb4`
+driver does not implement `ethtool -m` — but the operator confirms it is the correct module and
+**this link has been up before**.
+
+So the far end is transmitting, which matches the −2.77 dBm measured at Et3's SFP, and its
+`NO-CARRIER` is *our* doing: `SerXmit=0` means we have never given it anything to lock onto. Both
+ends have been reporting no-link for opposite reasons.
+
+**Near loopback, done properly.** With the lane fully provisioned (`RxEn=1`, `TxEn=1`, `SigDet=12`),
+`SERDES_CFG` bit 28 `NearLoopbackEn` set, and both `lanelink` and `serdes_enable` re-run underneath
+it:
+
+```
+loopback off, provisioned    LANE_STATUS=0x00018000  BlockLock=0 RxRate=0 SigDet=12
+loopback on                  LANE_STATUS=0x00018000  BlockLock=0 RxRate=0 SigDet=12
+loopback on + re-provisioned LANE_STATUS=0x0001a000  BlockLock=0 RxRate=0 SigDet=13
+```
+
+`SigDet` moves, so something in the path responds. **Block lock never appears.** With the fibre, the
+optics and the far end all removed from the path, the lane still cannot recover a rate from its own
+transmitter — so the fault is inside this chip, and every remaining far-end hypothesis is closed.
+
+⚠ One caveat kept honest: nothing confirms `NearLoopbackEn` actually engages. The bit is set and
+`SigDet` changes, which is suggestive, but the SBus-side `sbus_near_loopback_en_cntl` is a register
+EOS never writes on this path and was avoided deliberately.
+
+### ⚠ A false negative worth recording
+
+The first attempt at this test, immediately after the cold boot, read `LANE_STATUS=0x00000000` with
+`SigDet=0` through every step and looked like a total failure. It was not: the cold boot returns the
+EPL lane block to its **unused-lane** state, so the SerDes work had nothing above it. Running
+`lanelink` first — restoring `RxEn`/`TxEn` — brought `SigDet` straight back to 12.
+
+**Every SerDes-level experiment needs the EPL provisioning applied first**, and after any reboot that
+must be redone. This is the third time in this document that a result was nearly misread because the
+lane was in a different state than assumed.
+
+### Also validated by accident
+
+`edgenos-up.sh` was run to restore the control plane, and the pinned mgmt route
+(`10.22.1.0/24 via 10.1.1.1 dev eth0 metric 5`) **held through `ospfd` installing its 34 routes** —
+mgmt SSH survived where it previously died. That is the first live confirmation of the fix now in
+`init-m1`, which until this point had only been reasoned about.
