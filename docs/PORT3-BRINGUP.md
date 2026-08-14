@@ -2027,3 +2027,59 @@ Proxmox side (`enp4s0d1`).
 ⚠ `Port1PcsSel = 3` was chosen by copying what Et1 and Et2 use. The datasheet's mode encoding has not
 been read, and `3` may not be the correct mode for every media type — it is simply what both working
 10G ports on this board are set to.
+
+### ★★ A second lane-1 gate: `EPL_CFG_A.Active_1`
+
+Finding `EPL_CFG_B` by symbol was luck; the class it belongs to is the real lesson. Searching the
+header for **every register with per-port fields** turns up three:
+
+```
+FM6000_EPL_CFG_A       Port0ReverseTxLanes / Port0ReverseRxLanes, and Active_0..Active_3
+FM6000_EPL_CFG_B       Port0PcsSel .. Port3PcsSel, QplMode
+FM6000_EPL_LED_STATUS  per-port LinkUp / Transmitting / Receiving / ...
+```
+
+`EPL_CFG_A` (`0x400*epl + 0x301 + EPL_BASE`) carries **`Active_0`..`Active_3` at bits 19-22** — a
+per-lane active enable. On EPL14:
+
+```
+EPL_CFG_A(14) = 0x7e0d7899    Active_0 = 1  (Et1)    Active_1 = 0  (Et3)
+```
+
+**A second gate held shut for lane 1**, in the same blind spot as the first: per-EPL registers with
+per-port fields, which no lane-block diff can ever surface because both lanes live in one register.
+Set to `0x7e1d7899`.
+
+### Where the night ends
+
+```
+PcsSel(port1) = 3      Active_1 = 1      SerXmit = 1      SigDet = 12
+BlockLock = 0          RxRate = 0        PCS_10GBASER_RX_STATUS = 0   (Et1 reads 1)
+```
+
+Both gates open, the full bring-up re-run underneath them, the far end confirmed correct and bounced
+by the operator — and the receiver still does not block-lock. Et1 unaffected throughout, 36 routes.
+
+### ⚠ The reference problem, stated plainly
+
+**No lane other than lane 0 has ever been active on this switch.** EPL14 and EPL16 both read
+`Active_0=1` with every other lane 0, and both working ports are lane 0. So for every per-EPL,
+per-port field there is *no known-good lane-1 value anywhere on this box* — `Active_1 = 1` and
+`PcsSel(port1) = 3` were both chosen by analogy with port 0, not read from a working example.
+
+That is the same trap this document fell into with `fine=2` versus `fine=1`: comparing against a
+reference that does not exist.
+
+**The next step is to create one.** Boot EOS, configure Et3 up, and capture `EPL_CFG_A`, `EPL_CFG_B`
+and the whole per-EPL region (`0x300`-`0x3ff` of EPL14) with `fmdump` — exactly the differential
+method that produced `ROUTED-PORT-ANATOMY.md`. That gives the first genuine lane-1-active reference
+this project has ever had, and every value guessed above becomes checkable.
+
+### What tonight established regardless
+
+- **Et3's PCS was disabled** (`Port1PcsSel = 0`), which is why `SerXmit` was 0. Setting it turned the
+  transmitter on — the first movement in `PORT_STATUS` in this entire investigation.
+- **Et3's lane was not marked active** (`Active_1 = 0`), a second independent gate.
+- Both live in per-EPL registers with per-port fields, a register class this investigation had never
+  examined, and which explains how "every register matches a working lane" could be true and useless
+  at the same time.
