@@ -1082,3 +1082,39 @@ are the same two conditions those last states are named after.
 `PWRUP` and `WAIT_SIGDETECT`, and which EPL registers it reaches through `fm6000GetEplMacNum`. That
 is the only place seen so far where the SerDes bring-up and the EPL block meet, and `SerXmit` is an
 EPL bit that nothing in the SerDes path has moved.
+
+## 2026-08-15: `fm6000SerDesEventHandler` — the call graph, without decoding 3.5k instructions
+
+`PORT3-BRINGUP.md` lists "decode `fm6000SerDesEventHandler` properly (0x364a89, 14 KB), state by
+state" as one of the two remaining routes for Et3. Before anyone spends a day on that, here is what
+it *calls*, which is cheap to get and narrows the job. The function spans `0x364a89`-`0x36840f`
+(to `fm6000SetSerDesState`), ~3,500 instructions.
+
+| callee | times | note |
+|---|---|---|
+| `fmLogMessage` / `fmErrorMsg` | 116 | more than half the call sites are logging |
+| `ReadStatus` | 3 | |
+| `fm6000StartPortLaneDfeTuning` | 2 | plus `Stop` x1 and `SetPortLaneDfeParams` x1 |
+| `fmCaptureLock` / `fmReleaseLock` | 3 / 4 | |
+| `fm6000ResetEthSerDes` | 1 | the op-`0x20` device reset we found empirically |
+| `fm6000InitSerDesSBusConfig` | 1 | the `0x17[4:0]=0x11` writer |
+| `fm6000MapEplLaneToSerDes` / `MapEplLaneToChannel` / `GetEplMacNum` / `DetermineBasePortAndLane` | 1 each | address arithmetic |
+| `fmDelay` | 1 | |
+| `LBGPostamble` | 1 | |
+
+**The useful negative: there is no call to anything that configures a block we have not already
+touched.** Reset, SBus config, DFE tuning and status reads are all things `fm6000_lanelink` and
+`fm6000_serdes_enable` already do. Whatever the handler adds for Et3 is in its **ordering, its
+waits, and its conditionals** — not in some additional subsystem call we have been missing. That
+supports the "sequence and timing" reading over the "something outside the lane register space"
+reading, and it means decoding the handler means tracing control flow, not finding a new API.
+
+⚠ **Two false leads, recorded so they are not followed again:**
+
+- `call 360a16 <fm6000CrmSetMemoryExt@@Base+0xd9e>` inside the handler is **not** a CRM write.
+  objdump names unnamed local functions by their offset from the nearest preceding symbol; `+0xd9e`
+  past `CrmSetMemoryExt` is a different function entirely. A CRM write would have been a strong lead
+  precisely because CRM is outside the SerDes and EPL spaces — which is what made it worth checking
+  and worth disproving.
+- `fm6000MapEplLaneToChannel` (`0x47cad6`) writes nothing. It validates `0 <= epl <= 0x18` and does
+  a reverse lookup through a table at `-0x120(%ebx)` indexed `epl*4 + i`. Pure address arithmetic.
