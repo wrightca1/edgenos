@@ -2680,3 +2680,33 @@ where they diverge.
 ⚠ The one exception, and it is the reason the SPICO test is worth running: **a hypothesis that
 predicts a *zero* is cheap to test.** `P(0 up in k | 50%) = 0.5^k`, so five boots reach p = 0.03 and
 seven reach p = 0.008. Predicting an extreme costs an hour; predicting a shift costs a day.
+
+### The per-boot trace, and one reading of it retracted
+
+**2026-08-15.** alpha10 boots with `fm6000-fullseq.sh` logging Et2 alongside Et1 at every settle
+step. First dark-boot trace:
+
+```
+STEP5 (replay done)  PORT_STATUS=000008c0 pcsRx=1        <- Et1, ALREADY LINKED
+t=3s .. t=21s        et2 PORT_STATUS=00000815  pcsRx=0  LANE_STATUS=0
+t=24s                et2 PORT_STATUS=00000c15  pcsRx=0  LANE_STATUS=0
+final                et1=000008c0/00000940   et2=00000815/00000000
+```
+
+⛔ **Retracted on sight:** I first read the `0x0815 -> 0x0c15` change at t=24s as a lock beginning
+and failing. It is bit 10, `Receiving`, and **Et1 toggles the same bit in the same log** — `0x0cc0`
+at every settle sample, `0x08c0` at the end. It is an activity flicker present on a working port,
+so it says nothing about Et2's failure. Caught by reading the control column in the same trace,
+which is the only reason it did not become another hypothesis.
+
+★ **What the trace does establish: Et1 is already linked at STEP5, before the settle loop starts.**
+It does not come up during STEP7; it arrives there up. That reframes the Et2 question into two
+alternatives that want completely different fixes:
+
+| observation on a GOOD Et2 boot | meaning |
+|---|---|
+| Et2 already up at STEP5 | the divergence happens **inside the replay**. The settle loop merely watches an outcome decided minutes earlier — which would explain why every register diff taken *after* settling has looked identical, including the 231-register three-column diff |
+| Et2 climbs during STEP7 | a **training-time race** |
+
+⚠ The STEP7-only trace cannot distinguish them, because **STEP5 logged Et1's register only.** Fixed
+in the build tree: STEP5 now logs Et2 too. One line, and it splits the question cleanly.

@@ -364,6 +364,20 @@ fi
 $BIN/fm6000_fullreplay "$CUR" $B ${PACE:-1500000} >> $LOG 2>&1; RC=$?
 [ "$CUR" != "$FWD" ] && rm -f /tmp/fwd.a /tmp/fwd.b
 say "  rc=$RC PIN=$(R 0x1c021) PORT_STATUS=$(R 0xe3800) pcsRx=$(R 0xe3826) sched=$(R 0x8062)"
+# ⚠ Et2 is logged HERE as well as in STEP7, and the distinction is the whole
+# question. Et1 arrives at STEP5 already linked (0x08c0/pcsRx=1) -- it does not
+# come up during the settle loop, it is up before the loop starts. So for Et2,
+# which links on only ~half of identical boots:
+#
+#   Et2 already up at STEP5   -> the divergence happens INSIDE the replay, and
+#                                the settle loop is watching an outcome decided
+#                                minutes earlier. That is why every register
+#                                diff taken after settling looked identical.
+#   Et2 climbs during STEP7   -> a training-time race.
+#
+# Those want completely different fixes and the STEP7-only trace cannot tell
+# them apart. One line closes it.
+say "        et2 PORT_STATUS=$(R 0xe4000) pcsRx=$(R 0xe4026) LANE_STATUS=$(R 0xe4038)"
 
 say "STEP6 SFP laser"
 V=$(S 0x5010); scdreg 0x5010 $(printf '0x%x' $(( 0x$V & ~0x40 ))) >/dev/null 2>&1
