@@ -659,3 +659,38 @@ step)` as the command, and command slices and data slices are **not** the same s
 Recorded because the arity test is still the right idea: done with the correct slice mapping it
 would separate `0x20` from `0xe0` on the bench, with no hardware at all. Someone should do it
 properly.
+
+### Correction, and why the arity test cannot be done statically after all
+
+**Two corrections to the section above, neither of which changes its conclusion.**
+
+**1. The CAM slice mapping was wrong for banks 17-19.** `MOD_COMMAND_RAM` banks 16..19 are all
+driven by **CAM slice 16** (`mod_decode.command_bank()`); slices 17..30 are *data* slices. My first
+enrichment run paired banks 17-19 with CAM slices 17-19, i.e. with data slices. Redone correctly the
+baseline moves from 51/302 to 52/302 and the result stands:
+
+```
+0x20   9/14   op1/0    p = 1.15e-04
+0x85   7/9    op4/5    p = 1.17e-04
+0xe0   7/9    op7/0    p = 1.17e-04
+```
+
+Only 3 steps were affected, but the check was worth running — the same class of index-pairing error
+is what `value_bank()`'s own comment records as having survived a passing `--verify` round-trip.
+
+**2. ⛔ "Someone should do the arity test properly" was wrong — it cannot be done statically.**
+
+I suggested counting each step's value operands and matching the documented value-byte counts. That
+is not merely a matter of fixing the index. Commands and values come from **different CAM slices**:
+commands from slices 0..16, values from data slices 17..31 via banks 0..14. Each slice contributes
+at most one entry *per frame*, so a command and the operands it consumes are associated
+**positionally in a per-frame stream**, not statically as a `(profile, step)` pair. There is no
+static mapping from a command word to "its" value words to count.
+
+It could still be done statically for a *specific* scenario — fix a key, work out which entry each
+slice yields, reconstruct both streams, and test whether `sum(length(cmd))` matches the value bytes
+available under each candidate split. That is a real experiment and a much larger one than it looked.
+
+**So A4's decisive test remains hardware**, exactly as `mod_decode.py` said. What has changed is its
+size: not "try candidate commands" across 47 bytes, but *"is `0x20` the TTL decrement and `0xe0` the
+checksum fixup, or the other way round?"* — one transit capture, two candidates.
