@@ -325,3 +325,43 @@ produce exactly that, and the suspicion was already pointing here.
 did not survive their own tests. The check is cheap and specific: log the full status byte per
 descriptor, not just bit 2, and see whether the short entries have EOP clear while the proper frames
 have it set. One capture, no reboot beyond the one it rides on.
+
+### ✅ CONFIRMED: punted frames span descriptors and the RX path ignores EOP
+
+alpha11's `rxdump` prints the whole descriptor status byte. The correlation is exact:
+
+```
+[0] st=04 eop=0 len=82   01 00 5e 00 00 05|80 a2 35 81 ca b4|07 01|03 ef 00 01 ff ff|08 00 ...
+[1] st=0c eop=1 len=8     tail
+[2] st=04 eop=0 len=82   33 33 00 00 00 05|80 a2 35 81 ca b4|07 01|03 ef 00 01 ff ff|86 dd ...
+[3] st=0c eop=1 len=20    tail -- contains 0a 65 65 f1 = 10.101.101.241, an OSPF router ID
+```
+
+**Heads carry `st=04` (DONE, EOP clear); tails carry `st=0c` (DONE + EOP set).** Entry [3] is
+demonstrably the tail of the OSPF hello in [2] — it holds a router ID from this network. The
+hypothesis is confirmed: **a frame is delivered across two descriptors and the code treats each as a
+complete frame**, because `fpdma.c` and `fm6000_rxdump.c` both gate on bit 2 alone and never read
+bit 3, which `fpdma.c`'s own TODO admits.
+
+Consequences for portd, which does the same:
+
+- the head descriptor is parsed as a whole frame and written to the TAP **truncated**
+- the tail fails the ethertype scan and is discarded as `n_rx_drop`
+
+⚠ **The split is not constant.** An earlier capture on alpha10 showed `len=90` frames whole,
+alongside short entries; this one shows a consistent 82-byte head. So it is a buffer-boundary or
+alignment effect, not a fixed MTU. That matters for D5: an RX path that truncates *some* frames
+depending on where they land would look exactly like an intermittent, load-dependent collapse.
+
+**This is now the strongest candidate for D5** ("ping collapses to 100% loss within ~3 minutes,
+still unroot-caused; suspicion is the portd DMA ring"). The suspicion was correct and the mechanism
+is now visible. ⚠ Still a candidate, not a proof: nobody has yet shown that fixing EOP handling
+fixes D5.
+
+### ⚠ A TAP's `carrier` is not a link signal
+
+`et2 carrier=1` on a boot where `PORT_STATUS = 0x0815` and the lane never locked. portd's TAP
+reports carrier once the interface is up, regardless of the physical port. **Any check that reads
+`/sys/class/net/etN/carrier` to decide whether the link is up is wrong** — `tools/transit-test.sh`
+did exactly that and would have run its test on a dark boot. Fixed to read `PORT_STATUS` at
+`0xe4000` instead.
