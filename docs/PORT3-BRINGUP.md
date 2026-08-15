@@ -2507,3 +2507,52 @@ physical one, and fits a parser-table cause far better.
 **Next test, one boot each:** does *any* non-default value at `PARSER_INIT_FIELDS(41,0,0)` kill Et2,
 or only `0x03ed`? Try `0x0002` in the high half. That separates "the GLORT value matters" from
 "writing this field at all matters", and it is the cheapest remaining discriminator.
+
+### ⚠ RETRACTION: "reverses cleanly" was over-claimed
+
+**2026-08-15.** A fifth boot broke the pattern. With the **unspliced** replay on flash
+(`71bffafe…`), the parser word confirmed at its default `00010103`, and `FULLSEQ DONE`, **Et2 came
+up dark** — `PORT_STATUS = 0x0815`, `LANE_STATUS = 0x0000`, stable across repeated samples.
+
+The five runs, with the variable I stopped controlling for:
+
+| # | preceding state | replay | Et2 |
+|---|---|---|---|
+| A | EOS → EdgeNOS | spliced | dark |
+| B | EOS → EdgeNOS | unspliced | **up** |
+| C | EOS → EdgeNOS | spliced | dark |
+| D | EOS → EdgeNOS | unspliced | **up** |
+| E | EdgeNOS ×3 partial → EdgeNOS | unspliced | **dark** |
+
+A-D remain a clean four-run alternation inside one transition type, and that is real evidence. But
+E was preceded by three **mid-FULLSEQ reboots** rather than a clean EOS boot, so it is a different
+experiment — and it shows Et2 can be dark with the splice absent.
+
+**What this means, stated properly:**
+
+- ⛔ **Not established:** that the spliced word *causes* Et2 to go dark. The correlation holds only
+  within EOS → EdgeNOS boots, and a second variable — what ran before — was uncontrolled.
+- ✅ **Still true:** the A-D alternation, and the live-chip diff showing the splice reaches no GLORT
+  structure. Neither depended on the causal claim.
+- ✅ **Strengthened:** the warm-inheritance hypothesis. Both Et2-up boots followed EOS with Et2
+  connected; the Et2-dark boot that had no splice followed EdgeNOS. That is the same pattern the
+  power-cycle result first suggested, and it now has a second, independent instance.
+
+**The commit "ROOT CAUSE -- one spliced replay word kills Et2" overstates its evidence.** The
+finding it should have claimed is narrower: *within a clean EOS → EdgeNOS boot, the splice and Et2's
+state alternated over four consecutive runs.*
+
+### Doing this properly
+
+Single observations are worthless here — this platform already fails roughly one boot in six, and
+this session saw three consecutive mid-sequence resets. Any claim about Et2 needs **repetition per
+arm and a stated count**, not one boot per condition:
+
+```
+arm 1   EOS -> EdgeNOS, unspliced      n boots, count Et2 up
+arm 2   EOS -> EdgeNOS, spliced        n boots, count Et2 up
+arm 3   EdgeNOS -> EdgeNOS, unspliced  n boots, count Et2 up
+```
+
+Arm 3 is the one that separates the splice from warm inheritance, and it is the arm that was never
+run. At ~7 minutes a boot this is an hour of wall-clock, which is the actual price of the answer.
