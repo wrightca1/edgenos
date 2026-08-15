@@ -247,3 +247,47 @@ written, whatever this arm reaches.** The defensible replacement is:
 > copper rate is zero or merely low is not established.
 
 C2 therefore stays on the checklist as real work, on evidence, rather than on a single boot.
+
+### FINAL: 0 of 7, Fisher p = 0.041
+
+```
+with SPICO      5 up / 10 boots
+without SPICO   0 up /  7 boots      one replay md5 throughout, 0 tainted, 0 failed
+                                     Et1 = 0x00000cc0 on all 17 boots
+
+Fisher exact, one-sided:  p = 0.0407
+```
+
+**Stripping the 30,002 IMEM transactions significantly reduces Et2's up-rate.** That is the claim,
+and it is now on evidence rather than on one boot.
+
+⚠ **It is still not "required", and 0-of-7 is not close to showing that:**
+
+| true no-SPICO rate | P(0 in 7) |
+|---:|---:|
+| 0% — required | 1.00 |
+| 5% | 0.70 |
+| 10% | 0.48 |
+| 20% | 0.21 |
+
+A true 10% rate produces this exact result about half the time. Distinguishing "zero" from "low"
+is not reachable by adding boots at any affordable count — it needs a mechanism, not a tally.
+
+### What to write in `fm6000-fullseq.sh`
+
+Replace the "*** SPICO IS REQUIRED for 10GBASE-CR ***" block with:
+
+> SPICO matters for 10GBASE-CR, measured: with the 30,002 IMEM transactions stripped Et2 did not
+> link on 7 consecutive boots, against an up-rate of 5/10 with the firmware present (Fisher exact,
+> one-sided, p = 0.041). Fibre is unaffected — Et1 came up on all 17. Whether the copper rate is
+> zero or merely low is NOT established, so do not read this as "impossible without SPICO".
+>
+> ⚠ Et2's link is intermittent at ~50% even with the firmware. Any future claim here needs n boots
+> per arm and a reported count; a single boot measures nothing. See docs/PORT3-BRINGUP.md.
+
+### Status of C1 / C2
+
+- **C1 "decide copper"** — decided, with a caveat. SPICO measurably matters for CR. "Zero
+  proprietary files" remains honest only for a fibre-only build.
+- **C2 "our own equaliser loop over SBus"** — stays on the checklist as real work. It is no longer
+  resting on a single boot, which is the change; the scope is unaltered.
