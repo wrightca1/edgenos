@@ -2710,3 +2710,64 @@ alternatives that want completely different fixes:
 
 ⚠ The STEP7-only trace cannot distinguish them, because **STEP5 logged Et1's register only.** Fixed
 in the build tree: STEP5 now logs Et2 too. One line, and it splits the question cleanly.
+
+## ★★★ 2026-08-15: the divergence is INSIDE the replay, not in the settle loop
+
+alpha10's per-boot trace, good boot against dark boot, bit 10 masked (it is noise — see the
+retraction above). **The only differences in the entire trace are Et2's own lines:**
+
+```
+dark   t=3s .. t=24s   et2 PORT_STATUS=00000815  pcsRx=0  LANE_STATUS=00000000
+good   t=3s .. t=24s   et2 PORT_STATUS=000008c0  pcsRx=1  LANE_STATUS=00000940
+```
+
+**Et2 is already fully locked at t=3s, the very first settle sample, and never changes.** It does
+not climb during STEP7 — it arrives there up, exactly as Et1 does. On a dark boot it is `0x0815`
+from the first sample and stays there.
+
+Everything else in both traces is byte-identical: same `rc=0`, same `PIN=00000208`, same `sched`,
+same memfill results, same Et1 behaviour. The replay ran the same way; only Et2's outcome differs.
+
+### Why this matters more than the coin itself
+
+**The outcome is decided inside STEP5 — the 299,803-write replay — before any settle sampling
+begins.** Two consequences:
+
+1. **Every register diff this project has taken on Et2 was taken after the fact.** The 231-register
+   three-column SerDes diff, the EPL comparisons, the `0x0b`/`0x0c`/`0x1f` analysis — all sampled a
+   chip whose fate was sealed minutes earlier. That is a sufficient explanation for why they kept
+   coming back clean, and it retires "the difference is not visible in any register" as a
+   conclusion: we were looking in the right place at the wrong time.
+2. **It is a race inside the replay**, not a training-time race in the settle loop. Ordering and
+   timing among 300k writes, not SerDes convergence.
+
+⚠ The earliest sample is t=3s *after* STEP6, so this excludes the settle loop but does not pin the
+moment inside the replay. `fm6000-fullseq.sh` now logs Et2 at STEP5 as well; the next image narrows
+it further.
+
+## ⛔ Transit traffic is blocked on portd's RX demux, not on forwarding
+
+With Et2 up, both netdevs came up correctly for the first time (`et1 10.101.101.26/29`,
+`et2 10.101.101.34/29`, both `carrier=1`, fibd programmed 14 routes). The transit test still
+returned 100% loss, and the reason is **not** the dataplane:
+
+```
+peer   10.101.101.34 lladdr 44:4c:a8:31:5d:ab STALE    peer LEARNED our MAC
+peer   swp7 rx 1026 packets                            traffic really arrives
+switch 10.101.101.33 FAILED (6 probes)                 we never see the replies
+switch et1 rx=51 tx=32     et2 rx=0 tx=13
+```
+
+**TX works on both ports** — Et2 transmitted 13 frames and the peer learned our MAC from them.
+**RX only ever reaches et1**, which is precisely the limitation `fm6000_portd.c` documents in its
+own header: injection stamps each port's egress GLORT in tag w1, but demuxing a *punted* frame back
+to a TAP needs the source GLORT out of the frame's tag, and **which halfword carries it is
+unconfirmed**. `PORTD_SRCWORD` defaults to 2; that default is either wrong or the demux is inert.
+
+**So A4 and B1 are not blocked on topology any more, and not on Et2 either — they are blocked on
+one unconfirmed field.** The experiment is a single boot: bring up with `PORTD_DEBUG=1`, which
+prints the tag of every punted frame, and compare the tags of frames arriving from Et1 against those
+from Et2. The halfword that differs is the answer.
+
+⚠ portd cannot be restarted without a chip reset, so this costs a boot — and Et2 is up on only half
+of them. Budget two.
