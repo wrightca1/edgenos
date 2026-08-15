@@ -280,3 +280,48 @@ and it is not the dataplane watchdog: `fm6000_wdog` is not started at boot (chec
 Do not diagnose this by boot-cycling. The console is the instrument — the kernel carries
 `nmi_watchdog=panic` and `reboot=p`, so a wedge reboots the box and the reason is printed on
 `ttyUSB2` and nowhere else. Watch it while the sequence runs.
+
+## 2026-08-15: the punt ring delivers entries that are not frames — SOP/EOP is unhandled
+
+The `fm6000_rxdump` capture taken to settle the F64 tag question showed something else worth having:
+**3 of 7 ring entries are not frames.**
+
+```
+[0] len=90  33 33 00 00 00 05|80 a2 35 81 ca b4|07 01|03 ef 00 01 ff ff|86 dd   proper
+[1] len=12  0a 65 65 f1 00 00 00 00 48 5d 93 f6                                 12 bytes
+[2] len=90  01 00 5e 00 00 05|80 a2 35 81 ca b4|07 01|03 ef 00 01 ff ff|08 00   proper
+[3] len=82  ... proper
+[4] len=20  01 00 00 13 00 0a 00 28 0a 65 65 f1 ...                             20 bytes
+[5] len=71  ... proper
+[6] len=19  0a 02 01 00 00 00 28 0a 65 65 19 00 ...                             19 bytes
+```
+
+The short entries carry recognisable data from this network — `0a 65 65 f1` is `10.101.101.241`,
+`0a 65 65 19` is `10.101.101.25`, the peer's swp6 address — so they are real bytes, not noise, but
+they are not Ethernet frames: no plausible DMAC/SMAC/ethertype structure.
+
+**The receive path never looks at SOP/EOP, and says so.** `fpdma.c`:
+
+```c
+/* HW sets status bit2 (FM6000_DESC_DONE) when it fills a descriptor
+ * (same done-bit as TX, per fpr_reclaim). TODO(live-trace): SOP/EOP/error */
+if (!(status & FM6000_DESC_DONE))
+```
+
+`fm6000_rxdump.c` is the same: `if(!(d[0]&0x04)) continue;`. Yet the descriptor format documents the
+bit — `FM6000_DESC_HANDOFF 0x09` is commented "READY(0)+EOP(3)" — so **bit 3 is EOP and a frame can
+span descriptors**. Every completed descriptor is currently treated as a whole frame.
+
+⚠ **Stated as a hypothesis, not a finding:** if frames can span descriptors, the short entries are
+continuation buffers and the receive path is delivering fragments as frames while dropping the rest.
+portd counts them as `n_rx_drop` and discards them silently, so nothing has ever surfaced it.
+
+**This is worth testing against D5.** The checklist's oldest unexplained defect is *"ping collapses
+to 100% loss within ~3 minutes, on EOS's own parser and the stock replay too, still unroot-caused;
+suspicion is the portd DMA ring."* A receive path that mis-assembles multi-descriptor frames would
+produce exactly that, and the suspicion was already pointing here.
+
+⚠ Do not treat that connection as established — today has produced several confident chains that
+did not survive their own tests. The check is cheap and specific: log the full status byte per
+descriptor, not just bit 2, and see whether the short entries have EOP clear while the proper frames
+have it set. One capture, no reboot beyond the one it rides on.
