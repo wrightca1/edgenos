@@ -153,3 +153,40 @@ stripped image — or the arm changes for other reasons too.
 C2 is *"if copper needs it — our own equaliser loop over SBus. Large, unscoped."* If SPICO turns out
 not to be required for CR, **C2 disappears** and "zero proprietary files" stops being a fibre-only
 claim. That is the single largest piece of remaining work riding on a conclusion drawn from one boot.
+
+### ⚠ Correction to this test's own framing, written before the result
+
+Above I wrote that 0 of 5 would "support 'required' at p≈0.016". **That is sloppy and I am fixing it
+before the answer arrives rather than after.**
+
+The p-value tests the null hypothesis *"stripping changes nothing"* — i.e. the measured ~50% rate.
+Rejecting that null establishes only that stripping **reduces** Et2's up-rate. It says nothing about
+whether the reduced rate is zero, and "required" means zero. The alternatives are not just
+{0%, 50%}:
+
+| true no-SPICO rate | P(0 up in 5) |
+|---|---:|
+| 0% — genuinely required | 1.00 |
+| 10% | 0.59 |
+| 20% | 0.33 |
+| 33% | 0.13 |
+| 50% — unchanged | 0.03 |
+
+**A true 20% rate produces 0-of-5 a third of the time.** So this test cannot separate "required"
+from "reduced but possible", and was never going to.
+
+**What each outcome licenses:**
+
+- **Any Et2 success** → decisive. "Required" is refuted, C2 disappears. Falsification needs one
+  observation and does not care about the base rate at all.
+- **0 of 5** → *"stripping SPICO significantly reduces Et2's up-rate (p ≈ 0.03)"*. Enough to keep C2
+  on the list as real work. **Not** enough to write "SPICO IS REQUIRED" back into
+  `fm6000-fullseq.sh` as settled — that overclaim is what started this thread, and restating it with
+  a p-value attached would be worse than the original, not better.
+
+Separating "required" from "reduced" would need ~15 boots at a true zero to reach p<0.001. The
+cheaper route is not more boots at all: it is catching *why* a good boot differs from a bad one
+inside one boot, which is what the Et2 sampling now added to `fm6000-fullseq.sh` STEP7 is for.
+
+**The general rule this hands the project: falsification costs one boot here, confirmation costs a
+day. Design experiments so a single observation can kill them.**
