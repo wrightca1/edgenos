@@ -26,8 +26,13 @@ edge 'for i in et1 et2; do
         [ -e /sys/class/net/$i ] || { echo "  $i MISSING"; continue; }
         echo "  $i carrier=$(cat /sys/class/net/$i/carrier 2>/dev/null) $(ip -4 addr show $i | grep -o "inet [0-9./]*")"
       done'
-if ! edge 'cat /sys/class/net/et2/carrier 2>/dev/null' | grep -q 1; then
-    echo "⛔ et2 has no carrier -- Et2 does not come up every boot. Reboot and retry."
+# ⚠ NOT the TAP's carrier. portd's TAP reports carrier=1 as soon as the
+# interface is up, whatever the physical lane is doing -- measured 2026-08-15 on
+# a boot where Et2's PORT_STATUS was 0x0815 and the lane never locked. Read the
+# MAC's own PORT_STATUS instead: RxLinkUp is bit 6.
+if ! edge '/mnt/flash/fmdump 0xe4000 1' | grep -qE '0(8|a|c|e)c0'; then
+    echo "⛔ Et2 PORT_STATUS shows no link -- Et2 does not come up every boot."
+    echo "   (a TAP carrier of 1 means nothing here; this reads the MAC.)"
     exit 1
 fi
 
