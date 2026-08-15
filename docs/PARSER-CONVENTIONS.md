@@ -782,3 +782,27 @@ evidence against that reading, and it is untested either way.
 
 **Do not build on "there are 64 halfword channels" until this is settled.** It follows from the
 6-bit `Dest` field, and it is the assumption that makes the upper half mysterious in the first place.
+
+### ✅ `Halfword0Dest` IS a halfword index — the 64-channel space is real
+
+The caveat above (that `Dest` might be a *byte* position, collapsing the space to 32 halfwords and
+dissolving the upper-half puzzle) is **refuted by the shipped configuration**. Over EOS's parser
+actions:
+
+```
+Halfword0Dest   166 writes   81 odd / 85 even
+Halfword1Dest   159 writes  119 odd / 40 even
+```
+
+A 16-bit halfword landing at a *byte* position would be aligned, so `Dest` would be even. Roughly
+half of `Halfword0Dest` and three quarters of `Halfword1Dest` are **odd**. Unaligned 16-bit writes
+at arbitrary odd byte offsets is not a plausible reading; arbitrary indices into a 64-entry halfword
+space is.
+
+Also checked, in case the two halfwords were the halves of one 32-bit field: the delta
+`Halfword1Dest - Halfword0Dest` is scattered (`+14` x24, `+1` x19, `-1` x16, `+7`, `+3`, `+2`,
+`+11`, `-15`...), so the two halfwords of an action generally go to **unrelated channels**.
+
+**Conclusion: there are 64 halfword channels, the FFU and MOD can each address only the lower 32,
+EOS's parser writes as high as 39, and no consumer of channels 32-63 has been identified.** That is
+a real gap, not an artefact of a bad assumption — which is what it needed to be checked for.
