@@ -377,3 +377,24 @@ A rebuild is the fix and the build tree is ready for one.
 claim of the form "X makes it work" needs n boots per arm and a reported count. Several conclusions
 in this file and in `PORT3-BRINGUP.md` were single observations and should be re-taken before they
 are built on.
+
+### C1 / C2 update — the copper question is being measured, not argued
+
+C1 reads *"Et2 is intermittent with **and** without SPICO. Until settled, 'zero proprietary files'
+is honest only for a fibre-only build."* That sentence contains the answer and misreads it: the
+intermittency is a property of **the boot**, not of copper. Et2 comes up on **5 of 10 identical
+boots** with the firmware fully present (`PORT3-BRINGUP.md`).
+
+So the claim C2 depends on — *SPICO is required for 10GBASE-CR* — rests on one boot per condition on
+a coin, and does not stand as evidence. **In progress:** five boots with exactly the 30,002 IMEM
+transactions stripped and nothing else (`fwd4-nospico.txt`, md5 `cac05757…`; the 477 SPICO
+control/interrupt commands are preserved, so the micro-controller is still reset, enabled and told
+to run — it simply has no firmware).
+
+- **any boot brings Et2 up** → "required" is refuted outright, and **C2 disappears entirely**.
+  "Zero proprietary files" stops being a fibre-only claim.
+- **0 of 5** → "required" is supported at p ≈ 0.03, and C2 stays on the list as real work.
+
+⚠ Note for whoever reads this next: **do not re-run this as a rate comparison.** Separating two
+arms near 50% needs ~32 boots each. This test is affordable only because the hypothesis predicts a
+*zero*, and a predicted zero is cheap to falsify. Design future copper experiments the same way.
