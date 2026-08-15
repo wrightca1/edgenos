@@ -220,6 +220,28 @@ else
     echo "--- FM6000 dataplane auto bring-up SKIPPED (no replay set on flash) ---"
 fi
 
+# --- dataplane watchdog (checklist E0a) -------------------------------------
+# The failure mode nothing else covers is "Linux healthy, dataplane dead": the
+# kernel's nmi_watchdog=panic handles a CPU lockup, and there is no /dev/watchdog
+# on this board, so an ASIC wedge with a live CPU used to sit there forever.
+#
+# It was written and hardware-validated on 2026-08-11 and then never started
+# automatically, which made it useless exactly when it was needed -- 2026-08-15
+# saw three consecutive mid-FULLSEQ resets with nothing watching. Start it here.
+#
+# Ping is deliberately NOT a signal (D5 makes it fail on a healthy box); it
+# watches PIN_STRAP and the kernel route count. /mnt/flash/wdog.off disables it
+# and the binary honours that itself -- create that file before any experiment
+# that deliberately downs the dataplane.
+if [ -n "$FWD" ] && [ -x /usr/bin/fm6000_wdog ]; then
+    if [ -f /mnt/flash/wdog.off ]; then
+        echo "--- dataplane watchdog DISABLED (/mnt/flash/wdog.off present) ---"
+    else
+        setsid /usr/bin/fm6000_wdog >/dev/null 2>&1 </dev/null &
+        echo "--- dataplane watchdog started (pid $!, log /mnt/flash/wdog.log) ---"
+    fi
+fi
+
 # --- reboot staging diagnostic (answers the netboot question) ---
 echo "--- reboot: kexec pre-staged by Aboot? ---"
 echo "    /sys/kernel/kexec_loaded = $(cat /sys/kernel/kexec_loaded 2>/dev/null) (1 = Aboot staged one; 0 = we must stage)"

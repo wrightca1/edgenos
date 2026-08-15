@@ -34,22 +34,46 @@ ip link set lo up
 ip addr add 127.0.0.1/8 dev lo 2>/dev/null
 ip addr add 10.101.255.26/32 dev lo 2>/dev/null
 
-say "3. port netdev et1 (PORTD_TXFCS=1: the ASIC expects an FCS placeholder on inject)"
-ip link del et1 2>/dev/null
+say "3. port netdevs (PORTD_TXFCS=1: the ASIC expects an FCS placeholder on inject)"
 # portd drives every port from ONE process -- they share the punt DMA ring, so a
-# second instance is not an option. PORTD_PORTS overrides the port list; the
-# default is et1 alone, exactly as before. To add Et3 once its lane links:
-#     PORTD_PORTS="et1:03ef et3:03ed -t 0" edgenos-up.sh
-# and add the matching `ip link/addr` lines below for et3.
-PORTD_TXFCS=1 setsid /usr/bin/fm6000_portd ${PORTD_PORTS:-et1 03ef x 0} \
+# second instance is not an option.
+#
+# PORTS is the table: <ifname> <glort> <cidr>. Both front ports are brought up by
+# default. Et1 and Et2 land on two DIFFERENT /29s of the same AS5610 peer, which
+# is what makes a frame in one and out the other a genuine TRANSIT through this
+# switch -- the prerequisite checklist items A4 and B1 are blocked on. Et3 is not
+# here because its lane has never linked under EdgeNOS; add it as
+# "et3 03ed 10.99.99.1/24" once it does.
+#
+# ⚠ Et2 does NOT come up every boot -- measured, not suspected. Treat a missing
+# et2 carrier as normal rather than as a fault, and never conclude anything from
+# a single boot. See docs/PORT3-BRINGUP.md.
+MAC="${EDGENOS_MAC:-44:4c:a8:31:5d:ab}"     # the chip's router MAC; every routed
+                                            # port carries it, a second one would
+                                            # not be matched for routing
+PORTS="${EDGENOS_PORTS:-et1 03ef 10.101.101.26/29
+et2 03ee 10.101.101.34/29}"
+
+echo "$PORTS" | while read -r i g c; do [ -n "${i:-}" ] && ip link del "$i" 2>/dev/null; done
+for_spec=$(echo "$PORTS" | while read -r i g c; do [ -n "${i:-}" ] && printf '%s:%s:%s ' "$i" "$g" "$MAC"; done)
+say "   portd: $for_spec-t 0"
+PORTD_TXFCS=1 setsid /usr/bin/fm6000_portd $for_spec -t 0 \
     >/tmp/portd.log 2>&1 </dev/null &
 sleep 3
-ip link set et1 down 2>/dev/null
-ip link set et1 address 44:4c:a8:31:5d:ab
-ip link set et1 mtu 1600                 # peer runs 1600 + MTU-mismatch detection
-ip link set et1 up
-ip addr add 10.101.101.26/29 dev et1 2>/dev/null
-say "   et1: $(ip -4 addr show et1 | grep -o 'inet [0-9./]*') mtu=$(cat /sys/class/net/et1/mtu)"
+
+echo "$PORTS" | while read -r i g c; do
+    [ -n "${i:-}" ] || continue
+    if [ ! -e "/sys/class/net/$i" ]; then
+        echo "[up]    ⛔ $i: no netdev -- portd did not create it" | tee -a $LOG
+        continue
+    fi
+    ip link set "$i" down 2>/dev/null
+    ip link set "$i" address "$MAC"
+    ip link set "$i" mtu 1600            # peer runs 1600 + MTU-mismatch detection
+    ip link set "$i" up
+    ip addr add "$c" dev "$i" 2>/dev/null
+    echo "[up]    $i: $(ip -4 addr show "$i" | grep -o 'inet [0-9./]*') mtu=$(cat /sys/class/net/$i/mtu) carrier=$(cat /sys/class/net/$i/carrier 2>/dev/null)" | tee -a $LOG
+done
 
 say "4. control plane (zebra + ospfd)"
 setsid /usr/bin/zebra -d -f /etc/quagga/zebra.conf </dev/null >/tmp/zebra.log 2>&1; sleep 3
