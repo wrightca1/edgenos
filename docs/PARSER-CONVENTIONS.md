@@ -747,3 +747,38 @@ So, whichever way the mapping goes:
 `DataSelect`, tops out at 31) can address.** Something else consumes the upper channels, or they are
 written for an effect other than being selected. Finding that consumer is likely to name the upper
 channels for free — the same way naming a channel once named it everywhere for `L3_SIP`/`L4_SRC`.
+
+### ⛔ The MAPPER is not the consumer of the upper channels
+
+Searched the header for every 5- and 6-bit selector-shaped field, looking for a block whose selector
+is wide enough to reach halfword channels 32-63. One candidate stood out —
+`MAPPER_SCENARIO_FLAGS_CFG`, sixteen 6-bit `FlagN_MuxSelect` fields — and EOS programs three of them
+above 32:
+
+```
+Flag0..15 MuxSelect = 0 16 4 0 28 3 14 27 8 9 13 40 19 42 43 2
+values >= 32: 40, 42, 43
+```
+
+Encouraging for about a minute, and then wrong: **that is a different bus.** `FlagN_MuxSelect`
+selects a *flag* source, not a byte of halfword-channel data — the parser's own `SetFlags` field is
+38 bits wide, a flag space, entirely separate from the 16-bit data channels that `Halfword0Dest` and
+`Halfword1Dest` write. Selecting flag 40 says nothing about halfword channel 40.
+
+**So the open question survives the search, and is sharper for it:**
+
+- The FFU reaches channels **0-31 only** — `ByteMux` is a 6-bit byte address, and `Top4Mux`'s 5 bits
+  likewise cover 32 halfwords. Both halves of the FFU (`FFU_SLICE_SCENARIO_CFG` and
+  `FFU_BST_SCENARIO_CFG1`) have the identical field widths.
+- MOD reaches **0-31 only** (5-bit `DataSelect`).
+- EOS's parser writes up to **channel 39**.
+- No block found in the header has a selector that reads halfword channels 32-63.
+
+Either those channels feed a consumer whose selector is not shaped like the ones searched for, or
+the destination space is not what it appears — e.g. if `Halfword0Dest` is a *byte* position rather
+than a halfword index, "channel 39" would be byte 39, halfword 19, and everything fits inside 32
+halfwords with no upper half at all. `Halfword0Rot` (a rotate, at halfword granularity) is weak
+evidence against that reading, and it is untested either way.
+
+**Do not build on "there are 64 halfword channels" until this is settled.** It follows from the
+6-bit `Dest` field, and it is the assumption that makes the upper half mysterious in the first place.
