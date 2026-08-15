@@ -50,6 +50,19 @@ struct fpdma {
     struct fpdma_backing  back;
     struct fpdma_ring     tx;
     struct fpdma_ring     rx;
+
+    /* Multi-descriptor RX reassembly. The hardware splits a frame across
+     * descriptors and marks the last one with EOP (status bit 3); the poll loop
+     * used to gate on DONE alone and hand each descriptor to the callback as if
+     * it were a whole frame. Measured 2026-08-15 with rxdump printing the full
+     * status byte: heads st=04 (EOP clear, 82 bytes), tails st=0c (EOP set,
+     * 8-20 bytes), and the tail of an OSPF hello carried a router ID from this
+     * network -- so the head was being delivered TRUNCATED and the tail dropped.
+     * FM6000_RX_MAX_LEN is 0x7ff and its own comment calls it "rx_skb_reass
+     * max", so this was designed in and never written. */
+    uint8_t               rx_reass[FM6000_RX_MAX_LEN];
+    uint16_t              rx_reass_len;
+    uint8_t               rx_reass_drop;   /* overflowed: discard through EOP */
 };
 
 /* Allocate + program both rings and enable the engine. tx_sz/rx_sz are

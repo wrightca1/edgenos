@@ -267,16 +267,39 @@ int fpdma_rx_poll(struct fpdma *fp, int budget,
         uint16_t len;
 
         /* HW sets status bit2 (FM6000_DESC_DONE) when it fills a descriptor
-         * (same done-bit as TX, per fpr_reclaim). TODO(live-trace): SOP/EOP/error
-         * bits + multi-descriptor reassembly (rx_skb_reass, max 0x7ff). */
+         * (same done-bit as TX, per fpr_reclaim), and bit3 (EOP) on the LAST
+         * descriptor of a frame -- FM6000_DESC_HANDOFF is documented
+         * "READY(0)+EOP(3)". Frames really do span descriptors here; see the
+         * note on rx_reass in fpdma.h for the capture that proves it. */
         if (!(status & FM6000_DESC_DONE))
             break;                       /* still owned by HW / empty          */
 
         len = *(volatile uint16_t *)(d + FM6000_DESC_LEN);
         if (len > FM6000_RX_MAX_LEN)
             len = FM6000_RX_MAX_LEN;
-        if (cb)
-            cb(cb_ctx, r->buf_va[r->tail & r->mask], len);
+
+        if ((status & FM6000_DESC_EOP) && fp->rx_reass_len == 0 &&
+            !fp->rx_reass_drop) {
+            /* Single-descriptor frame: the common case, and the only one the
+             * old code handled correctly. Deliver in place, no copy. */
+            if (cb)
+                cb(cb_ctx, r->buf_va[r->tail & r->mask], len);
+        } else {
+            if (!fp->rx_reass_drop &&
+                (uint32_t)fp->rx_reass_len + len <= FM6000_RX_MAX_LEN) {
+                memcpy(fp->rx_reass + fp->rx_reass_len,
+                       r->buf_va[r->tail & r->mask], len);
+                fp->rx_reass_len = (uint16_t)(fp->rx_reass_len + len);
+            } else {
+                fp->rx_reass_drop = 1;   /* oversize: discard through EOP */
+            }
+            if (status & FM6000_DESC_EOP) {
+                if (cb && !fp->rx_reass_drop && fp->rx_reass_len)
+                    cb(cb_ctx, fp->rx_reass, fp->rx_reass_len);
+                fp->rx_reass_len  = 0;
+                fp->rx_reass_drop = 0;
+            }
+        }
 
         /* Recycle: hand the descriptor back to HW (RX = READY only, EOP is HW-set). */
         desc_write(d, FM6000_DESC_RX_READY, (uint16_t)r->buf_len,

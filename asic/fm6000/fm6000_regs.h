@@ -339,6 +339,10 @@
 
 /* Descriptor field byte offsets within the 32-byte stride. */
 #define FM6000_DESC_STATUS      0x00u      /* u8 ownership/status              */
+#define FM6000_DESC_EOP         0x08u      /* status bit3 = last descriptor of a
+                                            * frame. HANDOFF (0x09) is documented
+                                            * "READY(0)+EOP(3)"; confirmed live
+                                            * 2026-08-15, heads st=04 tails st=0c */
 #define FM6000_DESC_DONE        0x04u      /* status bit2 = HW completed the BD
                                             * (vendor fpr_reclaim: testb $0x4;
                                             * 0x09 handoff -> 0x0D on done)     */
