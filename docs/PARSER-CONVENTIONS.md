@@ -589,3 +589,73 @@ that alone did not produce egress on an unconfigured port.
 e3–e26 dispatch the untagged ethertypes at the same state: `0x0800` IPv4, `0x86dd` IPv6, `0x0806`
 ARP, `0x8100`/`0x88a8` VLAN (with tag-depth variants), `0x8808` PAUSE, `0x88f7` PTP, `0x8906` FCoE,
 `0x8926`, plus a `0xbeef` and `0xffff` case in other states.
+
+## 2026-08-15: MOD command split — hypothesis A survives a discriminating test, and two opcodes get named
+
+Static analysis only, against EOS's own 302 valid MOD steps in the replay. No hardware; the box was
+busy measuring something else. `mod_decode.py` records the split as "a hypothesis with evidence, not
+a settled fact" — this narrows it.
+
+### The rival reading is now the worse one
+
+The datasheet says *every command carries a flag for whether it contributes to the checksum
+accumulator*, which makes a flag bit inside the Command byte plausible and gives a serious
+alternative to the working hypothesis:
+
+```
+A   opcode[7:5] : operand[4:0]                (mod_decode.py's hypothesis)
+B   csum[7] : opcode[6:4] : operand[3:0]      (a flag bit, 4-bit operand = length 1..16)
+```
+
+B is attractive: 8 of EOS's 47 distinct bytes appear as both `x` and `x|0x80`, and 4 operand bits
+match INSERT/DELETE/REPLACE's documented 1..16 exactly. It still loses.
+
+Grouping the 47 bytes both ways, **A partitions them with no parity exceptions** — opcode 2 is 13
+of 13 odd (even lengths, as the halfword-channel argument requires), opcodes 6 and 7 all even. **B
+needs two exceptions**, and they are exactly `0xc0` and `0xd0` — the two bytes A assigns to a
+different opcode entirely. An explanation that needs exceptions precisely where its rival has none
+is the weaker explanation.
+
+### Two opcodes named, by route-enrichment
+
+51 of the 302 steps have a CAM that *requires* `MOD_FLAGS[14]` — the route flag, absolute key bit 38.
+That is a 16.9% baseline, so a command that is route-specific will be enriched against it. Exact
+binomial tail, commands with n≥4:
+
+| cmd | route/total | under A | p |
+|---|---|---|---|
+| `0x20` | 9/14 | op1, operand 0 | 9.8e-05 |
+| `0x85` | 7/9 | op4, operand 5 | 1.0e-04 |
+| `0xe0` | 7/9 | op7, operand 0 | 1.0e-04 |
+| `0xd0` | 6/16 | op6, operand 16 | 4.0e-02 |
+
+`0x85` falling out as route-bound is a **free consistency check**: `mod_decode.py` reached the same
+conclusion from the CAM by hand, and it reappears here from a test that knew nothing about it.
+
+The new result is the other two. **`0x20` and `0xe0` are strongly route-bound and both carry
+operand 0** — no length. Routing requires exactly two edits that have no length operand: `DECREMENT`
+(the TTL, 0 value bytes) and `CHECKSUM` (the ones-complement fixup, 2 value bytes). So:
+
+> **`{0x20, 0xe0}` = `{DECREMENT, CHECKSUM}`, i.e. opcodes 1 and 7.**
+
+⚠ **Which is which is NOT established.** Both are operand 0 and both are route-bound; nothing here
+separates them.
+
+### What this does to A4
+
+A4's hardware test was "program one MOD step with a candidate command and look at what comes out",
+over a space of 47 observed bytes. **It is now a two-way question**: program `0x20`, program `0xe0`,
+and see which decrements the TTL and which repairs the checksum. That is one capture on the transit
+rig, and `tools/transit-test.sh` already produces exactly the byte-level egress view it needs.
+
+### ⛔ One test I ran and had to throw away
+
+I tried to settle it by arity — count each step's value operands with a non-zero Type and match
+against the documented value-byte counts. It produced mixed counts (0, 2, 3, 4) for nearly every
+command, which is not a signal but a mistake: I indexed `MOD_VALUE_RAM` at the same `(profile,
+step)` as the command, and command slices and data slices are **not** the same slices —
+`mod_decode.py` says so in its own header, and I did not read it before writing the test.
+
+Recorded because the arity test is still the right idea: done with the correct slice mapping it
+would separate `0x20` from `0xe0` on the bench, with no hardware at all. Someone should do it
+properly.
