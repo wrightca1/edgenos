@@ -204,3 +204,59 @@ starts=sorted(a for a in mc if 0x140000<=a<0x144000 and (a-1) not in mc)
 print(len(starts))            # 413
 EOF
 ```
+
+## 2026-08-15: A2's blocker decoded — the three action tables, and the CPU port
+
+`FEATURE-COMPLETE-CHECKLIST.md` A2: *"Format fully known; blocked on a second decode, not on
+encoding. Its actions index `DMT_PROFILE`, `SetCpuCode` and `SetMirror` — tables configured
+elsewhere, so authoring 'trap to CPU' means knowing which CPU-code entry that is."*
+
+**All three tables are fully specified in `fm6000_api_regs_int.h`.** The block was never a decode
+problem; nobody had looked. Same lesson as the six wrong bit-order inferences, and it cost longer.
+
+```
+L2AR_ACTION_DMT      0x146000   3 banks x 32 entries x 3 words
+                     ACTION_DROP_CODE [7:0]   CmdA [11:8]   CmdB [14:12]
+                     ACTION_DMASK   [95:20]   -- 76-bit destination port mask
+L2AR_ACTION_CPU_CODE 0x146200   128 entries, each four 8-bit codes CPU_CODE_0..3
+L2AR_ACTION_MIRROR   0x146400   4 banks x 128, 4 bits each of
+                     MIR_RX / MIR_TX / MIR_TRUNC / MIR_MAP_PRI
+```
+
+### ★ Port 0 is the CPU port — two independent signatures
+
+Decoding EOS's populated DMT entries, `CmdA` is the verb and `ACTION_DMASK` the destination:
+
+| CmdA | entries | DMASK port count | reading |
+|---|---|---|---|
+| 0 | 2 | 76 | forward, all ports |
+| 1 | 17 | 0 or 1 | **drop** — no destination, `ACTION_DROP_CODE` carries the reason |
+| 2 | 7 | 21 / 75 / 76 | **flood** |
+| 3 | 6 | exactly 1, always **bit 0** | **redirect to a single port** |
+
+Two things identify that port without needing a datasheet:
+
+1. **Every flood mask that is not all-76 is missing exactly bit 0** — the four 75-port masks exclude
+   `[0]` and nothing else. The port you exclude when flooding is the CPU.
+2. **Every `CmdA=3` entry targets bit 0 alone**, and their `ACTION_DROP_CODE` values (`0x82`, `0x85`,
+   `0x8a`) overlap the contents of `L2AR_ACTION_CPU_CODE`, while `CmdA=1` drop entries carry
+   low codes (`0x03`, `0x06`, `0x10`-`0x1b`).
+
+Consistent with the port numbering established independently from `PARSER_INIT_FIELDS`, where the
+three cabled front ports are **20 (Et2), 40 (Et1), 41 (Et3)** — none of them port 0.
+
+### What this unblocks
+
+**"Trap to CPU" is a DMT entry with `CmdA = 3` and `ACTION_DMASK = 1<<0`**, with the CPU code in
+`ACTION_DROP_CODE` of the same entry. "Drop" is `CmdA = 1` with an empty mask and a reason code.
+That is exactly what A2 said it needed in order to author actions, so **A2 is no longer blocked on
+the second decode** — it is down to writing the encoder.
+
+⚠ **Not established.** The same 8-bit field is called `ACTION_DROP_CODE` and appears to serve as a
+CPU code on `CmdA=3` entries; that dual role is inferred from the value overlap, not documented.
+`CmdB` is `0` in every populated entry, so its meaning is untested. And the 21-port mask in bank 1
+excludes all three known front ports, so it is some other port group — do not assume it is a VLAN
+member list without checking.
+
+The cheap confirmation for the CPU-port claim is live, not static: program a `CmdA=3` entry and see
+whether the frame arrives at `portd`.
