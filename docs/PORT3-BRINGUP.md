@@ -2395,3 +2395,73 @@ demonstrably worked under EdgeNOS once.
 That last point reopens the question of why Et2 ever worked. The surviving hypothesis is **warm-boot
 inheritance**: EOS left the SerDes receiver configured, our replay never re-established it, and the
 first genuinely cold start exposed a gap that had always been there.
+
+### ★★★ ROOT CAUSE: Et2 was never damaged — one spliced replay word takes it down
+
+**2026-08-15.** Et2's failure is caused by the **Et3 SGLORT splice**, and it reverses cleanly.
+Same image, same transition (EOS → EdgeNOS), same far end, one variable:
+
+| `fwd4.txt` | Et2 `PORT_STATUS` | `LANE_STATUS` | `PCS_10GBASER_RX_STATUS` |
+|---|---|---|---|
+| `fwd4-preport3` — unspliced | **`0x08c0`** | `0x0940` | **1** |
+| `fwd4-splicedGLORT` — one word | `0x0815` | `0x0000` | 0 |
+
+The whole difference is line 312646 of 373,345:
+
+```
+001082a4   00010103   ->   03ed0103
+```
+
+Ran in both directions, and the reversal was run *after* the peer bounce, so the `swp7` bounce is
+eliminated as the cause — Et2 broke again with `swp7` untouched.
+
+**This retracts "⚠ Et2 regressed, and the splice is not the cause".** That conclusion rested on Et2
+staying at `0x0815` across cold boots — but every one of those cold boots ran the *spliced* replay.
+It was circular, and the write test on Et2's SerDes was blamed for something it did not do. Et2's
+hardware has been fine throughout, which is also why it kept linking under EOS.
+
+### The address, decoded
+
+`0x1082a4` = `PARSER_BASE`(`0x100000`) + `0x082a4`, and `PARSER_INIT_FIELDS` starts at `0x08200`
+with a stride of 4, so this is **`PARSER_INIT_FIELDS(41, 0, 0)`**.
+
+Dumping the table and looking for real GLORTs settles the port numbering, which several documents
+had guessed at:
+
+```
+port 20   03ee0102     Et2
+port 40   03ef0101     Et1
+port 41   03ed0103     Et3      <- the splice, in Et3's OWN slot
+```
+
+⚠ So this is **not** an index error. The splice went where it was meant to go. Writing Et3's GLORT
+into Et3's parser slot takes down **Et2's receiver** — a port whose slot was not touched.
+
+Unused ports carry `0001` in the high half and an odd low byte (`0109`, `010b`, `010d`, `010f` for
+ports 36-39); the three cabled ports carry a real GLORT and low bytes `01`/`02`/`03`.
+
+### Why this matters beyond Et2
+
+`fm6000_tbl3init.c` records that **`PARSER_INIT_FIELDS` was tried as a generated table and backed
+out**: *"970 writes. Passed its first boot 7/8 rounds clean, then a 3-boot soak gave 2 clean and 1
+at 90-100% loss."* That was filed as a reliability regression — variance.
+
+It probably was not variance. A single word of this table deterministically decides whether a port
+achieves receive lock, so a generator that reorders or drops writes here would produce exactly that
+pattern: mostly clean, occasionally a port down and total loss. **`PARSER_INIT_FIELDS` is
+load-bearing for link bring-up, not just for parsing.**
+
+The mechanism is still unknown, and it is genuinely surprising: `LANE_STATUS = 0` is *no signal
+detect*, a physical-layer reading that a parser register has no business reaching. Candidates, none
+tested: the value feeds one of our own generators, which then emits a different block; or the
+register is not parser-only despite its name and address; or an unmapped GLORT on a lane that is not
+enabled wedges something upstream of EPL16.
+
+### State left on the box
+
+`/mnt/flash/fwd4.txt` is back to the unspliced replay (`71bffafe…`), so **Et2 comes up on the next
+boot** and the second forwarding port is available again. The spliced copy is kept as
+`/mnt/flash/fwd4-splicedGLORT.txt` — it is the reproducer, do not delete it.
+
+⚠ **The Et3 SGLORT work is blocked on this.** Port 41's GLORT cannot simply be re-added; doing so
+costs Et2. Whatever unblocks A4 and B1 through Et2 must not carry that splice.
