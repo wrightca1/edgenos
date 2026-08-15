@@ -2465,3 +2465,45 @@ boot** and the second forwarding port is available again. The spliced copy is ke
 
 ⚠ **The Et3 SGLORT work is blocked on this.** Port 41's GLORT cannot simply be re-added; doing so
 costs Et2. Whatever unblocks A4 and B1 through Et2 must not carry that splice.
+
+### The mechanism: a live-chip diff between the two states, and what it rules out
+
+**2026-08-15.** Both states are reproducible on demand, so the technique that has worked repeatedly
+here — diff a live chip against a live chip — applies directly. Dumped ten regions under the spliced
+replay (Et2 dark) and again under the unspliced one (Et2 up), same image, same boot path:
+
+```
+EPL14 lane0/Et1, EPL14 cfg, EPL16 lane0/Et2, EPL16 cfg,
+PARSER_INIT_STATE, PARSER_INIT_FIELDS, GLORT_CAM, GLORT_RAM,
+L3AR_DGLORT/SGLORT_PROFILE                       1,626 words
+```
+
+**151 words differ, and every one of them is accounted for without a mechanism:**
+
+- **`GLORT_CAM`, `GLORT_RAM`, `L3AR_DGLORT/SGLORT_PROFILE`: 0 differences of 512 words.** The GLORT
+  written into the parser table **never propagates** to any GLORT structure. That kills the obvious
+  theory — that a GLORT appearing for a lane which is not enabled corrupts a downstream lookup.
+- **Every EPL difference is a status register or a counter** — `PORT_STATUS`, `LANE_STATUS`,
+  `PCS_10GBASER_RX_STATUS`, `PCS_10GBASEX_TX_STATUS`, `EPL_LED_STATUS`, the four
+  `TX_FIFO_*_PTR_STATUS`, `EPL_1588_TIMER_STATUS`. These differ *because* one port is up and the
+  other is not. The configuration registers in both EPLs are identical.
+- **The 120 remaining differences are unwritten memory.** They sit in `PARSER_INIT_STATE` indices
+  **76-127** and `PARSER_INIT_FIELDS` indices **76-97** — on a 52-port switch. They read as
+  random-looking values in duplicate address pairs, differing by a handful of bits between boots.
+  That is boot-to-boot noise in memory nothing ever writes, not an effect of the splice.
+  ⚠ Worth pursuing separately: it is another instance of the uninitialised-memory class that
+  produced three real memfill defects (MOD, MAPPER, L2F).
+
+**So the only real configuration difference between "Et2 works" and "Et2 is dark" is the spliced
+word itself.** The effect is not mediated by anything in the GLORT path, the L3AR profiles, or
+either EPL's configuration.
+
+One reading worth keeping: `LANE_STATUS = 0` was described earlier as "no signal detect", but every
+field in that register — block lock, rate, signal-detect sample — reads zero when the PCS is held
+inactive, regardless of what is arriving on the fibre. So the symptom is equally consistent with
+**the lane's PCS never being brought out of reset**, which is a configuration story rather than a
+physical one, and fits a parser-table cause far better.
+
+**Next test, one boot each:** does *any* non-default value at `PARSER_INIT_FIELDS(41,0,0)` kill Et2,
+or only `0x03ed`? Try `0x0002` in the high half. That separates "the GLORT value matters" from
+"writing this field at all matters", and it is the cheapest remaining discriminator.
