@@ -57,3 +57,4 @@ build/*/m0/initrd-i386
 
 # compiled diagnostic tools (source is tracked)
 asic/fm6000/tools/fm6000_l2scan
+asic/fm6000/fm6000_sbus
