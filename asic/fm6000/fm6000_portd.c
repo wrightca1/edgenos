@@ -87,13 +87,29 @@ static struct port ports[MAX_PORTS];
 static int nports;
 
 /* Which halfword of a punted frame's F64 tag holds the SOURCE glort.
- * ⚠ NOT CONFIRMED. On inject we build w1 = DGLORT and w2 = 0xff00, which reads
- * like the CPU's own SGLORT, so w2 is the natural candidate and is the default.
- * PORTD_SRCWORD overrides it; PORTD_DEBUG prints the tag of punted frames, so
- * one run on a box with two live ports settles it. Until then an unmatched
- * frame goes to port 0 -- byte-for-byte the behaviour of the single-port
- * version, so a wrong guess here cannot regress a working single-port setup. */
-static int src_word = 2;
+ *
+ * ⚠ THIS WAS 2, AND 2 IS WRONG. The old comment reasoned that since inject
+ * builds w1 = DGLORT and w2 = 0xff00, w2 "reads like the CPU's own SGLORT", so
+ * w2 was the natural candidate. That is an argument from the TX layout about
+ * the RX layout, and it does not hold.
+ *
+ * It is WORD 1, and this was decoded and written down before this file guessed:
+ * docs/PORT3-BRINGUP.md, "The punt frame format, decoded", from an fm6000_rxdump
+ * capture with no portd competing --
+ *
+ *     33 33 00 00 00 05 | 80 a2 35 81 ca b4 | 07 01  03 ef  00 01  ff ff | 86 dd
+ *     DMAC                SMAC                F64 tag: 4 x 16-bit at offset 12
+ *
+ * "Tag word 1 is the GLORT: source on RX, destination on TX. Every punted frame
+ * from Et1 carries 0x03ef, which is precisely PARSER_INIT_FIELDS[40] >> 16."
+ * The same slot, opposite direction -- which is why w1 is right and w2 is not.
+ *
+ * The symptom of the wrong value, measured 2026-08-15 with both ports up: every
+ * punted frame falls through to port 0, so et1 rx climbs while et2 rx stays 0
+ * even though et2 transmits fine and the peer has learned our MAC. The
+ * fallback hides it -- a wrong src_word and a tag with no source field at all
+ * look identical from the outside. */
+static int src_word = 1;
 static volatile sig_atomic_t stop_flag;
 static unsigned long n_rx, n_tx, n_rx_drop;
 static int dbg;                      /* PORTD_DEBUG=N -> hexdump first N frames */

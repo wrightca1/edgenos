@@ -2771,3 +2771,39 @@ from Et2. The halfword that differs is the answer.
 
 ⚠ portd cannot be restarted without a chip reset, so this costs a boot — and Et2 is up on only half
 of them. Budget two.
+
+### ⛔ CORRECTION: the demux blocker is not `src_word`, it is that punted frames carry NO TAG
+
+I read `PORT3-BRINGUP.md`'s own decoded punt format — "tag word 1 is the GLORT: source on RX" —
+saw that `fm6000_portd.c` defaults `src_word = 2`, and concluded the demux was reading the wrong
+halfword. **The live capture says the problem is one level down.**
+
+`PORTD_DEBUG=1` on a boot with both ports up:
+
+```
+portd: punt demux on tag w2 (PORTD_SRCWORD); unmatched -> et1
+  TAP<-ASIC (no tag) len=90:
+    33 33 00 00 00 05 80 a2 35 81 ca b4 86 dd 6c 0c
+    DMAC                SMAC                ^^^^^ ethertype at offset 12
+```
+
+**There is no F64 tag.** DMAC, SMAC, ethertype — a complete, clean Ethernet frame. `on_punt` scans
+for an ethertype at `+12` before testing the tagged layout at `+20`, matches at `off=0`, and takes
+the untagged path, which hard-codes `ports[0]`. `port_for_tag()` is never called, which is why the
+run produced **zero** `punt tag` lines. No value of `src_word` can matter when there is nothing to
+read.
+
+⚠ **And the same frame type WAS tagged in the earlier capture.** The `rxdump` layout recorded above
+has identical DMAC `33 33 00 00 00 05` and SMAC `80 a2 35 81 ca b4` — the same OSPF/IPv6 multicast
+frame — with `07 01 03 ef 00 01 ff ff` spliced in. So tagging is **configuration-dependent and is
+currently off**, not a property of the frame.
+
+**The real question for A4/B1 is therefore: what makes the ASIC prepend F64 on punt, and why is it
+not set now?** Candidates, none tested: a per-port or CPU-port attribute selecting ISL/F64 on
+redirect; the `MOD_*_TAG` tables (`MOD_TX_PORT_TAG`, `MOD_DST_PORT_TAG`); or the special-delivery
+parser rule this project already added for the F64 frame type. That last one is suggestive — the
+frame type was decoded and wired into `parser_program.py`, and the current image runs *our* parser.
+
+`src_word` is nonetheless changed from 2 to 1 in `fm6000_portd.c`, because word 1 is what the
+capture shows and word 2 was an argument from the TX layout about the RX layout. **It is inert until
+frames are tagged**, and must not be mistaken for the fix.
