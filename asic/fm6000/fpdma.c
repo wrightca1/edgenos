@@ -278,28 +278,22 @@ int fpdma_rx_poll(struct fpdma *fp, int budget,
         if (len > FM6000_RX_MAX_LEN)
             len = FM6000_RX_MAX_LEN;
 
-        if ((status & FM6000_DESC_EOP) && fp->rx_reass_len == 0 &&
-            !fp->rx_reass_drop) {
-            /* Single-descriptor frame: the common case, and the only one the
-             * old code handled correctly. Deliver in place, no copy. */
-            if (cb)
-                cb(cb_ctx, r->buf_va[r->tail & r->mask], len);
-        } else {
-            if (!fp->rx_reass_drop &&
-                (uint32_t)fp->rx_reass_len + len <= FM6000_RX_MAX_LEN) {
-                memcpy(fp->rx_reass + fp->rx_reass_len,
-                       r->buf_va[r->tail & r->mask], len);
-                fp->rx_reass_len = (uint16_t)(fp->rx_reass_len + len);
-            } else {
-                fp->rx_reass_drop = 1;   /* oversize: discard through EOP */
-            }
-            if (status & FM6000_DESC_EOP) {
-                if (cb && !fp->rx_reass_drop && fp->rx_reass_len)
-                    cb(cb_ctx, fp->rx_reass, fp->rx_reass_len);
-                fp->rx_reass_len  = 0;
-                fp->rx_reass_drop = 0;
-            }
-        }
+        /* ⚠ DO NOT reassemble on status bit 3 without settling what it means.
+         * A 2026-08-15 attempt did exactly that, on the reading that bit 3 is
+         * EOP and frames span descriptors. Two facts refute it:
+         *   - RX buffers are 2048 bytes (ring_alloc below), so a 90-byte frame
+         *     cannot split across two of them;
+         *   - a complete single-descriptor frame would have EOP SET, and the
+         *     good frames in the capture read st=04, bit 3 CLEAR. The short
+         *     malformed entries are the ones with bit 3 set.
+         * The file header lists the RX bits as OWN/SOP/EOP/err, so bit 3 on a
+         * runt is far more likely an ERROR flag. What is real and unexplained:
+         * the ring does deliver entries that are not frames -- 8, 12, 19 and 20
+         * bytes, carrying live addresses from this network but no Ethernet
+         * structure -- and they are counted as n_rx_drop and thrown away.
+         * Identify bit 3 before acting on it. */
+        if (cb)
+            cb(cb_ctx, r->buf_va[r->tail & r->mask], len);
 
         /* Recycle: hand the descriptor back to HW (RX = READY only, EOP is HW-set). */
         desc_write(d, FM6000_DESC_RX_READY, (uint16_t)r->buf_len,
