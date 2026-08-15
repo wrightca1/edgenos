@@ -260,3 +260,26 @@ member list without checking.
 
 The cheap confirmation for the CPU-port claim is live, not static: program a `CmdA=3` entry and see
 whether the frame arrives at `portd`.
+
+### ⚠ `L2AR_ACTION_MIRROR` is entirely unpopulated
+
+Running `l2ar_action_decode.py --summary` over EOS's replay:
+
+```
+L2AR_ACTION_DMT       32 populated entries
+L2AR_ACTION_CPU_CODE  20 populated of 128
+L2AR_ACTION_MIRROR     0 populated
+```
+
+**Nothing configures mirroring on this box.** That matters beyond A2, because
+`FEATURE-COMPLETE-CHECKLIST.md` A4 proposes unblocking itself by *"(a) TX-mirror to the CPU port,
+which needs the mirror table and therefore lands in A2"*. There is no shipped mirror configuration
+to decode, copy or learn from — that route would mean authoring the table from the register header
+alone and validating it on hardware, which is strictly more work than the alternatives A4 lists.
+
+Since A4's real blocker turned out to be out of date anyway (there are two forwarding ports and the
+peer has `tcpdump`), the mirror route can be dropped rather than pursued.
+
+Also from the same run, for whoever authors CPU codes: `L2AR_ACTION_CPU_CODE` holds 20 populated
+entries of 128, each packing four 8-bit codes, with values clustering in `0x01`-`0x23` and
+`0x82`-`0x8a`. The high-bit group is the one that overlaps the codes on trap-to-CPU DMT entries.
