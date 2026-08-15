@@ -806,3 +806,59 @@ Also checked, in case the two halfwords were the halves of one 32-bit field: the
 **Conclusion: there are 64 halfword channels, the FFU and MOD can each address only the lower 32,
 EOS's parser writes as high as 39, and no consumer of channels 32-63 has been identified.** That is
 a real gap, not an artefact of a bad assumption — which is what it needed to be checked for.
+
+### ⚠ WEAKENED: `{0x20, 0xe0}` = `{DECREMENT, CHECKSUM}` fails a co-occurrence test
+
+Earlier today I concluded from route-enrichment that `0x20` (op1/operand 0) and `0xe0` (op7/operand
+0) are the two length-less routing edits, `DECREMENT` (TTL) and `CHECKSUM`. **A test I did not run
+at the time contradicts the pairing.**
+
+Routing an IPv4 frame needs *both* edits: decrement the TTL, then repair the header checksum for it.
+Two commands that are that pair must appear **together** in any program that routes. Over EOS's 18
+populated programs:
+
+```
+contain 0x20 : 5
+contain 0xe0 : 5
+contain BOTH : 1        expected under independence: 1.39
+```
+
+**They are independent, not paired.** One program of eighteen carries both, which is what pure
+chance predicts. A TTL decrement without a checksum fixup is a broken IPv4 router; four programs
+have `0x20` without `0xe0` and four have `0xe0` without `0x20`.
+
+**What survives, and what does not:**
+
+- ✅ **Both commands are genuinely route-enriched** — `0x20` 9/14 and `0xe0` 7/9 against a 17%
+  baseline, p ≈ 1.2e-04. That was a test of each command separately and it stands.
+- ⛔ **The identification of them as the `{DECREMENT, CHECKSUM}` pair does not.** Route-association
+  made them *candidates*; I promoted that to an identification on the strength of "routing needs
+  exactly two length-less edits", which is an argument about the datasheet, not about the data.
+- The co-occurrence partners are also unhelpful: both appear most often beside `0x41` (op2/1), which
+  is simply the most common command overall.
+
+**So A4's hardware test is back to being genuinely open**, not a two-way tiebreak. What it has kept
+is the *shortlist*: `0x20` and `0xe0` are the two most strongly route-bound commands with no length
+operand, so they remain the first things to program on the transit rig — but the experiment must be
+"what does this command do", not "which of these two is the TTL".
+
+### The only program carrying both, for whoever runs that test
+
+```
+program 15, in stream order
+  slot  5  c0   op6/0    jitter=0
+  slot  6  20   op1/0    jitter=1
+  slot  7  20   op1/0    jitter=1
+  slot  8  e0   op7/0    jitter=1
+  slot  9  e0   op7/0    jitter=1
+  slot 10  98   op4/24   jitter=0
+  ...
+```
+
+Two structural observations worth carrying into the bench test, neither yet explained:
+
+- **Commands appear in consecutive runs of identical values** — `20 20`, `e0 e0`, `98 98`,
+  `01 01 01`, `41 41 41`. A step is not written once.
+- **`Jitter` is 1 on exactly `0x20` and `0xe0` here** and 0 on their neighbours (`c0`, `98`, `01`,
+  `0b`), 7 on `0x41`. The field is 6 bits at `[13:8]` and its meaning is undocumented in our notes;
+  it is the only field that separates the two candidates from everything around them.
