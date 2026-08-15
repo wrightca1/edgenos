@@ -2556,3 +2556,80 @@ arm 3   EdgeNOS -> EdgeNOS, unspliced  n boots, count Et2 up
 
 Arm 3 is the one that separates the splice from warm inheritance, and it is the arm that was never
 run. At ~7 minutes a boot this is an hour of wall-clock, which is the actual price of the answer.
+
+### ★★★ The answer: Et2's bring-up is NON-DETERMINISTIC, and the splice was never the cause
+
+**2026-08-15.** A sixth boot, run as a clean EOS → EdgeNOS transition with the **unspliced** replay
+(`71bffafe…`), the parser word verified at its default `00010103`, both EPL gates correct
+(`EPL_CFG_A = 0x7e0d7899`, `EPL_CFG_B = 0x00090003`) — and Et2 sampled **every 30 s for six minutes**
+rather than for a few seconds:
+
+```
+t=30s ... t=360s     PORT_STATUS = 0x0815     LANE_STATUS = 0x0000     (12 of 12 samples)
+Et1 the whole time   PORT_STATUS = 0x0cc0
+```
+
+The full series, by condition:
+
+| # | preceding state | replay | Et2 |
+|---|---|---|---|
+| A | EOS → EdgeNOS | spliced | dark |
+| B | EOS → EdgeNOS | unspliced | **up** |
+| C | EOS → EdgeNOS | spliced | dark |
+| D | EOS → EdgeNOS | unspliced | **up** |
+| E | EdgeNOS partial → EdgeNOS | unspliced | dark |
+| F | EOS → EdgeNOS | unspliced | dark |
+
+**The same condition produces both outcomes.** B, D and F are the identical experiment — same
+image, same transition, same replay, same flash — and it comes up 2 times in 3. So:
+
+- ⛔ **The splice hypothesis is refuted.** Not weakened, refuted: the unspliced replay produces a
+  dark Et2 on its own.
+- ⛔ **The four-run A-D alternation was coincidence.** At a base rate near 2 in 3, an alternating
+  run of four has probability about (1/3)(2/3)(1/3)(2/3) ≈ **5%** — uncommon for one comparison,
+  and entirely expected once you make several. I made several.
+- ✅ **The real finding is bigger than the one I was chasing: Et2 link bring-up under EdgeNOS is
+  intermittent.**
+
+### What that retrospectively explains
+
+Nearly the whole Et2 narrative in this document was single-boot observations of a coin flip:
+
+- **"A write test damaged Et2"** (2026-08-14) — no. Et2 was never damaged. It links under EOS every
+  time, and under EdgeNOS about two thirds of the time.
+- **"It stayed at `0x0815` across cold boots"** — a run of tails, over a handful of boots.
+- **"A power cycle does not clear it"** — same.
+- **"One spliced word kills Et2, and it reverses"** — same, with an alternating pattern that looked
+  like a control and was not.
+
+**Every one of those conclusions came from one boot per condition on a port that does not come up
+reliably.** The platform is documented as failing roughly 1 boot in 6 and this session watched three
+consecutive mid-FULLSEQ resets; that should have set the prior. It did not.
+
+### The method rule this earns
+
+**On this platform, a single boot measures nothing.** Any claim of the form "X makes the port come
+up" needs n boots per arm and a reported count, because the null hypothesis is not "no effect" — it
+is "a two-thirds coin". Add it to the list next to *run the control before the experiment* and
+*a round-trip proves self-consistency, not correctness*.
+
+⚠ Two readings are also now suspect and should be re-taken with repetition before being relied on:
+the Et2 SerDes three-column diff (`0x0b`/`0x0c`/`0x1f`) and the `sbus_tx_elec_idle_cntl` reading —
+both were taken on a single dark boot, and a dark boot is now known to happen on its own.
+
+### What is NOT affected
+
+- **Et3 is a different, deterministic failure.** It has been dark on *every* boot ever recorded,
+  under every replay, with the gates open or closed. A 0-for-many is not a coin.
+- **The live-chip diff stands**: the spliced GLORT reaches no GLORT structure (0 differences of 512
+  words across `GLORT_CAM`, `GLORT_RAM` and the L3AR profiles). That was a comparison of register
+  contents, not of link outcomes.
+- **The uninitialised parser memory at indices ≥76** stands, for the same reason.
+
+### Next, properly
+
+Measure the rate before theorising about the cause: **10 consecutive EOS → EdgeNOS boots, unspliced,
+Et2 sampled for 6 minutes each, count the ups.** That establishes the base rate, which every future
+Et2 claim has to be tested against. Only then is it worth asking what varies between a good boot and
+a bad one — and the honest place to look is FULLSEQ's own ordering and timing, not the replay
+contents, since the contents are now known to be identical across both outcomes.
