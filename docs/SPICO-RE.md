@@ -190,3 +190,60 @@ inside one boot, which is what the Et2 sampling now added to `fm6000-fullseq.sh`
 
 **The general rule this hands the project: falsification costs one boot here, confirmation costs a
 day. Design experiments so a single observation can kill them.**
+
+## RESULT: 0 of 5 boots with SPICO stripped — and the statistic I pre-registered was wrong
+
+**2026-08-15.** Five boots, IMEM stripped, arm verified `cac05757…` on every one, zero tainted,
+zero failed, `Et1 = 0x00000cc0` throughout (fibre links fine without the firmware, as the original
+bisect said).
+
+```
+with SPICO      5 up / 10 boots
+without SPICO   0 up /  5 boots
+```
+
+### ⛔ The correction
+
+I pre-registered "0 of 5 supports the hypothesis at p ≈ 0.03". **That statistic is wrong.** It
+treats the 50% baseline as a *known* rate; it is not, it was estimated from 10 boots with a 24-76%
+interval. Comparing two samples needs Fisher's exact test:
+
+```
+binomial against an assumed 50%       p = 0.031
+Fisher exact, one-sided (correct)     p = 0.084     <- NOT significant
+```
+
+So 0-of-5 against a 50% arm is **suggestive and in the predicted direction, but does not reach
+significance.** Had I not recomputed it, this file would now claim a significant result on the
+strength of the wrong test — which is precisely the failure mode the rest of this document exists
+to correct, arriving one layer up: not a wrong measurement this time, a wrong analysis of a good one.
+
+### Extending the arm
+
+Fisher, if the no-SPICO arm stays at zero:
+
+| no-SPICO boots | p |
+|---:|---:|
+| 5 | 0.084 |
+| 6 | 0.058 |
+| 7 | **0.041** |
+| 8 | 0.029 |
+| 10 | 0.016 |
+
+Two more boots buy significance for ~25 minutes, against a checklist item (C2) scoped as "large,
+unscoped", so they were run.
+
+### ⚠ The ceiling, which more boots do not raise
+
+Even at 0-of-10, this design shows SPICO **significantly reduces** Et2's up-rate. It cannot show
+"required", because required means a true rate of zero and a null result cannot distinguish zero
+from small: a true 10% rate yields 0-of-7 about half the time.
+
+**So `fm6000-fullseq.sh`'s "*** SPICO IS REQUIRED for 10GBASE-CR ***" should not be restored as
+written, whatever this arm reaches.** The defensible replacement is:
+
+> With the 30,002 IMEM transactions stripped, Et2 did not link on N consecutive boots, against an
+> up-rate of 5/10 with the firmware present (Fisher p = …). Fibre (Et1) is unaffected. Whether the
+> copper rate is zero or merely low is not established.
+
+C2 therefore stays on the checklist as real work, on evidence, rather than on a single boot.
