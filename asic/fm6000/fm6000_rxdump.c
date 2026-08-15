@@ -27,7 +27,16 @@ int main(int argc,char**argv){
       if(!(d[0]&0x04)) continue;
       uint16_t len=*(volatile uint16_t*)(d+2);
       uint8_t *p=(uint8_t*)fp.rx.buf_va[i];
-      printf("[%2u] len=%-4u ",n,len);
+      /* Print the WHOLE status byte, not just the done bit we gate on. The
+       * descriptor format documents bit 3 as EOP (FM6000_DESC_HANDOFF is
+       * "READY(0)+EOP(3)"), and fpdma.c's RX poll carries a TODO admitting
+       * SOP/EOP/error are unhandled -- so a frame spanning descriptors would
+       * appear here as one good entry followed by short ones. A 2026-08-15
+       * capture showed exactly that shape: 4 proper frames and 3 entries of
+       * 12/19/20 bytes carrying real addresses but no Ethernet structure.
+       * If the short entries have EOP clear while the proper ones have it set,
+       * the receive path is delivering fragments as frames. */
+      printf("[%2u] st=%02x eop=%d len=%-4u ",n,d[0],(d[0]>>3)&1,len);
       for(int j=0;j<32;j++) printf("%02x%s",p[j],(j==5||j==11||j==13||j==19)?"|":" ");
       printf("\n"); n++;
       d[0]=FM6000_DESC_RX_READY; __sync_synchronize();
