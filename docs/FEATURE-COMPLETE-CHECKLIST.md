@@ -328,3 +328,52 @@ discriminating if a positive result is reachable.
 **Ping is not useless — but it needs a control.** D5 makes ping fail for unrelated reasons, so a
 bare failure proves nothing. Alternating our program against EOS's in the same minute (A/B/C/A)
 turned it into a reliable signal: EOS 0%, ours-overlaid 0%, ours-with-deletions 100%, EOS 0%.
+
+## 2026-08-15: the A4/B1 blocker is gone, and E0a was worse than recorded
+
+### ✅ The egress capture point exists — A4 and B1 are no longer blocked on topology
+
+A4 says *"the 7150 currently has no egress capture point: one front port (et1), no tcpdump, peer
+`10.101.101.25` refuses SSH"*, and B1 inherits the same blocker. **All three clauses are now false:**
+
+- **Two front ports come up under EdgeNOS**, Et1 and Et2. Not one.
+- They land on **two different /29s of the same AS5610** — `swp6 10.101.101.25/29` and
+  `swp7 10.101.101.33/29` — so a frame in one and out the other genuinely transits the switch.
+- That peer is `10.1.1.238`, **it answers SSH** (root/`as5610`), and it has **`tcpdump 4.99.4`**.
+
+`tools/transit-test.sh` drives it: a `/32` route on the peer forces the hairpin (the peer is both
+ends, so without it the traffic never touches the switch), then `tcpdump` on `swp6` captures what
+the 7150 **emitted**. That is exactly the observation A4 needs to choose between the surviving
+readings of the command split, and what B1 needs to see which frame bytes affect a match.
+
+⚠ **Gated on a coin flip, not on a fault.** Et2 does not come up on every boot — see
+`PORT3-BRINGUP.md`, where a single-boot reading of exactly this produced two days of wrong
+conclusions. `transit-test.sh` refuses to run without an et2 carrier rather than returning a
+confusing null; if it refuses, reboot and retry, and do not diagnose it.
+
+### ⛔ E0a was understated: the watchdog was not in the image at all
+
+The entry says the watchdog "must be launched by hand". In fact `build-release-swi.sh`'s tool list
+never named `fm6000_wdog`, so **no image has ever contained it** — the only copy is one that was
+hand-placed on flash. Fixed: it is built into the image and started from `init-m1` after the
+dataplane comes up, honouring `/mnt/flash/wdog.off`.
+
+This mattered the same day: three consecutive mid-FULLSEQ resets, with nothing watching.
+
+⚠ `/mnt/flash/wdog.off` has been present since 2026-08-13 and is still there. **Remove it when the
+current experiments finish**, or the newly-started watchdog will disable itself on every boot.
+
+### ⚠ Every image on flash predates the `MGMT_PEER` pin
+
+`init-m1` was fixed on 2026-08-13 to pin the admin subnet to `eth0`. **alpha9 was built before that
+and does not carry it**, so `edgenos-up.sh` still black-holes management the moment ospfd forms an
+adjacency — observed live today, recovered over serial. Every initrd on flash has the same hole.
+A rebuild is the fix and the build tree is ready for one.
+
+### On the numbers in this file
+
+`D5` says route count, not ping, is the reliable signal. That is right and does not go far enough:
+**on this platform a single boot measures nothing at all.** Et2's link state is intermittent, so any
+claim of the form "X makes it work" needs n boots per arm and a reported count. Several conclusions
+in this file and in `PORT3-BRINGUP.md` were single observations and should be re-taken before they
+are built on.
