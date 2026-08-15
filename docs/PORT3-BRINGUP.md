@@ -2807,3 +2807,55 @@ frame type was decoded and wired into `parser_program.py`, and the current image
 `src_word` is nonetheless changed from 2 to 1 in `fm6000_portd.c`, because word 1 is what the
 capture shows and word 2 was an argument from the TX layout about the RX layout. **It is inert until
 frames are tagged**, and must not be mistaken for the fix.
+
+### The tag control IS set — so the untagged punt is not a missing configuration
+
+`MOD_TX_PORT_TAG` is 76 entries, one per port, with a 2-bit `Tag`. EOS sets it to **2 on exactly two
+ports — port 0 (the CPU) and port 1** — and 0 on all 74 others. That is the obvious "tag frames on
+egress to this port" control, and port 0 being the CPU matches the independent port-numbering
+evidence.
+
+**It is set correctly on the live chip:**
+
+```
+0015f280 = 00000002    MOD_TX_PORT_TAG[0]   CPU
+0015f281 = 00000002    MOD_TX_PORT_TAG[1]
+0015f294 = 00000000    MOD_TX_PORT_TAG[20]  Et2
+0015f2a8 = 00000000    MOD_TX_PORT_TAG[40]  Et1
+0015f300 = 00000002    MOD_DST_PORT_TAG[0]
+```
+
+So the untagged punt is **not** a missing register write, and that eliminates the most obvious
+cause. Why frames still arrive without an F64 tag is open.
+
+### What is now precisely characterised
+
+```
+peer -> switch et2 address 10.101.101.34 : 3 pings, 100% loss
+switch et1 rx  27 -> 212                   frames DO arrive, in volume
+switch et2 rx  0                           and none are attributed to et2
+portd log      "TAP<-ASIC (no tag)"        no F64 tag on any of them
+```
+
+The failure chain, end to end:
+
+1. Frames for Et2 reach the CPU punt ring — `et1 rx` climbs when Et2 traffic is generated.
+2. They carry no F64 tag, so `on_punt` takes its untagged path.
+3. That path hard-codes `ports[0]`, so every frame is delivered to **et1's** TAP.
+4. Linux discards Et2's ARP replies as arriving on the wrong interface, so the neighbour for
+   `10.101.101.33` stays `FAILED`, so the switch cannot even send a reply.
+5. **et2 is receive-dead at the netdev layer**, and every bidirectional protocol on it fails.
+
+⚠ Nothing here is a dataplane fault. Et2 links, transmits, and its frames reach the CPU. The break
+is entirely in per-port attribution on the punt path.
+
+**The open question, stated tightly:** the same frame type (OSPF/IPv6 multicast, DMAC
+`33 33 00 00 00 05`, SMAC `80 a2 35 81 ca b4`) was captured **with** an F64 tag by `fm6000_rxdump`
+earlier in this project and **without** one now, while `MOD_TX_PORT_TAG[0]` reads 2 in both cases.
+Something other than that register decides it. Candidates not yet tested: tagging may apply only to
+frames redirected by an explicit CPU action (`L2AR_ACTION_DMT` `CmdA=3`) and not to multicast that
+reaches the CPU by flooding; or our generated parser may not set a flag EOS's did.
+
+**The cheap discriminator** is to capture with `fm6000_rxdump` on this same boot and see whether the
+tag is present there — if rxdump sees tags and portd does not, the difference is in portd, not the
+ASIC. It costs a boot, because rxdump and portd contend for the same punt ring.
