@@ -398,3 +398,55 @@ to run — it simply has no firmware).
 ⚠ Note for whoever reads this next: **do not re-run this as a rate comparison.** Separating two
 arms near 50% needs ~32 boots each. This test is affordable only because the hypothesis predicts a
 *zero*, and a predicted zero is cheap to falsify. Design future copper experiments the same way.
+
+## ★★★ 2026-08-15: TRANSIT WORKS — A4 and B1 are unblocked
+
+The prerequisite both items have been blocked on since 2026-08-12 is met. Frames now enter Et2, are
+routed, and leave Et1, and we can see what the switch emitted.
+
+Captured on the peer's `swp6` — the 7150's **egress** — while pinging in via `swp7`:
+
+```
+44:4c:a8:31:5d:ab > 80:a2:35:81:ca:b4, IPv4, length 102:
+    10.101.101.33 > 10.102.1.1: ICMP echo request
+
+0x0000:  4500 0054 4daa 4000 3f01 7312 0a65 6521
+0x0010:  0a66 0101 0800 188e ...
+```
+
+- **Source MAC is the switch's router MAC**, destination is the peer's swp6 — the L2 header was
+  rewritten, so this is a routed frame, not a bridged one.
+- **TTL = `0x3f` = 63.** The peer sent 64. **The MOD engine's DECREMENT is visible on the wire.**
+- **Checksum `0x7312` recomputed** for the new TTL — MOD's CHECKSUM step, also visible.
+
+(The 100% ping loss is only `10.102.1.1` not answering; transit is proven by the egress capture, not
+by the reply.)
+
+### What unblocked it
+
+Not topology, and not Et2. **One field.** `fm6000_portd.c` demuxed punted frames using tag word 2;
+the source glort is in **word 1**, which this repo's own `PORT3-BRINGUP.md` recorded months ago.
+With `src_word = 1`:
+
+```
+10.101.101.33 dev et2 lladdr 80:a2:35:81:ca:b5 REACHABLE     (was FAILED)
+ping 10.101.101.34 from the peer: 6/6, 0% loss
+et2 rx: 0 -> 15
+```
+
+Per-port RX had never worked, and could not have: every punted frame fell through to port 0. The
+single-port setup masked it perfectly, which is why it survived so long.
+
+### A4 is now a two-hour job, not a blocked one
+
+A4 needed to "observe emitted bytes" to settle the MOD command split. It can now do so on demand.
+The candidates are `0x20` (op1/operand 0) and `0xe0` (op7/operand 0) — the two most route-enriched
+length-less commands (p ≈ 1.2e-04 each) — though ⚠ they do **not** co-occur across EOS's programs,
+which argues against them being the DECREMENT/CHECKSUM pair (see `PARSER-CONVENTIONS.md`). The bench
+test is now direct: program a candidate, send a frame through the hairpin, and read the TTL and
+checksum off `swp6`.
+
+### B1 likewise
+
+B1 needed to see which frame bytes affect an FFU match. Transit traffic through a programmable slice
+is exactly that experiment, and it now has both a path and a capture point.
