@@ -2859,3 +2859,48 @@ reaches the CPU by flooding; or our generated parser may not set a flag EOS's di
 **The cheap discriminator** is to capture with `fm6000_rxdump` on this same boot and see whether the
 tag is present there — if rxdump sees tags and portd does not, the difference is in portd, not the
 ASIC. It costs a boot, because rxdump and portd contend for the same punt ring.
+
+### ✅ THE CORRECTION WAS WRONG. The tag IS present, and `src_word = 1` IS the fix
+
+`fm6000_rxdump`, alpha10, portd not running, `MOD_TX_PORT_TAG[0] = 2`:
+
+```
+[0] len=90  33 33 00 00 00 05|80 a2 35 81 ca b4|07 01|03 ef 00 01 ff ff|86 dd ...
+[2] len=90  01 00 5e 00 00 05|80 a2 35 81 ca b4|07 01|03 ef 00 01 ff ff|08 00 ...
+[3] len=82  33 33 00 00 00 05|80 a2 35 81 ca b4|07 01|03 ef 00 01 ff ff|86 dd ...
+[5] len=71  01 00 5e 00 00 05|80 a2 35 81 ca b4|07 01|03 ef 00 01 ff ff|08 00 ...
+                                                 w0    w1    w2    w3
+4 of 7 captured frames carry the tag. w1 = 0x03ef = Et1's SGLORT.
+```
+
+**The ASIC tags punted frames exactly as `PORT3-BRINGUP.md` recorded months ago.** So the chain is:
+
+```
+tag word 2 = 0x0001        portd reads w2 because src_word defaulted to 2
+no port has glort 0x0001   port_for_tag matches nothing
+-> return 0                every frame goes to et1's TAP
+```
+
+That is precisely the observed `et1 rx=212, et2 rx=0`, and `src_word = 1` fixes it.
+
+### ⛔ How I got it wrong, because the mechanism matters
+
+I ran `PORTD_DEBUG=1` and saw a single dumped frame reading `DMAC | SMAC | 86 dd` with no tag, plus
+zero `punt tag` lines, and concluded the ASIC had stopped tagging. Both observations were real and
+both were misleading:
+
+- **`PORTD_DEBUG=N` dumps N frames, and I passed 1.** The one frame it printed was one of the
+  **short malformed ring entries** (`len=12`, `19`, `20` also appear in the rxdump capture) — not a
+  representative frame. I generalised from n=1 on the same day I wrote that a single boot measures
+  nothing.
+- **Zero `punt tag` lines is what a *wrong* `src_word` looks like too.** `port_for_tag` is only
+  called on the tagged path; the untagged frame I happened to dump never reached it. Absence of the
+  debug line was read as absence of tags.
+
+The original reasoning — that word 1 holds the source glort, from this repo's own decoded punt
+format — was right, and I abandoned it on weaker evidence than it was based on. **`src_word = 1`
+stands, and it is not inert.**
+
+⚠ Also visible and unexplained: **3 of 7 ring entries are short and malformed** (12, 19, 20 bytes,
+with plausible-looking Ethernet fragments). They are not frames. Worth a look on their own — portd
+counts them via `n_rx_drop`, so they are being silently discarded today.
