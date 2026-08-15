@@ -225,3 +225,58 @@ keeps it winning afterwards. A plain default route is **not** sufficient — tha
 OSPF's more-specific route beat it.
 
 Verify with `ip route get <admin-host>`; it must name `dev eth0`.
+
+## 2026-08-15: two-port bring-up, and two things alpha9 gets wrong
+
+Transit traffic — the prerequisite A4 and B1 have been blocked on for days — needs **both** front
+ports as netdevs. The topology for it already exists and had not been noticed:
+
+```
+7150 Et1  10.101.101.26/29  <-->  AS5610 swp6  10.101.101.25/29
+7150 Et2  10.101.101.34/29  <-->  AS5610 swp7  10.101.101.33/29
+```
+
+Two *different* subnets on the same peer, so a frame in one port and out the other genuinely
+transits the switch. And the AS5610 (`10.1.1.238`, root/`as5610`) has **`tcpdump 4.99.4`**, which is
+the egress capture point `FEATURE-COMPLETE-CHECKLIST.md` A4 says is missing. It is not missing.
+
+### `edgenos-up.sh` cannot do this on its own
+
+It configures `et1` only — `PORTD_PORTS` selects the ports portd creates, but the `ip link`/`ip addr`
+lines for anything else are not there, as its own comment admits. `/mnt/flash/up2.sh` wraps it:
+sets `PORTD_PORTS` for both ports, then configures `et2`.
+
+⚠ Passing `PORTD_PORTS` through a one-shot `ssh 'VAR=... sh script'` did **not** take — portd came
+up with the default `et1` alone and the only evidence was one line in `/tmp/portd.log`. Check
+`/sys/class/net/et2` exists before believing a two-port bring-up happened, and remember portd cannot
+be restarted without a chip reset, so a failed attempt costs a reboot.
+
+### ⚠ alpha9 predates the `MGMT_PEER` pin — bring-up still black-holes management
+
+`init-m1` was fixed on 2026-08-13 to pin the admin subnet to `eth0`, but **alpha9 was built before
+that fix and does not carry it.** Observed live: `edgenos-up.sh` completes, ospfd forms its
+adjacency, and the route table shows
+
+```
+10.22.1.0/24 via 10.101.101.25 dev et1  metric 20
+```
+
+with no `eth0` route at all — management dies mid-command. Recovery is over serial:
+
+```
+ip route add 10.22.1.0/24 via 10.1.1.1 dev eth0 metric 5
+```
+
+`up2.sh` now does this immediately after `edgenos-up.sh` returns. **The real fix is a rebuild**; any
+image older than 2026-08-13 has this hole, and the initrds already on flash all predate it.
+
+### ⚠ Repeated mid-FULLSEQ reboots
+
+Three consecutive boots reset partway through the sequence — uptime back to 1 min, both ports still
+at `0x0015`, the log restarting from `STEP1`. That is worse than the documented "fails 1 boot in 6"
+and it is not the dataplane watchdog: `fm6000_wdog` is not started at boot (checklist E0a) and
+`/mnt/flash/wdog.off` is present anyway.
+
+Do not diagnose this by boot-cycling. The console is the instrument — the kernel carries
+`nmi_watchdog=panic` and `reboot=p`, so a wedge reboots the box and the reason is printed on
+`ttyUSB2` and nowhere else. Watch it while the sequence runs.
