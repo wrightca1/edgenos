@@ -95,3 +95,61 @@ not required at all on this platform.
 
 Priority is low relative to the microcode generator: SPICO is not required for the working datapath,
 and it does not fix copper.
+
+## 2026-08-15: ⚠ "SPICO IS REQUIRED for 10GBASE-CR" does not survive the base-rate measurement
+
+`fm6000-fullseq.sh` carries this at the top of the file, and checklist C1/C2 rest on it:
+
+```
+*** SPICO IS REQUIRED for 10GBASE-CR (DAC/copper). ***
+An earlier bisect concluded it was unnecessary -- that was WRONG, because it
+only ever checked Et1 (10GBASE-SR fibre). With the firmware stripped:
+  Et1 (SR)  links fine   -> PORT_STATUS=0x8c0, pcsRx=1
+  Et2 (CR)  does NOT     -> PORT_STATUS=0x815, pcsRx=0
+With fwd4.txt unmodified, BOTH link at 0x8c0/pcsRx=1.
+```
+
+**The last line is measurably false.** Ten controlled boots, `fwd4.txt` unmodified in the relevant
+sense — and it demonstrably contains the firmware, 30,479 SBus writes to the SPICO broadcast device
+`0xfd` of 62,482 total — gave **Et2 up on about half of them**, sitting at exactly `0x0815` on the
+rest. See `PORT3-BRINGUP.md` for the run.
+
+So the inference collapses:
+
+- "SPICO stripped → Et2 reads `0x815`" is **one boot per condition** on a port that reads `0x815`
+  roughly 44% of the time *with* the firmware present.
+- That observation is therefore consistent with an unlucky boot and establishes nothing.
+- The earlier bisect that concluded SPICO was unnecessary was overturned on this evidence. **The
+  overturning is what is now in doubt** — not necessarily the original conclusion.
+
+⚠ **This is not a claim that SPICO is unnecessary for copper.** It is a claim that the evidence for
+"required" does not survive contact with the base rate. Checklist C1 already half-noticed this
+("Et2 is intermittent with *and* without SPICO") but read the intermittency as a property of copper
+rather than of the boot.
+
+### The experiment that settles it, and it is cheap
+
+The general case is hopeless — separating two rates near 50% needs ~31 boots per arm. **But this
+hypothesis predicts an extreme, not a shift**: if SPICO is genuinely required for CR, Et2 must come
+up **never** without it. Testing a predicted zero is far cheaper than testing a difference:
+
+```
+P(0 up in k boots | the measured ~56% rate) = 0.44^k
+  k=3  -> 0.085      not enough
+  k=5  -> 0.016      significant
+  k=7  -> 0.003      comfortable
+```
+
+**Five boots with the SPICO writes stripped, Et2 sampled for three minutes each.** One single
+success refutes "required" outright. Five failures support it at p≈0.016. That is about an hour on
+`tools/et2-baserate.sh` with a stripped replay, against the 6.5 hours per arm a general comparison
+would need.
+
+⚠ Run it against the **same** replay with only the `0xfd` writes removed — not against an older
+stripped image — or the arm changes for other reasons too.
+
+### Why this matters to scope
+
+C2 is *"if copper needs it — our own equaliser loop over SBus. Large, unscoped."* If SPICO turns out
+not to be required for CR, **C2 disappears** and "zero proprietary files" stops being a fibre-only
+claim. That is the single largest piece of remaining work riding on a conclusion drawn from one boot.

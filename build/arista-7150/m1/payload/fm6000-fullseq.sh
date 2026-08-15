@@ -370,7 +370,18 @@ V=$(S 0x5010); scdreg 0x5010 $(printf '0x%x' $(( 0x$V & ~0x40 ))) >/dev/null 2>&
 say "  0x5010 $V -> $(S 0x5010)"
 
 say "STEP7 settle + link"
+# ⚠ Et2 is sampled here as well as Et1, and that is not cosmetic. Et2's link
+# comes up on roughly half of otherwise identical boots -- measured over 10
+# controlled boots, see docs/PORT3-BRINGUP.md -- and at ~12 min a boot an A/B
+# comparison needs about 31 boots PER ARM to detect even a 50-point difference.
+# So the outcome cannot be chased by booting; it has to be caught happening.
+# Every boot now leaves a trace of both ports, so a good boot and a bad one can
+# be diffed after the fact for where they diverge.
+#   Et1 EPL14 lane0  PORT_STATUS 0xe3800  pcsRx 0xe3826  LANE_STATUS 0xe3838
+#   Et2 EPL16 lane0  PORT_STATUS 0xe4000  pcsRx 0xe4026  LANE_STATUS 0xe4038
 i=1; while [ $i -le 8 ]; do sleep 3
   say "  t=$((i*3))s PORT_STATUS=$(R 0xe3800) pcsRx=$(R 0xe3826) 0xe383f=$(R 0xe383f) PIN=$(R 0x1c021)"
+  say "        et2  PORT_STATUS=$(R 0xe4000) pcsRx=$(R 0xe4026) LANE_STATUS=$(R 0xe4038)"
   i=$((i+1)); done
+say "  final et1=$(R 0xe3800)/$(R 0xe3838)  et2=$(R 0xe4000)/$(R 0xe4038)"
 say "=== FULLSEQ DONE ==="
