@@ -694,3 +694,56 @@ available under each candidate split. That is a real experiment and a much large
 **So A4's decisive test remains hardware**, exactly as `mod_decode.py` said. What has changed is its
 size: not "try candidate commands" across 47 bytes, but *"is `0x20` the TTL decrement and `0xe0` the
 checksum fixup, or the other way round?"* — one transit capture, two candidates.
+
+## 2026-08-15: FFU ByteMux — the parsimony test fails, but the widths say something
+
+### ⛔ The test I expected to discriminate does not
+
+B1's open question is whether `ByteMux` is (a) a direct halfword-channel index, or (b) a byte
+address (`channel = v//2`, byte `v%2`). The obvious test: EOS's parser writes only some channels, so
+whichever reading points at channels the parser never writes is the wrong one.
+
+Ran it against every value EOS actually programs — 17 distinct `ByteMux` values across
+`FFU_SLICE_SCENARIO_CFG`, and the 33 halfword channels its parser writes:
+
+```
+channels written  : 0-3, 5-7, 12-25, 28-39            (33 of 64, max 39)
+ByteMux values    : 0 1 2 3 8 17 18 21 24 32 33 34 35 40 53 58 60
+
+reading (a)  v is the channel     -> 5 values hit unwritten channels:  8 40 53 58 60
+reading (b)  channel = v//2       -> 5 values hit unwritten channels:  8 17 18 21 53
+```
+
+**Exactly five misses each.** The test does not discriminate, and `FEATURE-COMPLETE-CHECKLIST.md`'s
+"the shipped configurations refute neither" stands unchanged. Recorded so nobody runs it twice.
+
+### ★ What the field widths do settle
+
+Two facts from the header that were not previously written down:
+
+```
+PARSER_RAM  Halfword0Dest [43:38]   6 bits  -> 64 halfword channels, not 32
+            Halfword1Dest [49:44]   6 bits
+FFU_SLICE_SCENARIO_CFG
+            ByteMux_0..3            6 bits each
+            Top4Mux                 5 bits
+MOD VALUE_RAM  Val*_DataSelect      5 bits  -> reaches channels 0-31 only
+```
+
+**The channel space is 64 halfwords.** And each `ByteMux` contributes **8 bits** to the 38-bit key
+(4x8 + 6 = 38, the arithmetic already in this file), i.e. it names a *byte*. Six bits naming a byte
+covers 64 bytes = **32 halfword channels**. A byte address into the full 64-halfword space would
+need 7 bits and there are only 6.
+
+So, whichever way the mapping goes:
+
+> **The FFU can only reach half the channel space.** Under (b) it sees bytes of channels 0-31;
+> under (a) it sees halfwords 0-63 but then contributes 8 bits of a 16-bit halfword with nothing
+> naming which byte — which the key arithmetic does not allow. **(b) is forced by the key width**,
+> independently of the parsimony test that failed above.
+
+⚠ And that raises a new question worth more than the original one: **EOS's parser writes channels
+32-39, which neither the FFU (6-bit byte address, tops out at channel 31) nor MOD (5-bit
+`DataSelect`, tops out at 31) can address.** Something else consumes the upper channels, or they are
+written for an effect other than being selected. Finding that consumer is likely to name the upper
+channels for free — the same way naming a channel once named it everywhere for `L3_SIP`/`L4_SRC`.
