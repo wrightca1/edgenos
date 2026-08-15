@@ -2633,3 +2633,50 @@ Et2 sampled for 6 minutes each, count the ups.** That establishes the base rate,
 Et2 claim has to be tested against. Only then is it worth asking what varies between a good boot and
 a bad one — and the honest place to look is FULLSEQ's own ordering and timing, not the replay
 contents, since the contents are now known to be identical across both outcomes.
+
+### ★★★ THE MEASUREMENT: Et2 comes up on half of identical boots
+
+**2026-08-15.** Ten controlled boots, one arm held constant — EOS → EdgeNOS, unspliced replay, Et2
+sampled every 30 s for three minutes. `tools/et2-baserate.sh`.
+
+```
+boot  1 UP    2 UP    3 UP    4 dark   5 dark
+      6 UP    7 UP    8 dark   9 dark  10 dark
+
+RESULT: Et2 up 5 / 10 valid boots   (tainted = 0, failed = 0)
+95% Wilson interval: 24% .. 76%
+```
+
+Every boot verified the same `fwd4.txt` md5 (`71bffafe…`), the same parser word (`00010103`), the
+same Et1 state (`0x00000cc0`, ten for ten) and a boot-to-boot reproducible uptime of 196-197 s at
+sampling. Nothing drifted. **Et2 is a coin.**
+
+### What that retires
+
+| claim | how it was reached | verdict |
+|---|---|---|
+| "a write test damaged Et2" | 1 boot | dead — Et2 was never damaged |
+| "it stayed dark across cold boots" | ~3 boots | a run of tails |
+| "a power cycle does not clear it" | 1 boot | same |
+| "one spliced word kills Et2, and it reverses" | 4 boots, alternating | **P = 0.062, about 1 in 16** |
+| yesterday's spliced boots, 0 up of 2 | 2 boots | **P = 0.25** — unremarkable, splice stays refuted |
+
+### ⛔ And it makes A/B testing Et2 by booting infeasible
+
+At a 50% base rate, separating two arms needs, at 80% power:
+
+```
+30-point difference   ~88 boots per arm
+40-point difference   ~49 boots per arm
+50-point difference   ~32 boots per arm
+```
+
+At ~12.5 minutes a boot that is **6.5 hours per arm** for a difference large enough to be obvious by
+other means. Anything subtler is unreachable. **So Et2 questions cannot be answered by booting.**
+The outcome has to be caught *within* a boot: `fm6000-fullseq.sh` now samples Et2's `PORT_STATUS`
+and `LANE_STATUS` alongside Et1 at every settle step, so a good boot and a bad one can be diffed for
+where they diverge.
+
+⚠ The one exception, and it is the reason the SPICO test is worth running: **a hypothesis that
+predicts a *zero* is cheap to test.** `P(0 up in k | 50%) = 0.5^k`, so five boots reach p = 0.03 and
+seven reach p = 0.008. Predicting an extreme costs an hour; predicting a shift costs a day.
