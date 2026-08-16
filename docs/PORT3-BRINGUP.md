@@ -2944,3 +2944,54 @@ not SerDes training convergence. That redirects the whole investigation:
 
 ⚠ This does not identify the block or the mechanism. It says where to look, and rules out the place
 this project has been looking for two days.
+
+## ★★★ Et2's link is established INSIDE the replay, and the successful path is deterministic
+
+**2026-08-16.** alpha13 samples Et2 every 16k ops inside `fm6000_fullreplay`. Three independent GOOD
+boots produced **byte-identical** traces:
+
+```
+114688 ops (mmio=22432  sbus=30752) et2=0x00000015/00000000   unprovisioned
+131072 ops (mmio=38816  sbus=30752) et2=0x00000015/00000000
+147456 ops (mmio=55200  sbus=30752) et2=0x00000015/00000000
+163840 ops (mmio=71584  sbus=30752) et2=0x00000815/00000000   SerXmit on, no lock
+180224 ops (mmio=87743  sbus=30827) et2=0x00000cc0/00000940   LINKED
+196608 ops (mmio=104127 sbus=30827) et2=0x000008c0/00000940
+212992 ops (mmio=120511 sbus=30827) et2=0x000008c0/00000940
+```
+
+**Et2 links between op 163,840 and 180,224**, and the SBus counter moves `30752 → 30827` across
+exactly that window — **75 SBus transactions** bring the lane from transmitting to locked.
+
+★ **Three good boots are identical down to the SBus tally.** The successful path is not merely
+repeatable, it is deterministic. So whatever differs on a dark boot, **it is not the instruction
+stream** — the same writes are issued in the same order.
+
+### Why only 7 samples, not ~17
+
+The print sits after the SBus `continue`:
+
+```c
+if(a==0xF001u){ ... sbus(v,pend); continue; }   /* SBus ops never reach the print */
+wr(a,v); mmio++;
+if((n & 0x3fff)==0){ ... print ... }
+```
+
+**A sample only fires when the 16,384th op happens to be an MMIO write.** Early in the replay SBus
+dominates — the SPICO upload alone is ~30k transactions — so most multiples land on SBus lines and
+are skipped. At op 114,688 only 22,432 ops were MMIO, which confirms it. ⚠ To sample the first
+~110k ops the print must be moved above the SBus `continue`.
+
+### What this leaves
+
+Two candidates for the ~50% failure, and they want different fixes:
+
+1. **The hardware responds differently to identical writes** — the SerDes sometimes fails to train on
+   the same stimulus. A physical-layer convergence problem; `PACE` and DFE are the levers.
+2. **The divergence is before op 114,688**, in the unsampled region. Not excluded by these traces.
+
+⚠ **And the instrument may be perturbing the result.** alpha13 adds an MMIO read per 16k ops — a
+delay in the very sequence whose timing is suspect. Et2 has come up on **3 of 3** boots with alpha13
+against a measured **5 of 10** without it. That is p ≈ 0.125 and proves nothing yet, but it is the
+direction the timing hypothesis predicts, and if the dark arm stays absent through more boots the
+null result is itself the finding: *inserting delay into the replay improves Et2's link rate.*
