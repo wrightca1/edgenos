@@ -947,3 +947,40 @@ FULLSEQ reprograms `MOD_COMMAND_RAM` from scratch, so the damage is transient by
 ⚠ The single-register `a4-leaveout.sh` was safe throughout — it saves one value, and all ten
 registers it touched verified restored. The failure came from scaling the write without scaling the
 check.
+
+### A4 slice sweep, second run — and last night's "wedge" was my restore, not the chip
+
+**2026-08-16.** With the fixed harness (verified 32-value save, health check between tests, wedge
+treated as terminal):
+
+```
+slice 0   ttl 63     no effect
+slice 1   ttl 63     no effect
+slice 2   ttl 63     no effect
+slice 3   no frame   RECOVERED
+slice 4   no frame   RECOVERED
+slice 5   ttl 63     no effect
+slice 6   ttl 63     no effect
+slice 7   no frame   wedged -- reboot, RESUME_FROM=8
+```
+
+★ **Slices 3 and 4 recovered this time.** Last night disabling slice 3 wedged the box permanently and
+I recorded it as a property of the perturbation. It was not: **the permanent wedge was my restore
+writing zeros over the bank**, because the save was guarded only by "non-empty". With a verified
+save, disabling those slices is fully reversible. The harness fix removed a fault I had attributed
+to the hardware.
+
+**Three slices are load-bearing for emitting the frame at all: 3, 4 and 7.**
+
+- 3 and 4 carry the operand-5 (length-6) commands `0x85`/`0x05` that `mod_decode.py` inferred to be
+  the MAC rewrite from field widths and value-bank contents. Remove the MAC rewrite, get no valid
+  frame. Two independent methods agreeing.
+- ⚠ **Slice 7 carries `0xe0`** at slots 4, 5 and 7. If `0xe0` is essential to producing a valid frame
+  at all, that constrains what it can be — a checksum fixup being *required* for a frame to appear on
+  the wire is possible (a bad checksum could be dropped downstream) but is not the obvious reading.
+
+**No slice has yet changed the TTL while continuing to emit**, which is the signature that names
+`DECREMENT`. Slices 8-19 remain.
+
+⚠ Note the cost model: each wedge needs a reboot, and each reboot needs Et2 to link (~50%) **and**
+per-port RX to work (2 of 3 boots observed). So productive boots are perhaps 1 in 3.
