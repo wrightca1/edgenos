@@ -2995,3 +2995,39 @@ delay in the very sequence whose timing is suspect. Et2 has come up on **3 of 3*
 against a measured **5 of 10** without it. That is p ≈ 0.125 and proves nothing yet, but it is the
 direction the timing hypothesis predicts, and if the dark arm stays absent through more boots the
 null result is itself the finding: *inserting delay into the replay improves Et2's link rate.*
+
+### ⚠ The observer effect, and the same statistical error made twice
+
+alpha13 adds one MMIO read per 16k ops inside the replay. Et2 has since linked on **4 of 4** boots,
+against a measured **5 of 10** without it.
+
+⛔ **I first reported this as heading for significance at 6/6 (p = 0.016). That is the wrong test**,
+and it is the identical mistake made against SPICO earlier the same day: `0.5^k` treats the baseline
+as a *known* 50%, when it was estimated from 10 boots. Comparing two samples needs Fisher's exact:
+
+```
+4/4 vs 5/10   p = 0.126
+5/5 vs 5/10   p = 0.084
+6/6 vs 5/10   p = 0.058     still not significant
+```
+
+**6/6 would not clear 0.05.** Roughly 8/8 is needed, and the run is capped at 6. The binomial figure
+is seductive precisely because it is the easy one to compute; the lesson was written into
+`SPICO-RE.md` hours earlier and then repeated anyway.
+
+### The methodological bind this creates
+
+If the sampling really does perturb the outcome, then **the instrument suppresses the very event it
+was built to capture** — the dark arm may never appear because the extra delay prevents it. The
+traces would then describe a modified system, and "4 identical good traces" would be a property of
+alpha13 rather than of the replay.
+
+**The way out is to test the delay deliberately instead of reading it off an artifact:** vary `PACE`
+with the in-replay sampling removed, n boots per arm, and measure. `PACE` is already a documented
+knob (`init-m1` passes `PACE=1500000`) and `ET2-COPPER-LINK.md` already records a thin suspicion
+that copper needs it. That is a designed experiment with a stated count, which is what this question
+has needed from the start.
+
+⚠ What survives regardless: **the four good traces are byte-identical**, including the SBus tally.
+Whatever differs on a dark boot, it is not the instruction stream — and that conclusion does not
+depend on the sampling being neutral, because it is a comparison *among* sampled boots.
