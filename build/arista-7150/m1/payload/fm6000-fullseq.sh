@@ -362,6 +362,12 @@ if [ "${GENBLK:-1}" = "1" ]; then
 		gen_split '\(001[89abcdef]\|00014\)' fm6000_sweepinit L2F+LBS
 fi
 $BIN/fm6000_fullreplay "$CUR" $B ${PACE:-1500000} >> $LOG 2>&1; RC=$?
+# ⚠ KEEP the generated replay. fm6000_fullreplay's progress counters index THIS
+# file, not /mnt/flash/fwd4.txt -- the generators filter blocks out and hand it a
+# rewritten copy. Deleting it made every op number in the in-replay Et2 trace
+# unresolvable: op 174,080 could not be mapped back to a write. Copy it to flash
+# so a trace can be turned into actual register writes offline.
+[ "$CUR" != "$FWD" ] && { cp "$CUR" /mnt/flash/fwd-executed.txt 2>/dev/null; sync; }
 [ "$CUR" != "$FWD" ] && rm -f /tmp/fwd.a /tmp/fwd.b
 say "  rc=$RC PIN=$(R 0x1c021) PORT_STATUS=$(R 0xe3800) pcsRx=$(R 0xe3826) sched=$(R 0x8062)"
 # ⚠ Et2 is logged HERE as well as in STEP7, and the distinction is the whole
