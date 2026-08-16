@@ -1076,3 +1076,49 @@ which CAM entry fires needs the frame's full 48-bit key. **Disabling a whole sli
 prediction**, and narrowing inside the guilty slice with single-register perturbations needs none
 either — the entry that fires is the one whose removal changes the wire. 20 + 20 tests, no
 hypothesis required, and the answer contradicted the hypothesis we had.
+
+## ★★★ MOD is a POSITIONAL byte-edit stream — proved by disabling slice 11
+
+**2026-08-16.** Slice 11's anomalous `ttl 65` is not a tcpdump misparse. Raw egress bytes:
+
+```
+baseline            4500 0054 e28f 4000 3f01 de2c 0a65 6521 0a66 0101
+slice 11 disabled   4500 0054 faa9 3f00 4101 c512 0a65 6521 0a66 0101
+                                       ^^^^ ^^
+IP header offsets      0    2    4    6    8   10
+```
+
+- **Baseline**: byte 6-7 = `40 00` (flags, DF set), byte 8 = `3f` — TTL 63, correctly decremented.
+- **Slice 11 disabled**: byte 6 = **`3f`** — the *flags* byte has been decremented from `0x40` —
+  and byte 8 reads `41`.
+
+**The edit landed two bytes early.** The chip wrote to the wrong offset; `tcpdump` reported it
+faithfully. So `ttl 65` was never an increment, and the earlier caution against recording it as one
+was right for the wrong reason.
+
+### What this establishes
+
+**The MOD program is a positional byte-edit stream, and position is carried by the preceding
+commands.** Removing slice 11 removed something that advances the write position — a `SKIP`, or the
+length contribution of an edit — and every later edit shifted by two bytes. That is exactly the
+datasheet's model (§5.21.5: SKIP/INSERT/DELETE/REPLACE "consumed as a stream by a per-port unit")
+now demonstrated on hardware rather than read.
+
+### It also resolves the `0x05` contradiction
+
+`0x05` decrements the TTL in slice 14 and looks like the MAC rewrite in slices 3/4. Under a
+positional stream both are the same operation: **an edit of length 6 applied wherever the stream has
+reached.** Under `opcode[7:5]:operand[4:0]`, operand 5 means length 6.
+
+- In slices 3/4 the position is the L2 header, so a 6-byte edit is the **MAC**.
+- In slice 14 the position is IP offset 8, where 6 bytes span **TTL, Protocol and Checksum** —
+  which explains why disabling that one step stopped the decrement *and* left no `bad cksum`: the
+  TTL and its checksum are repaired by the same edit.
+
+The command byte therefore gives an operation **shape**, not a target. **A MOD generator must track
+the write position across the whole stream**, which is a stronger requirement than decoding the
+opcode split — and it is why command and value slices being separate matters so much.
+
+⚠ Not yet established: which command supplies the two-byte advance that slice 11 contributes, and
+whether the advance is a `SKIP` or the length of an edit. The same slice sweep answers it, applied
+to the value banks.
