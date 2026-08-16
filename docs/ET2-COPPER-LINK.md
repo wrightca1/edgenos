@@ -118,3 +118,75 @@ needs and 10GBASE-SR does not. Diff it against the `0x45`/`0x49` programming abo
 
 Until then `fwd4.txt` stays canonical: it is the original artifact and the only one that has ever
 produced a two-port link, even if only once.
+
+---
+
+## 2026-08-16: five measurements that change this document
+
+### 1. ⛔ The lane is NOT marginal — measured, not inferred
+
+EOS ships FM6000 SerDes diagnostics (`show interfaces <if> phy detail`, see `EOS-SOURCES.md`). With
+all three ports linked:
+
+```
+            eyeScore  dfeCrse/Fine  eFifoErr
+Et1 (SR)     0x2a40     0002/0002       0     always links
+Et2 (CR)     0x3212     0002/0002       0     links ~50% under EdgeNOS
+Et3 (SR)     0x3340     0002/0001       0
+```
+
+**Et2 has more eye margin than Et1**, the port that has never failed. DFE converged to the same
+state. This refutes the physical readings of the problem — a weak signal, or equalisation failing to
+converge. The copper lane is electrically healthy; ⚠ though note this measures **EOS's** bring-up,
+so it shows what the lane *can* reach, not what ours achieves.
+
+### 2. The rate is 5 of 10, not "intermittent"
+
+Ten controlled boots, one arm, verified replay md5 and parser word each time, zero tainted:
+**Et2 links on 5 of 10.** The experiment matrix above records much smaller samples ("unpaced 2/5,
+genuinely paced 1/1"); this is the first properly counted figure, and it was taken **with the default
+`PACE=1500000` already applied.**
+
+### 3. The outcome is decided INSIDE the replay
+
+`fm6000_fullreplay` now samples Et2 every 16k ops. Four independent good boots:
+
+```
+147456 ops  et2=0x0015/00000000   unprovisioned
+163840 ops  et2=0x0815/00000000   SerXmit on, no lock     sbus=30752
+180224 ops  et2=0x0cc0/00000940   LINKED                  sbus=30827
+```
+
+**Et2 links between op 163,840 and 180,224 — 75 SBus transactions.** It never climbs during the
+settle loop; it arrives there already up or already dark.
+
+### 4. ★ The successful path is deterministic
+
+Those four good traces are **byte-identical**, including the SBus tally. So whatever differs on a
+dark boot, **it is not the instruction stream** — the same writes are issued in the same order. That
+is the strongest constraint this problem has: it rules out "a write is missing" and points at timing
+or at the hardware's response.
+
+### 5. ⚠ The instrument may perturb the result
+
+The in-replay sampling adds one MMIO read per 16k ops. Et2 linked on **4 of 4** boots with it,
+against 5 of 10 without. Fisher 4/4 vs 5/10 gives p = 0.126 — not significant, and 6/6 would still
+only reach 0.058. But the direction is what the pacing hypothesis predicts, and it is the reason the
+`PACE` experiment below is being run deliberately rather than read off an artifact.
+
+## The `PACE` experiment, and why it is affordable
+
+`PACE` is now settable from `/mnt/flash/pace.conf` (alpha14), so arms cost no rebuild.
+
+Separating 50% from 90% needs ~49 boots per arm. But the hypothesis predicts an **extreme** in the
+other direction — unpaced should fail nearly always — and a predicted zero is cheap: Fisher 0/7 vs
+5/10 gives p = 0.041. **Running now: 7 boots at `PACE=2000`.**
+
+⚠ A clean zero would actually contradict this document's own "unpaced 2/5". If links appear, the
+older figure is being corroborated and the clean-zero story is the one that fails.
+
+## What replaces "the one experiment that would settle it"
+
+The `fmPlatformTraceRegOps` capture proposed above is still worth doing, but it is no longer the
+only lead. **The 75-SBus-transaction window is a much narrower target**, and it can be compared
+against EOS's own programming of device `0x45` without a new capture.
