@@ -3031,3 +3031,47 @@ has needed from the start.
 ⚠ What survives regardless: **the four good traces are byte-identical**, including the SBus tally.
 Whatever differs on a dark boot, it is not the instruction stream — and that conclusion does not
 depend on the sampling being neutral, because it is a comparison *among* sampled boots.
+
+## ★★★ Et2's lane is NOT marginal — eye score measured under EOS
+
+**2026-08-16.** Using the EOS diagnostics found the same day (`show interfaces <if> phy detail`,
+`CliPlugin/FocalPointV2PhyCli.py`), with all three ports linked:
+
+```
+            eyeScore  dfeMode  dfeCrse  dfeFine   dfeParms   eFifoErr
+Et1 (SR)     0x2a40    0002     0002     0002    3f0a025f      0      always links
+Et2 (CR)     0x3212    0002     0002     0002    2315176f      0      links ~50% under EdgeNOS
+Et3 (SR)     0x3340    0002     0002     0001    3f07007f      0
+```
+
+**Et2's eye score is higher than Et1's**, the port that has linked on every boot ever recorded. It
+sits mid-range across the three, DFE converged to the same coarse/fine state (2/2), and the elastic
+FIFO error count is zero on all three.
+
+### What this rules out
+
+⛔ **The lane is not physically marginal.** The leading physical explanation for a ~50% link rate —
+a weak or borderline signal that sometimes fails to train — is refuted by direct measurement. Et2 has
+more eye margin than a port that never fails.
+
+⛔ **DFE non-convergence is not the cause either.** `dfeMode`/`dfeCrse`/`dfeFine` are `0002/0002/0002`
+on Et2, identical to Et1 and effectively identical to Et3.
+
+### What it leaves
+
+**The intermittency is in our bring-up sequence, not the silicon or the cable.** Combined with the
+in-replay traces — four byte-identical good boots, Et2 linking between op 163,840 and 180,224 across
+75 SBus transactions — the picture is:
+
+> the hardware is capable of linking reliably; EOS achieves that; our replay achieves it about half
+> the time, with an instruction stream that is byte-identical between successes.
+
+⚠ **On eyeScore semantics.** The units and direction are undocumented in our notes; the argument here
+does not depend on them, because it is a *comparison against two known-good ports on the same chip
+and the same boot*. Et2 is not an outlier in either direction. If a future reading treats eyeScore
+as an absolute threshold, that assumption needs establishing first.
+
+⚠ Also note this is EOS's bring-up, not ours. It says the lane *can* achieve this margin, not that it
+does under EdgeNOS. **The same measurement under EdgeNOS is the obvious next step** — but it needs
+the SDK, which we deliberately do not link, so it would mean reading the same SerDes registers
+directly (`SerdesStat 0x00100f0f`, `SerdesSigDet 0x000001fe` and the rest are all in the dump above).
