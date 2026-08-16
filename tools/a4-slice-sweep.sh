@@ -39,7 +39,19 @@ base_ok=$(probe | grep -c "ttl 63")
 [ "$base_ok" -ge 1 ] || { echo "⛔ baseline is already broken -- reboot before starting"; exit 1; }
 echo "baseline ok (ttl 63)"
 
+# Slices already known to stop the frame are NOT candidates: A4's signature is
+# "TTL changes while the frame still emits", which a load-bearing slice cannot
+# show. Re-testing them only buys another wedge and another reboot, and reboots
+# are the expensive part -- each needs Et2 to link (~50%) and per-port RX to
+# work. List them in a4-skip.txt (one per line) to skip.
+SKIPFILE="$S/a4-skip.txt"
+skip_bank(){ [ -f "$SKIPFILE" ] && grep -qx "$1" "$SKIPFILE"; }
+
 for bank in $(seq "$FROM" 19); do
+    if skip_bank "$bank"; then
+        echo "slice $bank -> SKIPPED (known load-bearing; cannot show the TTL signature)"
+        continue
+    fi
     base=$((0x159000 + 0x20*bank))
     saved=$(edge "for s in \$(seq 0 31); do printf '%s ' \$(/mnt/flash/fmdump \$(printf 0x%x \$(( $base + \$s ))) 1 | awk '{print \$2}'); done")
     cnt=$(echo $saved | wc -w)
