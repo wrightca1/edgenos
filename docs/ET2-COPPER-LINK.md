@@ -190,3 +190,50 @@ older figure is being corroborated and the clean-zero story is the one that fail
 The `fmPlatformTraceRegOps` capture proposed above is still worth doing, but it is no longer the
 only lead. **The 75-SBus-transaction window is a much narrower target**, and it can be compared
 against EOS's own programming of device `0x45` without a new capture.
+
+## ⚠⚠ 2026-08-16: the variable may be the READ, not the pacing
+
+Three arms, and they do not line up the way the pacing hypothesis predicts:
+
+```
+image     in-replay Et2 read   PACE        Et2 links
+alpha12   no                   1500000      5 / 10
+alpha13   yes                  1500000      4 / 4
+alpha14   yes                  2000          4 / 4     (effectively unpaced)
+                                             ────
+          with the read  8/8        without it  5/10     Fisher one-sided p = 0.029
+```
+
+**Pacing varied by a factor of 750 across the two read-arms and changed nothing.** Removing ~34 s of
+settle time did not stop Et2 linking — 4 of 4 unpaced. So:
+
+- ⛔ **Pacing is not necessary.** The clean-zero prediction fell on the first unpaced boot, and this
+  document's own "unpaced 2/5" is corroborated rather than the newer story.
+- ⛔ **Delay is not the mechanism.** If 1.5 s per 16k ops makes no difference, a few microseconds of
+  MMIO read time cannot be doing it either.
+- ★ **The common factor in both 4/4 arms is the added read** of `0xe4000` and `0xe4038` once per 16k
+  ops, introduced in alpha13 to bisect the race and inherited by alpha14.
+
+**The leading hypothesis is now that reading Et2's status registers during the replay helps the lane
+link** — a latch-on-read or state-machine-advancing side effect. Unusual, but status registers do
+behave that way, and it fits every arm.
+
+### ⚠ Why this is a lead and not a finding
+
+- The 8/8 is **two arms pooled after the fact**, not a designed pair. Post-hoc pooling inflates
+  significance.
+- The 5/10 baseline was taken across a long session with the box in varying states, including boots
+  following wedges and forced reboots. **Its conditions are not reproducible**, so it may simply be
+  a depressed measurement rather than a true rate.
+- p = 0.029 rests on that baseline being comparable. If it is not, there is no effect to explain.
+
+### The designed test
+
+Build an image identical to alpha14 **with the read removed**, and run 7 boots against 7 with it —
+one variable, same harness, same session, arms verifiable per boot. If the no-read arm drops back
+toward 50% while the read arm stays high, the side-effect hypothesis is real and the fix is a
+deliberate status read in our bring-up. If both run high, **the 5/10 baseline was the outlier** and
+the Et2 mystery was partly an artifact of measuring across an unstable session.
+
+⚠ The second outcome is quite likely and would be worth knowing: it would mean several hours of this
+investigation chased a rate that was never stable.
