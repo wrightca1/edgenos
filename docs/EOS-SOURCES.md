@@ -1118,3 +1118,69 @@ reading, and it means decoding the handler means tracing control flow, not findi
   and worth disproving.
 - `fm6000MapEplLaneToChannel` (`0x47cad6`) writes nothing. It validates `0 <= epl <= 0x18` and does
   a reverse lookup through a table at `-0x120(%ebx)` indexed `epl*4 + i`. Pure address arithmetic.
+
+## 2026-08-16: EOS ships FM6000 SerDes diagnostics — eye score and DFE state, via CLI
+
+Answering "is there an Intel/Fulcrum diag tool for this ASIC": **yes, and it is already on the box.**
+`libFocalpointSDK.so` exports **971 `fm6000*` symbols**, and EOS wraps the relevant ones in a CLI
+plugin shipped as readable Python:
+
+```
+usr/lib/python2.7/site-packages/CliPlugin/FocalPointV2PhyCli.py
+```
+
+### The commands
+
+```
+show platform fm6000 epl serdes     eplId <n>      (privileged)
+show platform fm6000 epl lane       eplId <n>
+show platform fm6000 epl pcs        eplId <n>
+show platform fm6000 epl interrupts eplId <n>
+```
+
+Each dispatches to the `FocalPointV2Hw` agent as `show epl serdes <n>`. **Et2 is EPL16, Et1/Et3 are
+EPL14.**
+
+`_printFm6000Details` — registered for `show interfaces <if> phy detail` via
+`PhyCli.registerPhySpecificDisplayFn('Hardware::Phy::Fm6000Status')` — prints per lane:
+
+```
+eyeScore  dfeMode  dfeCrse  dfeFine  dfeParms  eFifoErr
+portStatusReg serdesStatusReg serdesCfgReg serdesRxCfgReg serdesTxCfgReg
+serdesSigDetReg macCfgReg serdesImReg serdesIpReg linkImReg linkIpReg
+```
+
+### Why this matters for Et2
+
+**`eyeScore` is a measurement of signal quality.** Nothing this project has built can produce one —
+we have only ever read link state, which is binary. It gives a direct discriminator for the ~50%
+failure:
+
+- **Low/marginal eye score under EOS too** → the lane is physically marginal, and intermittent
+  training is expected. The fix is DFE/`PACE`, not write ordering.
+- **Healthy eye score under EOS** → EOS's bring-up achieves something ours does not, and the
+  difference is in the sequence rather than the silicon.
+
+`fm6000CheckPortLaneDfeTuningState` and `fm6000GetPortLaneDfeStatus` answer the companion question:
+did DFE tuning converge, or time out?
+
+### Other diagnostics worth knowing about
+
+```
+fm6000DbgTakeEyeDiagram / PlotEyeDiagram / GetPortEyeDiagram   full eye capture
+fm6000DbgDumpEthSerDesRegister      SerDes registers with field names
+fm6000DbgDumpL2ArRuleHit            which L2AR rules actually matched  -> B1
+fm6000DbgDumpL3ArRuleHit            same for L3AR
+fm6000DbgDumpFFU / FFUBstSlice / FFUEacl / GlortTable / Mapper / Mirror
+```
+
+`DbgDumpL2ArRuleHit` is close to what **B1** needs: rule-hit counters name the matching rule
+directly, instead of inferring it from emitted bytes.
+
+⚠ **The boundary.** These are EOS's, and EOS is licensed on this box — using them to *characterise*
+hardware is exactly what the reference boots have always been for. **Nothing we ship may link
+`libFocalpointSDK.so`**; the goal is zero proprietary files. Diagnose with EOS, implement from our
+own code, same line the register-header work already respects.
+
+⚠ Our notes previously dismissed these bindings as "a high-level API … contain no MOD opcodes". True
+for the question asked then. Nobody had checked them for **SerDes diagnostics**.
