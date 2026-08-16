@@ -898,3 +898,52 @@ selected by a CAM match on frame attributes, and picking the wrong bank perturbs
 nothing. And ⚠ **this writes to a live forwarding table**; `MOD_COMMAND_RAM` is not one of the tables
 that refuse writes after boot (`PARSER_INIT_FIELDS` is), so the change will take and forwarding will
 be affected until the next boot. Do it with the box already in a known state and a reboot budgeted.
+
+### A4 bench test: first run, one valid result and a wedged box
+
+**2026-08-15/16.** Transit works, so the test is finally runnable: clear a MOD step's `Valid` bit,
+send a frame through the hairpin, and read TTL and checksum off the peer's `swp6`. Baseline is
+`ttl 63` with a good checksum.
+
+**Command-level leave-one-out found nothing.** Three hand-picked steps — `slice 8 slot 9` (`0x20`),
+`slice 7 slot 7` (`0xe0`), `slice 10 slot 14` (`0x20`) — each cleared, each restored, TTL unchanged
+at 63 every time. I had picked them by constraining only `DST_PORT_Tag` and the route flag; the CAM
+key is 48 bits and the rest evidently excludes those entries. **Predicting which entry fires needs
+the whole key, and guessing at it does not work.**
+
+**Slice-level is the right search** — disable a whole slice and whatever would have fired cannot,
+which is 20 tests instead of 302 and needs no shortlist. Valid results before the run went bad:
+
+```
+slice 0  ttl 63       no effect
+slice 1  ttl 63       no effect
+slice 2  ttl 63       no effect
+slice 3  no frame     forwarding stops entirely
+```
+
+⚠ **Slice 3 agrees with an independent inference.** `mod_decode.py` reasoned from field widths and
+value-bank contents that the operand-5 (length-6) commands `0x85`/`0x05` are the **MAC rewrite**, and
+slices 3 and 4 are where those live. Remove the MAC rewrite and there is no valid frame to emit.
+Two different methods, same conclusion.
+
+### ⛔ Everything after slice 3 in that run is invalid
+
+Slices 4-8 also reported "no frame". They were not five more essential slices — **the box wedged at
+slice 3 and never recovered**, and every later reading was the same dead state. Confirmed by probing
+with nothing perturbed: 0 frames captured.
+
+The cause was the harness, not the chip: the bank save captured its 32 values through a nested shell
+loop, the guard only checked that the result was non-empty, and a short capture then had the restore
+write **zeros** over a live table. `0x159060` read `0x00000000` afterwards. A reboot fixed it —
+FULLSEQ reprograms `MOD_COMMAND_RAM` from scratch, so the damage is transient by construction.
+
+**Three rules, now implemented in `tools/a4-slice-sweep.sh`:**
+
+1. **Verify the save** — exactly 32 values or skip the bank. "Non-empty" is not a check.
+2. **Health-check between tests** with nothing perturbed. Six readings were taken after the box died.
+3. **Restore is not recovery.** A restored table does not un-wedge a dataplane in flight. Treat a
+   frame stopping as terminal, reboot, and `RESUME_FROM` the next slice.
+
+⚠ The single-register `a4-leaveout.sh` was safe throughout — it saves one value, and all ten
+registers it touched verified restored. The failure came from scaling the write without scaling the
+check.
