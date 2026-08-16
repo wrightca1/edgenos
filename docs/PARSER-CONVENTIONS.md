@@ -1294,3 +1294,57 @@ the sweep's zeroing did not disable the operands the way it was assumed to.
 (`DECREMENT`, `SKIP 6`, and before them the `{0x20, 0xe0}` pairing). What is established is narrower
 and worth keeping: **slice 14 slot 9 is the step responsible for the TTL decrement**, found by
 perturbation, and whatever it does it also writes the length field.
+
+## ★★★ `0x05` IS `SKIP 6` — and opcode 0 = SKIP is now confirmed three ways
+
+**2026-08-16.** The size test settles it. Slice 14 slot 9 (`0x1591c9`, command `0x05`), three payload
+sizes, enabled and disabled:
+
+```
+            correct        ENABLED          DISABLED
+-s 56       0054  ttl 3f   4500 0054 3f01   4500 ff54 4001
+-s 400      01ac  ttl 3f   4500 01ac 3f01   4500 00ac 4001
+-s 1000     0404  ttl 3f   4500 0404 3f01   4500 0304 4001
+```
+
+**With the step enabled**, length and TTL are both correct at every size — a working router.
+
+**With it disabled**, the length *high byte is exactly one less* than it should be
+(`00→ff`, `01→00`, `04→03`) and the TTL is **not** decremented.
+
+**The decrement did not disappear — it moved.** From offset 8 (TTL) to offset 2 (length high byte).
+`8 - 2 = 6`.
+
+> **`0x05` is `SKIP 6`.** Opcode 0, operand 5, count = operand + 1 = 6 — the same encoding as
+> `0x01` = `SKIP 2`. Removing the skip leaves the following single-byte `DECREMENT` landing six
+> bytes earlier.
+
+### Opcode 0 = SKIP, on three independent measurements
+
+| evidence | result |
+|---|---|
+| `0x01` removed, slice 11 | later edit lands **2** bytes early |
+| `0x05` removed, slice 14 | later edit lands **6** bytes early |
+| count = operand + 1 | holds for both, and matches the datasheet's SKIP range |
+
+### ⛔ Correcting the record, twice
+
+1. **"Command byte `0x05` decrements the TTL" was wrong.** It is a skip; the decrement is a
+   *different, later* step that this skip positions. The A4 entry recorded earlier today must be read
+   as **"slice 14 slot 9 positions the decrement"**, not as identifying `DECREMENT`.
+2. **My reason for dismissing `SKIP 6` was also wrong.** I argued that a skip's removal would displace
+   everything downstream, and since src, dst and flags were byte-identical, it could not be a skip.
+   **A `SKIP` before a single-byte transform displaces nothing** — it relocates one edit. Whole-frame
+   displacement only happens for `INSERT`/`DELETE`, which change length. I tested for the wrong
+   signature and drew a confident conclusion from its absence.
+
+### What this leaves
+
+- **`DECREMENT` is still unidentified.** It is a step *after* slice 14 slot 9 in the stream. The same
+  perturbation method will find it: it is the entry whose removal stops the TTL changing **without**
+  relocating the edit.
+- The value-bank tension **dissolves**: a `SKIP` needs no operands, and the decrement is a transform
+  which the datasheet gives 0 value bytes. Both agree with the sweep finding no bank affects the TTL.
+- `mod_decode.py`'s reading of `0x05`/`0x85` as the **MAC rewrite** is now doubtful for the same
+  reason my claim was — operand 5 means *skip 6*, not *write 6*. Slices 3/4 stopping the frame needs
+  re-attributing to other commands in those slices.
