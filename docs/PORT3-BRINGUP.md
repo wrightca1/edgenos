@@ -2904,3 +2904,43 @@ stands, and it is not inert.**
 ⚠ Also visible and unexplained: **3 of 7 ring entries are short and malformed** (12, 19, 20 bytes,
 with plausible-looking Ethernet fragments). They are not frames. Worth a look on their own — portd
 counts them via `n_rx_drop`, so they are being silently discarded today.
+
+## ★★★ ANSWERED: Et2's outcome is decided INSIDE the replay, not in the settle loop
+
+**2026-08-16.** alpha11/12 log Et2 at STEP5 — the moment the 299,803-write replay finishes, before
+any settling. Both arms now captured:
+
+```
+GOOD boot   STEP5   et2 PORT_STATUS=00000cc0  pcsRx=1  LANE_STATUS=00000940
+DARK boot   STEP5   et2 PORT_STATUS=00000815  pcsRx=0  LANE_STATUS=00000000
+```
+
+**Et2 is already fully locked when the replay completes, or already dark.** It does not climb during
+STEP7; the settle loop only ever observes a result that was fixed minutes earlier. Et1 behaves the
+same way — up at STEP5 on every boot — so this is how the chip works, not an Et2 peculiarity.
+
+### What this retires
+
+**"The difference is no longer visible in any register."** That conclusion, and the two days behind
+it, rested on diffs taken *after* settling: the 231-register three-column SerDes comparison, the EPL
+lane blocks, `0x0b`/`0x0c`/`0x1f`, `analog_to_core_obs`. Every one of them sampled a chip whose fate
+was already sealed. They were not looking in the wrong place — they were looking at the right place
+at the wrong time, which is why they kept coming back clean and why closing every difference changed
+nothing.
+
+### What it means
+
+**Et2's ~50% failure is a race inside the replay** — ordering or timing among 300k register writes —
+not SerDes training convergence. That redirects the whole investigation:
+
+- ⛔ **Stop diffing post-boot register state.** It cannot see this.
+- ✅ **Instrument the replay itself.** `fm6000-fullseq.sh` already reports per-block progress; the
+  question is which block leaves Et2 locked or dark. Sampling `0xe4000` between blocks would bisect
+  300k writes down to one block in a handful of boots — the same bisection that found the SPICO
+  answer, applied inside STEP5.
+- The `PACE` knob (`init-m1` passes `PACE=1500000`) is the obvious first variable, since a timing
+  race is exactly what pacing changes. `ET2-COPPER-LINK.md` already records a suspicion that copper
+  "seems to need it; evidence is still thin" — that thin evidence now has a mechanism to attach to.
+
+⚠ This does not identify the block or the mechanism. It says where to look, and rules out the place
+this project has been looking for two days.
