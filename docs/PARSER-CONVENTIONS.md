@@ -1122,3 +1122,52 @@ opcode split — and it is why command and value slices being separate matters s
 ⚠ Not yet established: which command supplies the two-byte advance that slice 11 contributes, and
 whether the advance is a `SKIP` or the length of an edit. The same slice sweep answers it, applied
 to the value banks.
+
+## MOD_VALUE_RAM sweep: the TTL decrement is NOT operand-driven
+
+**2026-08-16.** First perturbation of the operand side — 14 banks from data slices 17-30 plus slice
+31 → bank 14. Zeroing a bank sets every operand's `Type` to 0, supplying no value bytes. Compared on
+the full IP header hex with the IP ID and checksum masked (they change every packet; an exact match
+reported bank 0 as "changed" when only those moved).
+
+```
+banks 0, 1, 4, 5, 6, 7, 8, 9    unchanged
+banks 2, 3                      NO FRAME  (both recovered)
+bank 10                         NO FRAME  (wedged -- RESUME_FROM=11)
+banks 11-14                     not yet run
+```
+
+**No bank produced a partial change.** Every effect is all-or-nothing: either the frame is unaffected
+or it does not emit. Nothing altered the header while leaving the frame valid.
+
+### ⛔ A prediction of mine, recorded beforehand and refuted
+
+I argued that since a decremented TTL is derived from the incoming frame, it must be channel-sourced,
+and that banks **7 and 9** — the only banks with *no* constants, every operand `Type=2` (data from a
+parser channel) — should therefore drive it. **Both are unchanged.**
+
+The premise was the error: the TTL value does not come from `MOD_VALUE_RAM` at all.
+
+### What survives, and it is the datasheet's own reading
+
+`DECREMENT` is documented with **0 value bytes**. It *transforms* a byte already in the frame rather
+than writing supplied content, so no operand bank can affect it — which is exactly what the sweep
+shows. The banks that do matter (2, 3, 10) are all constant-bearing, consistent with supplying
+literal content for rewrites the frame cannot be emitted without, and matching `mod_decode.py`'s
+finding that banks 3 and 4 hold a literal system MAC.
+
+### Why this helps A4's generator
+
+It splits the problem along a clean line:
+
+- **Transform-type commands** (`DECREMENT`, and by extension the checksum fixup) need **no operand
+  modelling at all**. The command and the write position are sufficient.
+- **Content-writing commands** (`INSERT`, `REPLACE`, the MAC rewrite) need the paired value bank.
+
+So the coupling between command and data slices — which looked like it might make a generator
+intractable — only binds for the second class. That is a materially smaller problem than "a generator
+cannot be written from command bytes alone".
+
+⚠ Banks 11-14 are untested. And bank 4 came back *unchanged* despite `mod_decode.py` associating
+banks 3 and 4 with the MAC rewrite; the likely explanation is that bank 4 serves a frame path our
+routed IPv4 unicast does not take, but that is untested.
