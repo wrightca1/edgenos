@@ -1171,3 +1171,45 @@ cannot be written from command bytes alone".
 ⚠ Banks 11-14 are untested. And bank 4 came back *unchanged* despite `mod_decode.py` associating
 banks 3 and 4 with the MAC rewrite; the likely explanation is that bank 4 serves a frame path our
 routed IPv4 unicast does not take, but that is untested.
+
+### Value-bank sweep COMPLETE — all 15 banks, no partial changes anywhere
+
+```
+unchanged   banks 0, 1, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14      (12 banks)
+NO FRAME    banks 2, 3, 10                                     (3 banks)
+partial     none
+```
+
+**Not one bank altered the header while leaving the frame valid.** Every effect is all-or-nothing:
+either the frame is unaffected, or it cannot be emitted. That includes bank 14, which is driven by
+CAM slice 31 rather than the 17-30 range and was the most likely place for an exception to hide.
+
+### The operand question is closed
+
+`MOD_VALUE_RAM` supplies **content** for edits that write new bytes, and nothing else. Specifically:
+
+- **Transform commands** — `DECREMENT`, and by extension the checksum fixup that rides with it —
+  take their input from the frame and need **no operand data**. Zeroing every value bank in turn
+  never once stopped the TTL decrementing. That is the datasheet's own reading (`DECREMENT`: 0 value
+  bytes) confirmed by exhaustive measurement rather than inference.
+- **Content commands** — `INSERT`, `REPLACE`, the MAC rewrite — need their paired bank, and removing
+  it makes the frame unemittable rather than merely wrong. The three banks that matter (2, 3, 10)
+  are all constant-bearing, consistent with `mod_decode.py` finding a literal system MAC in the
+  value banks.
+
+### What A4's generator therefore has to reproduce
+
+```
+transform commands   command byte + write position                   (no operands)
+content commands     command byte + write position + operand bank
+```
+
+The command/data slice coupling that looked like it might make a generator intractable **binds only
+for the second class**. Combined with the positional-stream result, the model a generator needs is:
+maintain a write position across the stream, emit an operation shape per step, and attach operand
+data only for the content-writing shapes.
+
+⚠ Still untested: bank 4 came back unchanged despite `mod_decode.py` associating banks 3 **and** 4
+with the MAC rewrite. The likely reading is that bank 4 serves a frame path our routed IPv4 unicast
+does not take — the CAM selects per frame — but nobody has checked. It is the one loose thread in an
+otherwise complete sweep.
