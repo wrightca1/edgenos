@@ -100,6 +100,13 @@ and self-describing (each image records its component list under
 `/var/lib/edgenos/epkg/installed`). The unified AS5610 `edged` is built and linked from
 source. Adding a third switch is a `switchdb/` entry + a `platform/<board>/` folder.
 
+## Support this project
+
+EdgeNOS is developed on real Edgecore hardware bought out of pocket. If it saved you
+time, [buy me a coffee](https://buymeacoffee.com/wrightca1).
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/wrightca1)
+
 ## Licensing
 
 All components are distributable. Kernel / BDE-KNET / Buildroot / Quagga are GPL; the
