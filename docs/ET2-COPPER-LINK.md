@@ -237,3 +237,54 @@ the Et2 mystery was partly an artifact of measuring across an unstable session.
 
 ⚠ The second outcome is quite likely and would be worth knowing: it would mean several hours of this
 investigation chased a rate that was never stable.
+
+## ★★★★ 2026-08-16: Et2 TRAINS on failing boots too — the link is torn down afterwards
+
+The dark-boot trace, finally captured (alpha14 carries the in-replay sampling, and a dark boot
+appeared on the unpaced arm):
+
+```
+ops        GOOD                     DARK
+114688     et2=0x00000015/00000000  et2=0x00000015/00000000
+131072     et2=0x00000015/00000000  et2=0x00000015/00000000
+147456     et2=0x00000015/00000000  et2=0x00000015/00000000
+163840     et2=0x00000815/00000000  et2=0x00000815/00000000     SerXmit on, both
+180224     et2=0x00000cc0/00000940  et2=0x000008c0/00000940     LINKED, BOTH
+196608     et2=0x000008c0/00000940  et2=0x00000815/00000000     <<< DARK LOSES IT
+212992     et2=0x000008c0/00000940  et2=0x00000815/00000000
+```
+
+**Et2 links on failing boots.** It reaches `LANE_STATUS = 0x0940` — block lock, rate acquired — at
+op 180,224, the same point as every good boot. Then between 180,224 and 196,608 the link is
+**destroyed**: `PORT_STATUS 0x08c0 → 0x0815`, `LANE_STATUS 0x0940 → 0x00000000`.
+
+### This reframes the entire problem
+
+⛔ **"Et2 fails to train" is wrong.** Training succeeds every time observed. The failure is a
+**teardown of an already-established link**, and it happens inside a 16,384-op window — about 16k
+MMIO writes, `mmio 87,743 → 104,127`.
+
+That explains what had been puzzling:
+
+- **the healthy eye score** — the lane is fine, because it does link;
+- **the byte-identical instruction stream** — the same writes are issued either way; what varies is
+  whether one of them lands while the lane is in a state it can disturb;
+- **why pacing did nothing** — there is no training race to give more time to;
+- **why the failure is "latched"** — a torn-down link is not retried later in the replay, so it stays
+  down through the settle loop and beyond, exactly as `docs/PORT3-BRINGUP.md` recorded.
+
+### The target is now specific
+
+**Some write between op 180,224 and 196,608 can knock down an established 10GBASE-CR link.** That is
+a bisectable window of ~16k writes, and the same in-replay sampling can be tightened (print every
+1k ops in that range) to narrow it much further in a single boot.
+
+⚠ Note the mechanism must be state-dependent, not simply "this write breaks the link" — the same
+writes are issued on good boots without breaking it. Something about the lane's state when the write
+lands decides the outcome, which is why it looks like a coin.
+
+### What this retires
+
+The `PACE` work, the eye-score check, the SerDes-configuration diffs and the SPICO arm were all
+aimed at *training*. Training is not the problem. **The 75-SBus-transaction bring-up window is the
+right sequence and it works.** The next window is the one that matters.
