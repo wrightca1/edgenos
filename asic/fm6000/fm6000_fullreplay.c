@@ -126,7 +126,13 @@ int main(int argc,char**argv){
     if(a==0xF002u){ pend=v; continue; }
     if(a==0xF001u){ if(v==0) continue; sbus(v,pend); continue; }
     wr(a,v); mmio++;
-    if((n & 0x3fff)==0){
+    /* Fine sampling across the TEARDOWN window. The dark-boot trace showed Et2
+     * reaching block lock at op 180,224 exactly as on good boots, then losing it
+     * by 196,608 -- PORT_STATUS 0x08c0 -> 0x0815, LANE_STATUS 0x0940 -> 0. So a
+     * write in that window can knock down an ESTABLISHED 10GBASE-CR link.
+     * Sample every 1k ops through 163,840..212,992 to narrow it from ~16k writes
+     * to ~1k in one boot; 16k elsewhere, as before. */
+    if((n >= 163840 && n <= 212992) ? ((n & 0x3ff)==0) : ((n & 0x3fff)==0)){
       if(pace) usleep(pace);
       if(rd(PIN)!=0x208u){ printf("\n OFF-BUS at line %lu (0x%05x <- 0x%08x)\n",n,a,v); aborted=1; break; }
       /* Sample Et2 as the replay runs. Et2 links on only ~half of identical
