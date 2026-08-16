@@ -1250,3 +1250,47 @@ is byte-identical, the decrement claim stands.
 This is the same instrument failure as reading `ttl 65` and inferring an increment: **a field decode
 hides a shift.** Once known, it should have been applied to every earlier result taken with the same
 tool — and it was not.
+
+### ★ RE-TEST: `0x05` is neither a pure DECREMENT nor a SKIP
+
+**2026-08-16.** Disabling slice 14 slot 9 (`0x1591c9`, command `0x05`) and reading **raw bytes**
+rather than the parsed TTL:
+
+```
+baseline   4500 0054 b0f4 4000 3f01 0fc8 0a65 6521
+disabled   4500 ff54 bc8d 4000 4001 042e 0a65 6521
+                ^^                ^^
+```
+
+(bytes 4-5 are the IP ID and vary per packet; not comparable.)
+
+**Two fields change, not one:**
+
+- **byte 8: `3f` → `40`** — the TTL is no longer decremented.
+- **byte 2: `00` → `ff`** — the IP **total-length** high byte is corrupted.
+
+Source and destination addresses and the flags field are **unchanged**, so **nothing shifted**.
+
+**That refutes both candidate readings:**
+
+- ⛔ **Not a pure `DECREMENT`.** A transform of one byte cannot also change the length field. The
+  A4 answer as recorded — "command byte `0x05` decrements the TTL" — is **too simple** and must be
+  qualified: this step is *responsible for* the decrement, but it does more.
+- ⛔ **Not `SKIP 6`.** A skip's removal displaces everything downstream; src and dst are byte-identical
+  and the flags field is untouched. The `0x01` = `SKIP 2` result stands on its own evidence, but it
+  does not generalise to `0x05` the way I feared.
+
+**What it looks like instead:** a content edit that writes several header bytes, among them the
+total-length high byte and the TTL. Under `opcode[7:5]:operand[4:0]` operand 5 means length 6, and a
+6-byte write reaching both offset 2 and offset 8 is not contiguous — so either the operand is not a
+byte count here, or the edit is not a single contiguous span.
+
+⚠ **And it is in tension with the value-bank sweep.** If `0x05` writes content, that content should
+come from `MOD_VALUE_RAM` — yet zeroing all 15 banks never once stopped the TTL decrementing. Either
+the bytes come from somewhere else (a parser channel reaching the MOD engine by another path), or
+the sweep's zeroing did not disable the operands the way it was assumed to.
+
+**Do not record an opcode meaning for `0x05` yet.** Three readings have now been tried and refuted
+(`DECREMENT`, `SKIP 6`, and before them the `{0x20, 0xe0}` pairing). What is established is narrower
+and worth keeping: **slice 14 slot 9 is the step responsible for the TTL decrement**, found by
+perturbation, and whatever it does it also writes the length field.
