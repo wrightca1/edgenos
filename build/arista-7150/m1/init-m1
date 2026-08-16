@@ -206,7 +206,16 @@ for f in /mnt/flash/fwd4.txt /mnt/flash/fwd5.txt; do [ -f "$f" ] && { FWD="$f"; 
 if [ -n "$FWD" ] && [ -x /usr/bin/fm6000_coldreplay ] && \
    [ -x /usr/lib/edgenos/platform/fm6000-fullseq.sh ]; then
     echo "--- FM6000 dataplane auto bring-up (replay $FWD, log /var/log/fm6000-fullseq) ---"
-    FWD="$FWD" PACE="${PACE:-1500000}" \
+    # PACE is settable from flash so an experiment can change arms without a
+    # rebuild: echo 2000 > /mnt/flash/pace.conf makes the replay effectively
+    # unpaced, and removing the file restores the default. The 50% Et2 link rate
+    # measured 2026-08-16 was WITH the default pacing already applied, and the
+    # recorded evidence for pacing is thin ("unpaced 2/5, genuinely paced 1/1"),
+    # so this is the knob that experiment needs.
+    [ -r /mnt/flash/pace.conf ] && PACE=$(tr -dc 0-9 < /mnt/flash/pace.conf)
+    [ -n "${PACE:-}" ] || PACE=1500000
+    echo "    PACE=$PACE"
+    FWD="$FWD" PACE="$PACE" \
         sh /usr/lib/edgenos/platform/fm6000-fullseq.sh > /var/log/fm6000-fullseq 2>&1
     grep -E 'PORT_STATUS|t=40s|DONE' /var/log/fm6000-fullseq | tail -3 | sed 's/^/    /'
     for p in "Et1 0xe3800 0xe3826" "Et2 0xe4000 0xe4026"; do
