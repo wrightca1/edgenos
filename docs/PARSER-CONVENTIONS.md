@@ -984,3 +984,41 @@ to the hardware.
 
 ⚠ Note the cost model: each wedge needs a reboot, and each reboot needs Et2 to link (~50%) **and**
 per-port RX to work (2 of 3 boots observed). So productive boots are perhaps 1 in 3.
+
+## ★★★ A4: the TTL decrement is in MOD slice 14
+
+**2026-08-16.** The slice sweep completed all 20 slices. Baseline is `ttl 63` (the peer sends 64;
+the switch decrements once).
+
+```
+slice  0  1  2  5  6  8  9 10 18 19   ttl 63     no effect
+slice  3  4  7 12 13 15 16 17         no frame   load-bearing for emission
+slice 11                              ttl 65     <<< anomalous, see below
+slice 14                              ttl 64     <<< THE DECREMENT
+```
+
+**Disabling slice 14 leaves the TTL at 64 — the value the peer sent, un-decremented — while the
+frame still emits.** That is precisely A4's signature, and it is the first direct identification of
+a MOD command's function on this chip.
+
+⚠ **Slice 11 gives `ttl 65`, which no decrement can explain.** The peer sends 64 and nothing should
+raise it. Candidates, untested: the IP header is shifted so `tcpdump` reads the wrong byte as TTL
+(an insert/delete length change would do this); or slice 11 performs an edit whose removal
+misaligns the header. **Do not record slice 11 as "increments the TTL"** — a misparse is the more
+likely reading and it is cheap to settle by dumping the raw bytes rather than trusting tcpdump's
+field decode.
+
+### Why the sweep succeeded where command-guessing failed
+
+Three hand-picked leave-one-out tests on `0x20`/`0xe0` steps changed nothing, because predicting
+which CAM entry fires needs the frame's full 48-bit key and I was constraining two fields. Disabling
+a whole slice needs no such prediction. **20 tests, no shortlist, and it did not depend on the
+`{0x20, 0xe0}` hypothesis being right** — which matters, since the co-occurrence test had already
+argued that hypothesis was wrong.
+
+### Next
+
+`tools/a4-narrow.sh 14` walks slice 14's valid entries with the single-register perturbation and
+reports the **command byte** of the one that matters. That byte is A4's answer: the opcode for
+`DECREMENT`. If it is neither `0x20` nor `0xe0`, the shortlist is falsified and the split hypothesis
+needs re-deriving from a known-correct opcode.
