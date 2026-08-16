@@ -1022,3 +1022,57 @@ argued that hypothesis was wrong.
 reports the **command byte** of the one that matters. That byte is A4's answer: the opcode for
 `DECREMENT`. If it is neither `0x20` nor `0xe0`, the shortlist is falsified and the split hypothesis
 needs re-deriving from a known-correct opcode.
+
+## ★★★ A4 ANSWERED: the TTL decrement is command byte `0x05`, slice 14 slot 9
+
+**2026-08-16.** Leave-one-out over every valid entry in slice 14, single-register perturbation, each
+restored before the next:
+
+```
+slot 9  cmd 05 -> ttl 64    <<< the frame still emits, TTL NOT decremented
+slot 6  cmd e0 -> ttl 63        no effect
+slots 1,2,4,5,7,8,10,11,15,16,17-24 -> ttl 63   no effect
+```
+
+**Command byte `0x05` performs the TTL decrement**, and it is the first MOD command on this chip
+whose function has been established by measurement rather than inference.
+
+### ⛔ This falsifies the `{0x20, 0xe0}` shortlist
+
+`0x05` is neither. And `0xe0` was tested **in the same slice, on the same frame** (slot 6) and did
+nothing. The route-enrichment statistics that produced that shortlist were sound as far as they went
+— `0x20` and `0xe0` really are route-associated at p ≈ 1.2e-04 — but route-association is not
+function. Two commands can both appear mostly on routed frames without either being the TTL edit.
+
+### ⚠ And it is in tension with the existing decode
+
+`mod_decode.py` infers that the operand-5 commands `0x05`/`0x85` are the **MAC rewrite**, reasoning
+that under `opcode[7:5]:operand[4:0]` an operand of 5 means length 6, which is the MAC length, and
+that the value banks supply a literal system MAC. That reading is supported by slices 3 and 4 —
+which carry `0x85`/`0x05` and whose removal stops the frame entirely, exactly as losing the MAC
+rewrite should.
+
+**But the same byte `0x05` in slice 14 slot 9 decrements the TTL**, which is a one-byte edit.
+
+Both cannot be true of a self-contained opcode. The possibilities, none yet tested:
+
+1. **The command byte is not self-describing.** What a step does depends on its **value operands**,
+   which come from the *data* slices (17-31) via `MOD_VALUE_RAM`, not from the command slice. Then
+   `0x05` names an operation shape — "replace 6 bytes" — and the operands decide *which* 6 bytes and
+   with what. IPv4 offsets 8-13 are TTL, Protocol, Checksum and two bytes of source address, so a
+   6-byte replace starting at offset 8 would cover the TTL and the checksum together.
+2. The `opcode[7:5]:operand[4:0]` split is wrong, and `0x05` is a different opcode entirely.
+3. Slices 3/4 stop the frame for some reason other than the MAC rewrite.
+
+⚠ **Reading (1) would mean a MOD generator cannot be written from the command bytes alone** — it
+needs the paired value operands, which is precisely the coupling `mod_decode.py` flagged when it
+found that command and data live in different slices. That is a bigger constraint on A4's generator
+than the opcode split ever was.
+
+### The method that got here
+
+Three hand-picked leave-one-out tests on shortlist candidates changed nothing, because predicting
+which CAM entry fires needs the frame's full 48-bit key. **Disabling a whole slice needs no such
+prediction**, and narrowing inside the guilty slice with single-register perturbations needs none
+either — the entry that fires is the one whose removal changes the wire. 20 + 20 tests, no
+hypothesis required, and the answer contradicted the hypothesis we had.
