@@ -129,7 +129,15 @@ int main(int argc,char**argv){
     if((n & 0x3fff)==0){
       if(pace) usleep(pace);
       if(rd(PIN)!=0x208u){ printf("\n OFF-BUS at line %lu (0x%05x <- 0x%08x)\n",n,a,v); aborted=1; break; }
-      printf("  %lu ops (mmio=%lu sbus=%ld to=%ld) PIN=ok\n",n,mmio,sbus_n,sbus_to);
+      /* Sample Et2 as the replay runs. Et2 links on only ~half of identical
+       * boots, and its outcome is already fixed by the time STEP5 finishes
+       * (docs/PORT3-BRINGUP.md) -- so the transition happens somewhere INSIDE
+       * these 300k writes and nothing downstream can see where. One extra MMIO
+       * read per 16k ops gives ~18 samples across the replay, which is enough
+       * to bisect a good boot's dark->up transition to a 16k-op window.
+       *   et2 0x0815 = dark, 0x08c0/0x0cc0 = linked. */
+      printf("  %lu ops (mmio=%lu sbus=%ld to=%ld) PIN=ok et2=0x%08x/%08x\n",
+             n,mmio,sbus_n,sbus_to,rd(0xe4000),rd(0xe4038));
     }
   }
   fclose(f);
