@@ -1213,3 +1213,40 @@ data only for the content-writing shapes.
 with the MAC rewrite. The likely reading is that bank 4 serves a frame path our routed IPv4 unicast
 does not take — the CAM selects per frame — but nobody has checked. It is the one loose thread in an
 otherwise complete sweep.
+
+### ⚠ `0x01` is a 2-byte SKIP — which puts the `0x05` result in doubt
+
+**2026-08-16.** Narrowing slice 11: **slot 0, command byte `0x01`**, and its removal reproduces the
+whole-slice signature exactly:
+
+```
+baseline            4500 0054 4000 3f01 0a65 6521
+slot 0 (0x01) off   4500 0054 3f00 4101 0a65 6521
+```
+
+Under `opcode[7:5]:operand[4:0]`, `0x01` is opcode 0 operand 1, i.e. **count = operand + 1 = 2** — a
+2-byte `SKIP`. That matches `mod_decode.py`'s guess that "SKIP almost certainly being 0", and it is
+the first confirmation of the opcode-0 assignment.
+
+⚠ **And it undermines the claim that `0x05` is `DECREMENT`.** If opcode 0 is `SKIP`, then `0x05` is
+opcode 0 operand 5 = **`SKIP` 6**, not a transform. Removing a 6-byte skip would displace every
+later edit by six bytes, and the TTL byte could then read 64 simply because the decrement landed
+somewhere else entirely.
+
+**`a4-narrow.sh` only grepped `ttl N`. It never dumped raw bytes**, so it cannot tell those apart:
+
+```
+"0x05 decrements the TTL"                     -> TTL 64 because no decrement happened
+"0x05 skips 6, and removing it moved the edit" -> TTL 64 because the decrement hit another byte
+```
+
+Both produce `ttl 64`. The distinguishing evidence is whether **other header bytes moved**, which the
+tool discarded.
+
+**Re-test required**: disable slice 14 slot 9 and dump the raw header. If bytes elsewhere changed,
+`0x05` is a skip and the A4 answer is wrong as recorded. If only the TTL differs and everything else
+is byte-identical, the decrement claim stands.
+
+This is the same instrument failure as reading `ttl 65` and inferring an increment: **a field decode
+hides a shift.** Once known, it should have been applied to every earlier result taken with the same
+tool — and it was not.
