@@ -1,5 +1,27 @@
 # EdgeNOS
 
+> ### This branch: Arista DCS-7050TX-64 (BCM56855 / Trident2)
+>
+> A **third switch**, added to `platform/arista-7050tx-64/` and
+> `asic/bcm56855/`. It routes — 40G uplink, OSPF adjacency Full, 35 routes, and
+> a hardware FIB whose adds, next-hop changes and withdrawals are each verified
+> against the chip — on a **stock 6.12 kernel with no out-of-tree kernel
+> modules**, because the BDE and packet path were rewritten in user space.
+>
+> **Status `bringup`, not production.** Copper bring-up is unreliable, the SDK
+> agent and routing daemons are started by hand, and there has been no cold-boot
+> test. Everything that does not work is listed in the platform README.
+>
+> ⚠ **Read [`platform/arista-7050tx-64/PROVENANCE.md`](platform/arista-7050tx-64/PROVENANCE.md)
+> before reusing this.** The board vendor's own data — port map, cooling curve,
+> retimer tuning — is deliberately **not** shipped here; it is generated on the
+> switch itself. Building this without those files gives you a switch whose fans
+> run at 100% and whose SDK will not attach, and the platform README says how to
+> produce them.
+>
+> Everything below describes EdgeNOS generally and applies to all three switches.
+
+
 A unified, **multi-architecture / multi-ASIC** network operating system build system.
 One **switch database** describes every supported switch; from it, EdgeNOS builds a
 **per-switch ONIE installer** carrying a base system for that CPU + ASIC plus its

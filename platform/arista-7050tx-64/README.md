@@ -5,9 +5,12 @@ CPU, Broadcom Trident2. **This is a bring-up in progress, not a finished
 platform** — read [PROVENANCE.md](PROVENANCE.md) before publishing anything from
 it, and the state of play below before trusting it.
 
-The detailed reverse-engineering record — 41 documents, traces, artifacts — lives
-in the private research repo `td2-7050tx64-reverse-engineering`; start at its
-`docs/STATE-OF-PLAY.md`. This branch carries only the platform support.
+The detailed reverse-engineering record behind this — how the chip was brought
+up, what was measured, and every wrong turn — is kept in a private repository.
+This branch carries only the platform support that came out of it, so some
+commit messages here refer to findings you cannot see. Where that matters, the
+reasoning has been restated in these documents rather than left as a dangling
+reference.
 
 ## What works
 
