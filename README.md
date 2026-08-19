@@ -14,6 +14,7 @@ EdgeNOS 0.1.0 — supported switches
 MODEL                  ARCH     ASIC       KERNEL  STATUS      DOWNLOAD
 accton as4610-54       armhf    bcm56340   6.1     production  EdgeNOS-0.1.0-arm-accton-as4610-54-r0.swi
 accton as5610-52x      powerpc  bcm56846   6.1     production  EdgeNOS-0.1.0-powerpc-accton_as5610_52x-r0.bin
+arista 7050tx-64       x86_64   bcm56855   6.12    bringup     (source only -- see notes)
 ```
 
 ## How it fits together
@@ -99,6 +100,29 @@ Production-capable on two switches (AS5610-52X, AS4610-54T), both fully package-
 and self-describing (each image records its component list under
 `/var/lib/edgenos/epkg/installed`). The unified AS5610 `edged` is built and linked from
 source. Adding a third switch is a `switchdb/` entry + a `platform/<board>/` folder.
+
+**A third switch is being added on this branch: the Arista DCS-7050TX-64**
+(x86_64, BCM56855 / Trident2) — `platform/arista-7050tx-64/`. It routes: 40G
+uplink up, OSPF adjacency Full, and a hardware FIB whose adds, next-hop changes
+and withdrawals are each verified against the chip rather than inferred.
+
+It is **`bringup`, not production**, and differs from the two production boards
+in three ways worth knowing before reusing anything from it:
+
+* **No kernel BDE and no KNET.** A user-space BDE (`asic/bcm56855/bde_shim.c`)
+  drives the chip over sysfs PCI resources and a reserved DMA region, with tap
+  netdevs for packet I/O. That is what lets it run a stock 6.12 kernel with
+  nothing out-of-tree — and it is why this board has no `linux-kernel-bde`.
+* **Targets `sdkpoc`, not `edged`.** `sdkpoc` is the bring-up agent: cold init,
+  port bring-up, tap datapath and FIB sync in one binary, written while the
+  chip's behaviour was still being learned. Converging it onto `core/datapath`
+  is the next structural step.
+* **The image ships none of the board vendor's data.** `config.bcm`, the cooling
+  curve and the retimer tuning are generated on the switch itself from what is
+  already on it. Read
+  [`platform/arista-7050tx-64/PROVENANCE.md`](platform/arista-7050tx-64/PROVENANCE.md)
+  before reusing any of this, and the platform README for what does not work yet
+  — copper bring-up is unreliable, and there has been no cold-boot test.
 
 ## Licensing
 

@@ -1,0 +1,17 @@
+# EdgeNOS switch ASIC: Broadcom BCM56855 (Trident2)
+# Used by: arista-7050tx-64
+id: bcm56855
+name: Broadcom BCM56855 (Trident2)
+vendor: broadcom
+family: trident2
+device_id: "0xb855"        # 14e4:b855, read off the box
+sdk: openbcm               # OpenBCM 6.5.24, NOT vendored -- builder supplies the tree
+sdk_chip: bcm56850_a0      # the SDK reports BCM56855_A2 and binds the 56850_A0 driver
+cmic: cmicm
+datapath: sdkpoc           # bring-up agent, not edged yet -- see platform README
+
+# ⚠ NO KERNEL MODULES. Unlike the other ASICs here, this one runs a user-space
+# BDE (asic/bcm56855/bde_shim.c) over sysfs PCI resources and a reserved DMA
+# region, with tap netdevs instead of KNET. That is what lets it run a stock
+# 6.12 kernel with nothing out-of-tree.
+kernel_modules: []

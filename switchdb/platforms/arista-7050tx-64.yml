@@ -1,0 +1,39 @@
+# EdgeNOS platform: Arista DCS-7050TX-64 (Yreka64)
+# 48x10GBASE-T + 4x QSFP+, AMD Kabini host, BCM56855 (Trident2) switch ASIC.
+onie_platform: x86_64-arista_7050tx_64-r0   # not ONIE-booted: Aboot -> kexec (see platform README)
+vendor: arista
+model: 7050tx-64
+aliases:
+  - dcs-7050tx-64
+  - yreka64
+
+arch: x86_64
+asic: bcm56855
+kernel: "6.12"           # our own build; nothing out-of-tree
+
+datapath: sdkpoc
+components:
+  - sdkpoc               # cold init, port bring-up, tap datapath, FIB sync
+  - bde-shim             # user-space BDE -- no linux-kernel-bde, no KNET
+  - frr                  # zebra + ospfd control plane (8.4.4, stock Debian)
+  - platmon              # sensors, PSU, fans, LEDs, cooling loop
+  - scd                  # Arista's GPL scd.ko / scd-hwmon.ko
+firmware: []             # the BCM84848 PHYs carry their own
+
+platform_dir: platform/arista-7050tx-64
+
+installer: swi           # Aboot boots a SWI; no ONIE on this box
+persistence: tmpfs       # initrd only today -- no overlay yet
+init: busybox
+
+status: bringup
+notes: >
+  40G uplink up, OSPF Full, 35 routes, and a hardware FIB whose adds, next-hop
+  changes and withdrawals are each verified against the chip. Platform
+  management complete: temperatures, both PSUs over PMBus, fan tach and
+  presence, chassis and fan-tray LEDs, and a cooling loop.
+  NOT production. Copper bring-up is unreliable (two runs in five complete), the
+  SDK agent and control plane are still started by hand, and there has been no
+  cold-boot test. The image deliberately ships none of the board vendor's data --
+  cooling.conf, retimer.conf and config.bcm are generated on the switch itself;
+  see platform/arista-7050tx-64/PROVENANCE.md.
