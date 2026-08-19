@@ -14,7 +14,12 @@ EdgeNOS 0.1.0 — supported switches
 MODEL                  ARCH     ASIC       KERNEL  STATUS      DOWNLOAD
 accton as4610-54       armhf    bcm56340   6.1     production  EdgeNOS-0.1.0-arm-accton-as4610-54-r0.swi
 accton as5610-52x      powerpc  bcm56846   6.1     production  EdgeNOS-0.1.0-powerpc-accton_as5610_52x-r0.bin
+arista 7050sx2-72q     amd64    bcm56860   6.12    bring-up    (no installer yet — boots via kexec)
 ```
+
+The Arista is `bring-up`, not `production`: it forwards IPv4 and IPv6 in hardware and
+runs OSPFv2/OSPFv3, but there is no ONIE installer for it yet (it is booted with
+`kexec` from the factory OS) and it has no fan control.
 
 ## How it fits together
 
@@ -98,11 +103,11 @@ The AS5610 `edged` is built from this tree (verified: 11/11 sources compile + li
 Production-capable on two switches (AS5610-52X, AS4610-54T), both fully package-composed
 and self-describing (each image records its component list under
 `/var/lib/edgenos/epkg/installed`). The unified AS5610 `edged` is built and linked from
-source. Adding a third switch is a `switchdb/` entry + a `platform/<board>/` folder.
+source. A switch is added with a `switchdb/` entry + a `platform/<board>/` folder.
 
-**Arista DCS-7050SX2-72Q** (BCM56860 / Trident2+) is supported on the
-`publish/arista-7050sx2-72q-td2plus` branch — a vendor switch running EdgeNOS instead
-of its factory OS, forwarding IPv4 and IPv6 **in the switch chip**. Measured rather
+**This branch adds a third: the Arista DCS-7050SX2-72Q** (BCM56860 / Trident2+) — a
+vendor switch running EdgeNOS instead of its factory OS, forwarding IPv4 and IPv6
+**in the switch chip**. Measured rather
 than asserted: 1000/1000 and 997/1000 packets delivered end to end with the CPU
 counter flat at its idle rate, where software forwarding would have shown ~2000.
 OSPFv2 and OSPFv3 reach full adjacency on multiple ports, peering with a
