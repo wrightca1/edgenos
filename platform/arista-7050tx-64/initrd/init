@@ -1,0 +1,318 @@
+#!/bin/busybox sh
+# EdgeNOS /init -- Arista DCS-7050TX-64 (Crow CPU card / Yreka64 switch card)
+#
+# MILESTONE 1: prove we own the box. Boot our own kernel+initrd through Aboot's
+# kexec, come up on the serial console, bring up management, and dump a hardware
+# inventory we can diff against the EOS golden set. The ASIC is deliberately
+# left dark -- no BDE, no SDK, no register writes.
+#
+# SAFETY, in order of how much they matter:
+#   1. This never writes flash and never touches boot-config. It is booted with
+#      `boot flash:/edgenos.swi` from the Aboot prompt, which is a ONE SHOT --
+#      the next power cycle goes straight back to EOS on its own.
+#   2. A self-reboot backstop fires after $BACKSTOP seconds no matter what else
+#      happens, so a wedged session recovers itself without a truck roll.
+#   3. The SCD watchdog state is REPORTED, not programmed. We do not yet have a
+#      trustworthy pet for this board (the 7050SX2's scdreset is hardcoded for
+#      a different SCD and a different ASIC), and arming a watchdog we cannot
+#      reliably feed would be strictly worse than leaving it alone.
+set -u
+
+# 40 min was fine for boot-and-poke sessions but too short for anything that
+# has to converge: a 3 h run was cut off mid-verification while OSPF was up and
+# the FIB sync was being checked. 3 h default, and pass EDGENOS_BACKSTOP on the
+# cmdline (kernel-params) for longer -- or 0 to disable it entirely, which is a
+# deliberate choice to give up the safety net that returns the box to EOS.
+BACKSTOP=${EDGENOS_BACKSTOP:-10800}     # 3 h
+IP_SELF=${EDGENOS_IP:-10.1.1.243}       # NOT .242 -- that is EOS's address
+IP_GW=${EDGENOS_GW:-10.1.1.1}
+OUT=/tmp/inventory.txt
+
+/bin/busybox --install -s /bin
+mount -t proc     none /proc  2>/dev/null
+mount -t sysfs    none /sys   2>/dev/null
+mount -t devtmpfs none /dev   2>/dev/null
+mkdir -p /dev/pts 2>/dev/null
+mount -t devpts   none /dev/pts 2>/dev/null
+exec >/dev/console 2>&1 </dev/console
+
+# Backstop first, before anything that could hang.
+[ "$BACKSTOP" = "0" ] && echo "EdgeNOS: backstop DISABLED -- nothing will return this box to EOS"
+[ "$BACKSTOP" = "0" ] || \
+( sleep "$BACKSTOP"; echo; echo "EdgeNOS: backstop reached, rebooting to EOS";
+  /bin/busybox reboot -f ) &
+
+echo
+echo "=================================================================="
+echo " EdgeNOS  --  DCS-7050TX-64  --  milestone 1"
+echo " kernel: $(cat /proc/version 2>/dev/null | cut -c1-60)"
+echo "=================================================================="
+echo
+
+# --- management network ----------------------------------------------------
+# Two bugs bit us on the first boot (docs/EDGENOS-FIRST-BOOT.md); both are
+# handled here rather than by hoping boot0 got it right.
+NIC=""
+for n in ma1 eth0 eth1 eth2; do
+    [ -d /sys/class/net/$n ] && { NIC=$n; break; }
+done
+
+if [ -n "$NIC" ]; then
+    ip link set "$NIC" up 2>/dev/null
+
+    # BUG69923: on Crow, tg3 loses its MAC mailbox across a kexec and comes up
+    # as 00:10:18:00:00:00 -- the unprogrammed Broadcom default, not the system
+    # MAC. boot0 is supposed to refresh it by bouncing the link in Aboot, but
+    # that only works if it found the interface. Fix it here too: boot0 passes
+    # the MAC it saw in Aboot as edgenos_mac=, and we apply it if what the
+    # driver came up with looks wrong.
+    MAC=$(cat /sys/class/net/$NIC/address 2>/dev/null)
+    WANT=$(sed -n 's/.*edgenos_mac=\([0-9a-fA-F:]*\).*/\1/p' /proc/cmdline)
+    case "$MAC" in
+        00:10:18:00:00:00|00:00:00:00:00:00)
+            if [ -n "$WANT" ]; then
+                echo "EdgeNOS: tg3 MAC is the unprogrammed default -- setting $WANT"
+                ip link set "$NIC" down
+                ip link set "$NIC" address "$WANT"
+                ip link set "$NIC" up
+            else
+                echo "EdgeNOS: ** WARNING ** tg3 MAC is $MAC (unprogrammed default)"
+                echo "EdgeNOS: ** and boot0 passed no edgenos_mac= to correct it"
+            fi
+            ;;
+    esac
+
+    # Wait for CARRIER before configuring. On the first boot /init raced the
+    # link: addresses and routes went on at t=27s but tg3 only reported "Link is
+    # up" at t=32s, and the default route did not survive. Symptom was nasty --
+    # the box pings its own gateway happily but is unreachable from anywhere
+    # off-subnet, which reads exactly like a dead box. Same signature the 7150
+    # and 7050SX2 both produced for different reasons.
+    i=0
+    while [ "$i" -lt 30 ]; do
+        [ "$(cat /sys/class/net/$NIC/carrier 2>/dev/null)" = "1" ] && break
+        i=$((i+1)); sleep 1
+    done
+    echo "EdgeNOS: $NIC carrier after ${i}s"
+
+    ip addr add "$IP_SELF/24" dev "$NIC" 2>/dev/null
+    ip route add default via "$IP_GW" dev "$NIC" 2>/dev/null
+
+    # ⚠ PIN THE MANAGEMENT PATH BEFORE ANY ROUTING PROTOCOL RUNS.
+    #
+    # OSPF on a front-panel port will happily learn a route covering the subnet
+    # this box is managed from, and a more specific learned route beats the
+    # default -- so the box silently drops off the network the moment the
+    # adjacency comes up. It happened here: within seconds of converging,
+    #
+    #     ip route get 10.22.1.5
+    #     10.22.1.5 via 10.101.101.49 dev xe60  src 10.101.101.50
+    #
+    # with the default via eth0 still present and still correct. The console was
+    # the only way back in. EOS carried the same guard as a static
+    # "ip route 10.22.1.0/24 10.1.1.1" (artifacts/golden-20260816-40g/
+    # sys-running.txt), which is what this reproduces -- metric 0 so it wins.
+    #
+    # Set EDGENOS_MGMT_NET=none to disable, or to another prefix if the
+    # workstation moves. See docs/OSPF-CONTROL-PLANE.md.
+    MGMT_NET=${EDGENOS_MGMT_NET:-10.22.1.0/24}
+    if [ "$MGMT_NET" != "none" ]; then
+        ip route add "$MGMT_NET" via "$IP_GW" dev "$NIC" metric 0 2>/dev/null
+        ip route show | grep -q "$MGMT_NET" \
+            && echo "EdgeNOS: management route $MGMT_NET via $IP_GW pinned" \
+            || echo "EdgeNOS: ** WARNING ** management route $MGMT_NET NOT pinned"
+    fi
+
+    # Verify, and keep verifying. Routes are dropped whenever the link bounces,
+    # and losing the default route is invisible from the console -- everything
+    # local still works.
+    ip route show | grep -q '^default' \
+        && echo "EdgeNOS: default route via $IP_GW installed" \
+        || echo "EdgeNOS: ** WARNING ** no default route"
+
+    # Announce ourselves, or we are unreachable from off-subnet until something
+    # upstream ages out its ARP entry.
+    #
+    # This one cost real time to find. EdgeNOS could ping the build host with 0%
+    # loss while the build host could not reach EdgeNOS at all -- outbound fine,
+    # inbound blackholed. The router caches 10.1.1.243 -> MAC, and every time we
+    # boot with a different MAC than it has cached (EOS's .242/.7b, tg3's
+    # unprogrammed default, now the prefdl base .7a) that cache is stale and
+    # inbound traffic goes to a MAC nobody answers for. Any outbound packet
+    # fixes it, which is why it looked intermittent and self-healing.
+    arping -c 2 -A -I "$NIC" "$IP_SELF" >/dev/null 2>&1 \
+        && echo "EdgeNOS: gratuitous ARP sent for $IP_SELF" \
+        || { ping -c 2 -W 1 "$IP_GW" >/dev/null 2>&1 \
+             && echo "EdgeNOS: primed upstream ARP via $IP_GW"; }
+    ( while true; do
+        sleep 20
+        ip route show 2>/dev/null | grep -q '^default' || \
+            ip route add default via "$IP_GW" dev "$NIC" 2>/dev/null
+      done ) &
+
+    echo "EdgeNOS: $NIC up at $IP_SELF  (mac $(cat /sys/class/net/$NIC/address 2>/dev/null))"
+    telnetd -l /bin/sh 2>/dev/null && echo "EdgeNOS: telnetd on $IP_SELF:23"
+else
+    echo "EdgeNOS: no management NIC found -- console only"
+fi
+
+# --- inventory -------------------------------------------------------------
+{
+  echo "### EdgeNOS milestone-1 inventory"
+  echo "### $(date 2>/dev/null)"
+  echo
+  echo "## /proc/version";  cat /proc/version
+  echo; echo "## /proc/cmdline"; cat /proc/cmdline
+  echo; echo "## memory";       head -3 /proc/meminfo
+  echo; echo "## cpu";          grep -m1 'model name' /proc/cpuinfo; grep -c ^processor /proc/cpuinfo
+  echo; echo "## PCI devices (vendor:device @ slot)"
+  for d in /sys/bus/pci/devices/*; do
+      printf "  %s  %s:%s  class %s\n" "$(basename $d)" \
+          "$(sed s/0x// $d/vendor)" "$(sed s/0x// $d/device)" \
+          "$(sed s/0x// $d/class)"
+  done
+  echo; echo "## PCI BARs of interest"
+  for d in 0000:01:00.0 0000:02:00.0 0000:04:00.0; do
+      [ -d /sys/bus/pci/devices/$d ] || continue
+      echo "  $d:"; head -2 /sys/bus/pci/devices/$d/resource | sed 's/^/    /'
+  done
+  echo; echo "## net devices"; ls /sys/class/net/
+  echo; echo "## block devices"; ls /sys/block/
+  echo; echo "## dmesg tail"; dmesg | tail -40
+} > "$OUT" 2>&1
+
+cat "$OUT"
+
+# --- users -----------------------------------------------------------------
+# FRR and anything else that calls getpwnam need these to exist. The initrd had
+# no /etc/passwd at all, which is what made Quagga fail with
+# "privs_init: could not lookup user root" (docs/OSPF-CONTROL-PLANE.md).
+[ -e /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\nfrr:x:92:92:frr:/var/run/frr:/bin/false\n' > /etc/passwd
+[ -e /etc/group ]  || printf 'root:x:0:\nfrr:x:92:\nfrrvty:x:85:frr\n' > /etc/group
+
+# --- flash -----------------------------------------------------------------
+# ⚠ /mnt/flash was a bare directory in the tmpfs rootfs until 2026-08-19, and
+# nothing said so. Two SWI deployments were written into RAM and lost, and the
+# md5sum used to "verify" each one read the RAM copy straight back, so both
+# looked clean. The box quietly kept booting an older image.
+#
+# The tell that was walked past: a real flash listing has the EOS images,
+# boot-config and startup-config on it. A /mnt/flash containing only the file
+# just written is not a flash, it is a directory.
+if [ ! -e /mnt/flash/boot-config ]; then
+    mkdir -p /mnt/flash
+    mount /dev/sda1 /mnt/flash 2>/dev/null
+fi
+if [ -e /mnt/flash/boot-config ]; then
+    echo "EdgeNOS: /mnt/flash mounted ($(ls /mnt/flash | wc -l) entries)"
+else
+    echo "EdgeNOS: ** /mnt/flash NOT mounted -- anything written there is RAM"
+fi
+
+# --- Arista's GPL SCD drivers, opt-in --------------------------------------
+# scd-hwmon.ko turns the SCD's SMBus accelerators into real Linux i2c adapters,
+# which is what reaches the DS100KR800 retimer (0x58), the BCM84848 PHYs and the
+# transceiver EEPROMs. Both modules are Arista's own GPL source, built for
+# 6.12.0 -- our kernel's vermagic matches and MODVERSIONS is off, so they load.
+case " $(cat /proc/cmdline) " in
+    *edgenos_scd=load*)
+        echo "EdgeNOS: edgenos_scd=load -- loading Arista SCD drivers"
+        insmod /lib/modules/scd.ko 2>&1 && echo "  scd.ko loaded"
+        insmod /lib/modules/scd-hwmon.ko 2>&1 && echo "  scd-hwmon.ko loaded"
+        # The driver is generic; the board topology goes in through new_object.
+        # Offsets and bus counts are the two SMBus accelerators from
+        # docs/PLATFORM-SCD-I2C.md. This yields i2c-3..8 (platform) and
+        # i2c-9..12 (one per QSFP).
+        D=/sys/bus/pci/devices/0000:02:00.0
+        echo "smbus_master 0x8000 0 6" > $D/new_object 2>/dev/null
+        echo "smbus_master 0x9400 1 4" > $D/new_object 2>/dev/null
+        sleep 1
+        echo "  SCD i2c buses: $(ls /sys/class/i2c-dev 2>/dev/null | wc -l) adapters total"
+
+        # Power/select the QSFP modules. Without this a fitted module answers
+        # neither its EEPROM nor drives its receiver, and the SerDes reads
+        # afe_det=0 with the far end transmitting -- see
+        # docs/SCD-SMBUS-WORKING.md. EOS runs Et52 at 0x101; bits 5 and 7 are
+        # the low-power/reset controls we must clear.
+        # NOTE this register does NOT read back what you write (status bits are
+        # mixed in), so it is judged by effect, not read-back.
+        for o in A100 A110 A120 A130; do
+            busybox devmem 0xf600$o 32 0x101 2>/dev/null
+        done
+        echo "  QSFP modules powered (xcvr ctrl 0xA100-0xA130 = 0x101)"
+
+        # Board temperature sensors. Two MAX6658-family parts on the SCD SMBus,
+        # each giving a local and a remote reading -- together the four board
+        # sensors EOS reports. The i2c core will not probe these addresses on
+        # its own, so name them; lm90 then presents them under /sys/class/hwmon.
+        for spec in "3 0x4c" "4 0x4c"; do
+            set -- $spec
+            echo "max6658 $2" > /sys/bus/i2c/devices/i2c-$1/new_device 2>/dev/null \
+                && echo "  temp sensor: max6658 at $2 on i2c-$1"
+        done
+
+        # The two PWR-500AC-R supplies. Each owns a whole SMBus -- bus0:3 and
+        # bus0:4, so i2c-6 and i2c-7 -- and answers PMBus at 0x58. That gives
+        # input/output current and power plus the supply's own hotspot and inlet
+        # temperatures, which is everything `show environment power` prints.
+        # An unpowered supply does not answer at all: PSU 2 has no AC feed on
+        # this bench, so expect its probe to fail and read presence from the SCD
+        # GPIO at 0x5000 instead. Presence is never an SMBus probe.
+        for bus in 6 7; do
+            echo "pmbus 0x58" > /sys/bus/i2c/devices/i2c-$bus/new_device 2>/dev/null \
+                && echo "  psu: pmbus at 0x58 on i2c-$bus"
+        done
+
+        # Keep the front panel telling the truth. `platmon led auto` reads PSU
+        # presence and health, fan presence and tach, and sets the four SCD
+        # chassis LEDs plus the four fan-tray LEDs to match. It is a snapshot, so
+        # it runs on a loop -- a panel that was right once is not a panel that is
+        # right. 60 s rather than faster because reading PMBus raw races the
+        # kernel driver that owns the same address (see docs/PLATFORM-SCD-I2C.md).
+        #
+        # This touches LED registers only. It never writes fan PWM: platmon
+        # refuses any CPLD register outside 0x24/0x25.
+        ( while : ; do
+              /bin/platmon cool --apply >/dev/null 2>&1
+              /bin/platmon led auto >/dev/null 2>&1
+              sleep 60
+          done ) &
+        echo "  cooling + panel: platmon cool --apply / led auto every 60 s"
+        ;;
+esac
+
+# --- ASIC reset, opt-in ----------------------------------------------------
+# The SCD holds the BCM56855 in reset at power-on, so it does not even appear
+# on PCI until software deasserts it (docs/ASIC-RESET-RELEASE.md). This is NOT
+# done by default: the default boot stays ASIC-dark so a plain boot can never
+# perturb the chip. Pass edgenos_asic=release on the cmdline, or run
+# /bin/asic-release.sh --release by hand.
+case " $(cat /proc/cmdline) " in
+    *edgenos_asic=release*)
+        echo "EdgeNOS: edgenos_asic=release -- taking the ASIC out of reset"
+        # --release-all, not --release. Deasserting bit 0 alone brings the ASIC
+        # onto PCI but leaves the other eight held, and two of them matter:
+        # bit 8 is the DS100KR800 retimer on the QSFP path, and something in
+        # that set also gates the SCD MDIO to the BCM84848s -- with only bit 0
+        # released the PHY self-test reads 0xffff, and releasing all nine turns
+        # the same read into 0x600d/0x84f9. So bit-0-only silently costs both
+        # the 40G link and all 48 copper ports. 0x1FF -> 0x00000000 is what EOS
+        # itself runs. See docs/LINK-UP-40G.md.
+        /bin/asic-release.sh --release-all
+        ;;
+esac
+
+echo
+echo "=================================================================="
+echo " EdgeNOS: inventory written to $OUT"
+echo " ASIC: /bin/asic-release.sh (report) | --release (deassert)"
+echo " Backstop reboot in ${BACKSTOP}s.  'reboot -f' returns to EOS now."
+echo "=================================================================="
+echo
+
+# --- shell on the console --------------------------------------------------
+while true; do
+    setsid cttyhack /bin/sh
+    echo "EdgeNOS: shell exited, respawning (reboot -f to return to EOS)"
+    sleep 1
+done

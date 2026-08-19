@@ -1,0 +1,34 @@
+# Board manifest: Arista DCS-7050TX-64 (Yreka64)
+# Read alongside platform/arista-7050tx-64/README.md, which says plainly what is
+# working and what is not -- this board is a bring-up in progress, not a
+# finished platform like accton-as5610-52x.
+platform: x86_64-arista_7050tx_64-r0
+arch: x86_64
+asic: bcm56855
+
+datapath:
+  target: sdkpoc                     # NOT edged yet -- see README, "How this
+                                     # differs from the finished platforms"
+  build: asic/bcm56855/Makefile
+  sources:
+    asic:     asic/bcm56855          # user-space BDE shim + SDK agent
+    platform: platform/arista-7050tx-64
+
+config:    platform/arista-7050tx-64/config          # config.bcm, config-phybus.inc
+kernel_config: platform/arista-7050tx-64/kernel/config-7050tx64
+initrd:    platform/arista-7050tx-64/initrd/init
+
+drivers:
+  - scd            # Arista's own GPL scd.ko / scd-hwmon.ko, loaded from the initrd
+  - lm90           # 2x MAX6658 board temperature sensors
+  - pmbus          # 2x PWR-500AC-R power supplies
+
+platform_monitor: platform/arista-7050tx-64/platmon.c   # sensors, PSU, fans, LEDs, cooling
+
+control_plane: platform/arista-7050tx-64/deploy          # FRR 8.4.4 (zebra + ospfd)
+
+# Hardware, for reference:
+#   CPU     AMD Kabini (Crow CPU card)
+#   ASIC    BCM56855_A2, driven by the BCM56850_A0 driver, OpenBCM SDK 6.5.24
+#   Ports   48x 10GBASE-T (BCM84848 quad PHYs) + 4x QSFP+ (40G or 4x10G)
+#   SCD     Arista 3475:0001 -- SMBus, MDIO, GPIO, LEDs, resets

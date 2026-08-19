@@ -1,0 +1,165 @@
+# Config fragment for the EdgeNOS kernel on the Arista DCS-7050TX-64.
+# Merged onto x86_64_defconfig by tools/mkkernel.sh.
+#
+# Style and much of the hard-won content follow the 7050SX2 fragment
+# (kbuild/kernel-7050.config) and the 7150's kernel-m1.config. Where this board
+# differs from the 7050SX2 it is called out, because the differences are the
+# whole reason this is a separate file:
+#
+#   * boot flash is USB on EHCI, NOT eMMC     -> USB stack instead of MMC
+#   * CPU card is Crow / AMD Kabini, not Intel -> PIIX4 SMBus, k10temp, amd64_edac
+#   * the SCD driver needs UIO                 -> CONFIG_UIO
+#
+# Hardware inventory this is derived from: docs/SYSTEM-AND-KERNEL-REQUIREMENTS.md
+
+# --- boot-time paging / relocation -----------------------------------------
+# CARRIED OVER FROM THE 7050SX2, AND NOT NEGOTIABLE.
+# With x86_64_defconfig's defaults the first 7050SX2 build reset the box
+# instantly on kexec: console showed kexec's "Starting new kernel" and then
+# Aboot, with NO kernel output at all even with earlyprintk. That rules out
+# everything after console init and points at the decompressor / head_64.S.
+# 5-level paging and KASLR both run exactly there. This board is a 2013-era
+# AMD Kabini with no LA57, same as that box had no LA57.
+# CONFIG_X86_5LEVEL is not set
+# CONFIG_RANDOMIZE_BASE is not set
+# CONFIG_RANDOMIZE_MEMORY is not set
+
+# --- the bootloader's cmdline must win --------------------------------------
+# CONFIG_CMDLINE_OVERRIDE=y silently replaced boot0's append on the 7050SX2.
+# Keep a serial-only fallback and let Aboot's kexec override it.
+CONFIG_CMDLINE_BOOL=y
+CONFIG_CMDLINE="console=ttyS0,9600"
+# CONFIG_CMDLINE_OVERRIDE is not set
+
+# --- keep the config recoverable --------------------------------------------
+# /proc/config.gz on the running switch is then the config. The 7050SX2 rebuild
+# was only necessary because the original .config had been lost.
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+
+# --- serial console ---------------------------------------------------------
+# 9600 8N1 on ttyS0 -- docs/CONSOLE-ACCESS.md.
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+
+# --- management NIC ---------------------------------------------------------
+# 14e4:1682 Broadcom NetXtreme at 0000:04:00.0, EOS's Management1 / ma1.
+# Built in, NOT a module: the initrd has no /lib/modules, and on the 7050SX2
+# CONFIG_TIGON3=m with no modules in the initramfs is exactly why ma1 never
+# appeared. See also BUG69923 in docs/BOOT-CHAIN.md -- the MAC mailbox dance.
+CONFIG_TIGON3=y
+
+# --- boot flash is USB, not eMMC -- THE BIG DIFFERENCE FROM THE 7050SX2 -----
+# /mnt/flash is an internal USB flash drive on EHCI port 1-2
+# (090c:1000 Feiya), NOT a SATA disk and NOT an eMMC part. The cmdline proves
+# it: block_flash=pci0000:00/0000:00:12.[02]/usb./.-2/.*$
+# A kernel with AHCI alone will not find the flash.
+CONFIG_USB=y
+CONFIG_USB_EHCI_HCD=y
+CONFIG_USB_EHCI_PCI=y
+CONFIG_USB_OHCI_HCD=y
+CONFIG_USB_OHCI_HCD_PCI=y
+CONFIG_USB_STORAGE=y
+CONFIG_SCSI=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_VFAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ASCII=y
+CONFIG_NLS_ISO8859_1=y
+
+# The SATA slot is present too (1022:7801, Hudson/Bolton FCH) even though the
+# boot flash is not on it.
+CONFIG_ATA=y
+CONFIG_SATA_AHCI=y
+
+# --- AMD Kabini platform ----------------------------------------------------
+# 1022:780b -> /dev/i2c-0 and /dev/i2c-1. These are the ONLY standard Linux I2C
+# adapters on the box; the platform devices hang off the SCD's own SMBus
+# accelerators instead (docs/SCD-PROGRAMMING-MODEL.md).
+CONFIG_I2C=y
+CONFIG_I2C_CHARDEV=y
+CONFIG_I2C_PIIX4=y
+
+# 1022:1533 -> the "Cpu temp sensor" EOS reports at ~44 C.
+CONFIG_HWMON=y
+CONFIG_SENSORS_K10TEMP=y
+
+# The board temperature sensors. Two MAX6658/ADM1032-family parts hang off the
+# SCD's SMBus accelerators (manuf=0x01, dev=0x11 read from both), each with a
+# local and a remote channel -- which is where the four board readings EOS
+# reports come from: "CPU board", "Back-panel", "Board" and "Front-panel"
+# (artifacts/platform-20260816/env-temp.txt). Without this driver they are
+# reachable only by hand with i2cget and there is no hwmon node.
+# See docs/PLATFORM-SENSORS.md.
+CONFIG_SENSORS_LM90=y
+
+# The two PWR-500AC-R supplies. Each owns a whole SCD SMBus (bus0:3, bus0:4) and
+# answers PMBus at 0x58 -- the FDL's "0x00" is a slot base, not an address; the
+# real one comes from Arista's own platform tree, where PWR-500AC-R is either the
+# Artesyn DS495SPE-3-402/404 or the Delta DPS-495CB-1 and both set
+# PMBUS_ADDR = 0x58. The generic driver is enough: EOS reads input/output current,
+# power, and the PSU's own hotspot and inlet temperatures, all standard PMBus
+# commands. CONFIG_PMBUS is the core, CONFIG_SENSORS_PMBUS the generic device.
+# See docs/PLATFORM-SCD-I2C.md.
+CONFIG_PMBUS=y
+CONFIG_SENSORS_PMBUS=y
+
+# 1022:1532 memory ECC. EDAC itself depends on RAS, and the AMD64 driver on
+# EDAC_DECODE_MCE (AMD_NB is already =y from x86_64_defconfig) -- neither is on
+# by default, and without them both options silently vanish.
+CONFIG_RAS=y
+CONFIG_EDAC=y
+CONFIG_EDAC_DECODE_MCE=y
+CONFIG_EDAC_AMD64=y
+
+# --- Arista's own GPL SCD drivers -------------------------------------------
+# scd-hwmon.ko is Arista's open-source SCD component driver and it implements
+# the SCD's SMBus accelerators as real Linux i2c adapters -- which is the
+# platform unlock: the DS100KR800 retimer (0x58), the 48 copper ports' BCM84848
+# PHYs and every transceiver EEPROM all hang off those accelerators.
+# It needs the multicolor LED class for led_classdev_multicolor_register_ext
+# and led_mc_calc_color_components; without it the module will not resolve.
+CONFIG_LEDS_CLASS=y
+CONFIG_NEW_LEDS=y
+CONFIG_LEDS_CLASS_MULTICOLOR=y
+# It also registers an SPI controller (the SCD has one), so the SPI core must be
+# present or the module fails to resolve spi_register_controller and friends.
+CONFIG_SPI=y
+CONFIG_SPI_MASTER=y
+
+# --- SCD --------------------------------------------------------------------
+# scd.ko is GPL and declares "depends: uio" -- it exposes one UIO device per
+# SCD interrupt bit. Without UIO the module will not load at all.
+# See docs/SCD-PROGRAMMING-MODEL.md.
+CONFIG_UIO=y
+CONFIG_UIO_PDRV_GENIRQ=y
+
+# --- ASIC access ------------------------------------------------------------
+# The SDK maps the BCM56855's BARs through /dev/mem and the PCI resource files.
+# STRICT_DEVMEM off so this does not depend on iomem=relaxed being on the
+# cmdline, though we pass it anyway.
+CONFIG_DEVMEM=y
+# CONFIG_STRICT_DEVMEM is not set
+CONFIG_PCI=y
+CONFIG_PCI_MSI=y
+
+# --- initramfs --------------------------------------------------------------
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+
+# --- networking the control plane will need ---------------------------------
+CONFIG_TUN=y
+CONFIG_VLAN_8021Q=y
+CONFIG_BRIDGE=y
+
+# --- modules ----------------------------------------------------------------
+# scd.ko and any BDE build out of tree against this kernel.
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+
+# --- kexec ------------------------------------------------------------------
+# We are the TARGET of Aboot's kexec, which needs nothing special, but keeping
+# kexec available means EdgeNOS can chain-load too.
+CONFIG_KEXEC=y

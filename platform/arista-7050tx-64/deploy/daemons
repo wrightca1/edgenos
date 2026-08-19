@@ -1,0 +1,9 @@
+# Which FRR daemons init starts. zebra is mandatory -- it owns the kernel FIB,
+# which is what sdkpoc's SDKPOC_FIBSYNC mirrors into the ASIC.
+#
+# staticd is included because FRR 8.x moved static routes out of zebra into it;
+# without staticd a "ip route" line in frr.conf is silently ignored.
+zebra=yes
+ospfd=yes
+ospf6d=no
+staticd=yes
