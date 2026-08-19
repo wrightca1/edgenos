@@ -24,7 +24,8 @@ reference.
 | Control plane | FRR 8.4.4, OSPF Full, 35 routes |
 | Hardware FIB | adds, next-hop changes and withdrawals all verified against the chip |
 | Platform | 5 hwmon devices, 2 PSUs over PMBus, 4 fan trays, chassis + tray LEDs |
-| Cooling | EOS's interpolated curve, clamped `[127, 180]` |
+| Cooling | closed loop on the inlet sensor, clamped `[127, 180]`, refreshed every 60 s |
+| Watchdog | **hardware** — `sp5100_tco`, 60 s timeout, fed by `init`; resets the box if it wedges |
 
 ## What does not
 
@@ -94,5 +95,25 @@ initrd/init          the initrd: SCD, resets, sensors, cooling, panel, flash
 config/              config.bcm (⚠ EOS-derived — see PROVENANCE.md), phy bus
 deploy/              FRR configuration
 platmon.c            platform monitor: sensors, PSU, fans, LEDs, cooling
-tools/               image build, reset release, retimer, Aboot console
+kernel-params        the kernel cmdline; belongs at /mnt/flash/kernel-params
+tools/               image build, reset release, retimer, Aboot and EOS console
 ```
+
+## Safety net
+
+There is **no timer that reboots the box on a schedule**. There was, and it
+rebooted healthy sessions mid-run. It is replaced by a hardware watchdog:
+`sp5100_tco` with a 60 s timeout, fed every 15 s by `init`. If the box wedges —
+a hung kernel, a stuck register access — the hardware resets it and Aboot boots
+whatever `boot-config` points at, which is normally the vendor NOS.
+
+`CONFIG_WATCHDOG_NOWAYOUT=y` is deliberate: without it, closing `/dev/watchdog`
+disarms the watchdog, so anything that stops the feeder silently removes the
+safety net. `edgenos_watchdog=off` leaves it unarmed; `EDGENOS_BACKSTOP=<seconds>`
+in `kernel-params` re-enables the old timer alongside it if a session wants a
+hard ceiling.
+
+⚠ Verified by letting it fire: the feeder was killed and the board reset 62 s
+later. Worth knowing before you test it yourself — the reset is unclean, and the
+vendor NOS did not come up cleanly afterwards on this board. Do not test this
+remotely on a box you cannot power-cycle.

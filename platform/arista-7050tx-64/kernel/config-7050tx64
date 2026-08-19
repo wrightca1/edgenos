@@ -104,6 +104,24 @@ CONFIG_SENSORS_LM90=y
 CONFIG_PMBUS=y
 CONFIG_SENSORS_PMBUS=y
 
+# Hardware watchdog, replacing the timer backstop that used to reboot this box
+# to EOS every N hours whether or not anything was wrong.
+#
+# The SCD has a watchdog of its own, but Arista's scd.ko only handles its
+# INTERRUPT (it panics on it) -- it is not a pettable /dev/watchdog. The AMD FCH
+# one is, and this board has the FCH LPC bridge sp5100_tco binds to: 1022:780e
+# at 00:14.3, the same chipset whose SMBus i2c-piix4 already drives.
+#
+# ⚠ NOWAYOUT is deliberate. Without it, closing /dev/watchdog disarms the
+# watchdog, so anything that stops the petting daemon also quietly removes the
+# safety net -- which is the failure mode a watchdog exists to prevent. With it,
+# once armed the box reboots unless something keeps feeding it. Pass
+# edgenos_watchdog=off on the cmdline to never arm it in the first place.
+CONFIG_WATCHDOG=y
+CONFIG_WATCHDOG_CORE=y
+CONFIG_WATCHDOG_NOWAYOUT=y
+CONFIG_SP5100_TCO=y
+
 # 1022:1532 memory ECC. EDAC itself depends on RAS, and the AMD64 driver on
 # EDAC_DECODE_MCE (AMD_NB is already =y from x86_64_defconfig) -- neither is on
 # by default, and without them both options silently vanish.

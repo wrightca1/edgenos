@@ -1,0 +1,35 @@
+# EdgeNOS kernel cmdline for the DCS-7050TX-64.
+#
+# Aboot appends this file to the kernel command line. It lives on the switch at
+# /mnt/flash/kernel-params, and until 2026-08-19 it existed ONLY there -- a
+# boot-critical file with no copy under version control. This is the
+# authoritative copy; deploy it with:
+#
+#     cp image/kernel-params /mnt/flash/kernel-params      (flash must be mounted)
+#
+# EdgeNOS: reserve DMA for the SDK user-space BDE (tools/sdkshim/bde_shim.c).
+# Vanilla Linux does not understand Arista dmamem=, so without this the shim
+# would DMA into live kernel memory at 0xd0000000.
+memmap=64M$0xd0000000
+
+# Load Arista's GPL SCD drivers, and take the ASIC out of reset. init releases
+# ALL NINE resets, not just bit 0 -- see docs/LINK-UP-40G.md, where a partial
+# release cost both the 40G retimer and every copper PHY.
+edgenos_scd=load
+edgenos_asic=release
+
+# Unrecognised key=value cmdline args land in init's environment, which is how
+# init picks these up.
+#
+# ⚠ THE TIMER BACKSTOP IS OFF, DELIBERATELY. It rebooted the box on a schedule
+# whether or not anything was wrong, and it ended a healthy 6 h session
+# mid-verification while OSPF was converging. A hardware watchdog replaced it:
+# sp5100_tco with a 60 s timeout, fed every 15 s by init, so the box returns to
+# EOS when it actually wedges rather than on a clock. See the watchdog notes in
+# image/initrd/init.
+#
+# Set a non-zero value here for a session that wants a hard upper bound anyway;
+# the two mechanisms coexist.
+EDGENOS_BACKSTOP=0
+
+# edgenos_watchdog=off would leave the watchdog unarmed. Not set, so it arms.

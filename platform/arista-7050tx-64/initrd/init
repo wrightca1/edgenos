@@ -10,12 +10,12 @@
 #   1. This never writes flash and never touches boot-config. It is booted with
 #      `boot flash:/edgenos.swi` from the Aboot prompt, which is a ONE SHOT --
 #      the next power cycle goes straight back to EOS on its own.
-#   2. A self-reboot backstop fires after $BACKSTOP seconds no matter what else
-#      happens, so a wedged session recovers itself without a truck roll.
-#   3. The SCD watchdog state is REPORTED, not programmed. We do not yet have a
-#      trustworthy pet for this board (the 7050SX2's scdreset is hardcoded for
-#      a different SCD and a different ASIC), and arming a watchdog we cannot
-#      reliably feed would be strictly worse than leaving it alone.
+#   2. A HARDWARE WATCHDOG returns the box to EOS if it wedges. It replaced a
+#      timer backstop that rebooted on a schedule whether or not anything was
+#      wrong -- which cut a healthy 6 h session off mid-verification.
+#   3. The SCD's own watchdog is still only REPORTED, not programmed. Arista's
+#      scd.ko handles its interrupt rather than exposing a pettable device, so
+#      the watchdog used here is the AMD FCH one via sp5100_tco.
 set -u
 
 # 40 min was fine for boot-and-poke sessions but too short for anything that
@@ -23,7 +23,12 @@ set -u
 # the FIB sync was being checked. 3 h default, and pass EDGENOS_BACKSTOP on the
 # cmdline (kernel-params) for longer -- or 0 to disable it entirely, which is a
 # deliberate choice to give up the safety net that returns the box to EOS.
-BACKSTOP=${EDGENOS_BACKSTOP:-10800}     # 3 h
+# ⚠ The timer backstop is now OFF by default; the watchdog below replaced it.
+# It rebooted the box on a schedule regardless of health, and on 2026-08-19 it
+# ended a healthy 6 h session mid-run. Still available -- pass EDGENOS_BACKSTOP
+# =<seconds> -- for a session where you want a hard upper bound no matter what.
+BACKSTOP=${EDGENOS_BACKSTOP:-0}
+WATCHDOG=${EDGENOS_WATCHDOG:-on}        # edgenos_watchdog=off to leave it unarmed
 IP_SELF=${EDGENOS_IP:-10.1.1.243}       # NOT .242 -- that is EOS's address
 IP_GW=${EDGENOS_GW:-10.1.1.1}
 OUT=/tmp/inventory.txt
@@ -36,11 +41,33 @@ mkdir -p /dev/pts 2>/dev/null
 mount -t devpts   none /dev/pts 2>/dev/null
 exec >/dev/console 2>&1 </dev/console
 
-# Backstop first, before anything that could hang.
-[ "$BACKSTOP" = "0" ] && echo "EdgeNOS: backstop DISABLED -- nothing will return this box to EOS"
+# Safety net first, before anything that could hang.
+#
+# The watchdog is a real one: the hardware resets the box if nothing feeds
+# /dev/watchdog, so it catches the failures a timer cannot distinguish from
+# healthy work -- a wedged kernel, a hung register access, a lost console. A
+# reset lands in Aboot, which boots EOS by default, so recovery is the same as
+# the old backstop's without rebooting a box that is fine.
+#
+# -t 15 feeds it every 15 s; -T 60 asks the hardware for a 60 s timeout, so it
+# tolerates a few missed feeds before acting.
+case "$WATCHDOG" in
+  off|0)
+    echo "EdgeNOS: watchdog DISABLED -- nothing will return this box to EOS" ;;
+  *)
+    if [ -c /dev/watchdog ]; then
+        /bin/busybox watchdog -t 15 -T 60 /dev/watchdog 2>/dev/null \
+            && echo "EdgeNOS: watchdog armed (60 s timeout, fed every 15 s)" \
+            || echo "EdgeNOS: ** watchdog present but could not be armed"
+    else
+        echo "EdgeNOS: ** no /dev/watchdog -- sp5100_tco did not bind, UNPROTECTED"
+    fi ;;
+esac
+
 [ "$BACKSTOP" = "0" ] || \
 ( sleep "$BACKSTOP"; echo; echo "EdgeNOS: backstop reached, rebooting to EOS";
   /bin/busybox reboot -f ) &
+[ "$BACKSTOP" = "0" ] || echo "EdgeNOS: timer backstop also set: ${BACKSTOP}s"
 
 echo
 echo "=================================================================="
