@@ -141,3 +141,53 @@ required to *own* it end to end.
   arm's length.
 * We ship GPL binaries without offering source. Fix that regardless of anything
   else here.
+
+
+---
+
+## Audit against what is actually published
+
+Checked 2026-08-19, after finding that SCD register offsets we had treated as
+confidential are published across Arista's own open tree. Reading something in a
+confidential file is not the same as the thing being confidential, so each
+withheld item was checked against Arista's GitHub, the SONiC build, and the
+wider ecosystem.
+
+| withheld here | is the data class public? |
+|---|---|
+| SCD register offsets | **yes** — Arista's own SONiC tree, 13–33 files each |
+| SCD LED block map | **yes** — `scd.addLeds([(0x6050,'status'), (0x6060,'fan_status'), (0x6070,'psu1'), (0x6080,'psu2')])`, the same addresses and names |
+| retimer tuning values | **yes** — `arista/drivers/ds125br.py` publishes per-board `amplitude[]`, `txDeEmphasis`, `rxEqualization`, and `disableCrc = 0x18` |
+| fan / thermal policy | **yes** — `device/arista/x86_64-arista_7050_qx32/fancontrol` in sonic-buildimage |
+| port map, polarity flips | **format yes, this board no** — `portmap_N=` in `stratum/stratum`; `phy_xaui_tx_polarity_flip_N` in `facebook/fboss` |
+
+**`config.bcm` stays out, and the audit confirms why.** The format is thoroughly
+public — Google and Meta both publish port maps and polarity flips — but nobody
+publishes *this board's* values, and the ones we had came from a live capture of
+the vendor NOS. A port map derived by measurement would carry none of that
+problem, which is the argument for doing it.
+
+**The retimer and cooling withholding was more cautious than it needed to be.**
+Arista publishes the same class of data for their other boards, down to an
+identical `disableCrc = 0x18`. The runtime-configuration split stays regardless,
+because it costs nothing and keeps this branch free of anything taken from a
+confidential source — but nobody should contort future work around treating
+those numbers as secrets.
+
+**An independent check of our own arithmetic.** Arista's published `fancontrol`
+for a Trident2 box uses `MINPWM=179` across a 30–40 °C band on a `max6658` at
+`0x4c`. This platform's fan scale of 180 was derived from a single observation,
+and an unrelated public file agrees with it.
+
+## Broadcom publishes this chip and this PHY
+
+`Broadcom/OpenMDK`, Broadcom's own GitHub organisation, contains
+`cdk/PKG/chip/bcm56855/` and `phy/PKG/chip/bcm84848/bcm84848_drv.c` — this exact
+ASIC and PHY, the latter defining `BCM84848_PMA_PMD_ID0 0x600d`, the identity
+read off the board. For anyone pursuing the independence question above, that is
+vendor-published support rather than an SDK obtained under unexamined terms.
+
+⚠ **Complete Broadcom SDK trees also appear on GitHub under third-party
+accounts.** They are not Broadcom's organisation. A mirror existing is not a
+licence, finding the SDK there changes nothing about its terms, and those
+repositories are deliberately not cited as a source anywhere in this tree.
