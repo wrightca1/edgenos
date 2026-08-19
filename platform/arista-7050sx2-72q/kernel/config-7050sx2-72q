@@ -1,0 +1,88 @@
+# Config fragment for the 7050SX2 EdgeNOS kernel, merged onto x86_64_defconfig.
+#
+# The running kernel is 6.12.0 #29 and neither its tree nor its .config exists
+# on any host we have, so this is a reconstruction from what the platform is
+# documented to need (docs/M0-ON-7050SX2.md §12) plus what this project has
+# since learned it needs. Style follows
+# Arista/build/arista-7150/m1/kernel-m1.config, which is also a fragment.
+
+# --- the reason for this rebuild -------------------------------------------
+# No TUN/TAP in the running kernel: nothing in /proc/devices, no /dev/net, and
+# nothing in /sys/class/misc (tun is a misc device, so that is definitive).
+# Built in rather than =m: the initrd has no /lib/modules.
+CONFIG_TUN=y
+
+# --- keep the config recoverable -------------------------------------------
+# This rebuild was only necessary because the original .config was lost. With
+# these, /proc/config.gz on the running switch is the config.
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+
+# --- management NIC ---------------------------------------------------------
+# BCM57762, MAC 44:4c:a8:eb:93:f6, same physical port as EOS's Management1.
+# Built in, not a module: M0-ON-7050SX2 §12.1 found CONFIG_TIGON3=m with no
+# modules in the initramfs, which is why ma1 never appeared.
+CONFIG_TIGON3=y
+
+# --- serial console ---------------------------------------------------------
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+
+# --- the bootloader's cmdline must win --------------------------------------
+# M0-ON-7050SX2 §12.1: CONFIG_CMDLINE_OVERRIDE=y was replacing boot0's append,
+# which is how nr_cpus=1 and pci=nocrs kept coming back. Keep a serial-only
+# fallback and let the loader override it -- kexec passes memmap= and
+# iomem=relaxed this way.
+CONFIG_CMDLINE_BOOL=y
+CONFIG_CMDLINE="console=ttyS0,9600"
+# CONFIG_CMDLINE_OVERRIDE is not set
+
+# --- ASIC access ------------------------------------------------------------
+# bde_shim maps the BCM56860's BARs through /dev/mem and the PCI resource
+# files. STRICT_DEVMEM off so this does not depend on iomem=relaxed being
+# passed, though the kexec cmdline still passes it.
+CONFIG_DEVMEM=y
+# CONFIG_STRICT_DEVMEM is not set
+CONFIG_PCI=y
+CONFIG_PCI_MSI=y
+
+# --- initramfs / rootfs -----------------------------------------------------
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+
+# --- eMMC, so EdgeNOS can reach /mnt/flash ----------------------------------
+# The running kernel has no /dev/mmcblk*, so the 177 MB sdkpoc-shell has to be
+# re-fetched over the network on every boot (~3 min a cycle). EOS mounts
+# /dev/mmcblk0p1 (vfat) there; with these the same partition is reachable from
+# EdgeNOS and the binary can just live on flash.
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_PCI=y
+CONFIG_MMC_SDHCI_ACPI=y
+CONFIG_VFAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_ASCII=y
+
+# --- boot-time paging / relocation ------------------------------------------
+# First build (all symbols verified, bzImage #1) reset the box instantly on
+# kexec: the console shows kexec's own "Starting new kernel" and then Aboot,
+# with NO kernel output at all even with earlyprintk=serial,ttyS0,9600. That
+# rules out anything after console init and points at the decompressor /
+# head_64.S. x86_64_defconfig turns on 5-level paging and KASLR, both of which
+# run exactly there; this board is a 2013-era Xeon with no LA57.
+# CONFIG_X86_5LEVEL is not set
+# CONFIG_RANDOMIZE_BASE is not set
+# CONFIG_RANDOMIZE_MEMORY is not set
+
+# --- platform I2C: fans, and the CPLD generally ---------------------------
+# The fan controller is the CPLD at i2c-1 address 0x23, on the x86 southbridge
+# SMBus -- NOT on the SCD's own accelerators, which is where the temperature
+# sensors and PSUs live. EOS reaches it with `i2cget -y 1 0x23 ...`
+# (FpgaPlugin/Alameda.py). Without these three the box has no /dev/i2c* at all
+# and fans cannot be read or controlled; see docs/PLATFORM-ENVIRONMENTALS.md.
+CONFIG_I2C=y
+CONFIG_I2C_CHARDEV=y
+CONFIG_I2C_PIIX4=y

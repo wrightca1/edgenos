@@ -1,0 +1,14 @@
+# Broadcom BCM56860 — Trident2+
+id: bcm56860
+vendor: broadcom
+family: trident2plus
+generation: trident2+
+sdk: openbcm            # OpenBCM SDK, supplied by the operator; not redistributed
+bandwidth_gbps: 1280
+ports:
+  max_10g: 104
+  max_40g: 32
+notes: >
+  Driven from user space through our own BDE shim (asic/bcm56860/bde_shim.c) —
+  no vendor kernel module. Interrupts are not connected, so polled_irq_mode=1 is
+  required or soc_attach() refuses to bring the chip up.

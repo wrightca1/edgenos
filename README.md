@@ -100,6 +100,16 @@ and self-describing (each image records its component list under
 `/var/lib/edgenos/epkg/installed`). The unified AS5610 `edged` is built and linked from
 source. Adding a third switch is a `switchdb/` entry + a `platform/<board>/` folder.
 
+**Arista DCS-7050SX2-72Q** (BCM56860 / Trident2+) is supported on the
+`publish/arista-7050sx2-72q-td2plus` branch — a vendor switch running EdgeNOS instead
+of its factory OS, forwarding IPv4 and IPv6 **in the switch chip**. Measured rather
+than asserted: 1000/1000 and 997/1000 packets delivered end to end with the CPU
+counter flat at its idle rate, where software forwarding would have shown ~2000.
+OSPFv2 and OSPFv3 reach full adjacency on multiple ports, peering with a
+Broadcom-based switch on one side and a Cisco Nexus on the other. Fan control is not
+implemented. See `platform/arista-7050sx2-72q/README.md`, and `PROVENANCE.md` there
+for what is deliberately not shipped and why.
+
 ## Support this project
 
 EdgeNOS is developed on real Edgecore hardware bought out of pocket. If it saved you

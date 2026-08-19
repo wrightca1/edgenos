@@ -1,0 +1,131 @@
+#!/bin/bash
+# Generate this board's SerDes polarity table from YOUR OWN switch.
+#
+# WHY THIS TOOL EXISTS
+# --------------------
+# EdgeNOS needs to know which SerDes lanes are polarity-inverted on the board.
+# Getting it wrong does not break the link -- it brings the link UP and makes
+# every frame garbage, because inverting a 64b/66b stream turns the sync header
+# 01 into 10, which is also legal, so the receiver locks happily onto nonsense.
+# On this board 30 TX lanes and 32 RX lanes are inverted and no public document
+# says which.
+#
+# The values are a property of the BOARD -- how the PCB routes each differential
+# pair -- but the only practical way to read them is to ask the vendor's own
+# software what it programmed. That makes the resulting table vendor-derived, so
+# it is NOT shipped with EdgeNOS. You generate it once, on your own switch, from
+# your own EOS installation, and it stays yours.
+#
+# This is the same arrangement the 7050TX-64 platform uses for its cooling curve
+# and retimer values: the mechanism is ours and public, the vendor's numbers are
+# read from the machine that already has them.
+#
+# USAGE
+#   ./mkpolarity.sh <switch-ip> > config-serdes-polarity.bcm
+#
+# Environment: SW_USER (default admin), SW_PW (default arista).
+#
+# READ-ONLY. Every command issued is a register read. Nothing is written to the
+# switch, and the switch may be carrying live traffic while this runs.
+#
+#   ⚠ Uses `phy raw sbus`. Do NOT substitute `getreg` -- a blind `getreg` sweep
+#     wedged this box hard enough to need a physical power cycle. `listreg` and
+#     `phy raw sbus` are safe; `getreg` is not.
+set -u
+SW=${1:?usage: mkpolarity.sh <switch-ip>}
+USER=${SW_USER:-admin}
+PW=${SW_PW:-arista}
+MODE=${MODE:-"platform trident shell"}
+
+SSHOPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+-o ConnectTimeout=10 -o HostKeyAlgorithms=+ssh-rsa
+-o PubkeyAcceptedKeyTypes=+ssh-rsa
+-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1,diffie-hellman-group1-sha1"
+
+# EOS's CLI SILENTLY DROPS most diag commands when they arrive as an SSH
+# exec-mode string -- no error, no output, which reads exactly like "the shell
+# cannot do that". The list has to be staged on the switch and run through
+# on-box FastCli. base64 avoids quoting through two shell layers. The mode line
+# must lead and `exit` must trail, or FastCli hangs holding the shell open.
+bsh() {
+    local b
+    b=$({ echo "$MODE"; cat; echo "exit"; } | base64 -w0)
+    sshpass -p "$PW" ssh $SSHOPTS "$USER@$SW" "enable
+bash echo $b | base64 -d > /tmp/mkpol.txt
+bash cd /tmp && FastCli -p 15 -c \"\$(cat /tmp/mkpol.txt)\" 2>&1" 2>/dev/null | tr -d '\r'
+}
+
+# ---- pass 1: which macro and lane is each logical port on? -----------------
+#
+#   Phy mapping dump:
+#         port   id0   id1  addr iaddr                    name           timeout
+#     xe0(  1)  600d  8770    8d    8d           TSCE4-A0/03/1     250000
+#
+# The bracketed number is the logical port the SDK's polarity property is keyed
+# on; `addr` is the SBUS macro; the digit after the last / in the name is the
+# lane within that macro.
+MAP=$(printf 'phy info\n' | bsh | awk '
+    /^ *xe[0-9]+\( *[0-9]+\)/ {
+        p = $0
+        sub(/.*\( */, "", p); sub(/\).*/, "", p)          # logical port
+        lane = $NF; lane = ""
+        for (i = 1; i <= NF; i++) if ($i ~ /\//) { lane = $i; break }
+        sub(/.*\//, "", lane)                              # trailing lane digit
+        # $1=xe0(  $2=1)  $3=id0  $4=id1  $5=addr  $6=iaddr  $7=name
+        # $5 is the SBUS macro. Taking $4 (id1, the PHY part number 8770) asks
+        # for a macro that does not exist and every read returns nothing.
+        if (p != "" && $5 ~ /^[0-9a-f]+$/ && lane ~ /^[0-3]$/) print p, $5, lane
+    }')
+
+[ -n "$MAP" ] || { echo "ERROR: could not read 'phy info' from $SW" >&2; exit 1; }
+NPORT=$(printf '%s\n' "$MAP" | wc -l)
+
+# ---- pass 2: read both polarity bits for every (macro, lane) ---------------
+#
+# One session for all of them. A round trip per register would be ~400 SSH
+# logins and take the better part of an hour.
+#
+# TX_PMD_DP_INVERT is TLB_TX_TLB_TX_MISC_CFG (0xd0e3) bit 0
+# RX_PMD_DP_INVERT is TLB_RX_TLB_RX_MISC_CFG (0xd0d3) bit 0
+CMDS=$(printf '%s\n' "$MAP" | while read -r port macro lane; do
+           echo "phy raw sbus 0x$macro 1.$lane 0xd0e3"
+           echo "phy raw sbus 0x$macro 1.$lane 0xd0d3"
+       done)
+
+# Each read answers with one "0x<addr>: 0x<value>" line, in the order asked.
+VALS=$(printf '%s\n' "$CMDS" | bsh | grep -oE '0x[0-9a-f]+: *0x[0-9a-f]+' \
+       | sed -E 's/.*: *0x0*([0-9a-f]+)/\1/; s/^$/0/')
+
+NVAL=$(printf '%s\n' "$VALS" | grep -c .)
+if [ "$NVAL" -ne $((NPORT * 2)) ]; then
+    echo "ERROR: asked for $((NPORT * 2)) registers, got $NVAL answers." >&2
+    echo "       Refusing to emit a table that may be misaligned -- a wrong" >&2
+    echo "       polarity table brings links up carrying garbage." >&2
+    exit 1
+fi
+
+printf '# SerDes polarity for this board, generated by tools/mkpolarity.sh\n'
+printf '# Source switch: %s, read %s\n' "$SW" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '# %d ports read from the running chip.\n#\n' "$NPORT"
+printf '# Read LIVE, not from a capture of bring-up: a capture of this board\n'
+printf '# shows these written as 0 and a later phase sets them, and reasoning\n'
+printf '# from the capture produced a confidently wrong answer here once.\n'
+
+TXO=""; RXO=""; ntx=0; nrx=0; i=1
+while read -r port macro lane; do
+    tx=$(printf '%s\n' "$VALS" | sed -n "${i}p");     i=$((i+1))
+    rx=$(printf '%s\n' "$VALS" | sed -n "${i}p");     i=$((i+1))
+    if [ $(( 0x$tx & 1 )) -eq 1 ]; then
+        TXO="$TXO$(printf 'phy_xaui_tx_polarity_flip_%s=0x1\t# macro 0x%s lane %s\n' "$port" "$macro" "$lane")"$'\n'
+        ntx=$((ntx+1))
+    fi
+    if [ $(( 0x$rx & 1 )) -eq 1 ]; then
+        RXO="$RXO$(printf 'phy_xaui_rx_polarity_flip_%s=0x1\t# macro 0x%s lane %s\n' "$port" "$macro" "$lane")"$'\n'
+        nrx=$((nrx+1))
+    fi
+done <<< "$MAP"
+
+printf '\n# --- TX polarity: %d inverted lanes ---\n' "$ntx"
+printf '%s' "$TXO"
+printf '\n# --- RX polarity: %d inverted lanes ---\n' "$nrx"
+printf '%s' "$RXO"

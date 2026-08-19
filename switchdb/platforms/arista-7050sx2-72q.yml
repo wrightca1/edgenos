@@ -1,0 +1,31 @@
+# EdgeNOS platform: Arista DCS-7050SX2-72Q
+# 48x SFP+ plus 6x QSFP+ (broken out 4x10G) = 72x10G, x86_64 host,
+# BCM56860 (Trident2+). Ships from the factory with EOS; EdgeNOS replaces it.
+vendor: arista
+model: dcs-7050sx2-72q
+aliases:
+  - arista-7050sx2-72q
+  - 7050SX2-72Q
+
+arch: amd64
+asic: bcm56860
+kernel: "6.12"           # own build; see platform/arista-7050sx2-72q/kernel/
+
+datapath: sdkpoc         # asic/bcm56860 — user-space BDE + OpenBCM
+components:
+  - sdkpoc               # cold init, port bring-up, tap bridge, hardware L3
+  - frr                  # zebra + ospfd + ospf6d
+  - scdreset             # SCD: reset, watchdog, SMBus, sensors  (GPL-2.0)
+  - leddance             # front-panel LEDs
+
+# NO config.bcm IS SHIPPED. The port map and SerDes polarity are properties of
+# the board that only the vendor OS publishes, so they are generated on the
+# operator's own switch:
+#   POLARITY=1 platform/arista-7050sx2-72q/tools/mkconfigbcm.sh <ip> > config.bcm
+# See platform/arista-7050sx2-72q/PROVENANCE.md.
+config_bcm: generated
+
+status: >
+  Forwards IPv4 and IPv6 in hardware, measured: 1000/1000 and 997/1000 packets
+  delivered with the CPU counter flat at the idle rate. OSPFv2 and OSPFv3 reach
+  Full on multiple ports. Fan control is not implemented.
