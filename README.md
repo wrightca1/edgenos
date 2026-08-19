@@ -109,7 +109,17 @@ time, [buy me a coffee](https://buymeacoffee.com/wrightca1).
 
 ## Licensing
 
-All components are distributable. Kernel / BDE-KNET / Buildroot / Quagga are GPL; the
-Broadcom OpenBCM SDK, OpenMDK, and PHY firmware are source-available (distribution +
-derivative grant). Keep the Broadcom notices; the result is source-available, not pure
-OSI. See the per-component licenses.
+**EdgeNOS itself is MIT licensed** (`LICENSE`). MIT rather than Apache-2.0 because the
+tree contains GPL-2.0 code and Apache-2.0 is GPLv2-incompatible; not GPL because the
+Broadcom SDK's terms are not GPL-compatible, so binaries linking it could not be
+distributed under GPL at all.
+
+That grant covers the code EdgeNOS Contributors wrote. It does not relicense what
+EdgeNOS builds on: kernel / BDE-KNET / Buildroot / Quagga / FRR / glibc are GPL or
+LGPL, and the Broadcom OpenBCM SDK, OpenMDK and PHY firmware are source-available
+(distribution + derivative grant) — keep the Broadcom notices. Where an image ships
+GPL binaries, distributing it carries their source obligation.
+
+One file is a per-file exception: `platform/arista-7050sx2-72q/scdreset.c` is
+GPL-2.0-only, because its SMBus master was transcribed from Arista's GPL driver rather
+than reimplemented from the register map. See `LICENSING.md` for the full scope.
