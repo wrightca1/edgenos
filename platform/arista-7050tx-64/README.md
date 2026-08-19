@@ -52,6 +52,35 @@ tools/mkswi.sh                                     # the SWI
 `STATIC=1` is required for anything that runs before the initrd has a loader.
 The SDK is **not** vendored; supply your own tree.
 
+⚠ `build-frr.sh` is **not optional**. `mkswi` warns if the FRR tree is missing
+and then builds the image anyway — you get a bootable switch with no routing
+daemons at all.
+
+## First boot on your own switch — three files you must generate
+
+This platform deliberately ships **none of the board vendor's data**. Three files
+are therefore not in this repository, and the switch needs them. All three are
+generated on the switch itself, from what is already on it:
+
+```
+tools/fdl-extract.sh all                      # -> /etc/edgenos/{cooling,retimer}.conf
+platform trident diag config > asic-config.txt   # under the vendor NOS
+tools/mkconfigbcm.py asic-config.txt > config.bcm
+```
+
+| file | without it |
+|---|---|
+| `/etc/edgenos/cooling.conf` | fans run at **100%** |
+| `/etc/edgenos/retimer.conf` | the retimer **refuses to program** — 40G stays dark |
+| `config.bcm` | the SDK **will not attach** — `Port config error !!` |
+
+Those defaults are chosen, not accidental. A box whose cooling policy is unknown
+should be loud rather than warm, and an unprogrammed retimer is an obvious dead
+port rather than a marginal link that works until it does not.
+
+[PROVENANCE.md](PROVENANCE.md) explains why these are absent: the mechanism is
+ours and is published, the vendor's numbers are not ours to publish.
+
 ## Layout
 
 ```
