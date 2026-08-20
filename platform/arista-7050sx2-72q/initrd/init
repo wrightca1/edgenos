@@ -1,0 +1,298 @@
+#!/bin/busybox sh
+# EdgeNOS /init: run the FULL bring-up, then hand out a shell ON THE CONSOLE.
+#
+# Written for the 2026-08-14 power outage, which left the 7050's Management1
+# port with no link partner (notconnect since boot). Every previous initrd
+# reached the operator over telnet on 10.1.1.241; with ma1 dead that is gone,
+# so this one puts an interactive shell on the serial console instead.
+#
+# The experiment it exists for: the AS5610 on the far end of Et1 is up and
+# reachable (10.1.1.238, swp8). Baseline with the 7050 on EOS is swp8 UP. If
+# swp8 comes back UP after this bring-up, our transmitter emits a lockable
+# stream and the Et25/Et48 fault is receive-side. If it stays DOWN, our
+# transmitter is the problem. PRBS cannot answer that -- its checker sits
+# behind the CDR -- and this can.
+#
+# State when the automatic part finishes:
+#   bring        prep + tscinit + xlportbring     -> sbusid 96/96
+#   ucodemdio    microcode into all 24 macros     -> ok 24 bad 0
+#   tscmicropost UC_ACTIVE + 8051 reset release
+#   pmdinit      PMD core init, per block
+#   lanerst      release per-lane PMD resets      -> ucready 96/96
+#   portinit     XLMAC + PCS, all ports           -> rslvd 78/96 at 0x0e05
+#   polfix       EOS golden RX polarity           -> polstat 23 ok
+#
+# MEASURE EARLY: the mailbox degrades 6-8 min into a boot (cause unknown, no
+# fan control after kexec). /bin/full re-runs everything from a clean chip.
+set -u
+/bin/busybox --install -s /bin
+mount -t proc none /proc 2>/dev/null
+mount -t sysfs none /sys 2>/dev/null
+mount -t devtmpfs none /dev 2>/dev/null
+mkdir -p /dev/pts 2>/dev/null
+mount -t devpts none /dev/pts 2>/dev/null
+# /tmp is NOT in the initrd cpio and nothing else creates it. The old kernel
+# (6.12.0 #29) happened to supply it via a built-in initramfs; a kernel built
+# from tools/kernel-7050.config does not, and then LOG below and `httpd -h /tmp`
+# both fail silently -- no log, no way to fetch results over 8080.
+mkdir -p /tmp 2>/dev/null
+exec >/dev/console 2>&1 </dev/console
+IP_SELF=${EDGENOS_IP:-10.1.1.241}
+LOG=/tmp/txtest.out
+
+# Watchdog first, always. 600 = 60 s at the SCD's 100 ms tick; the petting loop
+# below renews it. If anything wedges hard enough to stop the loop, the SCD
+# resets the box back into the factory image on its own -- that is the real
+# protection and it is CONDITIONAL on something actually being wrong.
+/bin/scdreset pet 600
+( while true; do sleep 30; /bin/scdreset pet 600 >/dev/null 2>&1; done ) &
+
+# THE BLIND 50-MINUTE REBOOT IS NOW OPT-IN, AND OFF BY DEFAULT.
+#
+# This used to be an unconditional `( sleep 3000; reboot -f ) &`, which rebooted
+# a perfectly healthy switch every 50 minutes. During bring-up that was a
+# reasonable backstop for a box you were about to wedge anyway. It is wrong for
+# anything meant to STAY up: a routing adjacency, a link under test, or a
+# thermal control loop -- which cannot do its job if the machine running it
+# restarts on a timer.
+#
+# It also made the box look flaky for reasons that had nothing to do with the
+# work: a session would simply end, and the obvious suspects were the chip, the
+# management NIC or the last change made, none of which were responsible.
+#
+# The watchdog above already covers the case this was for, and covers it better,
+# because it fires when something is wrong rather than when a clock runs out.
+# Set EDGENOS_AUTOREBOOT=<seconds> to bring the timer back for a risky run.
+if [ -n "${EDGENOS_AUTOREBOOT:-}" ]; then
+   echo "  auto-reboot armed: ${EDGENOS_AUTOREBOOT}s"
+   ( sleep "$EDGENOS_AUTOREBOOT"; /bin/busybox reboot -f ) &
+fi
+
+# ma1 is expected to be dead; try anyway, it costs nothing and if the cable
+# comes back mid-session telnet returns for free.
+NIC=""
+for i in 0 1 2 3 4 5; do [ -d /sys/class/net/eth$i ] && { NIC=eth$i; break; }; done
+#
+# THE MAC MUST BE SET BEFORE THE LINK COMES UP.
+#
+# The tg3 on this board has no NVRAM MAC the driver can read, so it invents one:
+# eth0 appears as 00:10:18:00:00:00 on every cold boot. The address itself does
+# not stop the box working, but the upstream switch and gateway hold an ARP
+# entry for the REAL address (44:4c:a8:eb:93:f6, the board's own), so the box
+# answers nobody and looks dead while sitting at a live prompt. That cost a long
+# detour once, and has needed a hand-typed fix on the console after every boot
+# since.
+#
+# Order matters: bring the interface DOWN, set the address, then up. Setting it
+# on a live interface is refused by the kernel, and setting it after the link
+# has come up means the wrong address has already been announced.
+MAC_SELF=${EDGENOS_MAC:-44:4c:a8:eb:93:f6}
+if [ -n "$NIC" ]; then
+   ip link set "$NIC" down 2>/dev/null
+   ip link set "$NIC" address "$MAC_SELF" 2>/dev/null \
+       || ifconfig "$NIC" hw ether "$MAC_SELF" 2>/dev/null
+   ip link set "$NIC" up 2>/dev/null
+   ifconfig "$NIC" up 2>/dev/null          # busybox `ip link set up` can no-op
+   ip addr add "$IP_SELF/24" dev "$NIC" 2>/dev/null
+   ip route add default via 10.1.1.1 dev "$NIC" 2>/dev/null
+   # The build host is off-subnet and OSPF may later advertise a route to it via
+   # a front-panel port, which black-holes the reply path. Pin it to the gateway.
+   ip route add 10.22.1.0/24 via 10.1.1.1 dev "$NIC" 2>/dev/null
+   echo "  ma1 $NIC $(cat /sys/class/net/$NIC/address 2>/dev/null) $IP_SELF"
+   httpd -h /tmp -p 8080 2>/dev/null; telnetd -l /bin/sh -p 23 2>/dev/null
+fi
+
+# BLANK THE PORT LEDs BEFORE ANYTHING ELSE TOUCHES THEM.
+#
+# These registers survive the kexec, so at this point they still show the
+# vendor OS's last picture of its own link state. That is not ours and may not
+# be true a second from now. The bridge lights whatever is genuinely up once it
+# starts; until then a dark panel is honest and a stale one is not.
+[ -x /bin/scdreset ] && /bin/scdreset ledclear >/dev/null 2>&1
+
+# COOLING STARTS AT BOOT, NOT WHEN SOMEONE REMEMBERS.
+#
+# The fan CPLD's uncontrolled default on this board is roughly 11,000 rpm --
+# enough to idle, not enough to trust under load. Nothing else on the system
+# drives it, so if this loop is not running the fans simply never respond to
+# temperature.
+#
+# It commands 100% first and ramps down, so the window between power-on and the
+# first reading is over-cooled rather than under-cooled. Set EDGENOS_NOTHERMAL=1
+# to suppress it when deliberately experimenting on the fan CPLD.
+if [ -z "${EDGENOS_NOTHERMAL:-}" ] && [ -x /bin/scdreset ]; then
+   ( /bin/scdreset thermal 10 > /tmp/thermal.log 2>&1 ) &
+   echo "  thermal loop started (log /tmp/thermal.log)"
+fi
+
+cat > /bin/bring <<'BRING'
+#!/bin/busybox sh
+/bin/scdreset poke 0x4000 0x3 >/dev/null 2>&1; sleep 2
+for c in release phase0 pcicfg phasea3 uchalt phasec phaseb; do
+  /bin/scdreset $c >/dev/null 2>&1
+done
+/bin/scdreset tscinit >/dev/null 2>&1
+/bin/scdreset xlportbring >/dev/null 2>&1
+echo "bring: done at t=$(cut -d. -f1 /proc/uptime)s"
+BRING
+chmod +x /bin/bring
+
+# Clearing the SIGDET force is part of MEASURING, not of bringing up: portinit
+# faithfully replays the SDK's SIGDET_CTL1 force (0xd0c1 bit 7 FRC, bit 8
+# FRC_VAL=0), which pins signal detect low and gates the CDR behind it. Read
+# linkstat before this and it says 0/96 for both signal detect and rx_lock, and
+# means nothing. That artefact cost the first reading of the 2026-08-14 run.
+cat > /bin/sdclear <<'SDC'
+#!/bin/busybox sh
+for b in 15 18 20 21 22 23 27 28 30 31 32 33 35 36 37 38 42 43 45 46 47 48 52 53; do
+  for l in 0 1 2 3; do
+    /bin/scdreset sbuswr $b $l 0x0800d0c1 0x00800000 >/dev/null 2>&1
+  done
+done
+echo "sdclear: SIGDET force cleared on 96 lanes"
+SDC
+chmod +x /bin/sdclear
+[ -f /mibdiff.sh ] && { cp /mibdiff.sh /bin/mibdiff; chmod +x /bin/mibdiff; }
+
+# The MMU half of soc_init, which the port work never needed and forwarding
+# does. Order follows the SDK: TDM lives in soc_misc_init, which runs before
+# soc_mmu_init, and both run before the port layer.
+#
+# These were all built and run on 2026-08-12 (`TDM-RUN-RESULT-20260812.md`) and
+# concluded "no frame moved" -- on a chip whose ports were dead, so the result
+# could not have been anything else. Re-run now that the ports carry a link.
+cat > /bin/mmu <<'MMU'
+#!/bin/busybox sh
+t() { echo "--- $* t=$(cut -d. -f1 /proc/uptime)s"; }
+t tdminit;   /bin/scdreset tdminit   2>&1 | tail -2
+t tdmverify; /bin/scdreset tdmverify 2>&1 | tail -2
+# CFAP: the cell free-address pool. 0x1e000100 is a REGISTER, not a memory --
+# reading it back with memr fails silently, so check bank0 at 0x1c000000.
+t cfap;      /bin/scdreset regw 3 0 0x1e000100 4 0x001fffff 2>&1 | tail -1
+sleep 2
+printf "  CFAP bank0: "; /bin/scdreset memr 3 0 0x1c000000 1 2>&1 | tail -1
+t gap32
+n=0
+while read -r cmd; do
+  case "$cmd" in ''|\#*) continue ;; esac
+  set -- $cmd; shift
+  /bin/scdreset "$@" >/dev/null 2>&1
+  n=$((n+1))
+done < /gap32.txt
+echo "  $n gap writes applied"
+t llsinit;   /bin/scdreset llsinit   2>&1 | tail -2
+t thdinit;   /bin/scdreset thdinit   2>&1 | tail -2
+echo "MMU_DONE t=$(cut -d. -f1 /proc/uptime)s"
+MMU
+chmod +x /bin/mmu
+
+# Enable the MACs. After the full bring-up XLMAC_CTRL reads 0x00005040 on every
+# port -- TX_EN (bit 0) and RX_EN (bit 1) both clear -- so the link is up
+# underneath a MAC that will not pass a frame. That is not a gap in the replay:
+# the SDK *disables* the MAC during bcm_init (the trace reads 0x5043 and writes
+# 0x5040) and re-enables it later from linkscan, which our capture does not
+# contain. 0x5043 is therefore the SDK's own enabled value, not a guess.
+cat > /bin/macen <<'MACEN'
+#!/bin/busybox sh
+n=0
+for b in 15 18 20 21 22 23 27 28 30 31 32 33 35 36 37 38 42 43 45 46 47 48 52 53; do
+  for p in 0 1 2 3; do
+    /bin/scdreset regw $b 0 0x0006000$p 8 0x00005043 >/dev/null 2>&1
+    n=$((n+1))
+  done
+done
+echo "macen: XLMAC_CTRL <- 0x5043 (TX_EN|RX_EN) on $n ports"
+MACEN
+chmod +x /bin/macen
+
+# The three link-time gates together. 251,314 writes of bcm_attach + bcm_init
+# set none of them -- chippost actually narrows EPC_LINK_BMAP back to the CPU
+# port -- so they are applied here, after the replay, every time.
+#   EGR_ENABLE     EPIPE  0x281c0000 + port,  PRT_ENABLE, dlen 4
+#   EPC_LINK_BMAP  IPIPE  0x55880000,         106-bit PORT_BITMAP, dlen 16
+# memw's 5th argument is dlen in BYTES. A word count NACKs.
+cat > /bin/gates <<'GATES'
+#!/bin/busybox sh
+/bin/macen
+i=0
+while [ $i -lt 130 ]; do
+  /bin/scdreset memw 2 0 $((0x281c0000+i)) 4 0x00000001 >/dev/null 2>&1
+  i=$((i+1))
+done
+/bin/scdreset memw 1 0 0x55880000 16 0xffffffff 0xffffffff 0xffffffff 0x000003ff \
+  >/dev/null 2>&1
+echo "gates: EGR_ENABLE on 130 ports, EPC_LINK_BMAP all ports"
+GATES
+chmod +x /bin/gates
+
+# Inject frames with no dst_port, so the chip has to forward them itself. The
+# destination MAC is in no L2 table, so a working chip floods them out the
+# front panel -- measurable on the AS5610's swp8 rx_packets, which is OUTSIDE
+# this box. CPU RXPKT cannot answer this: an injected frame has no reason to
+# be punted back even when forwarding works.
+cat > /bin/inject <<'INJ'
+#!/bin/busybox sh
+n=${1:-50}
+i=0
+while [ $i -lt $n ]; do
+  DMABUF_SCAN_MB=768 PKTTX_REAL=1 /bin/scdreset pkttx 3 64 0 >/dev/null 2>&1
+  i=$((i+1))
+done
+echo "inject: $n frames"
+INJ
+chmod +x /bin/inject
+
+# The whole sequence, in the one order that is known to work.
+# ucodemdio is self-contained -- do NOT run tscmicropre before it, or it
+# leaves the UCMEM in parallel-bus mode and the load fails silently.
+#
+# portfull replaces portinit: same starting op index, but every XLPORT write
+# the SDK issues from there to the end of bcm_init (80,216) rather than the
+# first bring-up pass per port (11,616). /bin/fullinit keeps the old path so
+# the two can be compared on the same boot.
+cat > /bin/full <<'FULL'
+#!/bin/busybox sh
+PORT=${PORT:-portfull}
+t() { echo "--- $* t=$(cut -d. -f1 /proc/uptime)s"; }
+/bin/bring
+# chipinit/chippost supersede /bin/mmu (tdminit + CFAP + gap32 + llsinit +
+# thdinit): they replay the SDK's own 251,314 writes to IPIPE, EPIPE and the
+# MMU, where the hand-ported stack was a few thousand and thdinit NACKed 301.
+# MMU=1 puts the old stack back for comparison.
+t chipinit;     /bin/scdreset chipinit     2>&1 | tail -1
+[ "${MMU:-0}" = 1 ] && /bin/mmu
+t sbusid;       /bin/scdreset sbusid       2>&1 | tail -1
+t ucodemdio;    /bin/scdreset ucodemdio /ucode.bin 2>&1 | tail -1
+t tscmicropost; /bin/scdreset tscmicropost 2>&1 | tail -1
+t pmdinit;      /bin/scdreset pmdinit      2>&1 | tail -1
+t lanerst;      /bin/scdreset lanerst      2>&1 | tail -1
+t ucready;      /bin/scdreset ucready      2>&1 | tail -1
+t $PORT;        /bin/scdreset $PORT        2>&1 | tail -1
+t chippost;     /bin/scdreset chippost     2>&1 | tail -1
+t rslvd;        /bin/scdreset rslvd        2>&1 | tail -1
+t polfix;       /bin/scdreset polfix       2>&1 | tail -1
+t polstat;      /bin/scdreset polstat      2>&1 | tail -1
+t gates;        /bin/gates
+t sdclear;      /bin/sdclear
+t linkstat;     /bin/scdreset linkstat     2>&1 | tail -1
+echo "FULL_DONE t=$(cut -d. -f1 /proc/uptime)s"
+FULL
+chmod +x /bin/full
+printf '#!/bin/busybox sh\nPORT=portinit exec /bin/full\n' > /bin/fullinit
+chmod +x /bin/fullinit
+
+{
+  echo "READY  t=$(cut -d. -f1 /proc/uptime)s  ma1=${NIC:-none}  BARE=${BARE:-1}"
+  # BARE boot: helpers are defined, nothing is run. The 2026-08-09 wirewatch
+  # sequence starts from a chip as EOS left it -- release/phase0/pcicfg, which
+  # is NOT the full SCD reset /bin/bring does -- so any run that lets /bin/full
+  # execute first is not reproducing it.
+  [ "${BARE:-1}" = 0 ] && /bin/full
+  echo "BARE_READY -- run /bin/full for our bring-up, or the wirewatch order"
+} 2>&1 | tee $LOG
+
+# A shell on the console, respawned if it exits, because init must not die.
+while true; do
+  setsid /bin/cttyhack /bin/sh </dev/console >/dev/console 2>&1
+  sleep 1
+done

@@ -2,20 +2,25 @@
  *
  * GPL-2.0 BECAUSE OF THE SMBUS MASTER, NOT BY CHOICE.
  *
- * The SCD SMBus section below is transcribed from Arista's GPL-2.0 driver
- * (scd-smbus.c) -- its bitfield layout and transaction protocol, not merely its
- * register addresses. Transcription produces a derivative work, so the licence
- * follows it and this whole file carries GPL-2.0 even though the rest of the
- * repository is permissively licensed.
+ * The SCD SMBus section in this file is transcribed from Arista's GPL-2.0
+ * driver (scd-smbus.c) -- its bitfield layout and transaction protocol, not
+ * merely its register addresses. Transcription produces a derivative work, so
+ * the licence follows it and this whole file carries GPL-2.0 even where the
+ * surrounding project is permissively licensed.
  *
- * The other Arista GPL drivers this file draws on (scd-reset.c, scd-led.c,
- * raven-fan-driver.c) were read for register MAPS only. Those are facts and do
- * not carry a licence -- every offset used here is published by Arista in the
- * GPL-2.0 aristanetworks/sonic tree.
+ * The other Arista GPL drivers this file draws on -- scd-reset.c, scd-led.c,
+ * raven-fan-driver.c, crow-fan-driver.c -- were read for register MAPS only.
+ * Those are facts and carry no licence; every offset used here is published by
+ * Arista in the GPL-2.0 aristanetworks/sonic tree.
  *
- * If this file is ever wanted under the repository's main licence, the SMBus
- * master has to be rewritten from the register map alone, without reference to
- * the driver source.
+ * If this file is ever wanted under a permissive licence, the SMBus master has
+ * to be rewritten from the register map alone, without reference to the driver
+ * source.
+ *
+ * NOTE TO ANYONE SYNCING THIS FILE ELSEWHERE: this header is load-bearing.
+ * Copying the file over a downstream copy without it silently relicenses
+ * GPL code, which is exactly what happened once on 2026-08-20 and was caught
+ * only by checking the first line after the copy.
  */
 /* scdreset -- Arista SCD + BCM56860 bring-up tool for EdgeNOS.
  *
@@ -46,6 +51,7 @@
 #include <time.h>
 #include <sys/mman.h>
 #include <stdint.h>
+#include <signal.h>
 
 #define SCD_RES  "/sys/bus/pci/devices/0000:05:00.0/resource0"
 #define ASIC_RES "/sys/bus/pci/devices/0000:01:00.0/resource0"
@@ -6170,6 +6176,313 @@ static int do_smbrd(int accel, int bus, int addr, int reg)
 }
 
 
+/* ------------------------------------------------------- Crow fan CPLD
+ *
+ * THE FAN CONTROLLER, AND HOW ITS REGISTER MAP WAS OBTAINED.
+ *
+ * This board's fans hang off a CPLD at SMBus address 0x60 on accelerator 0
+ * bus 0 -- the CPU card's bus. Two earlier attempts to find its PWM register by
+ * sweeping it POWERED THE SWITCH OFF, once through our own reads and once
+ * through the vendor's own tool; see docs/HAZARD-FAN-CONTROLLER-PROBING.md.
+ *
+ * None of the map below was probed. It is read from Arista's own GPL-2.0
+ * sources, which describe this exact part:
+ *
+ *   src/crow-fan-driver.c        "crow-cpld-fans", 4 fans, the register
+ *                                numbers and the tach conversion
+ *   arista/platforms/cpu/crow.py cpld = scd.newComponent(CrowFanCpld,
+ *                                          addr=scd.i2cAddr(hwmonBus, 0x60))
+ *
+ * That second line is what ties the driver to this board: the fan CPLD is an
+ * I2C device at 0x60 on an SCD bus, which is exactly where ours answers. Note
+ * that Arista's OTHER CPLD, the system one, is at 0x23 on the x86 SMBus -- a
+ * different device entirely, and conflating the two is easy.
+ *
+ * Register map, from crow-fan-driver.c:
+ *
+ *   0x00..0x07   tach 1..4, low byte then high byte
+ *   0x10..0x13   PWM for fan 1..4, 0..255            <- the thing we were hunting
+ *   0x18..0x1B   fan ID 1..4
+ *   0x21         presence bitmap
+ *   0x24 / 0x25  green / red LED
+ *   0x40         CPLD revision
+ *
+ *   RPM = 6000000 / ((high << 8) | low)
+ */
+#define CROW_ADDR      0x60
+#define CROW_ACCEL     0
+#define CROW_BUS       0
+#define CROW_TACH(n)   (unsigned)((n) * 2)      /* n = 0..3, low byte */
+#define CROW_PWM(n)    (unsigned)(0x10 + (n))
+#define CROW_ID(n)     (unsigned)(0x18 + (n))
+#define CROW_PRESENT   0x21u
+#define CROW_REV       0x40u
+#define CROW_NFAN      4
+#define CROW_MAX_PWM   255
+
+/* Write one byte to a device register over an SCD SMBus master.
+ *
+ * Same shape as do_smbrd's first half: address+W, register, data. There is no
+ * read phase and no repeated start, so three request words rather than four. */
+static int smb_wr_reg(int accel, int bus, int addr, unsigned reg,
+                      unsigned val)
+{
+    uint32_t base = SMB_BASE(accel), cs, resp;
+    const int ss = 3;
+    const unsigned PT = 1, PED = 0;
+    int i;
+
+    if (smb_enter(base) < 0) return -1;
+
+    wr(scd, base + SMB_REQ_OFF,
+       smb_req((unsigned)(addr << 1) | 0, ss, 0, 0, PT, 0, 0, 1, 1, bus, 0));
+    wr(scd, base + SMB_REQ_OFF,
+       smb_req(reg & 0xff, 0, 0,   0, PT, 0, 0, 1, 0, bus, 1));
+    wr(scd, base + SMB_REQ_OFF,
+       smb_req(val & 0xff, 0, PED, 0, PT, 1, 0, 1, 0, bus, 2));  /* sp=1 */
+
+    for (i = 0; i < 200; i++) {
+        cs = rd(scd, base + SMB_CS_OFF);
+        if (CS_NRS(cs) >= (unsigned)ss) break;
+        usleep(1000);
+    }
+    cs = rd(scd, base + SMB_CS_OFF);
+    if (CS_NRS(cs) == 0) return -1;
+    for (i = 0; i < (int)CS_NRS(cs) && i < 8; i++) {
+        resp = rd(scd, base + SMB_RESP_OFF);
+        if (RESP_BUSERR(resp) || RESP_TIMEOUT(resp) || RESP_ACKERR(resp))
+            return -1;
+    }
+    return 0;
+}
+
+/* Quiet read-byte: do_smbrd prints, which is wrong inside a control loop. */
+static int smb_rd_reg(int accel, int bus, int addr, unsigned reg)
+{
+    uint32_t base = SMB_BASE(accel), cs, resp = 0;
+    const int ss = 4;
+    const unsigned PT = 1, PED = 0;
+    int i, ti = 0;
+
+    if (smb_enter(base) < 0) return -1;
+    wr(scd, base + SMB_REQ_OFF,
+       smb_req((unsigned)(addr << 1) | 0, ss, 0, 0, PT, 0, 0, 1, 1, bus, ti++));
+    wr(scd, base + SMB_REQ_OFF,
+       smb_req(reg & 0xff, 0, PED, 0, PT, 0, 0, 1, 0, bus, ti++));
+    wr(scd, base + SMB_REQ_OFF,
+       smb_req((unsigned)(addr << 1) | 1, 0, 0, 0, PT, 0, 0, 1, 1, bus, ti++));
+    wr(scd, base + SMB_REQ_OFF,
+       smb_req(0, 0, PED, 0, PT, 1, 0, 0, 0, bus, ti++));
+
+    for (i = 0; i < 200; i++) {
+        cs = rd(scd, base + SMB_CS_OFF);
+        if (CS_NRS(cs) >= (unsigned)ss) break;
+        usleep(1000);
+    }
+    cs = rd(scd, base + SMB_CS_OFF);
+    if (CS_NRS(cs) == 0) return -1;
+    for (i = 0; i < (int)CS_NRS(cs) && i < 8; i++) {
+        resp = rd(scd, base + SMB_RESP_OFF);
+        if (RESP_BUSERR(resp) || RESP_TIMEOUT(resp) || RESP_ACKERR(resp))
+            return -1;
+    }
+    return (int)RESP_D(resp);
+}
+
+static int crow_rpm(int fan)
+{
+    int lo = smb_rd_reg(CROW_ACCEL, CROW_BUS, CROW_ADDR, CROW_TACH(fan));
+    int hi = smb_rd_reg(CROW_ACCEL, CROW_BUS, CROW_ADDR, CROW_TACH(fan) + 1);
+    unsigned t;
+
+    if (lo < 0 || hi < 0) return -1;
+    t = ((unsigned)hi << 8) | (unsigned)lo;
+    if (!t) t = 1;                       /* the driver does exactly this */
+    return (int)(6000000u / t);
+}
+
+/* Identity check before we ever write. A CPLD revision that reads back as
+ * 0x00 or 0xff means we are not talking to what we think we are, and writing a
+ * PWM value into an unknown device on a live switch is not something to do on
+ * an assumption. */
+static int crow_probe(void)
+{
+    int rev = smb_rd_reg(CROW_ACCEL, CROW_BUS, CROW_ADDR, CROW_REV);
+
+    if (rev < 0) {
+        fprintf(stderr, "crow: no response from 0x%02x on accel %d bus %d\n",
+                CROW_ADDR, CROW_ACCEL, CROW_BUS);
+        return -1;
+    }
+    if (rev == 0x00 || rev == 0xff) {
+        fprintf(stderr, "crow: implausible CPLD revision 0x%02x -- refusing "
+                "to write\n", rev);
+        return -1;
+    }
+    return rev;
+}
+
+/* A FLOOR, ALWAYS.
+ *
+ * The vendor's own thermal control never commands below 30%, and neither do we.
+ * A switch whose fans are commanded to zero because of an arithmetic slip does
+ * not report a bug, it cooks. `fanset N 0` is therefore clamped, and the only
+ * way past the floor is an explicit override that has to be typed. */
+#define CROW_MIN_PCT 30
+
+static int crow_set_pct(int fan, int pct, int allow_below_floor)
+{
+    int pwm;
+
+    if (pct > 100) pct = 100;
+    if (pct < CROW_MIN_PCT && !allow_below_floor) {
+        fprintf(stderr, "crow: %d%% is below the %d%% floor, clamping\n",
+                pct, CROW_MIN_PCT);
+        pct = CROW_MIN_PCT;
+    }
+    if (pct < 0) pct = 0;
+    pwm = pct * CROW_MAX_PWM / 100;
+    return smb_wr_reg(CROW_ACCEL, CROW_BUS, CROW_ADDR, CROW_PWM(fan), pwm);
+}
+
+/* Temperatures, from the two sensors this board carries.
+ *
+ *   Lm73    0x4a  accel 0 bus 0   front-panel / inlet
+ *   Max6658 0x4c  accel 1 bus 0   board
+ *
+ * Both report whole degrees in the high byte of register 0x00, which is all a
+ * cooling loop needs -- the fractional bits below it are not worth the extra
+ * transaction. A sensor that will not answer returns -1 and the caller treats
+ * that as "assume the worst", never as "assume fine".
+ */
+static int temp_lm73(void)   { return smb_rd_reg(0, 0, 0x4a, 0x00); }
+static int temp_max6658(void){ return smb_rd_reg(1, 0, 0x4c, 0x00); }
+
+static int temp_hottest(int *inlet, int *board)
+{
+    int a = temp_lm73(), b = temp_max6658(), hot = -1;
+
+    if (inlet) *inlet = a;
+    if (board) *board = b;
+    if (a > hot) hot = a;
+    if (b > hot) hot = b;
+    return hot;
+}
+
+/* THE COOLING LOOP.
+ *
+ * Proportional on the hottest sensor, with a floor and a ceiling, and hysteresis
+ * in the form of a slew limit so the fans do not audibly hunt.
+ *
+ *   at or below TMIN  ->  MIN%          (30, matching the vendor's own floor)
+ *   at or above TMAX  ->  100%
+ *   between           ->  linear
+ *
+ * Deliberately NOT a PID. The vendor's runs one per sensor with an integral
+ * term, and an integral term on a loop this slow mostly buys overshoot and a
+ * windup bug. Proportional with a floor is the behaviour that matters: fans
+ * rise with temperature and never stop.
+ *
+ * FAILURE IS NOT QUIET. If a sensor cannot be read, or the CPLD stops
+ * answering, the loop commands 100% and says so. The failure mode of a cooling
+ * loop must be "too much cooling", and the one thing it must never do is keep
+ * the last value because it could not measure anything.
+ */
+#define TH_TMIN   35      /* degC at or below which fans sit at the floor */
+#define TH_TMAX   65      /* degC at or above which fans are flat out     */
+#define TH_MAXPCT 100
+
+static int thermal_target(int hot)
+{
+    if (hot < 0)        return TH_MAXPCT;             /* unreadable -> flat out */
+    if (hot <= TH_TMIN) return CROW_MIN_PCT;
+    if (hot >= TH_TMAX) return TH_MAXPCT;
+    return CROW_MIN_PCT +
+           (hot - TH_TMIN) * (TH_MAXPCT - CROW_MIN_PCT) / (TH_TMAX - TH_TMIN);
+}
+
+static volatile int th_stop;
+static void th_sigint(int sig) { (void)sig; th_stop = 1; }
+
+static int do_thermal(int interval, int once)
+{
+    int cur = TH_MAXPCT, i;
+
+    if (crow_probe() < 0) return 1;
+
+    /* Start at full and come down. Starting low and ramping up would leave the
+     * box under-cooled for the first interval if it is already hot. */
+    for (i = 0; i < CROW_NFAN; i++) crow_set_pct(i, TH_MAXPCT, 0);
+
+    signal(SIGINT,  th_sigint);
+    signal(SIGTERM, th_sigint);
+
+    printf("thermal: floor %d%%, %dC->%dC maps %d%%->%d%%, every %ds\n",
+           CROW_MIN_PCT, TH_TMIN, TH_TMAX, CROW_MIN_PCT, TH_MAXPCT, interval);
+    fflush(stdout);
+
+    while (!th_stop) {
+        int inlet, board, hot = temp_hottest(&inlet, &board);
+        int want = thermal_target(hot), step, bad = 0;
+
+        /* Slew limit: up fast, down slowly. Reacting instantly downward makes
+         * the fans oscillate around a threshold; reacting slowly upward would
+         * be a thermal risk, so the asymmetry is deliberate. */
+        step = (want > cur) ? (want - cur) : ((cur - want) > 5 ? 5 : (cur - want));
+        cur  = (want > cur) ? want : cur - step;
+
+        for (i = 0; i < CROW_NFAN; i++)
+            if (crow_set_pct(i, cur, 0) < 0) bad++;
+
+        printf("thermal: inlet %3dC board %3dC hot %3dC -> %3d%%%s\n",
+               inlet, board, hot, cur,
+               bad ? "   *** CPLD WRITE FAILED ***" : "");
+        fflush(stdout);
+
+        if (bad) {
+            /* Cannot command the fans. Say so loudly and keep trying; the
+             * hardware holds its last value, which is why we start high. */
+            fprintf(stderr, "thermal: %d of %d fans did not accept a setting\n",
+                    bad, CROW_NFAN);
+        }
+        if (once) break;
+        for (i = 0; i < interval && !th_stop; i++) sleep(1);
+    }
+
+    /* LEAVE THE BOX SAFE. Whatever stopped us -- Ctrl-C, SIGTERM, a crash of
+     * the surrounding script -- the fans must not be left at whatever low value
+     * a cool moment happened to command. */
+    printf("thermal: stopping, setting fans to %d%%\n", TH_MAXPCT);
+    for (i = 0; i < CROW_NFAN; i++) crow_set_pct(i, TH_MAXPCT, 0);
+    fflush(stdout);
+    return 0;
+}
+
+static int do_fanshow(void)
+{
+    int rev = crow_probe(), present, i;
+
+    if (rev < 0) return 1;
+    present = smb_rd_reg(CROW_ACCEL, CROW_BUS, CROW_ADDR, CROW_PRESENT);
+    printf("crow fan cpld 0x%02x  rev 0x%02x  present 0x%02x\n",
+           CROW_ADDR, rev, present < 0 ? 0 : present);
+    for (i = 0; i < CROW_NFAN; i++) {
+        int pwm = smb_rd_reg(CROW_ACCEL, CROW_BUS, CROW_ADDR, CROW_PWM(i));
+        int id  = smb_rd_reg(CROW_ACCEL, CROW_BUS, CROW_ADDR, CROW_ID(i));
+        int rpm = crow_rpm(i);
+        /* PRESENCE IS ACTIVE LOW. crow-fan-driver.c reads it as
+         *     *present = ~(data >> index) & 0x01;
+         * so a CLEAR bit means the fan is there. Reading it the obvious way
+         * round reports every fan absent while all four are plainly spinning. */
+        int here = (present < 0) ? 1 : !((present >> i) & 1);
+        printf("  fan%d  pwm %3d (%3d%%)  rpm %5d  id 0x%02x%s\n",
+               i + 1, pwm, pwm < 0 ? 0 : pwm * 100 / CROW_MAX_PWM, rpm, id,
+               here ? "" : "   [absent]");
+    }
+    return 0;
+}
+
+
 /* --------------------------------------------------------------- Linux I2C
  * Read a byte from a device register on a standard Linux i2c bus.
  *
@@ -6649,6 +6962,76 @@ int main(int argc, char **argv)
         reg  = (int)strtoul(argv[4], NULL, 0);
         return do_i2crd(bus, addr, reg);
     }
+    /* ---- front-panel LEDs -----------------------------------------------
+     * Only enough to blank them. Driving them from link state needs the SDK,
+     * which knows it for all 72 ports, and that lives in the bridge
+     * (tools/sdkshim/ledsync.c). */
+    if (!strcmp(cmd, "ledclear")) {
+        unsigned i;
+        if (!(scd = map_res(SCD_RES, SCD_MAP_SIZE, 1))) return 1;
+        /* DARK IS HONEST; STALE IS NOT.
+         *
+         * Between power-on and the bridge starting, these registers hold
+         * whatever the previous occupant of this machine left in them -- the
+         * vendor OS's last picture of its own link state, which is not ours.
+         * A panel showing links that may not exist is worse than a dark one,
+         * so blank it and let the bridge light what is genuinely up. */
+        for (i = 0; i < 48; i++) wr(scd, 0x6100u + 0x10u * i, 0);   /* SFP+ */
+        for (i = 0; i < 24; i++) wr(scd, 0x6400u + 0x10u * i, 0);   /* QSFP */
+        printf("ledclear: 72 port LEDs blanked\n");
+        return 0;
+    }
+
+    /* ---- fans and cooling ------------------------------------------------
+     * The register map behind these comes from Arista's GPL crow-fan-driver.c,
+     * not from probing this device -- probing it powered the box off twice.
+     * See docs/HAZARD-FAN-CONTROLLER-PROBING.md. */
+    if (!strcmp(cmd, "fanshow")) {
+        if (!(scd = map_res(SCD_RES, SCD_MAP_SIZE, 1))) return 1;
+        return do_fanshow();
+    }
+    if (!strcmp(cmd, "fanpct")) {
+        int fan, pct, force = 0;
+        if (argc < 4) {
+            printf("usage: scdreset fanpct <fan 1-4|all> <percent> [force]\n");
+            printf("  percent is clamped to a %d%% floor unless 'force' is\n",
+                   CROW_MIN_PCT);
+            printf("  given -- a switch with its fans commanded to zero does\n");
+            printf("  not report a fault, it cooks.\n");
+            return 2;
+        }
+        pct   = (int)strtol(argv[3], NULL, 0);
+        force = (argc > 4 && !strcmp(argv[4], "force"));
+        if (!(scd = map_res(SCD_RES, SCD_MAP_SIZE, 1))) return 1;
+        if (crow_probe() < 0) return 1;
+        if (!strcmp(argv[2], "all")) {
+            int i, bad = 0;
+            for (i = 0; i < CROW_NFAN; i++)
+                if (crow_set_pct(i, pct, force) < 0) bad++;
+            printf("fanpct: all fans -> %d%%%s\n", pct,
+                   bad ? "  (some writes FAILED)" : "");
+            return bad ? 1 : 0;
+        }
+        fan = (int)strtol(argv[2], NULL, 0) - 1;
+        if (fan < 0 || fan >= CROW_NFAN) {
+            fprintf(stderr, "fanpct: fan must be 1..%d or 'all'\n", CROW_NFAN);
+            return 2;
+        }
+        if (crow_set_pct(fan, pct, force) < 0) {
+            fprintf(stderr, "fanpct: write FAILED\n");
+            return 1;
+        }
+        printf("fanpct: fan%d -> %d%%\n", fan + 1, pct);
+        return 0;
+    }
+    if (!strcmp(cmd, "thermal")) {
+        int interval = (argc > 2) ? (int)strtol(argv[2], NULL, 0) : 10;
+        int once     = (argc > 3 && !strcmp(argv[3], "once"));
+        if (interval < 1) interval = 1;
+        if (!(scd = map_res(SCD_RES, SCD_MAP_SIZE, 1))) return 1;
+        return do_thermal(interval, once);
+    }
+
     if (!strcmp(cmd, "smbrd")) {
         int accel, bus, addr, reg;
         if (argc < 6) {

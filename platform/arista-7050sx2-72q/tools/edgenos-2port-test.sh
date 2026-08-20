@@ -1,7 +1,4 @@
 #!/bin/busybox sh
-# SERVE=<url> overrides the build host these binaries are fetched from.
-# It defaults to the address of the lab machine these measurements were taken on;
-# set it to your own or the fetches will fail.
 # TWO ROUTED PORTS, and the forwarding proof that needed them.
 #
 #   et1 = logical port 1, VLAN 1006, 10.101.101.42/29  -> AS5610 swp8 (.41)
@@ -24,7 +21,7 @@ mount -t vfat /dev/mmcblk0p1 /mnt/flash 2>/dev/null
 killall sdkpoc-shell zebra ospfd ospf6d 2>/dev/null
 /bin/busybox sleep 3
 
-wget -q -O /tmp/sdkpoc-shell ${SERVE:-http://10.22.1.5:8123}/sdkpoc-shell || exit 3
+wget -q -O /tmp/sdkpoc-shell http://10.22.1.5:8123/sdkpoc-shell || exit 3
 chmod +x /tmp/sdkpoc-shell
 md5sum /tmp/sdkpoc-shell
 
@@ -32,9 +29,9 @@ md5sum /tmp/sdkpoc-shell
 # shared-library closure is identical to ospfd's (libc, libfrr, libjson-c), so
 # it can simply be dropped into the running rootfs. This does not survive a
 # reboot; rolling it into initrd-ospf is a repack.
-wget -q -O /usr/lib/frr/ospf6d ${SERVE:-http://10.22.1.5:8123}/ospf6d && chmod +x /usr/lib/frr/ospf6d
-wget -q -O /etc/frr/ospfd.conf  ${SERVE:-http://10.22.1.5:8123}/ospfd.conf
-wget -q -O /etc/frr/ospf6d.conf ${SERVE:-http://10.22.1.5:8123}/ospf6d.conf
+wget -q -O /usr/lib/frr/ospf6d http://10.22.1.5:8123/ospf6d && chmod +x /usr/lib/frr/ospf6d
+wget -q -O /etc/frr/ospfd.conf  http://10.22.1.5:8123/ospfd.conf
+wget -q -O /etc/frr/ospf6d.conf http://10.22.1.5:8123/ospf6d.conf
 
 /bin/scdreset wd 8000 | tail -1
 /bin/full > /tmp/full.out 2>&1; tail -1 /tmp/full.out

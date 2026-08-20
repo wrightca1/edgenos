@@ -1,0 +1,112 @@
+#!/bin/busybox sh
+# Bring the switch up as a router: two hardware ports, hardware L3, OSPFv2+v3.
+#
+# Everything this does was previously a hand-run test script. It is here, in the
+# image, because a box that reboots needs a one-word way back to a working state.
+#
+#   ospfup            full cold bring-up, then routing
+#   ospfup warm       skip /bin/full (chip already initialised)
+#
+# Addressing is overridable, because it is a property of the bench, not the box:
+#   ET1_V4=10.101.101.42/29   ET2_V4=10.101.101.57/29
+#   ET1_V6=...  ET2_V6=...    SERVE=http://<host>:8123
+set -u
+MODE=${1:-cold}
+
+ET1_V4=${ET1_V4:-10.101.101.42}    ET1_MASK=${ET1_MASK:-255.255.255.248}
+ET2_V4=${ET2_V4:-10.101.101.57}    ET2_MASK=${ET2_MASK:-255.255.255.248}
+ET1_V6=${ET1_V6:-2001:470:882d:1040::1/64}
+ET2_V6=${ET2_V6:-2001:470:882d:1056::1/64}
+MTU=${MTU:-1600}
+SERVE=${SERVE:-http://10.22.1.5:8123}
+
+say() { echo "ospfup: $*"; }
+
+mkdir -p /mnt/flash /var/run/frr /etc/frr 2>/dev/null
+mount -t vfat /dev/mmcblk0p1 /mnt/flash 2>/dev/null
+
+# The SDK binary is 177 MB and does not fit the initrd. Prefer a copy on flash
+# (survives reboots, no network needed); fall back to fetching it.
+BIN=/tmp/sdkpoc-shell
+if [ -x /mnt/flash/sdkpoc-shell ]; then
+    BIN=/mnt/flash/sdkpoc-shell
+    say "using $BIN"
+elif [ ! -x $BIN ]; then
+    say "fetching sdkpoc-shell from $SERVE"
+    wget -q -O $BIN "$SERVE/sdkpoc-shell" || { say "FETCH FAILED -- put it on /mnt/flash"; exit 3; }
+    chmod +x $BIN
+fi
+
+# NEVER let /bin/full reset the ASIC underneath a live bridge. That has taken
+# the box down before.
+killall sdkpoc-shell zebra ospfd ospf6d 2>/dev/null
+sleep 2
+
+if [ "$MODE" != warm ]; then
+    say "cold chip init"
+    /bin/full > /tmp/full.out 2>&1
+    tail -1 /tmp/full.out
+fi
+
+say "starting bridge: et1=port1 vlan1006, et2=port2 vlan1007, hardware L3"
+DMA_BASE=0xd0000000 SDKPOC_CONFIG=/config.bcm SDKPOC_BCM=1 SDKPOC_CL72=1 \
+SDKPOC_TAP=et1,et2 SDKPOC_TAP_PORT=1,2 SDKPOC_TAP_VLAN=1006,1007 \
+SDKPOC_TAP_L3=1 \
+    setsid $BIN > /tmp/bridge.log 2>&1 &
+
+i=0
+while [ $i -lt 40 ]; do
+    grep -q "port(s), rx active" /tmp/bridge.log 2>/dev/null && break
+    sleep 5; i=$((i+1))
+done
+grep -q "port(s), rx active" /tmp/bridge.log 2>/dev/null || {
+    say "BRIDGE DID NOT COME UP -- see /tmp/bridge.log"; tail -5 /tmp/bridge.log; exit 1; }
+grep -E "^tap: et|^l3: .*intf|^fp: v[46] group" /tmp/bridge.log
+
+# busybox `ip link set up` returns success while doing nothing; ifconfig is the
+# busybox-native path and is what actually brings a tap up.
+say "addressing"
+ifconfig et1 "$ET1_V4" netmask "$ET1_MASK" mtu "$MTU" up
+ifconfig et2 "$ET2_V4" netmask "$ET2_MASK" mtu "$MTU" up
+ip -6 addr add "$ET1_V6" dev et1 2>/dev/null
+ip -6 addr add "$ET2_V6" dev et2 2>/dev/null
+
+# The chip can only forward to a neighbour it has a host entry for, and those
+# are built from the kernel's ARP/NDP caches -- so the caches have to be
+# populated. Pinging both peers is what does it.
+say "resolving peers"
+for p in 10.101.101.41 10.101.101.58; do ping -c 2 -W 2 $p >/dev/null 2>&1; done
+ping -6 -c 2 -W 2 2001:470:882d:1056::2 >/dev/null 2>&1
+
+say "starting FRR"
+rm -f /var/run/frr/*.pid /var/run/frr/*.vty /var/run/frr/zserv.api 2>/dev/null
+chown -R 101:102 /var/run/frr /var/tmp 2>/dev/null
+chmod 0777 /var/run/frr /var/tmp 2>/dev/null
+/usr/lib/frr/zebra  -d -u root -g root -f /etc/frr/zebra.conf \
+    -i /var/run/frr/zebra.pid -z /var/run/frr/zserv.api
+sleep 3
+/usr/lib/frr/ospfd  -d -u root -g root -f /etc/frr/ospfd.conf \
+    -i /var/run/frr/ospfd.pid -z /var/run/frr/zserv.api
+sleep 2
+[ -x /usr/lib/frr/ospf6d ] && /usr/lib/frr/ospf6d -d -u root -g root \
+    -f /etc/frr/ospf6d.conf -i /var/run/frr/ospf6d.pid -z /var/run/frr/zserv.api
+
+# Wait on the kernel FIB, not on a vty socket. An unbounded read from ospfd's
+# vty has hung a script here with the test already passing.
+say "waiting for routes"
+n=0
+while [ $n -lt 30 ]; do
+    sleep 5; n=$((n+1))
+    v4=$(route -n 2>/dev/null | grep -cE 'et[12]')
+    v6=$(ip -6 route 2>/dev/null | grep -c via)
+    [ "$v4" -gt 5 ] && [ "$v6" -gt 5 ] && break
+done
+
+echo
+say "state after $((n*5))s"
+echo "  IPv4 routes via et1/et2 : $(route -n 2>/dev/null | grep -cE 'et[12]')"
+echo "  IPv6 routes via gateway : $(ip -6 route 2>/dev/null | grep -c via)"
+grep -E "used_route|routes /" /tmp/bridge.log 2>/dev/null | tail -2
+echo
+say "bridge log /tmp/bridge.log   daemons: $(ps 2>/dev/null | grep -cE '[z]ebra|[o]spf')"
+say "UP"

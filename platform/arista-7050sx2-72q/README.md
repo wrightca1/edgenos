@@ -18,8 +18,10 @@ user-space BDE shim — no vendor kernel modules, no vendor agents.
 | L2 switching, MAC learning | working |
 | IPv4 + IPv6 routing **in the switch chip** | working, measured below |
 | OSPFv2 + OSPFv3 (FRR) on multiple ports | Full adjacencies |
-| Sensors, PSU, LEDs | working |
-| Fan control / thermal loop | **not implemented** |
+| Sensors, PSU | working |
+| Port LEDs follow link | working |
+| Fan control and cooling loop | working |
+| ONIE installer | **not implemented** — boots by `kexec` from the factory OS |
 
 ### Hardware forwarding, measured rather than asserted
 
@@ -37,6 +39,25 @@ forwarding, every packet would appear there.
 Two orders of magnitude. The chip is forwarding; the CPU is not in the path.
 Topology was one port to a Broadcom-based switch and one to a Cisco Nexus, with
 routes learned by OSPF and mirrored into the chip's own tables.
+
+### Cooling
+
+`scdreset thermal` runs from the initrd at boot. Proportional on the hottest
+sensor, 35 °C -> 30% and 65 °C -> 100%, with a floor the vendor also uses and an
+asymmetric slew — up at once, down slowly — so the fans do not hunt. Measured
+response: 30/50/60/100% PWM gives 20270/25104/27522/35714 rpm.
+
+It is deliberately not a PID. The vendor runs one per sensor with an integral
+term; on a loop this slow that mostly buys overshoot and a windup bug. What
+matters is that fans rise with temperature and never stop, so an unreadable
+sensor commands 100%, a failed write says so loudly, and exit sets 100% — the
+failure mode of a cooling loop must be too much cooling.
+
+### Bringing it up
+
+    ospfup            cold chip -> two routed ports, dual-stack OSPF, ~50 s
+    scdreset fanshow  fan speeds, PWM, presence
+    scdreset thermal  the cooling loop (already running from init)
 
 ## Layout
 

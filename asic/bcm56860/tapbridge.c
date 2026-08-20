@@ -75,6 +75,10 @@ extern int  l3sync_add_intf(int unit, const char *ifname, int port, int vlan,
 extern int  l3sync_poll(void);
 extern void l3sync_stats(void);
 
+/* ledsync.c -- front-panel port LEDs follow link state */
+extern int  ledsync_start(int unit);
+extern void ledsync_poll(void);
+
 #define TAP_BUF   9216
 #define TAP_MINPK 60
 #define MAX_TAP   8
@@ -444,6 +448,14 @@ int tapbridge_start(int unit, const char *ifnames, int first_port)
         }
     }
 
+    /* PORT LEDs. Nothing else on the system drives them, so without this they
+     * hold whatever was last written -- which is how a pulled transceiver left
+     * its LED lit. Not fatal if the SCD cannot be mapped; the bridge still
+     * carries traffic, the panel is just wrong. */
+    if (!getenv("SDKPOC_NO_LEDS")) {
+        ledsync_start(unit);
+    }
+
     /* Hardware L3 is opt-in: without it the bridge still carries a control
      * plane, but every routed packet crosses the CPU. Each port becomes its own
      * router interface -- that is what makes forwarding between them a chip
@@ -495,6 +507,7 @@ void tapbridge_run(void)
         if (now - last_sync >= 5) {
             last_sync = now;
             l3sync_poll();
+            ledsync_poll();      /* cheap: reads link, writes only on change */
         }
         if (now - last_stat >= 30) {
             last_stat = now;

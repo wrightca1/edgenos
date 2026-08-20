@@ -73,8 +73,8 @@ LDMODE := -static
 # (already in LIBS) resolves what the SAL actually calls.
 endif
 
-sdkpoc: sdkpoc.c bde_shim.c tapbridge.c l3sync.c
-	$(CC) $(CFLAGS) $(LDMODE) -o $@ sdkpoc.c bde_shim.c tapbridge.c l3sync.c $(LIBS)
+sdkpoc: sdkpoc.c bde_shim.c tapbridge.c l3sync.c ledsync.c
+	$(CC) $(CFLAGS) $(LDMODE) -o $@ sdkpoc.c bde_shim.c tapbridge.c l3sync.c ledsync.c $(LIBS)
 
 clean:
 	rm -f sdkpoc

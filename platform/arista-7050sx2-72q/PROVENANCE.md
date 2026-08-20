@@ -23,7 +23,10 @@ published API.
 | `asic/bcm56860/sdkpoc.c` | cold init, port bring-up |
 | `asic/bcm56860/tapbridge.c` | hardware ports on the Linux network stack |
 | `asic/bcm56860/l3sync.c` | FIB → chip route/host tables, field-processor punt rules |
-| `platform/.../leddance.c` | front-panel LEDs |
+| `asic/bcm56860/ledsync.c` | port LEDs driven from link state |
+| `platform/.../leddance.c` | front-panel LED animation |
+| `platform/.../initrd/init` | the initrd: watchdog, mgmt NIC, thermal, LED blanking |
+| `platform/.../initrd/ospfup` | one-command bring-up |
 | `platform/.../kernel/config-7050sx2-72q` | kernel configuration |
 | `platform/.../tools/mkconfigbcm.sh`, `mkpolarity.sh` | the generators below |
 | `platform/.../deploy/frr/*` | routing configuration |
@@ -33,7 +36,7 @@ published API.
 | source | licence | how used |
 |---|---|---|
 | Arista `scd-smbus.c` | GPL-2.0 | **transcribed** into `scdreset.c` — see below |
-| Arista `scd-reset.c`, `scd-led.c`, `raven-fan-driver.c` | GPL-2.0 | read for register maps; no code copied |
+| Arista `scd-reset.c`, `scd-led.c`, `raven-fan-driver.c`, `crow-fan-driver.c` | GPL-2.0 | read for register maps; no code copied |
 | Broadcom OpenBCM SDK | Broadcom licence | API only; **not redistributed here** |
 | FRR 8.4.4, glibc | GPL-2.0 / LGPL | shipped unmodified in the image |
 
@@ -44,6 +47,20 @@ produces a derivative work, so the licence follows it. The rest of the file
 reads register *maps* from the same GPL sources, which is fact-gathering and
 does not carry the licence — but the file is GPL-2.0 as a whole because the
 SMBus section is in it.
+
+**The fan controller's register map came from that tree, not from this board.**
+Two attempts to find the PWM register by sweeping the CPLD powered the switch
+off. `crow-fan-driver.c` publishes the whole map -- tach at `0x00..0x07`, PWM at
+`0x10..0x13`, presence at `0x21`, `RPM = 6000000/tach` -- and
+`arista/platforms/cpu/crow.py` ties that driver to this board with
+`CrowFanCpld, addr=scd.i2cAddr(hwmonBus, 0x60)`, which is where ours answers.
+Nothing was probed to obtain it.
+
+The port LED encoding is ours by measurement rather than transcription: read off
+a running vendor OS, connected ports hold `0x10000000` and disconnected ones
+hold `0`. `scd-led.c` documents a richer scheme (a colour table in bits 26..28,
+blink at 25) but this board was never observed using it, so `ledsync.c` writes
+bit 28 and nothing else rather than inventing behaviour.
 
 Every SCD offset this platform uses is genuinely published by Arista in the
 GPL-2.0 `aristanetworks/sonic` tree — watchdog `0x0120`, reset `0x4000`, power
