@@ -17,6 +17,10 @@
 #include <syslog.h>
 #include <unistd.h>
 #include <time.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <sys/ioctl.h>
+#include <linux/i2c-dev.h>
 
 #include "edged.h"
 #include "portmap.h"
@@ -741,6 +745,103 @@ int portmap_phys_to_swp(int phys_port)
     return -1;
 }
 
+/* ---------------------------------------------------------------------------
+ * SFP/QSFP module presence.
+ *
+ * An empty cage leaves the SerDes RX input floating, and the noise on it makes
+ * CL49 block_lock assert and drop roughly once a second. portmap_link_poll()
+ * believed that, so every dark port flapped "link up/down" forever: each
+ * transition ran bmd_port_mode_update(), moved the TAP carrier, churned the
+ * L2/L3 tables behind it and wrote two log lines. On this board 43 of 52 cages
+ * are typically empty, which was the bulk of the datapath's log volume.
+ *
+ * A port with no module cannot have a link, so gate on presence first.
+ * MOD_ABS (active LOW) lives in two PCA9506 GPIO expanders on bus 17 -- the
+ * same source onlp/sfpi.c reads. edged does not link the ONLP library, so the
+ * layout is restated here rather than shared:
+ *
+ *   0x20 regs 0..4 : ports 1..40      (bit = (port-1) % 8)
+ *   0x23 reg  0    : ports 41..48     (bit = port-41)
+ *   0x23 reg  1    : QSFP 49..52      (bit = port-49)
+ *
+ * Seven byte reads cover the whole front panel, so the bitmap is refreshed on
+ * its own slow timer rather than per link poll (which runs every ~30ms).
+ *
+ * Fail OPEN: if the expanders cannot be read we keep the last good bitmap, and
+ * until the first successful read every port is assumed present. A flapping
+ * dark port is a nuisance; a bus hiccup that darkens live ports is an outage.
+ */
+#define SFP_PRESENCE_BUS        17
+#define SFP_PRESENCE_ADDR_LOW   0x20    /* MOD_ABS, ports 1-40 */
+#define SFP_PRESENCE_ADDR_HIGH  0x23    /* ports 41-48 + QSFP 49-52 */
+#define PCA9506_INPUT_BASE      0x00
+#define SFP_PRESENCE_REFRESH_S  2
+
+static uint64_t sfp_present_mask = ~(uint64_t)0;   /* assume present until read */
+static int      sfp_presence_valid;
+static time_t   sfp_presence_last;
+
+static int pca9506_read(uint8_t addr, uint8_t reg, uint8_t *val)
+{
+    char dev[32];
+    int fd, rv = -1;
+
+    snprintf(dev, sizeof(dev), "/dev/i2c-%d", SFP_PRESENCE_BUS);
+    fd = open(dev, O_RDWR);
+    if (fd < 0)
+        return -1;
+    if (ioctl(fd, I2C_SLAVE, addr) >= 0 &&
+        write(fd, &reg, 1) == 1 &&
+        read(fd, val, 1) == 1)
+        rv = 0;
+    close(fd);
+    return rv;
+}
+
+static void sfp_presence_refresh(void)
+{
+    uint64_t mask = 0;
+    uint8_t v;
+    int r, i;
+
+    for (r = 0; r < 5; r++) {                       /* ports 1..40 */
+        if (pca9506_read(SFP_PRESENCE_ADDR_LOW, PCA9506_INPUT_BASE + r, &v) != 0)
+            return;                                 /* keep the last good map */
+        for (i = 0; i < 8; i++)
+            if (!(v & (1 << i)))                    /* MOD_ABS is active LOW */
+                mask |= (uint64_t)1 << (r * 8 + i);
+    }
+    if (pca9506_read(SFP_PRESENCE_ADDR_HIGH, PCA9506_INPUT_BASE, &v) != 0)
+        return;
+    for (i = 0; i < 8; i++)                         /* ports 41..48 */
+        if (!(v & (1 << i)))
+            mask |= (uint64_t)1 << (40 + i);
+    if (pca9506_read(SFP_PRESENCE_ADDR_HIGH, PCA9506_INPUT_BASE + 1, &v) != 0)
+        return;
+    for (i = 0; i < 4; i++)                         /* QSFP 49..52 */
+        if (!(v & (1 << i)))
+            mask |= (uint64_t)1 << (48 + i);
+
+    if (!sfp_presence_valid || mask != sfp_present_mask) {
+        int n = 0;
+        for (i = 0; i < EDGED_MAX_PORTS; i++)
+            if (mask & ((uint64_t)1 << i))
+                n++;
+        syslog(LOG_INFO, "SFP presence: %d module(s) installed (mask=0x%013llx)",
+               n, (unsigned long long)mask);
+    }
+    sfp_present_mask  = mask;
+    sfp_presence_valid = 1;
+}
+
+/* swp is 1-based. Always true until the first successful expander read. */
+static int sfp_module_present(int swp)
+{
+    if (!sfp_presence_valid || swp < 1 || swp > EDGED_MAX_PORTS)
+        return 1;
+    return (sfp_present_mask >> (swp - 1)) & 1;
+}
+
 int portmap_swp_to_i2c_bus(int swp)
 {
     if (swp < 1 || swp > EDGED_MAX_PORTS)
@@ -974,6 +1075,12 @@ int portmap_link_poll(void)
     int i;
     int changes = 0;
     int first_poll = (link_poll_count++ == 0);
+    time_t now = time(NULL);
+
+    if (first_poll || (now - sfp_presence_last) >= SFP_PRESENCE_REFRESH_S) {
+        sfp_presence_last = now;
+        sfp_presence_refresh();
+    }
 
     for (i = 0; i < EDGED_MAX_PORTS; i++) {
         if (!edged.ports[i].valid || !edged.ports[i].enabled)
@@ -1002,7 +1109,12 @@ int portmap_link_poll(void)
          * CL49 single-lane block_lock. */
         int cl82_am = 0, cl82_deskew = 0;
         int pcs_link;
-        if (edged.ports[i].port_type == PORT_TYPE_QSFP)
+        /* No module in the cage -> the RX input is floating and block_lock is
+         * noise. Don't read it, and don't let it drive link state. */
+        int present = sfp_module_present(edged.ports[i].logical_port);
+        if (!present)
+            pcs_link = 0;
+        else if (edged.ports[i].port_type == PORT_TYPE_QSFP)
             pcs_link = cl82_link_get(edged.unit, port, &cl82_am, &cl82_deskew);
         else
             pcs_link = pcs_block_lock_get(edged.unit, port);
@@ -1019,12 +1131,11 @@ int portmap_link_poll(void)
         /* 40G QSFP auto re-init/retry: re-init a port that's up but not fully
          * AM-locked, once its peer's TX has had time to come live. Engages
          * deskew (which never fires from the boot-order init) and re-adapts. */
-        if (edged.ports[i].port_type == PORT_TYPE_QSFP) {
+        if (edged.ports[i].port_type == PORT_TYPE_QSFP && present) {
             if (pcs_link) {   /* aligned/locked (deskew + am_lock 0x6) */
                 qsfp_unlocked_since[i] = 0;   /* locked: clear timer */
                 qsfp_retry_count[i] = 0;
             } else {
-                time_t now = time(NULL);
                 if (qsfp_unlocked_since[i] == 0) {
                     qsfp_unlocked_since[i] = now;   /* start grace window */
                 } else if (qsfp_retry_count[i] < QSFP_RETRY_MAX &&
@@ -1055,7 +1166,7 @@ int portmap_link_poll(void)
         /* Steady-state per-lane EQ dump for QSFP: every 8th poll (all ports
          * are up by then, so this reflects real convergence — unlike the
          * config-time one-shot). */
-        if (edged.ports[i].port_type == PORT_TYPE_QSFP &&
+        if (edged.ports[i].port_type == PORT_TYPE_QSFP && present &&
             (link_poll_count % 8) == 1) {
             qsfp_eq_dump(edged.unit, port, edged.ports[i].ifname);
         }
