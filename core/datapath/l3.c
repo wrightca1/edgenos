@@ -13,6 +13,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
 #include <unistd.h>
@@ -432,6 +433,13 @@ int l3_init(void)
                enabled);
     }
 
+    /* NOTE: enabling the L2/L3/MPLS AUX_HASH_CONTROL + L2_LEARN/L2_BULK (all REGDIFF
+     * gaps vs Cumulus, soc_init sets them) was TESTED here and (a) did NOT flip transit
+     * to HW forwarding (the datapath still missed the L3_ENTRY) and (b) BROKE the OSPF
+     * multicast->CPU punt (hellos stopped reaching ospfd). So these soc_init gaps must
+     * be applied as a COHERENT SET with the rest (egress/ING/MMU config), not piecemeal.
+     * See REGDIFF_edged_vs_cumulus.txt (61 gaps + 81 diffs) + project_init_all_insight. */
+
     return 0;
 }
 
@@ -508,6 +516,334 @@ static int defip_slot_alloc(void)
 static void defip_slot_free(int slot)
 {
     if (defip_free_n < L3_ROUTE_MAX) defip_free[defip_free_n++] = slot;
+}
+
+/* ---------------------------------------------------------------------------
+ * dst-IP ACL denies via a kernel BLACKHOLE ROUTE.
+ *
+ * edged SOFTWARE-forwards L3 transit: the chip does L2 + punt-to-CPU, and the
+ * Linux kernel FIB does the routing (punt -> route -> inject back out). Verified
+ * 2026-07-15 with a real transit peer (host on swp5 -> box -> Nexus on swp1): the
+ * forwarded packets ride the CPU path, so chip-level filters (FP *and* L3
+ * DST_DISCARD) never see them — but a kernel `blackhole` route in the FIB drops
+ * them cleanly (host->Nexus went 6 -> 0 forwarded pkts). netfilter/iptables is not
+ * an option (this kernel has no ip_tables module). The blackhole route is simple,
+ * robust, matches edged's actual forwarding model, and touches nothing on the chip,
+ * so it cannot disturb the datapath or the control plane. Managed via `ip route`.
+ * Scope: L3-routed/transit + locally-destined IPv4, global across ingress ports.
+ *
+ * UPDATE 2026-07-16 (commit 1d0c582 armed the chip L3 lookup): the datapath now
+ * HARDWARE-forwards L3 transit (chip consults the programmed L3_ENTRY hash), so
+ * such traffic no longer rides the CPU path — the kernel blackhole alone would
+ * MISS it. For a /32 deny we therefore also program a chip L3_ENTRY with
+ * IPV4UC_DST_DISCARD=1: the L3 lookup hits it and drops the routed packet in
+ * silicon (verified via the swp-ingress rdbgc drop counter climbing). We KEEP
+ * the kernel blackhole too — belt-and-suspenders for any flow still software-
+ * forwarded (e.g. a dst with no armed chip entry / prefix denies below /32).
+ * ------------------------------------------------------------------------- */
+#define L3_DENY_MAX 128
+static struct { uint32_t ip, mask; int valid, chip, defip, slot; } l3_deny_tab[L3_DENY_MAX];
+
+/* Add (add=1) / remove (add=0) a /32 L3_DEFIP DST_DISCARD entry at an explicit
+ * TCAM slot. The datapath's L3 lookup uses the L3_DEFIP TCAM (NOT the L3_ENTRY
+ * host hash table — verified 2026-07-16: host-table discard entries read back
+ * VALID=1 DST_DISCARD=1 but HIT stays 0 and traffic still forwards) — AND only
+ * certain bands are consulted: the local-host /32s in the ~2560 band ARE honored
+ * (l3_local_host_add), while the transit band (1536) is NOT. So ACL /32 discards
+ * live in the SAME consulted 2560 band (base 2580, clear of the local hosts at
+ * 2560+). A /32 beats the connected /29 by LPM, so the chip drops. */
+#define ACL_DEFIP_DISCARD_BASE 2580
+#define ACL_DROP_NH_IDX 4000    /* reserved ING_L3_NEXT_HOP index for ACL drops */
+static int acl_drop_nh_ready = 0;
+
+/* One-time: program a DROP next-hop the ACL /32 entries can point at, in case
+ * the datapath honors NEXT_HOP_INDEX0.DROP but not the DST_DISCARD0 bit. */
+static void acl_ensure_drop_nh(void)
+{
+    ING_L3_NEXT_HOPm_t ing;
+    if (acl_drop_nh_ready)
+        return;
+    ING_L3_NEXT_HOPm_CLR(ing);
+    ING_L3_NEXT_HOPm_DROPf_SET(ing, 1);
+    ING_L3_NEXT_HOPm_ENTRY_TYPEf_SET(ing, 0);
+    if (WRITE_ING_L3_NEXT_HOPm(edged.unit, ACL_DROP_NH_IDX, ing) >= 0)
+        acl_drop_nh_ready = 1;
+}
+
+static int l3_v4_defip_discard(uint32_t ip, uint32_t mask, int add, int slot)
+{
+    L3_DEFIPm_t d;
+    L3_DEFIPm_CLR(d);
+    if (add) {
+        acl_ensure_drop_nh();
+        L3_DEFIPm_VALID0f_SET(d, 1);
+        L3_DEFIPm_MODE0f_SET(d, 0);
+        L3_DEFIPm_MODE_MASK0f_SET(d, 1);
+        L3_DEFIPm_IP_ADDR0f_SET(d, ip);
+        L3_DEFIPm_IP_ADDR_MASK0f_SET(d, mask);
+        L3_DEFIPm_VRF_ID_0f_SET(d, 0);
+        L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0x3ff);
+        /* Belt-and-suspenders: both a DROP next-hop AND the discard bit, so the
+         * entry drops if the /32 is matched at all (which mechanism the datapath
+         * honors is what we're testing). */
+        L3_DEFIPm_ECMP0f_SET(d, 0);
+        L3_DEFIPm_NEXT_HOP_INDEX0f_SET(d, ACL_DROP_NH_IDX);
+        L3_DEFIPm_DST_DISCARD0f_SET(d, 1);
+    }
+    /* remove: CLR'd d -> VALID0=0 invalidates the slot */
+    return WRITE_L3_DEFIPm(edged.unit, slot, d);
+}
+
+static void l3_deny_cidr(uint32_t ip, uint32_t mask, char *out, size_t n)
+{
+    int plen = 0; uint32_t m = mask;
+    while (m & 0x80000000u) { plen++; m <<= 1; }
+    snprintf(out, n, "%u.%u.%u.%u/%d",
+             (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff, plen);
+}
+
+/* Add (add=1) / remove (add=0) a chip L3_ENTRY DST_DISCARD for a /32 dst.
+ * Mirrors l3_host_add's key build (KEY_TYPE=0, V6=0, VRF=0) but sets
+ * IPV4UC_DST_DISCARD instead of a next-hop, so an armed L3 lookup drops the
+ * packet. Returns the schan index (>=0) on insert, 0 on delete, <0 on error. */
+static int l3_v4_discard_entry(uint32_t ip, int add)
+{
+    L3_ENTRY_IPV4_UNICASTm_t e;
+    L3_ENTRY_IPV4_UNICASTm_CLR(e);
+    L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(e, 0);
+    L3_ENTRY_IPV4_UNICASTm_V6f_SET(e, 0);
+    L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(e, ip);
+    L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(e, 0);
+    L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(e, 1);
+    if (add) {
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_DST_DISCARDf_SET(e, 1);
+        return l3_v4_schan_insert(edged.unit, &e);
+    }
+    return l3_v4_schan_delete(edged.unit, &e);
+}
+
+/* Is this /32 dst currently ACL-denied with a chip discard entry? Lets the
+ * neighbor->chip sync (l3_host_add) HONOR a deny instead of racing it: when a
+ * denied IP is also a resolved neighbor, l3_host_add would otherwise re-insert
+ * its forward entry and silently un-deny the IP. ip is host byte order. */
+static int l3_v4_is_denied(uint32_t ip)
+{
+    int i;
+    for (i = 0; i < L3_DENY_MAX; i++)
+        if (l3_deny_tab[i].valid && l3_deny_tab[i].chip &&
+            l3_deny_tab[i].mask == 0xffffffff && l3_deny_tab[i].ip == ip)
+            return 1;
+    return 0;
+}
+
+int l3_v4_deny_add(uint32_t ipv4_addr, uint32_t mask)
+{
+    int i;
+    char cidr[24], cmd[64];
+    if (mask == 0) {                           /* refuse "deny any" -> a blackhole default */
+        syslog(LOG_WARNING, "ACL: refusing dst=any deny (would blackhole all routing)");
+        return -1;
+    }
+    for (i = 0; i < L3_DENY_MAX; i++)          /* dedup */
+        if (l3_deny_tab[i].valid && l3_deny_tab[i].ip == ipv4_addr &&
+            l3_deny_tab[i].mask == mask)
+            return 0;
+    for (i = 0; i < L3_DENY_MAX; i++) if (!l3_deny_tab[i].valid) break;
+    if (i == L3_DENY_MAX) { syslog(LOG_WARNING, "ACL: L3 deny table full (%d)", L3_DENY_MAX); return -1; }
+
+    l3_deny_cidr(ipv4_addr, mask, cidr, sizeof(cidr));
+    snprintf(cmd, sizeof(cmd), "ip route replace blackhole %s 2>/dev/null", cidr);
+    if (system(cmd) != 0) {
+        syslog(LOG_WARNING, "ACL: blackhole route add failed for %s", cidr);
+        return -1;
+    }
+    l3_deny_tab[i].ip = ipv4_addr; l3_deny_tab[i].mask = mask; l3_deny_tab[i].valid = 1;
+    l3_deny_tab[i].chip = 0; l3_deny_tab[i].defip = 0; l3_deny_tab[i].slot = -1;
+
+    /* /32: also drop in the chip (the datapath HW-forwards these, bypassing the
+     * kernel blackhole). Prefix (<32) denies stay kernel-only for now. */
+    if (mask == 0xffffffff) {
+        int sl = ACL_DEFIP_DISCARD_BASE + i;   /* consulted /32 band, per-entry slot */
+        /* Primary in-chip drop: L3_DEFIP /32 DST_DISCARD (the table+band the
+         * datapath actually consults). */
+        if (l3_v4_defip_discard(ipv4_addr, mask, 1, sl) >= 0) {
+            l3_deny_tab[i].defip = 1; l3_deny_tab[i].slot = sl;
+            syslog(LOG_INFO, "ACL: dst-IP deny %s -> L3_DEFIP[%d] DST_DISCARD + kernel blackhole", cidr, sl);
+        } else {
+            syslog(LOG_WARNING, "ACL: L3_DEFIP DST_DISCARD failed for %s; kernel blackhole only", cidr);
+        }
+        /* Secondary: L3_ENTRY host discard (harmless; covers the host table). */
+        if (l3_v4_discard_entry(ipv4_addr, 1) >= 0)
+            l3_deny_tab[i].chip = 1;
+    } else {
+        syslog(LOG_INFO, "ACL: dst-IP deny %s -> kernel blackhole route (prefix, chip DST_DISCARD skipped)", cidr);
+    }
+    return 0;
+}
+
+int l3_v4_deny_del(uint32_t ipv4_addr, uint32_t mask)
+{
+    int i;
+    char cidr[24], cmd[64];
+    for (i = 0; i < L3_DENY_MAX; i++)
+        if (l3_deny_tab[i].valid && l3_deny_tab[i].ip == ipv4_addr &&
+            l3_deny_tab[i].mask == mask)
+            break;
+    if (i == L3_DENY_MAX) return 0;
+    if (l3_deny_tab[i].defip)
+        (void)l3_v4_defip_discard(ipv4_addr, mask, 0, l3_deny_tab[i].slot);
+    if (l3_deny_tab[i].chip)
+        (void)l3_v4_discard_entry(ipv4_addr, 0);   /* remove chip DST_DISCARD */
+    l3_deny_cidr(ipv4_addr, mask, cidr, sizeof(cidr));
+    snprintf(cmd, sizeof(cmd), "ip route del blackhole %s 2>/dev/null", cidr);
+    (void)system(cmd);
+    l3_deny_tab[i].valid = 0;
+    l3_deny_tab[i].chip = 0;
+    l3_deny_tab[i].defip = 0;
+    return 0;
+}
+
+void l3_v4_deny_reset(void)
+{
+    int i;
+    for (i = 0; i < L3_DENY_MAX; i++)
+        if (l3_deny_tab[i].valid)
+            (void)l3_v4_deny_del(l3_deny_tab[i].ip, l3_deny_tab[i].mask);
+}
+
+/* Full register diff vs working-Cumulus (SIGUSR1). Reveals any lookup-engine-arming
+ * register edged has as a persistent VALUE gap. cmp_regs[] auto-gen'd from Cumulus. */
+void l3_regdiff_diag(void)
+{
+    #include "generated/cmp_regs.h"
+    FILE *lf = fopen("/tmp/edged-acl.log", "a");
+    int k, gaps = 0, diffs = 0;
+    if (!lf) return;
+    for (k = 0; k < CMP_REGS_N; k++) {
+        uint32_t ours = 0xdeadbeef;
+        cdk_xgs_reg32_read(edged.unit, cmp_regs[k].addr, &ours);
+        if (ours == cmp_regs[k].cval) continue;
+        fprintf(lf, "REGDIFF %-34s cumulus=0x%08x ours=0x%08x %s\n",
+                cmp_regs[k].name, cmp_regs[k].cval, ours, ours == 0 ? "GAP" : "DIFF");
+        if (ours == 0) gaps++; else diffs++;
+    }
+    fprintf(lf, "REGDIFF summary: %d gaps, %d diffs of %d regs\n", gaps, diffs, CMP_REGS_N);
+    fclose(lf);
+}
+
+/* HW-L3-forwarding diagnostic (SIGUSR1 -> /tmp/edged-acl.log). Pinpoints why transit
+ * punts instead of HW-forwarding: the egress gate (EPC_LINK_BMAP / EGR_ENABLE) and
+ * whether a known neighbor (Nexus 10.101.101.2) is a real HW-forward L3 entry. */
+void l3_fwd_diag(void)
+{
+    FILE *lf = fopen("/tmp/edged-acl.log", "a");
+    int i;
+    if (!lf) return;
+
+    /* ACL DST_DISCARD readback: for each chip-programmed deny, look up the
+     * L3_ENTRY and report VALID/DST_DISCARD/HIT. The HW sets HIT when the
+     * datapath L3 lookup MATCHES the entry, so HIT=1 after sending traffic to
+     * the denied dst directly proves the chip is consulting (and thus dropping
+     * on) the discard entry — the definitive functional check for the in-chip
+     * ACL, independent of any punt/reply/counter observability. */
+    for (i = 0; i < L3_DENY_MAX; i++) {
+        L3_ENTRY_IPV4_UNICASTm_t key, got;
+        uint32_t ip = l3_deny_tab[i].ip;
+        int idx;
+        if (!l3_deny_tab[i].valid || !l3_deny_tab[i].chip) continue;
+        L3_ENTRY_IPV4_UNICASTm_CLR(key);
+        L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_V6f_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(key, ip);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(key, 1);
+        idx = l3_v4_schan_lookup(edged.unit, &key, &got);
+        if (idx < 0)
+            fprintf(lf, "ACL-DENY %u.%u.%u.%u/32: chip lookup NOT FOUND (rv %d)\n",
+                    (ip>>24)&0xff,(ip>>16)&0xff,(ip>>8)&0xff,ip&0xff, idx);
+        else
+            fprintf(lf, "ACL-DENY %u.%u.%u.%u/32: idx=%d VALID=%u DST_DISCARD=%u HIT=%u\n",
+                    (ip>>24)&0xff,(ip>>16)&0xff,(ip>>8)&0xff,ip&0xff, idx,
+                    L3_ENTRY_IPV4_UNICASTm_VALIDf_GET(got),
+                    L3_ENTRY_IPV4_UNICASTm_IPV4UC_DST_DISCARDf_GET(got),
+                    L3_ENTRY_IPV4_UNICASTm_HITf_GET(got));
+    }
+
+    {   /* EPC_LINK_BMAP — which ports the egress pipeline lets frames out of */
+        EPC_LINK_BMAPm_t b; EPC_LINK_BMAPm_CLR(b);
+        if (cdk_xgs_mem_read(edged.unit, EPC_LINK_BMAPm, 0, b.v, 3) >= 0)
+            fprintf(lf, "L3FWD EPC_LINK_BMAP W0=0x%08x W1=0x%08x W2=0x%08x\n",
+                    EPC_LINK_BMAPm_PORT_BITMAP_W0f_GET(b),
+                    EPC_LINK_BMAPm_PORT_BITMAP_W1f_GET(b),
+                    EPC_LINK_BMAPm_PORT_BITMAP_W2f_GET(b));
+    }
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {   /* EGR_ENABLE for swp1/swp2/swp5 */
+        int lp = edged.ports[i].logical_port, phys, pe = -1;
+        EGR_ENABLEm_t e;
+        if (!edged.ports[i].valid || (lp != 1 && lp != 2 && lp != 5)) continue;
+        phys = edged.ports[i].physical_lane;
+        EGR_ENABLEm_CLR(e);
+        if (cdk_xgs_mem_read(edged.unit, EGR_ENABLEm, phys, e.v, 1) >= 0)
+            pe = EGR_ENABLEm_PRT_ENABLEf_GET(e);
+        fprintf(lf, "L3FWD EGR_ENABLE swp%d phys=%d PRT_ENABLE=%d\n", lp, phys, pe);
+    }
+    {   /* Nexus 10.101.101.2 (0x0a656502): HW-forward L3 entry, or missing/CPU? */
+        L3_ENTRY_IPV4_UNICASTm_t key, got;
+        L3_ENTRY_IPV4_UNICASTm_CLR(key);
+        L3_ENTRY_IPV4_UNICASTm_KEY_TYPEf_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_V6f_SET(key, 0);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_IP_ADDRf_SET(key, 0x0a656502);
+        L3_ENTRY_IPV4_UNICASTm_IPV4UC_VRF_IDf_SET(key, 0);
+        int lk = l3_v4_schan_lookup(edged.unit, &key, &got);
+        if (lk >= 0) {
+            int nh = L3_ENTRY_IPV4_UNICASTm_IPV4UC_NEXT_HOP_INDEXf_GET(got);
+            int pn = -1, cpu = -1;
+            ING_L3_NEXT_HOPm_t ing; ING_L3_NEXT_HOPm_CLR(ing);
+            if (cdk_xgs_mem_read(edged.unit, ING_L3_NEXT_HOPm, nh, ing.v, 4) >= 0) {
+                pn  = ING_L3_NEXT_HOPm_PORT_NUMf_GET(ing);
+                cpu = ING_L3_NEXT_HOPm_COPY_TO_CPUf_GET(ing);
+            }
+            fprintf(lf, "L3FWD Nexus 10.101.101.2 L3_ENTRY FOUND idx=%d NHI=%d "
+                    "-> ING_L3_NEXT_HOP PORT_NUM=%d COPY_TO_CPU=%d (want PORT_NUM=phys,CPU=0)\n",
+                    lk, nh, pn, cpu);
+        } else {
+            fprintf(lf, "L3FWD Nexus 10.101.101.2 L3_ENTRY NOT FOUND (lk=%d) => L3 miss => punt\n", lk);
+        }
+    }
+    {   /* HW-fwd DEFIP (neighbor band 4096+) vs local-host /32 band (2560+) that WORKS */
+        int slots[5] = { 2606, 2560, 2561, 2562, 8000 }, s;
+        for (s = 0; s < 5; s++) {
+            L3_DEFIPm_t d; L3_DEFIPm_CLR(d);
+            if (cdk_xgs_mem_read(edged.unit, L3_DEFIPm, slots[s], d.v, 15) >= 0)
+                fprintf(lf, "L3FWD DEFIP[%d] V0=%d IP0=0x%08x MASK0=0x%08x MODE0=%d NHI0=%d\n",
+                        slots[s], L3_DEFIPm_VALID0f_GET(d), L3_DEFIPm_IP_ADDR0f_GET(d),
+                        L3_DEFIPm_IP_ADDR_MASK0f_GET(d), L3_DEFIPm_MODE0f_GET(d),
+                        L3_DEFIPm_NEXT_HOP_INDEX0f_GET(d));
+        }
+    }
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {   /* swp1/swp5 ingress PORT_VID (MY_STATION key) */
+        int lp = edged.ports[i].logical_port;
+        PORT_TABm_t pt;
+        if (!edged.ports[i].valid || (lp != 1 && lp != 5)) continue;
+        PORT_TABm_CLR(pt);
+        if (cdk_xgs_mem_read(edged.unit, PORT_TABm, lp, pt.v, 10) >= 0)
+            fprintf(lf, "L3FWD swp%d PORT_VID=%d V4L3=%d\n", lp,
+                    PORT_TABm_PORT_VIDf_GET(pt), PORT_TABm_V4L3_ENABLEf_GET(pt));
+    }
+    {   /* MY_STATION entries: which {MAC,VID} L3-terminate (routed) */
+        int m;
+        for (m = 0; m <= MY_STATION_TCAMm_MAX && m < 20; m++) {
+            MY_STATION_TCAMm_t my; uint32_t mf[2] = {0, 0};
+            MY_STATION_TCAMm_CLR(my);
+            if (cdk_xgs_mem_read(edged.unit, MY_STATION_TCAMm, m, my.v, 6) < 0) continue;
+            if (!MY_STATION_TCAMm_VALIDf_GET(my)) continue;
+            MY_STATION_TCAMm_MAC_ADDRf_GET(my, mf);
+            fprintf(lf, "L3FWD MY_STATION[%d] MAC=%04x%08x VID=%d\n",
+                    m, mf[1] & 0xffff, mf[0], MY_STATION_TCAMm_VLAN_IDf_GET(my));
+        }
+    }
+    fclose(lf);
+    l3_regdiff_diag();   /* full register diff vs Cumulus */
 }
 
 static struct l3_rt *route_find(uint32_t target, uint32_t mask)
@@ -843,21 +1179,19 @@ int l3_local_host_add(uint32_t ipv4_addr, int logical_port)
      * earlier /32 miss was a key/VRF detail; if it STILL RIPD4s, the L3 dst
      * lookup is not being performed -> deeper soc_init gap. Slot 8000 (lowest
      * priority). Remove after diagnosis. */
-    if (logical_port == 1) {
+    if (logical_port == 1) {   /* catch-all L3_DEFIP: match-any routed IPv4 -> CPU (kernel software-forwards) */
         L3_DEFIPm_t d;
         L3_DEFIPm_CLR(d);
         L3_DEFIPm_VALID0f_SET(d, 1);
         L3_DEFIPm_MODE0f_SET(d, 0);
-        L3_DEFIPm_MODE_MASK0f_SET(d, 0);         /* match ANY mode too */
+        L3_DEFIPm_MODE_MASK0f_SET(d, 0);
         L3_DEFIPm_IP_ADDR0f_SET(d, 0);
-        L3_DEFIPm_IP_ADDR_MASK0f_SET(d, 0);      /* match any IP */
+        L3_DEFIPm_IP_ADDR_MASK0f_SET(d, 0);
         L3_DEFIPm_VRF_ID_0f_SET(d, 0);
-        L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0);       /* match any VRF */
+        L3_DEFIPm_VRF_ID_MASK0f_SET(d, 0);
         L3_DEFIPm_NEXT_HOP_INDEX0f_SET(d, nh_idx);
         rv = WRITE_L3_DEFIPm(edged.unit, 8000, d);
-        syslog(LOG_INFO,
-               "DIAG L3_DEFIP[8000] CATCH-ALL (any mode/IP/VRF) -> nh_idx=%d (CPU) wr=%d",
-               nh_idx, rv);
+        syslog(LOG_INFO, "L3_DEFIP[8000] catch-all -> nh_idx=%d (CPU) wr=%d", nh_idx, rv);
     }
 
     /* L3 host entry: our IP -> nh_idx (-> CPU port).
@@ -1088,6 +1422,17 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
         L3_ENTRY_IPV4_UNICASTm_HITf_SET(hst, 0);
         L3_ENTRY_IPV4_UNICASTm_VALIDf_SET(hst, 1);
 
+        /* ACL deny wins over forwarding: if this neighbor's IP is dst-IP denied,
+         * program its host entry as DST_DISCARD so the neighbor sync can't race
+         * the ACL and un-deny it (fixes the deny-clobber observed 2026-07-16). */
+        if (l3_v4_is_denied(ip_be)) {
+            L3_ENTRY_IPV4_UNICASTm_IPV4UC_DST_DISCARDf_SET(hst, 1);
+            syslog(LOG_INFO,
+                   "L3 host %u.%u.%u.%u ACL-denied -> DST_DISCARD (not forward)",
+                   (ip_be >> 24) & 0xff, (ip_be >> 16) & 0xff,
+                   (ip_be >> 8) & 0xff, ip_be & 0xff);
+        }
+
         int idx = l3_v4_schan_insert(edged.unit, &hst);
         if (idx < 0) {
             syslog(LOG_WARNING,
@@ -1096,6 +1441,13 @@ int l3_host_add(int family, const void *addr, const uint8_t *mac, int ifindex)
         }
         syslog(LOG_DEBUG, "L3 host schan_insert placed at idx=%d", idx);
         l3_neigh_nh_record(ip_be, nh_idx);
+        /* NOTE: a HW-forward attempt (mirror this neighbor into a /32 L3_DEFIP with
+         * the real egress next-hop) was tried and did NOT flip transit to HW — the
+         * datapath's L3 DEFIP lookup does not match programmed entries (V4L3DSTMISS
+         * fires regardless), the same un-armed-lookup-engine wall as the FP. So
+         * transit stays software-forwarded (kernel FIB) and ACLs use blackhole
+         * routes; HW L3 forwarding needs the soc_init lookup-engine arming OpenMDK
+         * skips. See project_acl_l3_dst_discard_pivot / project_init_all_insight. */
     }
 
     syslog(LOG_INFO,

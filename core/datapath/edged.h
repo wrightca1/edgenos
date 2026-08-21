@@ -71,6 +71,14 @@ int  edged_acl_load(const char *path);   /* load + program /etc/edged/acls.conf 
 void edged_acl_reset(void);              /* invalidate all programmed ACL entries */
 void edged_acl_diag(void);               /* dump per-entry FP match counters (SIGUSR1) */
 
+/* dst-IP ACL denies via the L3 datapath (DST_DISCARD) — the FP-free path that
+ * works on this chip (core/datapath/l3.c). mask 0xffffffff => /32 L3_ENTRY,
+ * else an L3_DEFIP prefix. Used by acl.c for deny rules. */
+int  l3_v4_deny_add(uint32_t ipv4_addr, uint32_t mask);
+int  l3_v4_deny_del(uint32_t ipv4_addr, uint32_t mask);
+void l3_v4_deny_reset(void);
+void l3_fwd_diag(void);                  /* HW-L3-forward state (SIGUSR1) */
+
 /* iProc AXI sub-window register I/O (for CMICm regs whose writes
  * don't stick via direct BAR0 access). */
 int bde_iproc_read32(uint32_t offset, uint32_t *data);

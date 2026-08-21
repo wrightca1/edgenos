@@ -34,8 +34,11 @@ TARGET := edged
 .PHONY: all clean
 all: $(TARGET)
 
-$(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(SDK_LIBS) $(LDFLAGS)
+# Depend on the SDK archives too: rebuilding OpenMDK (a patched bmd/phy/cdk
+# source) changes only the .a files, and without this make reports "Nothing to
+# be done" and silently keeps the previously linked binary.
+$(TARGET): $(OBJS) $(SDK_LIBS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(SDK_LIBS) $(LDFLAGS)
 	@mkdir -p $(dir $(OUT)) && cp $@ $(OUT) && echo "edged -> $(OUT)"
 
 %.o: %.c

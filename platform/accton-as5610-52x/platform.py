@@ -53,6 +53,22 @@ class EdgeNOSPlatform_powerpc_accton_as5610_52x_r0(EdgeNOSPlatformBase, PortConf
     CPLD = "sys/devices/platform/as5610_52x_cpld"   # driver sysfs base (root-relative)
     SFP_EEPROMS = "sys/bus/i2c/devices/*-0050/eeprom"   # 48 SFP + 4 QSFP via at24 on muxed buses
 
+    # --- SFP/QSFP i2c-bus -> front-panel port map (verified live on the DTS mux tree,
+    #     2026-07-20; see docs/hal-transceivers.md). The kernel enumerates the mux
+    #     children contiguously, so the bus number is a pure function of the port:
+    #       SFP  1-48 : PCA9546@0x75 (ch0-3 = ports 1-32) / @0x76 (ch0-1 = ports 33-48)
+    #                   -> PCA9548@0x74 (ch0-7) => bus = 11 + 9*((p-1)//8) + ((p-1)%8)
+    #       QSFP 49-52: PCA9546@0x77 (ch0-3)             => bus = 66 + (p-49)
+    #     e.g. swp1=bus11, swp6=bus16, swp9=bus20, swp48=bus63, swp49(QSFP)=bus66.
+    #     NB: the legacy onlp/sfpi.c "21+port" macro is STALE and does NOT match this.
+    def _sfp_port_for_bus(self, bus):
+        for p in range(1, 49):
+            if 11 + 9 * ((p - 1) // 8) + ((p - 1) % 8) == bus:
+                return "swp%d" % p
+        if 66 <= bus <= 69:
+            return "swp%d" % (49 + (bus - 66))
+        return None
+
     def fan_count(self):
         return 4
 

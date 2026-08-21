@@ -4,29 +4,66 @@
 # own migration; OpenMDK headers/libs are the shared checkout. Produces
 # edgenos/output/edged and edgenos/output/sdk/*.a.
 #
+# Requires the shared OpenMDK checkout at ../OpenMDK (sibling of edgenos/):
+#   git clone https://github.com/Broadcom-Network-Switching-Software/OpenMDK
+# and the SDK build harness at ../newnos/asic/mdk-init.
+#
+# JOBS caps build parallelism (default 2) -- the 58-chip SDK compile will
+# otherwise saturate the build host.
+#
 # Usage: build/build-sdk-and-edged.sh   (from the edgenos/ repo root)
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 TOP=$(cd "$HERE/.." && pwd)
 IMG=${IMG:-debian:bullseye}
 
+# EdgeNOS diverges from stock OpenMDK in 13 files (the real port map, the XGS
+# packed-CMIC RX/TX DMA path that makes CPU punt fire, the Warpcore 40G fix).
+# OpenMDK is a gitignored vendor checkout, so those live as canonical copies in
+# newnos/patches/openmdk and are stamped back in by newnos's own script. Without
+# this a clean build produces a binary that links and then SEGVs on the first
+# bmd_rx_start -- stock dereferences the pkt argument edged passes as NULL.
+#
+# instpkgs.pl is non-idempotent and copies PKG/ masters into pkgsrc/ only when
+# pkgsrc/ is absent, so a changed patch set has to force the regeneration.
+APPLY=$TOP/newnos/scripts/apply-openmdk-patches.sh
+if [ -x "$APPLY" ]; then
+  BEFORE=$(find "$TOP/OpenMDK" -name '*.c' -newer "$APPLY" -print 2>/dev/null | md5sum)
+  (cd "$TOP/newnos" && sh "$APPLY" >/dev/null) || { echo "OpenMDK patch apply failed" >&2; exit 1; }
+  AFTER=$(find "$TOP/OpenMDK" -name '*.c' -newer "$APPLY" -print 2>/dev/null | md5sum)
+  if [ "$BEFORE" != "$AFTER" ]; then
+    echo "== OpenMDK patch set changed -> forcing a clean SDK regeneration =="
+    rm -rf "$TOP"/OpenMDK/*/pkgsrc/chip "$TOP"/OpenMDK/*/pkgsrc/arch \
+           "$TOP"/OpenMDK/*/pkgsrc/installed-chips "$HERE/output/sdk-build"
+  fi
+else
+  echo "warning: $APPLY not found — building against STOCK OpenMDK, which will" >&2
+  echo "         produce an edged that SEGVs in bmd_rx_start. See MIGRATION.md." >&2
+fi
+
 docker run --rm --network host -v "$TOP:/src" --entrypoint /bin/bash "$IMG" -c '
   set -e
   command -v powerpc-linux-gnu-gcc >/dev/null || { apt-get update -qq >/dev/null; \
     apt-get install -y -qq gcc-powerpc-linux-gnu make perl >/dev/null; }
   echo "== building OpenMDK SDK libs (mdk-init) =="
-  cp -r /src/newnos/asic/openmdk /tmp/openmdk
-  cp -r /src/newnos/asic/mdk-init /tmp/mdk-init
-  find /tmp/openmdk -path "*/pkgsrc/*" -exec touch {} + 2>/dev/null || true
-  rm -rf /tmp/openmdk/*/build; mkdir -p /tmp/sdk
-  make -C /tmp/mdk-init CROSS_COMPILE=powerpc-linux-gnu- MDK=/tmp/openmdk BLDDIR=/tmp/sdk \
-       -j"$(nproc)" >/tmp/mdk.log 2>&1 || echo "(mdk-init tool link warn — expected)"
-  N=$(find /tmp/sdk -name "*.a" | wc -l); echo "SDK libs: $N (expect >=16)"
+  # Build IN the shared OpenMDK checkout, not a /tmp copy. `make instpkgs`
+  # generates cdk_config_chips.h (and the per-chip sources it lists) into
+  # $CDK/include inside the tree; a /tmp copy throws those away with the
+  # container, and the edged compile -- which includes ../OpenMDK/cdk/include
+  # -- then dies on a missing cdk_config_chips.h.
+  # BLDDIR is persistent too, so a rebuild is incremental instead of a
+  # from-scratch 58-chip compile.
+  BLD=/src/edgenos/output/sdk-build
+  mkdir -p "$BLD"
+  make -C /src/newnos/asic/mdk-init CROSS_COMPILE=powerpc-linux-gnu- \
+       MDK=/src/OpenMDK BLDDIR="$BLD" \
+       -j"${JOBS:-2}" >/tmp/mdk.log 2>&1 || echo "(mdk-init tool link warn — expected)"
+  N=$(find "$BLD" -name "*.a" | wc -l); echo "SDK libs: $N (expect >=16)"
   [ "$N" -ge 16 ] || { tail -25 /tmp/mdk.log; exit 1; }
-  for d in bmd phy cdk libbde; do mkdir -p /src/edgenos/output/sdk/$d; cp /tmp/sdk/$d/*.a /src/edgenos/output/sdk/$d/; done
+  for d in bmd phy cdk libbde; do mkdir -p /src/edgenos/output/sdk/$d; cp "$BLD"/$d/*.a /src/edgenos/output/sdk/$d/; done
   echo "== linking unified edged =="
   make -C /src/edgenos/platform/accton-as5610-52x EDGENOS_ROOT=/src/edgenos \
-       SDK_BLDDIR=/src/edgenos/output/sdk 2>&1 | tail -3
+       SDK_BLDDIR=/src/edgenos/output/sdk -j"${JOBS:-2}" 2>&1 | tail -3
   SZ=$(stat -c%s /src/edgenos/output/edged 2>/dev/null || echo 0)
   echo "unified edged size: $SZ"
   [ "$SZ" -gt 15000000 ] && echo "EDGED_BUILD_OK" || { echo "ERROR: edged too small/missing"; exit 1; }

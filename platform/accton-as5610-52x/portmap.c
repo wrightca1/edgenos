@@ -17,6 +17,10 @@
 #include <syslog.h>
 #include <unistd.h>
 #include <time.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <sys/ioctl.h>
+#include <linux/i2c-dev.h>
 
 #include "edged.h"
 #include "portmap.h"
@@ -741,6 +745,119 @@ int portmap_phys_to_swp(int phys_port)
     return -1;
 }
 
+/* ---------------------------------------------------------------------------
+ * SFP/QSFP module presence.
+ *
+ * An empty cage leaves the SerDes RX input floating, and the noise on it makes
+ * CL49 block_lock assert and drop roughly once a second. portmap_link_poll()
+ * believed that, so every dark port flapped "link up/down" forever: each
+ * transition ran bmd_port_mode_update(), moved the TAP carrier, churned the
+ * L2/L3 tables behind it and wrote two log lines. On this board 43 of the 52
+ * cages are typically empty, which was the bulk of the datapath's log volume.
+ *
+ * A port with no module cannot have a link, so gate on presence first.
+ *
+ * Presence is an EEPROM probe at 0x50 on the port's own mux leg
+ * (port_to_i2c_bus[]) -- an empty cage NAKs, a seated optic returns its SFF
+ * identifier byte. NOT the MOD_ABS GPIO expanders onlp/sfpi.c reads: those
+ * constants (bus 17, PCA9506 @ 0x20/0x23) belong to a different board revision
+ * and nothing answers at them here.
+ *
+ * Two paths, because the at24/optoe driver only binds some cages:
+ *   - a bound cage exposes /sys/bus/i2c/devices/<bus>-0050/eeprom; read one
+ *     byte through it and stay off the mux entirely. The node is instantiated
+ *     whether or not an optic is seated, so existence proves nothing -- only a
+ *     successful read does.
+ *   - an unbound cage has no node, so probe /dev/i2c-<bus> directly. That needs
+ *     I2C_SLAVE_FORCE (0x50 may be claimed), which is the same thing the
+ *     platform layer already does for optic DDM.
+ *
+ * Fail OPEN: a bus we cannot open at all leaves the port assumed present, and
+ * so does every port until the first refresh completes. A flapping dark port is
+ * a nuisance, while wrongly darkening a live port is an outage.
+ *
+ * Refreshed on its own slow timer, not in the ~30ms link poll: seating an optic
+ * is a human-timescale event, and a miss on an empty cage costs an i2c timeout.
+ */
+#define SFP_PRESENCE_REFRESH_S  10
+
+static uint64_t sfp_present_mask = ~(uint64_t)0;   /* assume present until read */
+static int      sfp_presence_valid;
+static time_t   sfp_presence_last;
+
+/* All three return: 1 = optic seated, 0 = cage empty, -1 = cannot tell. */
+static int sfp_sysfs_probe(int bus)
+{
+    char path[64];
+    char byte;
+    int fd, n;
+
+    snprintf(path, sizeof(path),
+             "/sys/bus/i2c/devices/%d-0050/eeprom", bus);
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;                       /* driver never bound this cage */
+    n = (int)read(fd, &byte, 1);
+    close(fd);
+    return n == 1 ? 1 : 0;
+}
+
+static int sfp_i2c_probe(int bus)
+{
+    char path[32];
+    uint8_t reg = 0, val;
+    int fd, present = 0;
+
+    snprintf(path, sizeof(path), "/dev/i2c-%d", bus);
+    fd = open(path, O_RDWR);
+    if (fd < 0)
+        return -1;
+    if (ioctl(fd, I2C_SLAVE_FORCE, 0x50) >= 0 &&
+        write(fd, &reg, 1) == 1 &&
+        read(fd, &val, 1) == 1)
+        present = 1;
+    close(fd);
+    return present;
+}
+
+static int sfp_probe(int bus)
+{
+    int rv = sfp_sysfs_probe(bus);
+    return (rv >= 0) ? rv : sfp_i2c_probe(bus);
+}
+
+static void sfp_presence_refresh(void)
+{
+    uint64_t mask = 0;
+    int i, n = 0;
+
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {
+        int bus = port_to_i2c_bus[i];
+        int rv  = (bus > 0) ? sfp_probe(bus) : -1;
+
+        if (rv != 0) {                       /* present, or undeterminable */
+            mask |= (uint64_t)1 << i;
+            if (rv == 1)
+                n++;
+        }
+    }
+
+    if (!sfp_presence_valid || mask != sfp_present_mask)
+        syslog(LOG_INFO, "SFP presence: %d module(s) seated (mask=0x%013llx)",
+               n, (unsigned long long)mask);
+
+    sfp_present_mask   = mask;
+    sfp_presence_valid = 1;
+}
+
+/* swp is 1-based. Always true until the first refresh completes. */
+static int sfp_module_present(int swp)
+{
+    if (!sfp_presence_valid || swp < 1 || swp > EDGED_MAX_PORTS)
+        return 1;
+    return (sfp_present_mask >> (swp - 1)) & 1;
+}
+
 int portmap_swp_to_i2c_bus(int swp)
 {
     if (swp < 1 || swp > EDGED_MAX_PORTS)
@@ -974,6 +1091,12 @@ int portmap_link_poll(void)
     int i;
     int changes = 0;
     int first_poll = (link_poll_count++ == 0);
+    time_t now = time(NULL);
+
+    if (first_poll || (now - sfp_presence_last) >= SFP_PRESENCE_REFRESH_S) {
+        sfp_presence_last = now;
+        sfp_presence_refresh();
+    }
 
     for (i = 0; i < EDGED_MAX_PORTS; i++) {
         if (!edged.ports[i].valid || !edged.ports[i].enabled)
@@ -1002,7 +1125,12 @@ int portmap_link_poll(void)
          * CL49 single-lane block_lock. */
         int cl82_am = 0, cl82_deskew = 0;
         int pcs_link;
-        if (edged.ports[i].port_type == PORT_TYPE_QSFP)
+        /* No module in the cage -> the RX input is floating and block_lock is
+         * noise. Don't read it, and don't let it drive link state. */
+        int present = sfp_module_present(edged.ports[i].logical_port);
+        if (!present)
+            pcs_link = 0;
+        else if (edged.ports[i].port_type == PORT_TYPE_QSFP)
             pcs_link = cl82_link_get(edged.unit, port, &cl82_am, &cl82_deskew);
         else
             pcs_link = pcs_block_lock_get(edged.unit, port);
@@ -1019,12 +1147,11 @@ int portmap_link_poll(void)
         /* 40G QSFP auto re-init/retry: re-init a port that's up but not fully
          * AM-locked, once its peer's TX has had time to come live. Engages
          * deskew (which never fires from the boot-order init) and re-adapts. */
-        if (edged.ports[i].port_type == PORT_TYPE_QSFP) {
+        if (edged.ports[i].port_type == PORT_TYPE_QSFP && present) {
             if (pcs_link) {   /* aligned/locked (deskew + am_lock 0x6) */
                 qsfp_unlocked_since[i] = 0;   /* locked: clear timer */
                 qsfp_retry_count[i] = 0;
             } else {
-                time_t now = time(NULL);
                 if (qsfp_unlocked_since[i] == 0) {
                     qsfp_unlocked_since[i] = now;   /* start grace window */
                 } else if (qsfp_retry_count[i] < QSFP_RETRY_MAX &&
@@ -1055,7 +1182,7 @@ int portmap_link_poll(void)
         /* Steady-state per-lane EQ dump for QSFP: every 8th poll (all ports
          * are up by then, so this reflects real convergence — unlike the
          * config-time one-shot). */
-        if (edged.ports[i].port_type == PORT_TYPE_QSFP &&
+        if (edged.ports[i].port_type == PORT_TYPE_QSFP && present &&
             (link_poll_count % 8) == 1) {
             qsfp_eq_dump(edged.unit, port, edged.ports[i].ifname);
         }

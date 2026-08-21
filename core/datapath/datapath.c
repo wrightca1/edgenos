@@ -12,6 +12,8 @@
  */
 
 #include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 #include <syslog.h>
 
 #include "edged.h"
@@ -22,6 +24,12 @@
 
 /* From bcm56840_a0_internal.h */
 extern int bcm56840_a0_xlport_pbmp_get(int unit, cdk_pbmp_t *pbmp);
+
+/* Captured Cumulus soc_init register set ({addr, cval, name}, CMP_REGS_N).
+ * Auto-generated from the live Cumulus dump_soc.txt.  Used both by the REGDIFF
+ * diag (read-compare) and by datapath_apply_cumulus_regs() (the coherent-set
+ * write).  File-scope so both share one definition. */
+#include "generated/cmp_regs.h"
 
 /*
  * CPU punt configuration.
@@ -423,6 +431,17 @@ static int datapath_mac_init(int unit)
         RDBGC0_SELECTr_t r0; RDBGC3_SELECTr_t r3;
         RDBGC4_SELECTr_t r4; RDBGC5_SELECTr_t r5;
         RDBGC6_SELECTr_t r6; TDBGC6_SELECTr_t t6;
+        RDBGC1_SELECTr_t r1; RDBGC2_SELECTr_t r2;
+
+        /* RDBGC1 = CATCH-ALL: select every ingress drop reason (0xffffffff), so a
+         * per-port before/after diff reveals whether a packet was dropped for ANY
+         * reason (used to verify the in-chip ACL L3 DST_DISCARD actually fires,
+         * independent of which specific reason bit it maps to). RDBGC2 = RDISC
+         * (0x100) alone, the candidate reason for a routed dst-discard. */
+        RDBGC1_SELECTr_SET(r1, 0xffffffff);
+        ioerr += WRITE_RDBGC1_SELECTr(unit, r1);
+        RDBGC2_SELECTr_SET(r2, 0x00000100);
+        ioerr += WRITE_RDBGC2_SELECTr(unit, r2);
 
         RDBGC0_SELECTr_SET(r0, 0x04000d11);
         ioerr += WRITE_RDBGC0_SELECTr(unit, r0);
@@ -1246,6 +1265,60 @@ static int datapath_rc_full(int unit)
     return ioerr;
 }
 
+/*
+ * datapath_apply_cumulus_regs() - apply the captured Cumulus soc_init register
+ * set as a COHERENT WHOLE.
+ *
+ * OpenMDK's bmd_init programs only a minimal subset of the chip config that
+ * Broadcom's "init all" writes.  A full 335-register compare vs a live Cumulus
+ * dump (the REGDIFF diag below / REGDIFF_edged_vs_cumulus.txt) found 61 gaps +
+ * 81 diffs — the un-armed lookup/egress engines (L2/L3/MPLS AUX hash,
+ * EGR_CONFIG_1/2 + EGR_Q, ING_CONFIG_2=0x1ff, VFP/EFP slice control, the
+ * PP_C*_PORT block, MMU thresholds, ...).  Enabling any of these PIECEMEAL broke
+ * the control plane: arming the L2 hash AFTER cumulus_replicate had already
+ * SCHAN-hash-inserted the L2_USER_ENTRY protocol traps orphaned them (they
+ * hashed to a different bucket) -> OSPF punt died.  So the whole set must be
+ * applied HERE, before cumulus_replicate_init()'s hash inserts, so those inserts
+ * land in the correct (armed) buckets.
+ *
+ * We force Cumulus's value for every captured register EXCEPT:
+ *   - MMU_TO_{LOGIC,PHY}_PORT_MAPPING : legit port-layout differences (edged's
+ *     swp<->chip-port map differs; applying theirs mis-maps the ports).
+ *   - CPU_CONTROL_1 : edged sets MORE trap bits than Cumulus (0x18566f38 vs
+ *     0x18500600) to punt its control protocols to the CPU; keep edged's.
+ *
+ * Gated on the sentinel file /etc/edged/soc_replicate so the experiment can be
+ * enabled/reverted WITHOUT a rebuild (rm the file + restart edged to disable).
+ */
+static int datapath_apply_cumulus_regs(int unit)
+{
+    int i, applied = 0, skipped = 0;
+
+    if (access("/etc/edged/soc_replicate", F_OK) != 0) {
+        syslog(LOG_INFO,
+               "Cumulus soc_init replicate: DISABLED (no /etc/edged/soc_replicate)");
+        return 0;
+    }
+
+    for (i = 0; i < CMP_REGS_N; i++) {
+        const char *n = cmp_regs[i].name;
+        uint32_t v;
+        if (strstr(n, "MMU_TO_LOGIC_PORT_MAPPING") ||
+            strstr(n, "MMU_TO_PHY_PORT_MAPPING") ||
+            strstr(n, "CPU_CONTROL_1")) {
+            skipped++;
+            continue;
+        }
+        v = cmp_regs[i].cval;
+        cdk_xgs_reg32_write(unit, cmp_regs[i].addr, &v);
+        applied++;
+    }
+    syslog(LOG_INFO,
+           "Cumulus soc_init replicate: APPLIED %d regs, skipped %d (port-map/cpu-ctrl)",
+           applied, skipped);
+    return 0;
+}
+
 int datapath_init(void)
 {
     int ioerr = 0;
@@ -1257,6 +1330,10 @@ int datapath_init(void)
     ioerr += datapath_disable_vt(edged.unit);
     ioerr += datapath_cpu_punt_init(edged.unit);
     ioerr += datapath_hash_init(edged.unit);
+
+    /* Arm the full Cumulus soc_init config as a coherent set BEFORE the SCHAN
+     * hash inserts in cumulus_replicate_init() (see the function comment). */
+    ioerr += datapath_apply_cumulus_regs(edged.unit);
 
     /* Replicate Cumulus chip-memory state: EPC_LINK_BMAP, L2_USER_ENTRY,
      * EGR_VLAN/STG, FP_TCAM/POLICY.  See cumulus_replicate.c. */
@@ -1292,6 +1369,55 @@ void datapath_rx_diag(void)
 {
     int unit = edged.unit;
     int i;
+
+    /* FAST per-port drop-counter snapshot to a FILE, done FIRST (before the slow
+     * serdes diag below) so counter reads are reliable and don't depend on
+     * journald delivery or diag timing. Used to verify in-chip ACL drops:
+     * rdbgc1 = catch-all (all ingress drop reasons). Append; caller truncates
+     * /tmp/edged-drop.log between measurements. */
+    {
+        FILE *df = fopen("/tmp/edged-drop.log", "a");
+        if (df) {
+            int p;
+            for (p = 0; p <= 12; p++) {
+                RUCr_t ru; RDBGC0r_t d0; RDBGC1r_t d1; RDBGC2r_t d2;
+                uint32_t r, a, c, rd;
+                READ_RUCr(unit, p, &ru);
+                READ_RDBGC0r(unit, p, &d0);
+                READ_RDBGC1r(unit, p, &d1);
+                READ_RDBGC2r(unit, p, &d2);
+                r = RUCr_GET(ru); a = RDBGC0r_GET(d0);
+                c = RDBGC1r_GET(d1); rd = RDBGC2r_GET(d2);
+                if (r || a || c)
+                    fprintf(df, "DROPCNT port[%d]: RUC=%u rdbgc0(agg)=%u "
+                            "rdbgc1(ALLdrop)=%u rdbgc2(rdisc)=%u\n", p, r, a, c, rd);
+            }
+            /* L3_DEFIP layout dump: every VALID entry in the likely bands, to see
+             * where the connected /29 route lives vs the /32 discard band (2580)
+             * and understand the TCAM match priority. */
+            {
+                int s;
+                static const int lo[] = {0, 1530, 2555, 4090, 7995, -1};
+                static const int hi[] = {48, 1600, 2600, 4110, 8005, -1};
+                int b;
+                for (b = 0; lo[b] >= 0; b++) {
+                    for (s = lo[b]; s <= hi[b]; s++) {
+                        L3_DEFIPm_t d;
+                        if (READ_L3_DEFIPm(unit, s, &d) < 0) continue;
+                        if (!L3_DEFIPm_VALID0f_GET(d)) continue;
+                        fprintf(df, "DEFIP[%d]: ip=0x%08x mask=0x%08x nh=%u "
+                                "ecmp=%u discard=%u\n", s,
+                                L3_DEFIPm_IP_ADDR0f_GET(d),
+                                L3_DEFIPm_IP_ADDR_MASK0f_GET(d),
+                                L3_DEFIPm_NEXT_HOP_INDEX0f_GET(d),
+                                L3_DEFIPm_ECMP0f_GET(d),
+                                L3_DEFIPm_DST_DISCARD0f_GET(d));
+                    }
+                }
+            }
+            fclose(df);
+        }
+    }
 
     extern unsigned g_tx_calls, g_tx_ok, g_tx_fail, g_tx_lastrv;
 
@@ -1355,22 +1481,24 @@ void datapath_rx_diag(void)
         int pidx;
         for (pidx = 0; pidx <= 72; pidx++) {
             RUCr_t ru; RDBGC0r_t d0; RDBGC3r_t d3; RDBGC4r_t d4;
-            RDBGC5r_t d5; RDBGC6r_t d6;
-            uint32_t ruv, d0v;
+            RDBGC5r_t d5; RDBGC6r_t d6; RDBGC1r_t d1; RDBGC2r_t d2;
+            uint32_t ruv, d0v, d1v;
             READ_RUCr(unit, pidx, &ru);
             READ_RDBGC0r(unit, pidx, &d0);
-            ruv = RUCr_GET(ru); d0v = RDBGC0r_GET(d0);
-            if (ruv || d0v) {
+            READ_RDBGC1r(unit, pidx, &d1);
+            ruv = RUCr_GET(ru); d0v = RDBGC0r_GET(d0); d1v = RDBGC1r_GET(d1);
+            if (ruv || d0v || d1v) {
+                READ_RDBGC2r(unit, pidx, &d2);
                 READ_RDBGC3r(unit, pidx, &d3);
                 READ_RDBGC4r(unit, pidx, &d4);
                 READ_RDBGC5r(unit, pidx, &d5);
                 READ_RDBGC6r(unit, pidx, &d6);
                 syslog(LOG_INFO,
-                       "RX-DIAG sweep port[%d]: RUC=%u rdbgc0(agg)=%u "
-                       "rdbgc3(L3hdr)=%u rdbgc4(disc)=%u rdbgc5(filt)=%u "
-                       "rdbgc6(drop)=%u",
-                       pidx, ruv, d0v,
-                       RDBGC3r_GET(d3), RDBGC4r_GET(d4),
+                       "RX-DIAG sweep port[%d]: RUC=%u rdbgc1(ALLdrop)=%u "
+                       "rdbgc0(agg)=%u rdbgc2(rdisc)=%u rdbgc3(L3hdr)=%u "
+                       "rdbgc4(disc)=%u rdbgc5(filt)=%u rdbgc6(drop)=%u",
+                       pidx, ruv, d1v, d0v,
+                       RDBGC2r_GET(d2), RDBGC3r_GET(d3), RDBGC4r_GET(d4),
                        RDBGC5r_GET(d5), RDBGC6r_GET(d6));
             }
         }
@@ -1559,7 +1687,6 @@ void datapath_rx_diag(void)
          * have 0) plus value mismatches. cmp_regs[] auto-generated from the
          * Cumulus dump_soc.txt. */
         {
-            #include "generated/cmp_regs.h"
             int i, gaps = 0, diffs = 0;
             for (i = 0; i < CMP_REGS_N; i++) {
                 uint32_t ours = 0xdeadbeef;

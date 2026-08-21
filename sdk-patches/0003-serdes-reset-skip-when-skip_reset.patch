@@ -1,0 +1,49 @@
+--- a/src/soc/common/drv.c
++++ b/src/soc/common/drv.c
+@@ -3245,6 +3245,10 @@
+ int
+ soc_xgxs_reset(int unit, soc_port_t port)
+ {
++    /* AS5610 hybrid: on soc_skip_reset, edged owns the live ports; the unused port
++     * blocks aren't clocked and their XLPORT_XGXS_CTRL_REG reads SchanTimeOut. Per-port
++     * serdes reset is irrelevant to the FP engine, so skip it and let soc_init proceed. */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+     soc_reg_t           reg;
+     uint64              rval64;
+ #ifdef BCM_IPROC_SUPPORT
+@@ -3560,6 +3564,8 @@
+ int
+ soc_xgxs_in_reset(int unit, soc_port_t port)
+ {
++    /* AS5610 hybrid: skip per-port serdes access on skip_reset (see soc_xgxs_reset). */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+     soc_reg_t           reg;
+     uint64              rval64;
+     int                 reset_sleep_usec;
+@@ -3725,6 +3731,8 @@
+ int
+ soc_wc_xgxs_reset(int unit, soc_port_t port, int reg_idx)
+ {
++    /* AS5610 hybrid: skip per-port serdes access on skip_reset (see soc_xgxs_reset). */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+ #if defined(BCM_TRIUMPH3_SUPPORT)
+     const static soc_reg_t tr3_regs[] = {
+         PORT_XGXS0_CTRL_REGr,
+@@ -3854,6 +3862,8 @@
+ int
+ soc_wc_xgxs_in_reset(int unit, soc_port_t port, int reg_idx)
+ {
++    /* AS5610 hybrid: skip per-port serdes access on skip_reset (see soc_xgxs_reset). */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+ #ifdef BCM_TRIUMPH3_SUPPORT
+     const static soc_reg_t tr3_regs[] = {
+         PORT_XGXS0_CTRL_REGr,
+@@ -3998,6 +4008,8 @@
+ int
+ soc_wc_xgxs_power_down(int unit, soc_port_t port, int reg_idx)
+ {
++    /* AS5610 hybrid: skip per-port serdes access on skip_reset (see soc_xgxs_reset). */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+ #if defined(BCM_TRIUMPH3_SUPPORT)
+     const static soc_reg_t tr3_regs[] = {
+         PORT_XGXS0_CTRL_REGr,

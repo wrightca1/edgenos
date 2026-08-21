@@ -1,25 +1,30 @@
 /*
  * acl.c — EdgeNOS operator ACLs on the BCM56846 Field Processor (AS5610 / edged).
  *
- * Phase 2a: destination-IP deny/permit. Programmed by hand into the FP (no SDK),
- * reusing the single-wide VS6 slice that cumulus_replicate.c already stands up and
- * enables — physical slice 4, FPF2 selcode 1, which places the 32-bit DstIP at the
- * F2 field (bits 96..127, first octet at the MSB). The OSPF 224/8 trap lives at
- * entry 0 (idx 1024); ACL entries go at 1025+ (lower index = higher precedence, so
- * the OSPF trap and lower-seq rules win). deny -> FP_POLICY *_DROP=1; permit -> a
- * matching entry with no action (packet proceeds), giving permit-over-deny by seq.
+ * Phase 2b: destination-IP deny/permit. Programmed by hand into the FP (no SDK) as a
+ * DOUBLE-WIDE group on physical slices 4+5, replicating Cumulus 2.5.0's proven transit
+ * dst-IP ACL byte-for-byte (captured from this exact silicon — see
+ * CUMULUS_TRANSIT_ACL_RECIPE.md). Every prior single-wide attempt wrote a byte-perfect
+ * slice-4 entry the IFP never consulted: a dst-IP key (offset 110, width 32) does not
+ * fit one slice — the group MUST be double-wide (slices 4+5 paired via SLICE5_4_PAIRING).
  *
- * v1 matches DESTINATION IP only. Rules that also constrain protocol / source /
- * L4 ports can't be expressed on this slice yet (the src/proto/L4 key-bit layout is
- * not mapped), so they are SKIPPED with a warning rather than over-matching.
- * Shares the /etc/edged/acls.conf format + the edgenos acl CLI with the 4610.
- * See docs/acl-design.md.
+ * Each rule => a primary FP_TCAM[512+n] (slice 4, the DstIp/IpType key, spliced from the
+ * captured raw KEY/MASK template) + a secondary FP_TCAM[768+n] (slice 5, VALID=3) +
+ * FP_GM_FIELDS + FP_GLOBAL_MASK_TCAM for both halves. deny -> FP_POLICY *_DROP=1 +
+ * COPY_TO_CPU=3; permit -> no action (packet proceeds), giving permit-over-deny by seq
+ * (lower seq -> lower index -> higher FP precedence). The slice pairing/selcodes/enable
+ * are set once per load by acl_setup_doublewide().
+ *
+ * v1 matches DESTINATION IP only. Rules that also constrain protocol / source / L4 ports
+ * are SKIPPED with a warning rather than over-matching. Shares the /etc/edged/acls.conf
+ * format + the edgenos acl CLI with the 4610. See docs/acl-design.md.
  */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <syslog.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 
 #include "edged.h"
@@ -28,28 +33,17 @@
 #include <cdk/arch/xgs_reg.h>
 
 #define ACL_UNIT      0
-/* FP_TCAM is PHYSICAL-slice indexed (256 entries/slice): idx/256 = physical slice.
- * The IFP iterates VIRTUAL slices; virtual slice N's entries live in physical slice
- * FP_SLICE_MAP[N]. Confirmed live via the SDK oracle: FP_SLICE_MAP has VS6 -> phys 4,
- * and VS6 is the DstIP slice (FP_PORT_FIELD_SEL SLICE6_F2=1, single-wide, lookup-
- * enabled). So DstIP-key entries MUST sit in physical slice 4 = idx 1024..1279.
- *
- * The old base 512 was wrong: idx 512 = physical slice 2 = VS0 (map), which has
- * LOOKUP_ENABLE=0 — so entries there were never looked up (counter stayed 0, the
- * long-standing "IFP does no lookup" bug). cumulus_replicate's OSPF trap already
- * correctly uses idx 1024 (VS6 entry 0); ACL entries follow at 1025+. */
-/* DOUBLE-WIDE: primary entries in physical slice 6 (= virtual slice 8, the DstIp
- * double-wide slice cumulus_replicate pairs with 9 via SLICE9_8_PAIRING); the paired
- * secondary is written at idx+256 (physical slice 7). Cumulus put its entry at 1555
- * (slice6 offset 19); we start at 1537 and cap at 64 so primary 1537..1600 stays in
- * slice 6 and secondary 1793..1856 stays in slice 7. */
-/* SINGLE-WIDE physical slice 4 (FP_TCAM idx 512..767). PROVEN in silicon 2026-07-09:
- * an entry here IS consulted (a match-any drop killed 100% of traffic), whereas the old
- * double-wide slice-6/8 placement was never consulted. Trident+ slice geometry is
- * non-uniform (phys 0-3 = 128 entries, 4-9 = 256); slice 4 is single-wide, unpaired, and
- * we enable its FP_LOOKUP_ENABLE bit. See docs/acl-5610-double-wide-fp.md. */
+/* FP_TCAM index layout (Trident+, NON-uniform slice geometry): phys slices 0-3 hold 128
+ * entries each (idx 0..511), slices 4-9 hold 256 each. So:
+ *   physical slice 4 = idx 512..767   (double-wide PRIMARY   half)
+ *   physical slice 5 = idx 768..1023  (double-wide SECONDARY half, = primary idx + 256)
+ * Cumulus placed its entry at slice-4 offset 19 (idx 531) + slice-5 offset 19 (idx 787).
+ * We start at offset 0 and cap at 64: primary 512..575, secondary 768..831. Lower index
+ * = higher FP precedence, so lower-seq rules win. The captured register-diff proved the
+ * absolute slice numbers are just allocator output — what matters is the double-wide
+ * STRUCTURE (pairing + both-half selcodes + both LOOKUP-enable bits). */
 #define ACL_IDX_BASE  512
-#define ACL_MAX       64        /* 1537..1600 primary / 1793..1856 secondary */
+#define ACL_MAX       64        /* primary 512..575 / secondary 768..831 */
 
 static int acl_idx_used[ACL_MAX];
 static int acl_n = 0;
@@ -83,86 +77,151 @@ static int acl_cidr(const char *tok, uint32_t *ip, uint32_t *mask)
     return 0;
 }
 
+/* Raw FP_TCAM KEY/MASK template captured VERBATIM from Cumulus 2.5.0's working
+ * double-wide transit dst-IP deny (FP_TCAM[531], EID 0x7e, dst 10.101.101.2/32).
+ * These are the PHYSICAL fp_tcam KEY (bits 2..235) and MASK (bits 236..469) field
+ * values — copying them reproduces Cumulus's entry bit-for-bit, sidestepping the
+ * logical-DATA/MASK vs raw-X/Y DltaCam ambiguity that defeated every prior attempt.
+ * KEY holds only the DstIp @ offset 110; MASK holds the DstIp care-mask @110 PLUS the
+ * FIXED_MASK (IpType=IPv4) bits at the top. We write the template, then splice the
+ * per-rule DstIp into F2 (word[2] = KEY offset 110); the FIXED/IpType bits ride along.
+ * See CUMULUS_TRANSIT_ACL_RECIPE.md. LSW-first uint32[8]. */
+static const uint32_t ACL_KEY_TMPL[8]  =
+    { 0x00000000, 0x00000000, 0x00000000, 0x59408000, 0x00000299, 0x00000000, 0x00000000, 0x00000000 };
+static const uint32_t ACL_MASK_TMPL[8] =
+    { 0x00000000, 0x00000000, 0x00000000, 0xffffc000, 0x00003fff, 0x00000000, 0x80000000, 0x00000003 };
+
+/*
+ * Program ONE double-wide dst-IP ACL entry, matching the captured Cumulus recipe:
+ *   primary   FP_TCAM[idx]         (physical slice 4) — the DstIp/IpType key
+ *   secondary FP_TCAM[idx+256]     (physical slice 5) — VALID=3, completes the pair
+ *   FP_GM_FIELDS[idx]/[idx+256]    — the global-mask overlay (edged omitted this before)
+ *   FP_GLOBAL_MASK_TCAM[idx]/[idx+256] — VALID=1, match-ANY ingress port
+ *   FP_POLICY_TABLE[idx]           — G/Y/R_DROP + COPY_TO_CPU=3 (SwitchToCpuCancel)
+ * The slice pairing/selcodes/enable are set once per load by acl_setup_doublewide().
+ * edged's old SINGLE-WIDE slice-4 entry was never consulted: a dst-IP key at offset 110
+ * doesn't fit a single slice — the group MUST be double-wide (slices 4+5 paired).
+ */
 static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask, int deny)
 {
     FP_TCAMm_t t;
+    FP_GM_FIELDSm_t gf;
     FP_GLOBAL_MASK_TCAMm_t g;
     FP_POLICY_TABLEm_t p;
-    uint32_t f2[4]  = {0};
-    uint32_t f2m[4] = {0};
-    int w;
+    int sec = idx + 256;                        /* paired secondary in physical slice 7 */
+    /* DIAGNOSTIC: if /etc/edged/acl_gmask_any exists, program the global mask as match-ANY
+     * (VALID=1, IPBM_MASK=0 = don't-care all ports) to split "gate bug" from "IFP-arming
+     * wall": if the counter fires with match-any, the port gate was the blocker; if it
+     * still stays 0, the IFP lookup engine isn't armed regardless of entry/gate. */
+    int gmask_any = (access("/etc/edged/acl_gmask_any", F_OK) == 0);
 
-    /*
-     * FP_TCAM is a DltaCam: the hardware stores entries in X/Y form, NOT plain
-     * DATA/MASK. The SDK's soc_mem_write applies _soc_mem_tcam_dm_to_xy() before
-     * writing; the CDK's raw field-set does not. Without the transform the chip
-     * decodes our DATA/MASK as X/Y and the mask comes out garbage
-     * (decoded_mask = key | ~stored_mask), so no rule ever matches — verified on
-     * the live chip via the SDK: our old entry read back F2_MASK=<ip>ffff.. .
-     *
-     * 40nm (Trident+) encode:  K0 = mask & key  -> KEY (F2) field
-     *                          K1 = ~mask | key -> MASK (F2_MASK) field
-     * DstIP sits in F2 word 3 (bits 96..127); words 0..2 are don't-care.
-     */
-    {
-        /* DstIp sits in F2 WORD[2] (bits 64..95), per the live Cumulus capture
-         * (FP_TCAM[1555]: F2=0x00000000<ip>0000000000000000) — NOT word[3] which
-         * edged used before. docs/cumulus-acl-fp-recipe.md. */
-        uint32_t dm_key[4]  = { 0, 0, dstip, 0 };
-        uint32_t dm_mask[4] = { 0, 0, dstmask, 0 };
-        for (w = 0; w < 4; w++) {
-            f2[w]  =  dm_mask[w] & dm_key[w];   /* K0 */
-            f2m[w] = ~dm_mask[w] | dm_key[w];   /* K1 */
-        }
-    }
-
-    /*
-     * DOUBLE-WIDE group (Cumulus/switchd captured recipe): the match lives in the
-     * PRIMARY slice entry (this idx, physical slice 6 = virtual slice 8, paired
-     * with slice 9 by cumulus_replicate SLICE9_8_PAIRING=1); a paired SECONDARY
-     * entry at idx+256 (physical slice 7) completes the pair. The match qualifiers
-     * are mirrored into the PAIRING_* fields. edged's old single-wide entry never
-     * matched — this is the fix.
-     */
-    /* SINGLE-WIDE entry in physical slice 4 (proven consulted in silicon). One FP_TCAM
-     * line, no paired secondary, no PAIRING_* fields, no FP_GM_FIELDS overlay (all of
-     * those are double-wide-only). DstIp lives in F2 word[2] (F2f bits 64-95 = KEY bit
-     * 110 = single-wide selcode-1 offset f2_offset(46)+64, SDK-derived + Cumulus-proven).
-     * FIXED=0x100/care 0x300 selects IpType=IPv4. F1/F3/F4 masks MUST be don't-care
-     * (all-ones), else a raw-zero DltaCam field decodes to "must==0" and blocks the match
-     * (the bug that hid the whole feature — see docs/acl-5610-double-wide-fp.md). */
+    /* ── PRIMARY entry (physical slice 6) — verbatim field layout from the Cumulus
+     * capture FP_TCAM[1536]: DstIp lives in the TOP 32 bits of the 128-bit F2
+     * field (F2[127:96] = LSW-first word[3]); FIXED_MASK=0x380; the paired half
+     * (PAIRING_F2/PAIRING_FIXED_MASK=0x700) carries the same DstIp. ── */
     FP_TCAMm_CLR(t);
     FP_TCAMm_VALIDf_SET(t, 3);
-    FP_TCAMm_F2f_SET(t, f2);                        /* DstIp @ F2 word[2] (match-all: f2m=~0) */
-    FP_TCAMm_F2_MASKf_SET(t, f2m);
-    /* Every unused qualifier (F1/F3/F4/FIXED) MUST be don't-care = raw MASK(Y) all-ones,
-     * else a raw-zero DltaCam field decodes to "must==0" and blocks the match. FIXED is
-     * left don't-care (not IpType-constrained): its CDK field overlaps PAIRING_FIXED and
-     * the single-field write skews the decode; a dst-IP only exists on IP packets anyway,
-     * so not gating on IpType is harmless and matches the proven match-any config. */
     {
-        uint32_t allone39[2] = { 0xffffffffu, 0x0000007fu }; /* 39-bit all-ones = don't-care */
-        FP_TCAMm_F1_MASKf_SET(t, allone39);
-        FP_TCAMm_F3_MASKf_SET(t, allone39);
-        FP_TCAMm_F4_MASKf_SET(t, 0x7fu);                     /* 7-bit all-ones */
-        /* FIXED_MASK and PAIRING_FIXED_MASK overlap the same TCAM bits; set BOTH all-ones
-         * so the FIXED (IpType/Stage) field decodes to a clean don't-care (setting one
-         * alone leaves an overlapped bit cared, over-constraining the entry). */
-        FP_TCAMm_FIXED_MASKf_SET(t, 0x1ffffu);               /* 17-bit all-ones */
-        FP_TCAMm_PAIRING_FIXED_MASKf_SET(t, 0x7ffffu);       /* 19-bit all-ones */
+        uint32_t f2[4]  = { 0, 0, 0, dstip };
+        uint32_t f2m[4] = { 0, 0, 0, dstmask };
+        FP_TCAMm_F2f_SET(t, f2);
+        FP_TCAMm_F2_MASKf_SET(t, f2m);
+        FP_TCAMm_PAIRING_F2f_SET(t, f2);
+        FP_TCAMm_PAIRING_F2_MASKf_SET(t, f2m);
     }
+    FP_TCAMm_FIXED_MASKf_SET(t, 0x380);
+    FP_TCAMm_PAIRING_FIXED_MASKf_SET(t, 0x700);
     (void)WRITE_FP_TCAMm(unit, idx, t);
 
-    /* FP_GLOBAL_MASK_TCAM per-entry ingress-port gate (single index for single-wide).
-     * Trident requires VALID=1 even when IPBM/IPBM_MASK are 0 (triumph/field.c:3303-3350).
-     * IPBM=0/IPBM_MASK=0/VALID=1 = match ANY ingress port (SDK default). Per-port `apply`
-     * scoping would write a real IPBM bitmap here (needs IFP_GM_LOGIC_TO_PHYS_MAP remap). */
+    /* ── SECONDARY entry (physical slice 7) — Cumulus FP_TCAM[1792]: VALID=3 plus
+     * the fixed F3 mask the paired slice carries (F3_MASK=PAIRING_F3_MASK=
+     * 0x07fff80000). ── */
+    FP_TCAMm_CLR(t);
+    FP_TCAMm_VALIDf_SET(t, 3);
+    {
+        uint32_t f3m[4] = { 0xfff80000, 0x00000007, 0, 0 };   /* 0x07fff80000 */
+        FP_TCAMm_F3_MASKf_SET(t, f3m);
+        FP_TCAMm_PAIRING_F3_MASKf_SET(t, f3m);
+    }
+    (void)WRITE_FP_TCAMm(unit, sec, t);
+
+    /* ── FP_GM_FIELDS — the first-stage field gate. This is a GENUINE ternary field-TCAM
+     * (confirmed by distinct _X/_Y raw halves in the live-Cumulus capture 2026-07-16), not a
+     * plain mask register. Live Cumulus FP_GM_FIELDS[1536] = MASK/MASK_X=0x1fffffffff,
+     * KEY/KEY_X=0x1fffffffe1. edged previously set ONLY MASK (and to 0x1ffffffffe), leaving
+     * KEY=0 — so the field-TCAM could never match, the slice lookup was gated OFF, and
+     * FP_COUNTER stayed 0. Set all four halves verbatim. Secondary [sec] = VALID=1 only. ── */
+    FP_GM_FIELDSm_CLR(gf);
+    FP_GM_FIELDSm_VALIDf_SET(gf, 1);
+    { uint32_t gm[2] = { 0xffffffff, 0x0000001f };      /* MASK/MASK_X = 0x1fffffffff (all 37 bits care) */
+      uint32_t gk[2] = { 0xffffffe1, 0x0000001f };      /* KEY /KEY_X  = 0x1fffffffe1 (Cumulus verbatim)  */
+      FP_GM_FIELDSm_MASKf_SET(gf, gm);
+      FP_GM_FIELDSm_MASK_Xf_SET(gf, gm);
+      FP_GM_FIELDSm_KEYf_SET(gf, gk);
+      FP_GM_FIELDSm_KEY_Xf_SET(gf, gk); }
+    (void)WRITE_FP_GM_FIELDSm(unit, idx, gf);
+    FP_GM_FIELDSm_CLR(gf);
+    FP_GM_FIELDSm_VALIDf_SET(gf, 1);
+    (void)WRITE_FP_GM_FIELDSm(unit, sec, gf);
+
+    /* ── FP_GLOBAL_MASK_TCAM ingress-port gate — Cumulus FP_GLOBAL_MASK_TCAM[1536]
+     * VERBATIM: IPBM=0x00001fffffffffffff (all 53 front ports set), IPBM_MASK=
+     * 0x02001fffffffffffff (care ports 0-52 + bit57). edged's earlier IPBM=0
+     * (don't-care) did NOT match — the port gate needs the real bitmap. Secondary
+     * [1792] = VALID=1 only. ── */
     FP_GLOBAL_MASK_TCAMm_CLR(g);
     FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
+    if (!gmask_any) {   /* 3-word arrays — the IPBM field is >64 bits; a 2-word array corrupted it
+         * (read back 0x1fffffe00, gating out all ports). */
+        uint32_t ipbm[3]  = { 0xffffffff, 0x001fffff, 0x00000000 }; /* IPBM=0x1fffffffffffff (bits 0-52) */
+        uint32_t ipbmm[3] = { 0xffffffff, 0x001fffff, 0x00000002 }; /* IPBM_MASK=0x02001fffffffffffff — Cumulus
+                                                                     * FP_GLOBAL_MASK_TCAM[1536]; care bit is bit65
+                                                                     * (word2 bit1), NOT bit57 as before */
+        FP_GLOBAL_MASK_TCAMm_IPBMf_SET(g, ipbm);
+        FP_GLOBAL_MASK_TCAMm_IPBM_MASKf_SET(g, ipbmm);
+    }
     (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, idx, g);
+    FP_GLOBAL_MASK_TCAMm_CLR(g);
+    FP_GLOBAL_MASK_TCAMm_VALIDf_SET(g, 1);
+    (void)WRITE_FP_GLOBAL_MASK_TCAMm(unit, sec, g);
+
+    /* ── AUTHORITATIVE global-mask write: the X and Y pipe memories. On Trident the SDK
+     * (trx/field.c) programs FP_GLOBAL_MASK_TCAM by writing FP_GLOBAL_MASK_TCAM_X and _Y
+     * SEPARATELY via soc_mem_pbmp_field_set — the combined view above does NOT drive the
+     * X/Y the hardware actually consults, which is why the combined IPBM read back shifted
+     * and never gated our ingress port in. Write X/Y VERBATIM from the live-Cumulus capture
+     * (fpxy.txt idx 1536): X IPBM=IPBM_MASK=0x1fffffffe01; Y IPBM=0x1ffe00000001fe,
+     * IPBM_MASK=0x02001ffe00000001fe. Secondary [sec] = VALID=1 only. ── */
+    {
+        FP_GLOBAL_MASK_TCAM_Xm_t gx;
+        FP_GLOBAL_MASK_TCAM_Ym_t gy;
+        uint32_t x_ipbm[3]  = { 0xfffffe01, 0x000001ff, 0x00000000 }; /* 0x00000001fffffffe01 */
+        uint32_t y_ipbm[3]  = { 0x000001fe, 0x001ffe00, 0x00000000 }; /* 0x00001ffe00000001fe */
+        uint32_t y_ipbmm[3] = { 0x000001fe, 0x001ffe00, 0x00000002 }; /* 0x02001ffe00000001fe */
+        /* primary [idx] */
+        FP_GLOBAL_MASK_TCAM_Xm_CLR(gx);
+        FP_GLOBAL_MASK_TCAM_Xm_VALIDf_SET(gx, 1);
+        FP_GLOBAL_MASK_TCAM_Ym_CLR(gy);
+        FP_GLOBAL_MASK_TCAM_Ym_VALIDf_SET(gy, 1);
+        if (!gmask_any) {
+            FP_GLOBAL_MASK_TCAM_Xm_IPBMf_SET(gx, x_ipbm);
+            FP_GLOBAL_MASK_TCAM_Xm_IPBM_MASKf_SET(gx, x_ipbm);
+            FP_GLOBAL_MASK_TCAM_Ym_IPBMf_SET(gy, y_ipbm);
+            FP_GLOBAL_MASK_TCAM_Ym_IPBM_MASKf_SET(gy, y_ipbmm);
+        }
+        (void)WRITE_FP_GLOBAL_MASK_TCAM_Xm(unit, idx, gx);
+        (void)WRITE_FP_GLOBAL_MASK_TCAM_Ym(unit, idx, gy);
+        /* secondary [sec] = VALID only */
+        FP_GLOBAL_MASK_TCAM_Xm_CLR(gx);
+        FP_GLOBAL_MASK_TCAM_Xm_VALIDf_SET(gx, 1);
+        (void)WRITE_FP_GLOBAL_MASK_TCAM_Xm(unit, sec, gx);
+        FP_GLOBAL_MASK_TCAM_Ym_CLR(gy);
+        FP_GLOBAL_MASK_TCAM_Ym_VALIDf_SET(gy, 1);
+        (void)WRITE_FP_GLOBAL_MASK_TCAM_Ym(unit, sec, gy);
+    }
 
     FP_POLICY_TABLEm_CLR(p);
-    if (deny) {                                 /* permit = no action, packet proceeds */
+    if (deny == 1) {                            /* permit = no action, packet proceeds */
         FP_POLICY_TABLEm_G_DROPf_SET(p, 1);
         FP_POLICY_TABLEm_Y_DROPf_SET(p, 1);
         FP_POLICY_TABLEm_R_DROPf_SET(p, 1);
@@ -171,11 +230,19 @@ static void acl_program_one(int unit, int idx, uint32_t dstip, uint32_t dstmask,
         FP_POLICY_TABLEm_G_COPY_TO_CPUf_SET(p, 3);
         FP_POLICY_TABLEm_Y_COPY_TO_CPUf_SET(p, 3);
         FP_POLICY_TABLEm_R_COPY_TO_CPUf_SET(p, 3);
+    } else if (deny == 2) {                     /* DIAGNOSTIC "copy": mirror match to CPU,
+         * no drop. A matched transit packet (HW-forwarded swp1->swp2) that ALSO appears on
+         * the swp1 CPU tap = proof the FP LOOKUP fired (independent of the broken counter and
+         * of whether the drop action works). COPY_TO_CPU=1 = copy (not =3 cancel). */
+        FP_POLICY_TABLEm_G_COPY_TO_CPUf_SET(p, 1);
+        FP_POLICY_TABLEm_Y_COPY_TO_CPUf_SET(p, 1);
+        FP_POLICY_TABLEm_R_COPY_TO_CPUf_SET(p, 1);
     }
     FP_POLICY_TABLEm_COUNTER_MODEf_SET(p, 7);   /* count all colors: a match signal */
-    FP_POLICY_TABLEm_COUNTER_INDEXf_SET(p, idx);
+    FP_POLICY_TABLEm_COUNTER_INDEXf_SET(p, idx & 0x7f);   /* 7-bit field (was wrapping) */
     (void)WRITE_FP_POLICY_TABLEm(unit, idx, p);
-    acl_log("prog idx=%d f2[3]=0x%08x/0x%08x %s", idx, dstip, dstmask, deny ? "DENY" : "permit");
+    acl_log("prog idx=%d f2[3]=0x%08x/0x%08x action=%s", idx, dstip, dstmask,
+            deny == 1 ? "DENY" : deny == 2 ? "COPY2CPU" : "permit");
 }
 
 /* Dump each ACL entry's FP match counter to the file-log (wired to SIGUSR1). A
@@ -188,7 +255,56 @@ void edged_acl_diag(void)
     int i;
 
     cdk_xgs_reg32_read(ACL_UNIT, FP_SLICE_ENABLEr, &sev);
-    acl_log("diag FP_SLICE_ENABLE(runtime)=0x%08x (want lookup bit for phys8)", sev);
+    acl_log("diag FP_SLICE_ENABLE(runtime)=0x%08x (want Cumulus 0x000e33ff: slices 8/9 lookup)", sev);
+
+    /* FP-STAGE REGDIFF: read the FP/ingress-pipeline registers that gate whether the
+     * IFP lookup runs, compare to the working-Cumulus values (from dump_soc.txt). A GAP
+     * (ours=0) on FP_TCAM_BLK_SEL / FP_GM_TCAM_BLK_SEL etc. = the missing stage init. */
+    {
+        static const struct { uint32_t addr, cval; const char *name; } fpr[] = {
+            { 0x0d180d20, 0x00000fff, "FP_TCAM_BLK_SEL" },
+            { 0x0d180d21, 0x00000fff, "FP_GM_TCAM_BLK_SEL" },
+            { 0x0d180601, 0x000e33ff, "FP_SLICE_ENABLE" },
+            { 0x01180602, 0x000001ff, "ING_CONFIG_2" },
+            { 0x01180600, 0x2080300e, "ING_CONFIG_64(lo)" },
+            { 0x0f180665, 0x0000000c, "SW2_FP_DST_ACTION_CONTROL" },
+            { 0x04180620, 0x000000ff, "VFP_SLICE_CONTROL" },
+            { 0x04180621, 0x00000003, "VFP_KEY_CONTROL" },
+            { 0x04180636, 0x0000e4e4, "VFP_SLICE_MAP" },
+            /* IFP-STAGE gates (Cumulus dump_soc): if any of these differ after
+             * arming, the IFP lookup stage isn't running -> that's why no entry
+             * fires (the copy test proved the stage is dead). */
+            { 0x02180647, 0x00000000, "ING_BYPASS_CTRL" },
+            { 0x0f180658, 0x00000000, "ING_MISC_CONFIG" },
+            { 0x0c180606, 0x00000080, "ING_MISC_CONFIG2" },
+        };
+        unsigned k;
+        for (k = 0; k < sizeof(fpr)/sizeof(fpr[0]); k++) {
+            uint32_t v = 0xdeadbeef;
+            cdk_xgs_reg32_read(ACL_UNIT, fpr[k].addr, &v);
+            acl_log("diag FPREG %-26s ours=0x%08x cumulus=0x%08x %s",
+                    fpr[k].name, v, fpr[k].cval,
+                    v == fpr[k].cval ? "OK" : (v == 0 ? "**GAP**" : "**DIFF**"));
+        }
+    }
+
+    /* Per-port FP key-select dump — the KEY generation for slice 8 depends on
+     * FP_PORT_FIELD_SEL[chip_port].SLICE8 selcodes being set on the port the
+     * traffic actually ingresses. Cumulus capture (all ports): SLICE8 F1=5/F2=1/
+     * F3=7, SLICE9 F1=0xc/F2=5/F3=0xa, SLICE9_8_PAIRING=1. Dump raw words 0-2 for
+     * ports 0-12 so we can confirm swp-ingress ports carry the selcodes. */
+    {
+        int pp;
+        for (pp = 0; pp <= 12; pp++) {
+            FP_PORT_FIELD_SELm_t fs;
+            FP_PORT_FIELD_SELm_CLR(fs);
+            if (cdk_xgs_mem_read(ACL_UNIT, FP_PORT_FIELD_SELm, pp, fs.v, 6) < 0) continue;
+            acl_log("diag PFS[%d] raw=%08x.%08x.%08x SLICE8_F2=%u SLICE9_8_PAIR=%u",
+                    pp, fs.v[2], fs.v[1], fs.v[0],
+                    FP_PORT_FIELD_SELm_SLICE8_F2f_GET(fs),
+                    FP_PORT_FIELD_SELm_SLICE9_8_PAIRINGf_GET(fs));
+        }
+    }
 
     for (i = 0; i < acl_n; i++) {
         FP_TCAMm_t t;
@@ -225,8 +341,12 @@ void edged_acl_diag(void)
         FP_COUNTER_TABLEm_CLR(c); pkts = 0xffffffff;
         if (cdk_xgs_mem_read(ACL_UNIT, FP_COUNTER_TABLEm, idx, c.v, 3) >= 0)
             pkts = c.v[0] & 0x1fffffff;
-        acl_log("diag idx=%d valid=%d dstip(f2[2])=0x%08x COUNTER_INDEX=%u MODE=%u "
-                "G_DROP=%u counter[idx]=%u", idx, valid, f2[2], cidx, cmode, gdrop, pkts);
+        /* dst-IP lives in f2[3] (top word of the 128-bit F2) — see acl_program_one, which
+         * writes f2[4]={0,0,0,dstip}. This readback printed f2[2] and so always showed
+         * 0x00000000, which reads as "the key was never programmed" and cost real debugging
+         * time (2026-07-21): the key was in fact correct. Read the same word we write. */
+        acl_log("diag idx=%d valid=%d dstip(f2[3])=0x%08x COUNTER_INDEX=%u MODE=%u "
+                "G_DROP=%u counter[idx]=%u", idx, valid, f2[3], cidx, cmode, gdrop, pkts);
     }
 
     /* Decisive scan: hits may land at a COUNTER_INDEX != our TCAM idx. Sweep the whole
@@ -262,19 +382,22 @@ void edged_acl_diag(void)
             if (cdk_xgs_mem_read(ACL_UNIT, PORT_TABm, prt, pt.v, 10) >= 0)
                 fe = PORT_TABm_FILTER_ENABLEf_GET(pt);
             if (cdk_xgs_mem_read(ACL_UNIT, FP_PORT_FIELD_SELm, prt, fs.v, 6) >= 0) {
-                acl_log("diag INGRESS port=%d FILTER_EN=%d PFS S6.F2=%u S7.F2=%u S8.F2=%u "
-                        "S9.F2=%u PAIR7_6=%u PAIR9_8=%u", prt, fe,
-                        FP_PORT_FIELD_SELm_SLICE6_F2f_GET(fs),
-                        FP_PORT_FIELD_SELm_SLICE7_F2f_GET(fs),
-                        FP_PORT_FIELD_SELm_SLICE8_F2f_GET(fs),
-                        FP_PORT_FIELD_SELm_SLICE9_F2f_GET(fs),
-                        FP_PORT_FIELD_SELm_SLICE7_6_PAIRINGf_GET(fs),
-                        FP_PORT_FIELD_SELm_SLICE9_8_PAIRINGf_GET(fs));
+                acl_log("diag INGRESS port=%d FILTER_EN=%d PFS S4[F1=%u F2=%u F3=%u] "
+                        "S5[F1=%u F2=%u F3=%u] PAIR5_4=%u", prt, fe,
+                        FP_PORT_FIELD_SELm_SLICE4_F1f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE4_F2f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE4_F3f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE5_F1f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE5_F2f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE5_F3f_GET(fs),
+                        FP_PORT_FIELD_SELm_SLICE5_4_PAIRINGf_GET(fs));
             } else {
                 acl_log("diag INGRESS port=%d FILTER_EN=%d PFS read FAILED", prt, fe);
             }
         }
     }
+
+    l3_fwd_diag();   /* HW-L3-forward state: egress gates + Nexus neighbor entry */
 }
 
 /* Invalidate every ACL entry we programmed (VALID=0), so a reload rebuilds cleanly. */
@@ -283,8 +406,11 @@ void edged_acl_reset(void)
     FP_TCAMm_t t;
     int i;
     FP_TCAMm_CLR(t);            /* VALID=0 -> entry disabled */
-    for (i = 0; i < acl_n; i++)
-        (void)WRITE_FP_TCAMm(ACL_UNIT, acl_idx_used[i], t);          /* single-wide: one line */
+    for (i = 0; i < acl_n; i++) {
+        int idx = acl_idx_used[i];
+        (void)WRITE_FP_TCAMm(ACL_UNIT, idx, t);         /* primary (slice 4)   */
+        (void)WRITE_FP_TCAMm(ACL_UNIT, idx + 256, t);   /* secondary (slice 5) */
+    }
     acl_n = 0;
 }
 
@@ -348,6 +474,21 @@ static void acl_gm_map_init(void)
  * being initialized, the IFP global-mask lookup hits uninitialized entries and NO FP rule
  * ever matches (match-any reads counter=0). This is an OPERATION, not a register value —
  * which is why register replication never reproduced it. Init all 2048 entries to 0. */
+/* Init ONLY FP_GLOBAL_MASK_TCAM (all 2048) — "THE operation" the SDK's
+ * _soc_trident_misc_init does that OpenMDK skips ("Must clear FP_GLOBAL_MASK_TCAM
+ * ... without it NO FP rule ever matches"). Unlike acl_clear_global_mask() this
+ * does NOT touch FP_TCAM/FP_POLICY, so cumulus_replicate's FP traps + forwarding
+ * survive. Our per-entry FP_GLOBAL_MASK_TCAM is re-written afterward. */
+static void acl_init_gmask_only(void)
+{
+    FP_GLOBAL_MASK_TCAMm_t e;
+    int i;
+    FP_GLOBAL_MASK_TCAMm_CLR(e);
+    for (i = 0; i <= 2047; i++)
+        (void)WRITE_FP_GLOBAL_MASK_TCAMm(ACL_UNIT, i, e);
+    acl_log("FP_GLOBAL_MASK_TCAM initialized (2048 entries; FP_TCAM/POLICY preserved)");
+}
+
 static void acl_clear_global_mask(void)
 {
     int i;
@@ -388,7 +529,109 @@ static void acl_ifp_pipeline_enable(void)
         ING_EN_EFILTER_BITMAPm_BITMAPf_SET(e, ones);     /* filter enabled on all ports */
         (void)WRITE_ING_EN_EFILTER_BITMAPm(ACL_UNIT, 0, e);
     }
+    /* NOTE: ING_CONFIG_2=0x1ff (a REGDIFF gap the SDK sets for BCM56846) was tried here
+     * and BROKE box->Nexus forwarding (its USE_VLAN_ING_PORT_BITMAP bit needs subsystems
+     * edged's partial init lacks) WITHOUT enabling the IFP match. Reverted — not the gate. */
     acl_log("IFP pipeline enable: IFP_BYPASS=0 + ING_EN_EFILTER_BITMAP=all-ports");
+}
+
+/* Stand up the DOUBLE-WIDE dst-IP group on slices 4+5 — the exact control surface the
+ * Cumulus register-diff proved (only 3 registers change): FP_PORT_FIELD_SEL (per port:
+ * both-half selcodes + SLICE5_4_PAIRING=1), FP_SLICE_KEY_CONTROL (secondary DstClass),
+ * FP_SLICE_ENABLE (enable + LOOKUP-enable BOTH slices). RMW everywhere so the trap slices
+ * cumulus_replicate set up are preserved. Selcodes verbatim from the capture:
+ *   slice4 (primary):   F1=5  F2=1  F3=7
+ *   slice5 (secondary): F1=0xc F2=5 F3=0xa , SLICE_5_DST_CLASS_ID_SEL=1 */
+/* IFP key-generation qualifier remap tables. The SDK's _bcm_field_trx_tcp_ttl_tos_init
+ * (trident field_init) fills TCP_FN[0-63], TTL_FN[0-255], TOS_FN[0-255] with an identity map
+ * (FN0=FN1=index); OpenMDK never does, leaving them all-zero. These feed the IFP key
+ * generator — a zeroed remap makes it build a key that can't match, so the lookup never fires
+ * (counter=0 even with a correct entry + wide-open gate, observed 2026-07-17). Fill identity,
+ * exactly as the SDK does. */
+/* DIAGNOSTIC (gated on /etc/edged/acl_close_gaps): write the three registers the FPREG diff
+ * found differing from working Cumulus — ING_CONFIG_2=0x1ff, VFP_KEY_CONTROL=0x3, and
+ * ING_CONFIG_64 |= 0x20800000. Their semantics look non-IFP (ARP/VFP/general-ingress), so this
+ * is a last long-shot; the CDK register IDs equal the SOC addresses on this OpenMDK build, so
+ * write by raw address. */
+static void acl_close_reg_gaps(void)
+{
+    uint32_t v;
+    v = 0x00000003; (void)cdk_xgs_reg32_write(ACL_UNIT, 0x04180621, &v); /* VFP_KEY_CONTROL */
+    v = 0x000001ff; (void)cdk_xgs_reg32_write(ACL_UNIT, 0x01180602, &v); /* ING_CONFIG_2    */
+    v = 0; (void)cdk_xgs_reg32_read(ACL_UNIT, 0x01180600, &v);
+    v |= 0x20800000; (void)cdk_xgs_reg32_write(ACL_UNIT, 0x01180600, &v); /* ING_CONFIG_64 lo */
+    acl_log("close_reg_gaps: VFP_KEY_CONTROL=0x3 ING_CONFIG_2=0x1ff ING_CONFIG_64|=0x20800000");
+}
+
+static void acl_init_fn_tables(void)
+{
+    int i;
+    for (i = 0; i <= 63; i++) {
+        TCP_FNm_t e; TCP_FNm_CLR(e);
+        TCP_FNm_FN0f_SET(e, i); TCP_FNm_FN1f_SET(e, i);
+        (void)WRITE_TCP_FNm(ACL_UNIT, i, e);
+    }
+    for (i = 0; i <= 255; i++) {
+        TTL_FNm_t t; TTL_FNm_CLR(t);
+        TTL_FNm_FN0f_SET(t, i); TTL_FNm_FN1f_SET(t, i);
+        (void)WRITE_TTL_FNm(ACL_UNIT, i, t);
+        { TOS_FNm_t o; TOS_FNm_CLR(o);
+          TOS_FNm_FN0f_SET(o, i); TOS_FNm_FN1f_SET(o, i);
+          (void)WRITE_TOS_FNm(ACL_UNIT, i, o); }
+    }
+    acl_log("IFP FN tables inited: TCP_FN[0-63] TTL_FN/TOS_FN[0-255] identity (key-gen arm)");
+}
+
+static void acl_setup_doublewide(void)
+{
+    int p, n = 0;
+
+    /* FP_PORT_FIELD_SEL per ingress port: selcodes for both halves + the pairing bit.
+     * edged addresses this memory by chip port (same as PORT_TAB/FILTER_ENABLE above),
+     * so cover every port 0..MAX — a transit packet may ingress on any front port. */
+    for (p = 0; p <= FP_PORT_FIELD_SELm_MAX; p++) {
+        FP_PORT_FIELD_SELm_t fs;
+        FP_PORT_FIELD_SELm_CLR(fs);
+        if (cdk_xgs_mem_read(ACL_UNIT, FP_PORT_FIELD_SELm, p, fs.v, 6) < 0) continue;
+        /* The user dst-IP ingress drop group is GID 3 = virtual slices 8,9
+         * (-> physical slices 6,7 via FP_SLICE_MAP), verified in the ACL capture
+         * (static_port_field_sel.txt). Selcodes verbatim: slice8 F1=5/F2=1/F3=7,
+         * slice9 F1=0xc/F2=5/F3=0xa, SLICE9_8_PAIRING=1. */
+        FP_PORT_FIELD_SELm_SLICE8_F1f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE8_F2f_SET(fs, 1);
+        FP_PORT_FIELD_SELm_SLICE8_F3f_SET(fs, 7);
+        FP_PORT_FIELD_SELm_SLICE9_F1f_SET(fs, 0xc);
+        FP_PORT_FIELD_SELm_SLICE9_F2f_SET(fs, 5);
+        FP_PORT_FIELD_SELm_SLICE9_F3f_SET(fs, 0xa);
+        FP_PORT_FIELD_SELm_SLICE9_8_PAIRINGf_SET(fs, 1);
+        if (WRITE_FP_PORT_FIELD_SELm(ACL_UNIT, p, fs) >= 0) n++;
+    }
+
+    /* FP_SLICE_KEY_CONTROL[0]: DstClass select for the secondary slice 9 (RMW). */
+    {
+        FP_SLICE_KEY_CONTROLm_t kc;
+        FP_SLICE_KEY_CONTROLm_CLR(kc);
+        if (cdk_xgs_mem_read(ACL_UNIT, FP_SLICE_KEY_CONTROLm, 0, kc.v, 4) >= 0) {
+            FP_SLICE_KEY_CONTROLm_SLICE_9_DST_CLASS_ID_SELf_SET(kc, 1);
+            (void)WRITE_FP_SLICE_KEY_CONTROLm(ACL_UNIT, 0, kc);
+        }
+    }
+
+    /* FP_SLICE_ENABLE: enable + LOOKUP-enable BOTH slices 4 and 5 (RMW-OR). Two distinct
+     * bit-fields: SLICE_ENABLE_SLICE_n = bit n, LOOKUP_ENABLE_SLICE_n = bit 10+n. The
+     * register-diff showed LOOKUP-enable is the bit that decides consult-vs-ignore; a
+     * paired slice with its LOOKUP bit clear is written but never looked up. */
+    {
+        FP_SLICE_ENABLEr_t se;
+        uint32_t v = 0;
+        cdk_xgs_reg32_read(ACL_UNIT, FP_SLICE_ENABLEr, &v);   /* for the log below */
+        v = 0x000e33ff;   /* Cumulus EXACT: SLICE_ENABLE all + LOOKUP_ENABLE 2,3,7,8,9
+                           * (clears the stray LOOKUP_SLICE_6 bit that read back as 0xf33ff) */
+        FP_SLICE_ENABLEr_CLR(se);
+        FP_SLICE_ENABLEr_SET(se, v);
+        (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
+        acl_log("doublewide: FP_SLICE_ENABLE=0x%08x, PFS pairing on %d ports", v, n);
+    }
 }
 
 int edged_acl_load(const char *path)
@@ -398,6 +641,7 @@ int edged_acl_load(const char *path)
     FILE *f = fopen(path, "r");
     char line[256];
     int nr = 0, nb = 0, i, j, done = 0, skipped = 0;
+    int fp_mode, fp_n = 0;
 
     if (!f) { syslog(LOG_INFO, "ACL: no %s (none configured)", path); return 0; }
     while (fgets(line, sizeof(line), f)) {
@@ -421,7 +665,7 @@ int edged_acl_load(const char *path)
             memset(&rules[nr], 0, sizeof(rules[nr]));
             strncpy(rules[nr].name, name, 31);
             rules[nr].seq  = atoi(t2);
-            rules[nr].deny = !strcmp(act, "deny");
+            rules[nr].deny = !strcmp(act, "deny") ? 1 : (!strcmp(act, "copy") ? 2 : 0);
             strncpy(rules[nr].dst, ds, sizeof(rules[nr].dst) - 1);
             proto_any = (!strcmp(pr, "ip") || !strcmp(pr, "any") || !strcmp(pr, "all"));
             src_any   = (!strcmp(sr, "any") || !strcmp(sr, "0.0.0.0/0"));
@@ -431,46 +675,42 @@ int edged_acl_load(const char *path)
     }
     fclose(f);
 
-    /* Program applied+supported rules in ascending seq order (lower seq -> lower
-     * index -> higher FP precedence), skipping unsupported ones with a warning. */
-    edged_acl_reset();
-    {   /* FP_SLICE_ENABLE = 0x000f73ff: slices 0-9 enabled + FP_LOOKUP_ENABLE on phys
-         * 2,3,6,7,8,9 (Cumulus set) PLUS bit 14 = FP_LOOKUP_ENABLE_SLICE_4 — our
-         * single-wide ACL slice. Without bit 14 the slice-4 entries are never consulted. */
-        FP_SLICE_ENABLEr_t se;
-        FP_SLICE_ENABLEr_CLR(se);
-        FP_SLICE_ENABLEr_SET(se, 0x000f73ff);
-        (void)WRITE_FP_SLICE_ENABLEr(ACL_UNIT, se);
+    /* ── Program applied rules via the L3 datapath (NOT the FP) ──────────────────
+     * The IFP/FP lookup is not armed by OpenMDK's init on this chip (exhaustively
+     * confirmed 2026-07-14 — every FP register+memory matches Cumulus yet the lookup
+     * never fires). The L3 forwarding path works, so a dst-IP deny is programmed as
+     * an L3 DST_DISCARD entry (l3_v4_deny_add): the chip's L3 lookup drops routed
+     * traffic to the dst. This touches NEITHER the FP nor the L2_USER_ENTRY CPU-punt,
+     * so it can't break forwarding or the control plane. deny -> a DST_DISCARD entry;
+     * permit -> nothing (permit is the default; a more-specific /32 permit would win
+     * by L3 longest-prefix-match). Scope: L3-routed/transit traffic, global ingress.
+     * The FP double-wide machinery (acl_program_one/acl_setup_doublewide/...) is kept
+     * for if/when the IFP is ever armed, but is not called on this path. */
+    /* FP silicon-drop path (gated on /etc/edged/acl_fp): program each dst-IP deny
+     * as a double-wide Ingress Field Processor Drop entry (slices 4+5) — the way
+     * Cumulus does it (act=Drop @ DstIp). Un-armed pre-coherent-set; the coherent
+     * soc_init set may now arm the FP lookup (as it armed the L3 lookup). Arm the
+     * full recipe once, then one entry per deny. L3 hybrid runs alongside so the
+     * ACL still works if the FP doesn't fire; rdbgc1 tells them apart (FP -> chip
+     * drop / rdbgc1 climbs; hybrid -> CPU punt / rdbgc1=0). */
+    fp_mode = (access("/etc/edged/acl_fp", F_OK) == 0);
+    l3_v4_deny_reset();
+    if (fp_mode) {
+        edged_acl_reset();          /* invalidate any prior FP entries */
+        acl_gm_map_init();          /* IFP global-mask logical->phys port map */
+        acl_init_fn_tables();       /* TCP_FN/TTL_FN/TOS_FN identity — IFP key-gen tables the
+                                     * SDK field_init fills but OpenMDK skips (key-gen arm) */
+        if (access("/etc/edged/acl_close_gaps", F_OK) == 0)
+            acl_close_reg_gaps();   /* diagnostic: replicate the 3 FPREG-diff register gaps */
+        acl_init_gmask_only();      /* init FP_GLOBAL_MASK_TCAM (the SDK "operation"
+                                     * without which no FP rule matches) — but NOT
+                                     * FP_TCAM/POLICY, so forwarding + traps survive */
+        acl_enable_port_filter();   /* PORT_TAB.FILTER_ENABLE all ports */
+        acl_ifp_pipeline_enable();  /* IFP_BYPASS=0 + ING_EN_EFILTER_BITMAP */
+        acl_setup_doublewide();     /* slices 8+9 pairing/selcodes (GID 3 recipe) */
+        acl_log("FP mode ON: double-wide IFP dst-IP drop armed (slices 8/9)");
     }
-    acl_enable_port_filter();               /* the missing per-port IFP enable */
-    acl_gm_map_init();                      /* the missing IFP global-mask port map */
-    acl_clear_global_mask();                /* the missing FP_GLOBAL_MASK_TCAM init */
-    acl_ifp_pipeline_enable();              /* the missing IFP stage enable (bypass+filter) */
-
-    /* ── SLICE GEOMETRY PROBE ────────────────────────────────────────────────────
-     * If a rule named "probe" is applied, write a match-ALL count entry at base+50 of
-     * every EVEN physical slice (0,2,4,6); their paired secondaries (base+256) land in
-     * the odd slices (1,3,5,7), so no two probe entries collide. Under real IPv4
-     * traffic the counter-scan (SIGUSR1) then shows WHICH physical slice the IFP
-     * actually consults — resolving the virtual-vs-physical FP_TCAM indexing that has
-     * blocked this feature for the whole project. Non-destructive (offset 50 clears the
-     * low-offset traps; permit = no drop). */
-    {
-        int pi;
-        for (pi = 0; pi < nr; pi++) if (!strcmp(rules[pi].name, "probe")) break;
-        if (pi < nr) {
-            int s;
-            for (s = 0; s <= 6 && acl_n < ACL_MAX; s += 2) {
-                int pidx = s * 256 + 50;
-                acl_program_one(ACL_UNIT, pidx, 0, 0, 0);   /* match-all, count-only */
-                acl_idx_used[acl_n++] = pidx;
-            }
-            acl_log("SLICE PROBE: match-all count entries at even-slice bases "
-                    "50(s0)/562(s2)/1074(s4)/1586(s6) — scan counters to find live slice");
-        }
-    }
-
-    while (acl_n < ACL_MAX) {
+    while (1) {
         int best = -1;
         for (i = 0; i < nr; i++) {
             if (rules[i].seq < 0) continue;                     /* already taken */
@@ -482,10 +722,28 @@ int edged_acl_load(const char *path)
         if (rules[best].supported) {
             uint32_t ip, mask;
             if (acl_cidr(rules[best].dst, &ip, &mask) == 0) {
-                int idx = ACL_IDX_BASE + acl_n;
-                acl_program_one(ACL_UNIT, idx, ip, mask, rules[best].deny);
-                acl_idx_used[acl_n++] = idx;
-                done++;
+                if (rules[best].deny == 1) {                    /* deny -> L3 DST_DISCARD */
+                    if (l3_v4_deny_add(ip, mask) == 0) done++;
+                    if (fp_mode && fp_n < ACL_MAX) {            /* + FP silicon drop */
+                        int idx = 1536 + fp_n;   /* physical slice 6 (virtual 8) */
+                        acl_program_one(ACL_UNIT, idx, ip, mask, 1);
+                        acl_idx_used[acl_n++] = idx;
+                        fp_n++;
+                    }
+                } else if (rules[best].deny == 2 && fp_mode && fp_n < ACL_MAX) {
+                    /* DIAGNOSTIC "copy": program an FP COPY_TO_CPU entry (mask=0
+                     * => match-any IPv4). If its FP_COUNTER increments (or copies
+                     * hit the CPU), the IFP stage IS running -> the dst-IP drop's
+                     * key is the issue; if it stays 0, the whole IFP stage is dead. */
+                    int idx = 1536 + fp_n;
+                    acl_program_one(ACL_UNIT, idx, ip, mask, 2);
+                    acl_idx_used[acl_n++] = idx;
+                    fp_n++;
+                    done++;
+                } else {                                        /* permit: default */
+                    acl_log("rule %s seq %d: permit (default) — no L3 entry needed",
+                            rules[best].name, rules[best].seq);
+                }
             }
         } else {
             syslog(LOG_WARNING, "ACL %s seq %d: 5610 v1 matches dst-IP only "
@@ -494,9 +752,9 @@ int edged_acl_load(const char *path)
         }
         rules[best].seq = -1;                                    /* mark taken */
     }
-    syslog(LOG_INFO, "ACL: installed %d FP entr%s from %s (%d skipped, dst-IP only)",
+    syslog(LOG_INFO, "ACL: installed %d L3 dst-IP den%s from %s (%d skipped)",
            done, done == 1 ? "y" : "ies", path, skipped);
-    acl_log("load %s: %d rules, %d applied-bindings -> %d installed, %d skipped",
+    acl_log("load %s: %d rules, %d applied-bindings -> %d L3 denies, %d skipped",
             path, nr, nb, done, skipped);
     return done;
 }

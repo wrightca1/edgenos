@@ -21,11 +21,21 @@ files:
   - src: edgenos/platform/accton-as5610-52x/config/config.bcm
     dst: /etc/edged/config.bcm
     mode: "0644"
+  - src: edgenos/core/datapath/config/journald-datapath.conf
+    dst: /etc/systemd/journald.conf.d/30-edgenos-datapath.conf
+    mode: "0644"
   - src: edgenos/platform/accton-as5610-52x/services/edged.service
     dst: /etc/systemd/system/edged.service
     mode: "0644"
 
 hooks:
+  preinst: |
+    #!/bin/sh
+    # The payload overwrites /usr/sbin/edged, and the kernel refuses to write a
+    # binary that is currently executing (ETXTBSY) -- so a live upgrade died in
+    # extract_payload before postinst ever got the chance to restart it. Stop
+    # the daemon first; postinst brings it back.
+    systemctl stop edged 2>/dev/null || true
   postinst: |
     #!/bin/sh
     # Reload + (re)start the datapath after a live install.

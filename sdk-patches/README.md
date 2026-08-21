@@ -18,3 +18,85 @@ Skipping it lets `soc_init` proceed past the MIIM (the PCIe link is already up
 via edged's kernel BDE) and makes SDK reset attempts non-fatal/recoverable. This
 is the one SDK patch worth keeping; see `docs/acl-5610-double-wide-fp.md` and the
 `project_acl_soc_init_pathA_deadend` memory for the full IFP-bring-up story.
+
+## 0002-soc_reset_bcm56840_a0-skip-when-skip_reset.patch (WIP — hybrid bring-up)
+Early-return out of `soc_reset_bcm56840_a0()` when `soc_skip_reset` is set. Part of
+the **hybrid** IFP bring-up (feature/5610-bde-mmap-intr): edged's bmd_init brings the
+chip fully up (LCPLLs locked, SBUS/blocks out of reset, SCHAN working — and it STAYS
+live/SCHAN-readable after edged exits), then the SDK runs `soc_init` on the live chip
+with all reset skipped so it doesn't unlock the PLLs / rewrite the SBUS ring-map (which
+kills the working SCHAN). PROVEN: with this patch `soc_init` gets past `soc_reset`
+preserving edged's SCHAN. REMAINING BLOCKER: the per-port XLPORT serdes init (fatal
+`XLPORT_XGXS_CTRL_REG` reads) runs BEFORE `misc_init` and times out on the port blocks
+edged didn't bring up (edged links only swp1/swp2). Next: skip/tolerate the whole port
+init (it's irrelevant to the FP engine) to reach `misc_init`/`bcm_field_init`. Not yet
+end-to-end; see memory `project_acl_soc_init_pathA_deadend`.
+
+## 0003-serdes-reset-skip-when-skip_reset.patch (WIP — hybrid)
+Early-return from the 5 per-port serdes-reset helpers in `src/soc/common/drv.c`
+(`soc_xgxs_reset`, `soc_xgxs_in_reset`, `soc_wc_xgxs_reset`, `soc_wc_xgxs_in_reset`,
+`soc_wc_xgxs_power_down`) when `soc_skip_reset` is set. These do fatal
+`XLPORT_XGXS_CTRL_REG` reads on port blocks edged didn't bring up (edged links only
+swp1/swp2) → SchanTimeOut. Ports are irrelevant to the FP engine. **With 0002+0003,
+`init soc` COMPLETES cleanly on edged's live chip (no SchanTimeOut) — the reset+port
+wall that blocked every prior approach is broken.**
+
+## 0004-trident-misc-memclear-skip.patch (WIP — hybrid)
+Three skips in `_soc_trident_misc_init` / helpers (`src/soc/esw/trident.c`) when
+`soc_skip_reset` is set — edged already initialized these: `_soc_trident_clear_all_memory`,
+the `FP_GLOBAL_MASK_TCAM` `soc_mem_clear`, and `_soc_trident_port_mapping_init`. Each was a
+misc_init op that timed out on the live chip.
+
+## Hybrid status / remaining wall (2026-07-12)
+With 0002+0003, **`init soc` completes cleanly** on edged's live chip. `init all` gets deep
+into `misc_init` but hits two BDE-level limits that patches can't paper over:
+1. **MMU/EPIPE register SCHAN writes time out** (e.g. addr 0x0c380001 MMU block, 0x0e170000
+   EPIPE) — the SDK's internal SBUS ring map (from the skipped `soc_reset_bcm56840_a0`)
+   doesn't match the chip's live ring map, so SCHAN ops to those blocks route wrong.
+2. **Memory clears use TableDMA** (`_soc_xgs3_mem_dma`, e.g. FP_GLOBAL_MASK_TCAM) which
+   times out — the polled custom BDE doesn't signal DMA completion.
+Tolerating SCHAN timeouts globally CORRUPTS SCHAN ("invalid S-Channel reply") — reverted.
+=> To finish the hybrid, the BDE needs real TableDMA completion + the SBUS ring map must be
+reconciled (set CMIC_SBUS_RING_MAP to the SDK's expectation without the disruptive full
+reset, or align edged's map). This is the genuine Option-2 BDE work, now precisely scoped.
+See memory `project_acl_soc_init_pathA_deadend`.
+
+## Hybrid progress update (2026-07-12, session 2)
+Config that advances furthest (stop edged first, then bcm.user):
+`os=unix phy_null=1 *_intr_enable=0 polled_irq_mode=1 soc_skip_reset=1
+ table_dma_enable=0 tslam_dma_enable=0 mem_cache_enable=0`
+- **SBUS timeout (0002 now writes CMIC_SBUS_TIMEOUT=0x13500)**: edged leaves it at
+  0x7d0 which is too low for MMU/EPIPE SCHAN ops. Verified it holds through init.
+- **table_dma_enable=0 + tslam_dma_enable=0**: memory ops fall back to SCHAN PIO,
+  eliminating the `_soc_xgs3_mem_dma` TableDmaTimeOut on the polled BDE.
+- **mem_cache_enable=0**: skips the FP_GLOBAL_MASK_TCAM SW-cache full-memory read.
+- Together these took misc_init from 111 SchanTimeouts + "invalid S-Channel reply"
+  (SCHAN desync) down to ~6, desync GONE.
+REMAINING WALL: misc_init's MMU/EPIPE register ops (addr 0x0c380001 MMU, 0x0e170000
+EPIPE) time out **non-deterministically** — same op passes one run, times out the
+next, even with CMIC_SBUS_TIMEOUT confirmed at 0x13500. This is marginal SCHAN
+reliability to blocks edged only partially brought up (the full reset that fully
+inits them is exactly what we skip). Fixing it likely needs either bringing those
+blocks fully out of reset without disturbing edged's SCHAN, or a BDE-level SCHAN
+completion/retry that tolerates the marginal timing. See memory
+`project_acl_soc_init_pathA_deadend`.
+
+## Hybrid — FUNDAMENTAL WALL identified (2026-07-13, session 3)
+Root cause of the remaining misc_init timeouts, now pinned: **soc_init reconfigures the
+actively-running datapath-scheduling blocks (IARB ingress arbiter, MMU traffic manager),
+and those blocks refuse SCHAN config writes while live.** Evidence:
+- Failing op decoded: SCHAN addr 0x0e170000 = `IARB_MAIN_TDM.ipipe0` (base 0x170000),
+  written by `_soc_trident_pg_tdm_init` / the IARB_MAIN_TDM loop.
+- Direct oracle access on the live chip: EGR_ING_PORT (idle egress mem) read+write BOTH
+  work; IARB_MAIN_TDM read works; the misc_init IARB **write** times out.
+- `schan_timeout_usec=2000000` (2s SW poll) does NOT help -> genuine failure, not marginal
+  timing. SCHAN retry (8x) and skip-schan-reset also don't help.
+- 0004 now also skips the IARB/TDM setup block, but the count stays ~16 because MMU-init /
+  other running-block writes have many more such ops.
+CONCLUSION: you cannot run the SDK's datapath reconfiguration (IARB/MMU scheduling) on a
+chip whose datapath is already live — those blocks won't accept config writes without being
+quiesced/reset, which is the reset we skip to preserve edged's PLLs. soc_init COMPLETES up
+to this point; the FP-engine enable we want is in bcm_field_init (after soc_init). Reaching
+it requires either quiescing IARB/MMU (=~reset, breaks edged) or making the running-block
+writes cleanly non-fatal without the SCHAN desync the naive tolerate caused. See memory
+`project_acl_soc_init_pathA_deadend`.

@@ -1,0 +1,59 @@
+--- a/src/soc/esw/trident.c
++++ b/src/soc/esw/trident.c
+@@ -5872,6 +5872,13 @@
+ #endif
+     };
+ 
++    /* AS5610 hybrid: on soc_skip_reset, edged already initialized all chip memories
++     * (forwarding is live and FP_TCAM reads/writes work). The SDK's HW memory-init
++     * below polls a per-pipe done bit that times out on this custom BDE, and it would
++     * wipe edged's live tables anyway. Skip it so misc_init can proceed to the FP/pipe
++     * config and bcm_field_init. */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
++
+     si = &SOC_INFO(unit);
+ 
+     /*
+@@ -6007,6 +6014,9 @@
+ int
+ _soc_trident_port_mapping_init(int unit)
+ {
++    /* AS5610 hybrid: edged already set up port mappings (forwarding is live); the SDK's
++     * MMU/EGR mapping-register writes here time out on the live chip. Skip on skip_reset. */
++    if (soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) { return SOC_E_NONE; }
+     soc_info_t *si;
+     soc_mem_t mem;
+     uint32 rval;
+@@ -7899,9 +7909,12 @@
+                                MEM_BLOCK_ALL, TRUE));
+     }
+ 
+-    if (!SOC_IS_RELOADING(unit) && !SOC_WARM_BOOT(unit)) {
++    if (!SOC_IS_RELOADING(unit) && !SOC_WARM_BOOT(unit) &&
++        !soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) {
+         /* Must clear FP_GLOBAL_MASK_TCAM after port to pipe mappings
+          * are initialized. */
++        /* AS5610 hybrid: this DMA-backed memory clear times out on the polled BDE;
++         * edged already initialized FP_GLOBAL_MASK_TCAM. Skip it on skip_reset. */
+         SOC_IF_ERROR_RETURN
+             (soc_mem_clear(unit, FP_GLOBAL_MASK_TCAMm, COPYNO_ALL, TRUE));
+     }
+@@ -8009,6 +8022,10 @@
+     }
+ 
+     /* Setup TDM within each port group */
++    /* AS5610 hybrid: the IARB/TDM port-scheduling tables are actively arbitrating on
++     * edged's live chip; config writes to a running IARB time out (direct reads work).
++     * edged already set the schedule up. Skip the whole TDM/IARB setup on skip_reset. */
++    if (!soc_property_get(unit, spn_SOC_SKIP_RESET, 0)) {
+     SOC_IF_ERROR_RETURN(_soc_trident_pg_tdm_init(unit));
+ 
+     /* Setup main TDM between each port group */
+@@ -8033,6 +8050,7 @@
+     }
+     soc_reg_field_set(unit, IARB_TDM_CONTROLr, &rval, TDM_WRAP_PTRf, count);
+     SOC_IF_ERROR_RETURN(WRITE_IARB_TDM_CONTROLr(unit, rval));
++    } /* end !skip_reset IARB/TDM setup (AS5610 hybrid) */
+ 
+     /* Setup EGR_PERQ_XMT_COUNTERS_BASE_ADDR for each port */
+     _soc_trident_egr_perq_xmt_counters_init(unit);
