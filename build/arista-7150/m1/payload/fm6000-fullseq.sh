@@ -448,6 +448,12 @@ if [ "${GENBLK:-1}" = "1" ]; then
 		# ⚠ gen_list_early: scheduler credit must be set before ports forward.
 		[ "${ESCHEDCFG:-1}" = "1" ] && [ -x "$BIN/fm6000_esched" ] && \
 			gen_list_early fm6000_esched ESCHED-cfg
+		# MOD per-front-panel-port frame settings: MIN_LENGTH = 64 bytes and
+		# TX_PORT_TAG = 0 (no egress tag), for the 52 data ports. A rule, not a
+		# table. Byte-verified 104/104 with the derived port set checked both
+		# ways (asic/fm6000/tools/gen_modports.py).
+		[ "${MODPORTS:-1}" = "1" ] && [ -x "$BIN/fm6000_modports" ] && \
+			gen_list_early fm6000_modports MOD-ports
 		# ERL: the egress rate limiter, INCLUDING its two-phase init. This is
 		# the first block with no write-once part at all -- every one of its 967
 		# addresses is written twice, 636 with two different values -- so it is
