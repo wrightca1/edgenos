@@ -17,6 +17,30 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 TOP=$(cd "$HERE/.." && pwd)
 IMG=${IMG:-debian:bullseye}
 
+# EdgeNOS diverges from stock OpenMDK in 13 files (the real port map, the XGS
+# packed-CMIC RX/TX DMA path that makes CPU punt fire, the Warpcore 40G fix).
+# OpenMDK is a gitignored vendor checkout, so those live as canonical copies in
+# newnos/patches/openmdk and are stamped back in by newnos's own script. Without
+# this a clean build produces a binary that links and then SEGVs on the first
+# bmd_rx_start -- stock dereferences the pkt argument edged passes as NULL.
+#
+# instpkgs.pl is non-idempotent and copies PKG/ masters into pkgsrc/ only when
+# pkgsrc/ is absent, so a changed patch set has to force the regeneration.
+APPLY=$TOP/newnos/scripts/apply-openmdk-patches.sh
+if [ -x "$APPLY" ]; then
+  BEFORE=$(find "$TOP/OpenMDK" -name '*.c' -newer "$APPLY" -print 2>/dev/null | md5sum)
+  (cd "$TOP/newnos" && sh "$APPLY" >/dev/null) || { echo "OpenMDK patch apply failed" >&2; exit 1; }
+  AFTER=$(find "$TOP/OpenMDK" -name '*.c' -newer "$APPLY" -print 2>/dev/null | md5sum)
+  if [ "$BEFORE" != "$AFTER" ]; then
+    echo "== OpenMDK patch set changed -> forcing a clean SDK regeneration =="
+    rm -rf "$TOP"/OpenMDK/*/pkgsrc/chip "$TOP"/OpenMDK/*/pkgsrc/arch \
+           "$TOP"/OpenMDK/*/pkgsrc/installed-chips "$HERE/output/sdk-build"
+  fi
+else
+  echo "warning: $APPLY not found — building against STOCK OpenMDK, which will" >&2
+  echo "         produce an edged that SEGVs in bmd_rx_start. See MIGRATION.md." >&2
+fi
+
 docker run --rm --network host -v "$TOP:/src" --entrypoint /bin/bash "$IMG" -c '
   set -e
   command -v powerpc-linux-gnu-gcc >/dev/null || { apt-get update -qq >/dev/null; \
