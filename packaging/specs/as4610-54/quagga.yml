@@ -7,6 +7,7 @@ files:
   - {src: edgecore-4610-54t/nos/datapath/routing/zebra-arm, dst: /opt/edgenos/zebra-arm, mode: "0755"}
   - {src: edgecore-4610-54t/nos/datapath/routing/ospfd-arm, dst: /opt/edgenos/ospfd-arm, mode: "0755"}
   - {src: edgecore-4610-54t/nos/datapath/routing/ospf6d-arm, dst: /opt/edgenos/ospf6d-arm, mode: "0755"}
+  - {src: edgenos/core/control-plane/config/sysctl-routing.conf, dst: /etc/sysctl.d/30-edgenos-routing.conf, mode: "0644"}
   - {src: edgenos/platform/accton-as4610-54/config/zebra.conf, dst: /etc/quagga/zebra.conf, mode: "0644"}
   - {src: edgenos/platform/accton-as4610-54/config/ospfd.conf, dst: /etc/quagga/ospfd.conf, mode: "0644"}
   - {src: edgenos/platform/accton-as4610-54/config/ospf6d.conf, dst: /etc/quagga/ospf6d.conf, mode: "0644"}
