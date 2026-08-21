@@ -1355,6 +1355,46 @@ and decide the FFU question.**
 write-once) -> SSCHED (291)~~ **DONE in alpha42** -> HASH (314) -> SAF (339) -> ESCHED (841) ->
 MOD (979) -> CM remainder (1,005) -> PARSER (1,164) -> L2L sweeper (1,357) -> ERL (1,934).
 
+★★ **THE BOOT CAN NOW RUN WITHOUT THE VENDOR FILE -- AND IT LINKS BUT DOES NOT
+FORWARD** (measured 2026-08-22, alpha55).
+
+Until now the entire bring-up was a TRANSFORMATION of `fwd4.txt`: `gen_list`
+filters our addresses out of the replay and splices our writes into its line
+stream. The generators were substitutions inside somebody else's sequence, so
+"98.6% of executed writes are ours" never meant the switch could boot without the
+file -- remove it and `init-m1` skipped the dataplane entirely.
+
+`fm6000-fullseq.sh` now has a **STANDALONE** mode (`STANDALONE=1`, or automatic
+when no replay is on flash) that runs all 41 generators directly by MMIO, in the
+order the splices already implied. `init-m1` attempts it instead of giving up.
+
+**Result of a boot with BOTH `fwd4.txt` and `fwd5.txt` absent:**
+
+    STANDALONE: ran 41 generators directly (0 non-zero, 0 absent)
+    final       et1=000008c0/00000940   et2=00000815/00000000
+    post-spico  et1=00000cc0/00000940   et2=000008c0/00000940   <- BOTH PORTS UP
+
+    edgenos-up.sh: kernel routes=5 (not 39), et1 rx=0
+    transit: 0 frames
+
+So **the link layer is fully ours** -- EPL, SerDes, PCS, both ports to clean lock
+with no vendor file anywhere -- **but forwarding is not**. No OSPF adjacency, no
+punted packets, nothing transits.
+
+**That settles a question this project could not previously answer.** The residual
+~1,800 writes are NOT merely runtime state that the hardware would regenerate;
+some of them are load-bearing for the forwarding path. The optimistic reading --
+"the sweeper runs itself, the bitmaps accumulate, so the residual does not matter"
+-- is now disproved for forwarding, while confirmed for link.
+
+**The next question is therefore precise and answerable:** which of the residual
+addresses does forwarding actually need? A bisect over the residual set, with
+transit as the oracle, would name them. That is a far smaller search than
+authoring blocks blind, and it is the shortest path to a replay-free dataplane.
+
+⚠ Restoring either replay file returns the box to normal (39 routes, transit 6/6),
+so this mode is safe to experiment with.
+
 ★ **RANK BY WRITE-ONCE ADDRESSES, NOT BY WRITE COUNT** (measured 2026-08-21).
 Ranking the remainder by size is misleading, because each block's existing
 generator already took its write-once addresses — so a small remainder is small

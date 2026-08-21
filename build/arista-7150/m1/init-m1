@@ -232,7 +232,19 @@ fi
 # to need it; evidence is still thin. See docs/ET2-COPPER-LINK.md.
 FWD=""
 for f in /mnt/flash/fwd4.txt /mnt/flash/fwd5.txt; do [ -f "$f" ] && { FWD="$f"; break; }; done
-if [ -n "$FWD" ] && [ -x /usr/bin/fm6000_coldreplay ] && \
+# ★ With no replay set on flash, attempt the bring-up ANYWAY, from our own
+# generators (fm6000-fullseq.sh STANDALONE). Previously a missing vendor file
+# meant the dataplane was skipped entirely, which made "how much of the replay do
+# we still need?" unanswerable -- the honest answer was "all of it", because the
+# whole sequence was a transformation of that file. Set STANDALONE=1 explicitly
+# to force it even when a replay IS present.
+#   /mnt/flash/standalone.conf -> force standalone
+[ -f /mnt/flash/standalone.conf ] && STANDALONE=1
+if [ -z "$FWD" ]; then
+    STANDALONE=1
+    echo "--- no replay set on flash: attempting STANDALONE bring-up from generators ---"
+fi
+if { [ -n "$FWD" ] || [ "${STANDALONE:-0}" = "1" ]; } && [ -x /usr/bin/fm6000_coldreplay ] && \
    [ -x /usr/lib/edgenos/platform/fm6000-fullseq.sh ]; then
     echo "--- FM6000 dataplane auto bring-up (replay $FWD, log /var/log/fm6000-fullseq) ---"
     # PACE is settable from flash so an experiment can change arms without a
@@ -244,7 +256,7 @@ if [ -n "$FWD" ] && [ -x /usr/bin/fm6000_coldreplay ] && \
     [ -r /mnt/flash/pace.conf ] && PACE=$(tr -dc 0-9 < /mnt/flash/pace.conf)
     [ -n "${PACE:-}" ] || PACE=1500000
     echo "    PACE=$PACE"
-    FWD="$FWD" PACE="$PACE" \
+    FWD="$FWD" PACE="$PACE" STANDALONE="${STANDALONE:-0}" \
         sh /usr/lib/edgenos/platform/fm6000-fullseq.sh > /var/log/fm6000-fullseq 2>&1
     grep -E 'PORT_STATUS|t=40s|DONE' /var/log/fm6000-fullseq | tail -3 | sed 's/^/    /'
     for p in "Et1 0xe3800 0xe3826" "Et2 0xe4000 0xe4026"; do

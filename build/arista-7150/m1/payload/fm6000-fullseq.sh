@@ -293,6 +293,68 @@ gen_after() {          # $1 = prefix to drop, $2 = generator, $3 = label
 	return 0
 }
 
+
+# ---- STANDALONE: run every generator directly, with no replay file ----------
+#
+# ★ WHY THIS EXISTS. Until now the whole bring-up was a TRANSFORMATION OF THE
+# VENDOR FILE: gen_list filters our addresses out of the replay and splices our
+# writes into its line stream at an anchor. That means the generators were
+# substitutions inside somebody else's sequence -- remove fwd4.txt and nothing
+# ran at all, however high the "provenance" number got. A 98.6% figure describes
+# how many of the executed writes are ours; it does NOT mean the switch can boot
+# without the file. This mode is what closes that gap.
+#
+# The order below is not invented. It is the order the splices already imply,
+# extracted from the gen_list/gen_list_early/gen_drop/gen_split calls in this
+# script, so a standalone boot performs the same blocks in the same sequence the
+# working boot does.
+#
+# ⚠ WHAT THIS DOES NOT DO. It does not supply the residual writes that no
+# generator covers (~1,800 at the time of writing: SBUS's indirect port, FFU's
+# multi-write remainder, and the monotonic bitmaps that accumulate as ports come
+# up). Much of that residual is runtime state which the hardware produces itself
+# once configured -- the L2L sweeper is the clearest case -- so the open question
+# this mode exists to ANSWER is how much of it actually matters at boot.
+# Treat a standalone boot as an experiment until it is shown to forward.
+STANDALONE_ORDER="
+fm6000_cminit fm6000_safinit fm6000_ffuinit fm6000_l2linit
+fm6000_parserinit fm6000_modinit fm6000_eplseq fm6000_l2arseq
+fm6000_l2arpre fm6000_l2arinit fm6000_mapperpre fm6000_mgmt2pre
+fm6000_hashinit fm6000_cmwm fm6000_mapper fm6000_smalltables
+fm6000_cmrest fm6000_parserfields fm6000_esched fm6000_modports
+fm6000_erl fm6000_sweeperinit fm6000_cmminit fm6000_monitorinit
+fm6000_statsarinit fm6000_eaclinit fm6000_laginit fm6000_glortinit
+fm6000_tbl3init fm6000_crmdrop fm6000_l3arinit fm6000_l3arslice1
+fm6000_l3arslice4 fm6000_l3arslice3 fm6000_l3arslice2 fm6000_l3artables
+fm6000_sweepinit fm6000_mgmt2init fm6000_eplinit fm6000_mapperinit
+fm6000_ffubstinit
+"
+run_standalone() {
+	_ran=0; _miss=0; _bad=0
+	for _t in $STANDALONE_ORDER; do
+		if [ -x "$BIN/$_t" ]; then
+			# ⚠ TWO ARGUMENT CONVENTIONS. The older tools take the BDF as a
+			# bare positional; the generators written later take "-b <bdf>"
+			# and answer a bare one with usage + exit 2. Passing the wrong
+			# form makes a generator look like it RAN when it did nothing --
+			# the first standalone boot had 14 of 41 silently no-op that way.
+			# Try the flag form, and fall back on exit 2 only.
+			$BIN/$_t -b $B >> $LOG 2>&1
+			_rc=$?
+			if [ "$_rc" -eq 2 ]; then
+				$BIN/$_t $B >> $LOG 2>&1
+				_rc=$?
+			fi
+			_ran=$((_ran + 1))
+			[ "$_rc" -ne 0 ] && { _bad=$((_bad + 1)); say "    $_t rc=$_rc"; }
+		else
+			_miss=$((_miss + 1))
+		fi
+	done
+	say "  STANDALONE: ran $_ran generators directly ($_bad non-zero, $_miss absent)"
+	return 0
+}
+
 CUR="$FWD"; NEXT=/tmp/fwd.a
 if [ "${GENBLK:-1}" = "1" ]; then
 	[ -x "$BIN/fm6000_cminit" ]  && gen_split '0011'  fm6000_cminit  CM
@@ -657,7 +719,14 @@ if [ "${SMALL_DIRECT:-1}" = "1" ]; then
 	done
 	say "  small write-once blocks applied directly"
 fi
-$BIN/fm6000_fullreplay "$CUR" $B ${PACE:-1500000} >> $LOG 2>&1; RC=$?
+# STANDALONE takes precedence, and a missing replay selects it automatically --
+# a boot with no vendor file should attempt the generators rather than do nothing.
+if [ "${STANDALONE:-0}" = "1" ] || [ ! -s "$CUR" ]; then
+	say "STEP5-ALT STANDALONE (no replay): generators only"
+	run_standalone; RC=$?
+else
+	$BIN/fm6000_fullreplay "$CUR" $B ${PACE:-1500000} >> $LOG 2>&1; RC=$?
+fi
 # ⚠ KEEP the generated replay. fm6000_fullreplay's progress counters index THIS
 # file, not /mnt/flash/fwd4.txt -- the generators filter blocks out and hand it a
 # rewritten copy. Deleting it made every op number in the in-replay Et2 trace
