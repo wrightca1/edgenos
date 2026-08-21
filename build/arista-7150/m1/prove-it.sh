@@ -24,8 +24,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 set -u
 
-SW="${SW:-10.1.1.77}"          # the 7150 under test
-PEER="${PEER:-10.1.1.238}"     # the independent neighbour (AS5610 / Cumulus)
+SW="${SW:-<switch>}"          # the 7150 under test
+PEER="${PEER:-<peer>}"     # the independent neighbour (AS5610 / Cumulus)
 OUT="${1:-}"
 [ "${1:-}" = "-o" ] && OUT="$2"
 
@@ -138,12 +138,12 @@ say "7. HARDWARE FORWARDING -- the TTL proves it is the ASIC, not software"
 echo "A /32 via the switch; the chip routes it back out and decrements TTL."
 peer '
 ip neigh replace 10.101.101.26 lladdr 44:4c:a8:31:5d:ab dev swp6
-ip route replace 10.22.1.99/32 via 10.101.101.26 dev swp6
-(timeout 14 tcpdump -i swp6 -n -v -c 4 "icmp and host 10.22.1.99" 2>/dev/null > /tmp/p.txt) &
-sleep 2; ping -c 1 -W 2 -t 64 10.22.1.99 >/dev/null 2>&1; sleep 13
+ip route replace <admin-net-host>/32 via 10.101.101.26 dev swp6
+(timeout 14 tcpdump -i swp6 -n -v -c 4 "icmp and host <admin-net-host>" 2>/dev/null > /tmp/p.txt) &
+sleep 2; ping -c 1 -W 2 -t 64 <admin-net-host> >/dev/null 2>&1; sleep 13
 echo "--- in, then out, captured on the NEIGHBOUR (ttl must drop by 1) ---"
 grep ttl /tmp/p.txt | head -2
-ip route del 10.22.1.99/32 via 10.101.101.26 dev swp6 2>/dev/null
+ip route del <admin-net-host>/32 via 10.101.101.26 dev swp6 2>/dev/null
 ip neigh del 10.101.101.26 dev swp6 2>/dev/null' 120
 
 say "8. THE ROUTES IN SILICON CAME FROM OSPF"

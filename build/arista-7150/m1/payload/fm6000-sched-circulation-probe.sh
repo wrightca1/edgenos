@@ -1,7 +1,7 @@
 #!/bin/sh
 # fm6000-sched-circulation-probe.sh — DECISIVE cold experiment: does the SSCHED ring circulate cold?
 #
-# Runs on the cold90 M1 probe shell (ssh root@10.1.1.77). Watchdog-safe (arms + pets + disarms).
+# Runs on the cold90 M1 probe shell (ssh root@<switch>). Watchdog-safe (arms + pets + disarms).
 # SSCHED-only diagnostic — does NOT read ESCHED/MCAST/MOD, so no off-bus-risk from the probe itself.
 #
 # Sequence: datasheet Table 4-1 boot init (memories writable + clocks up) -> InitSBus -> byte-exact

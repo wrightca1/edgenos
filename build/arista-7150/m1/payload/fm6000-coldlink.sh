@@ -13,7 +13,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 B=0000:02:00.0
-HOST=http://10.1.1.30:8001/fm6000link
+HOST=http://<mgmt-net-host>:8001/fm6000link
 LOG=/mnt/flash/coldlink.log
 
 : > $LOG

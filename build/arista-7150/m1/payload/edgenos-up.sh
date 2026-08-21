@@ -19,7 +19,7 @@ if pidof fm6000_portd >/dev/null 2>&1 && [ "${FORCE:-0}" != "1" ]; then
 	exit 1
 fi
 export LD_LIBRARY_PATH=/usr/lib
-B=http://10.1.1.30:8001
+B=http://<mgmt-net-host>:8001
 LOG=/tmp/edgenos-up.log; : > $LOG
 say(){ echo "[up] $*" | tee -a $LOG; }
 

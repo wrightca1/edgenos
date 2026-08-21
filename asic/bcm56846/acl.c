@@ -68,7 +68,7 @@ static void acl_log(const char *fmt, ...)
     fclose(lf);
 }
 
-/* "10.1.1.0/24" / "any" -> dst ip (host order, first octet = MSB) + mask. -1 = bad. */
+/* "<mgmt-net-host>/24" / "any" -> dst ip (host order, first octet = MSB) + mask. -1 = bad. */
 static int acl_cidr(const char *tok, uint32_t *ip, uint32_t *mask)
 {
     char buf[48], *slash;

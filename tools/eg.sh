@@ -1,4 +1,7 @@
 #!/bin/sh
+# Addresses are deliberately not baked in: this tree is published, and the lab
+# topology is not ours to publish. Export the host, or put it in a local
+# (gitignored) env file:  export EG_HOST=<addr>
 # eg.sh -- run a command on the 7150 under test (the "edge" box).
 #
 # Recreated 2026-08-20: this and p5.sh are referenced by transit-test.sh,
@@ -11,4 +14,4 @@
 exec sshpass -p "${EG_PASS:-arista}" ssh \
     -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive \
-    -o LogLevel=ERROR "root@${EG_HOST:-10.1.1.77}" "$@"
+    -o LogLevel=ERROR "root@${EG_HOST:?set EG_HOST to the 7150 under test}" "$@"

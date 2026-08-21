@@ -1961,7 +1961,7 @@ lane was in a different state than assumed.
 ### Also validated by accident
 
 `edgenos-up.sh` was run to restore the control plane, and the pinned mgmt route
-(`10.22.1.0/24 via 10.1.1.1 dev eth0 metric 5`) **held through `ospfd` installing its 34 routes** —
+(`<admin-net-host>/24 via <mgmt-net-host> dev eth0 metric 5`) **held through `ospfd` installing its 34 routes** —
 mgmt SSH survived where it previously died. That is the first live confirmation of the fix now in
 `init-m1`, which until this point had only been reasoned about.
 
@@ -2385,7 +2385,7 @@ demonstrably worked under EdgeNOS once.
   `001082a4  00010103 -> 03ed0103`. `0x03ed` is Et3's GLORT — the SGLORT splice. Unrelated to Et2.
   ⚠ Worth knowing on its own: **the shipped `fwd4.txt` is not a clean baseline**, it carries a
   hand-edited Et3 GLORT word.
-- **The far end.** `swp7` on the AS5610 (`10.1.1.238`, EdgeNOS on ppc) bounced down and up; it
+- **The far end.** `swp7` on the AS5610 (`<peer>`, EdgeNOS on ppc) bounced down and up; it
   returns to `LOWER_UP` immediately and Et2 does not move. ⚠ Its instant relock means that carrier
   report is not evidence of PCS lock — the same trap as the veth on Et3. Do not use it as a signal.
 - **Persistent state.** A full power cycle changes nothing, and the only flash difference is the one
@@ -3313,7 +3313,7 @@ EEPROM reader. On a running system it is disruptive.
 
 ### The remaining variable is the far end, and it is not measurable from here
 
-Et3 is cabled to `eth1` of the test system at `10.22.1.56`. That host is a **container**: both
+Et3 is cabled to `eth1` of the test system at `<console-host>`. That host is a **container**: both
 its `eth0` and `eth1` are veth pairs (`eth1@if15`, `ethtool` driver `veth`), so `eth1`'s
 `LOWER_UP` says nothing about the physical NIC — the real interface is the veth peer on the
 container host, which is not reachable from the container.

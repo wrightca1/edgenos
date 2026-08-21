@@ -32,7 +32,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 set -uo pipefail
 
-SW=${SW:-10.1.1.77}
+SW=${SW:-<switch>}
 PW=${PW:-arista}
 SSHO="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8"
 SSH="sshpass -p $PW ssh $SSHO root@$SW"

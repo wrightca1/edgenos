@@ -29,8 +29,8 @@ forwards on it — with no EOS involved anywhere.
 | Aboot loads unsigned SWI | ✅ | boots `edgenos-m1-clean2.swi`; no signature/TPM enforcement |
 | M1 kernel + initramfs | ✅ | busybox rootfs, 6.12.0, boots to shell in ~40 s |
 | Self-contained tool image | ✅ | 24 tools staged in `/usr/bin`; no runtime `wget` needed |
-| Mgmt Ethernet (tg3) | ✅ | 10.1.1.77 reachable, SSH via dropbear |
-| Serial console | ✅ | ttyS0 @9600 via 10.22.1.56 |
+| Mgmt Ethernet (tg3) | ✅ | <switch> reachable, SSH via dropbear |
+| Serial console | ✅ | ttyS0 @9600 via <console-host> |
 | SCD (FPGA) reg access | ✅ | `scdreg`, watchdog `0x0120`, power-cycle `0x7000<-0xdead` |
 | Boot-config self-revert | ✅ | `init-m1` rewrites boot-config → EOS each boot, so any unattended reboot lands on EOS |
 | Recovery when both lifelines die | ✅ | serial → Ctrl-C → `Aboot#` → rewrite boot-config. **Aboot has `wget`** |
@@ -113,15 +113,15 @@ down→up (`shutdown`/`no shutdown` — the "shut == cold" trick already proven 
 | ECMP | ⚠️ | group present and both NEXTHOP entries exist; **not yet exercised** (needs Et2 up) |
 | **OSPF** | ✅ | **Full adjacency with the AS5610, both sides confirming.** Complete routing table learned incl. a default route. Chain: ASIC → punt → TAP → kernel → ospfd → zebra → kernel FIB |
 | Port as a Linux netdev | ✅ | `fm6000_portd` — `et1` is a real interface; ping answered by the kernel stack |
-| FIB sync (kernel → ASIC) | ✅ | `fm6000_fibd` mirrors the kernel FIB into hardware. OSPF-learned prefixes verified forwarded in silicon (`ttl 40 → 39` on `10.22.1.0/24`) |
+| FIB sync (kernel → ASIC) | ✅ | `fm6000_fibd` mirrors the kernel FIB into hardware. OSPF-learned prefixes verified forwarded in silicon (`ttl 40 → 39` on `<admin-net-host>/24`) |
 | BGP / other protocols | ❌ | not built (the `quagga` component supports it) |
 | IPv6 | ❌ | parser recognises `0x86dd`, nothing above it |
 
 > **Is routing working? YES — verified 2026-08-06.** A packet was forwarded *through* the switch by
 > the ASIC, cold, with no EOS running:
 > ```
-> in : 80:a2:35:81:ca:b4 > 44:4c:a8:31:5d:ab   10.101.101.25 > 10.22.1.99   ttl 20
-> out: 44:4c:a8:31:5d:ab > 80:a2:35:81:ca:b4   10.101.101.25 > 10.22.1.99   ttl 19
+> in : 80:a2:35:81:ca:b4 > 44:4c:a8:31:5d:ab   10.101.101.25 > <admin-net-host>   ttl 20
+> out: 44:4c:a8:31:5d:ab > 80:a2:35:81:ca:b4   10.101.101.25 > <admin-net-host>   ttl 19
 > ```
 > The MACs were rewritten to the nexthop adjacency and **the TTL was decremented** — that is
 > hardware IP routing, not a software reply.

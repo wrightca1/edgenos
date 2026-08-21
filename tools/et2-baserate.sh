@@ -36,7 +36,7 @@ for i in $(seq 1 "$N"); do
         eos 'bash sync' >/dev/null; eos 'reload now' >/dev/null
     fi
     sleep 45
-    t=0; until ping -c1 -W2 10.1.1.77 >/dev/null 2>&1 || [ $t -ge 40 ]; do sleep 15; t=$((t+1)); done
+    t=0; until ping -c1 -W2 <switch> >/dev/null 2>&1 || [ $t -ge 40 ]; do sleep 15; t=$((t+1)); done
     sleep 60          # EOS needs ~4 min total before ports and CLI settle
     if ! eos 'show version | include Uptime' | grep -q Uptime; then
         say "  boot $i: FAILED to reach EOS"; failed=$((failed+1)); continue

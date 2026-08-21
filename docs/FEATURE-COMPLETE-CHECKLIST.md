@@ -239,7 +239,7 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
 ## Hardware state as left
 
 ```
-box            10.1.1.77, cold-booted on OUR parser, forwarding
+box            <switch>, cold-booted on OUR parser, forwarding
 parser         0x100c01 = 0x94ffffeb (ours)      routes 34, ARP resolved
 /mnt/flash     fwd4.txt = our spliced replay (373,345 writes)
                fwd4-stock.txt = stock (389,809), md5 0c31f84de104f9e10dce12cddb4d5540
@@ -251,7 +251,7 @@ boot-config    SWI=flash:/EOS-4.16.8M.swi
 fault: **every EdgeNOS boot must be re-armed.** To boot our parser again, write
 `SWI=flash:/edgenos-ourparser.swi` and reboot.
 
-Console is the gateway `smiley@10.22.1.56`, `/dev/ttyUSB2` @ 9600 8N1 — **but the USB numbering
+Console is the gateway `smiley@<console-host>`, `/dev/ttyUSB2` @ 9600 8N1 — **but the USB numbering
 moves whenever that box reboots. Probe, do not trust the number.** `ttyUSB0` is the AS5610,
 `ttyUSB1` the 7050SX2.
 
@@ -409,7 +409,7 @@ A4 says *"the 7150 currently has no egress capture point: one front port (et1), 
 - **Two front ports come up under EdgeNOS**, Et1 and Et2. Not one.
 - They land on **two different /29s of the same AS5610** — `swp6 10.101.101.25/29` and
   `swp7 10.101.101.33/29` — so a frame in one and out the other genuinely transits the switch.
-- That peer is `10.1.1.238`, **it answers SSH** (root/`as5610`), and it has **`tcpdump 4.99.4`**.
+- That peer is `<peer>`, **it answers SSH** (root/`as5610`), and it has **`tcpdump 4.99.4`**.
 
 `tools/transit-test.sh` drives it: a `/32` route on the peer forces the hairpin (the peer is both
 ends, so without it the traffic never touches the switch), then `tcpdump` on `swp6` captures what

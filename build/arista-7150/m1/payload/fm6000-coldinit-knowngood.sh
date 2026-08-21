@@ -1,11 +1,11 @@
 #!/bin/sh
 # fm6000-coldinit-knowngood.sh — the KNOWN-GOOD cold clean-room bank-init sequence (phase90).
 #
-# Run on the M1 cold-probe shell (cold90 build, FM6000_NOFILL=1) at root@10.1.1.77. Makes the FM6000
+# Run on the M1 cold-probe shell (cold90 build, FM6000_NOFILL=1) at root@<switch>. Makes the FM6000
 # MCAST bank read VALID ECC ZEROS from a cold boot (0x240000=0x00000000, chip alive) — the warm golden
 # state — with NO vendor code. Watchdog-safe (arms + pets + disarms). Flash-logged for hang forensics.
 #
-# Prereqs on the box (push live: wget http://10.1.1.30:8000/<f>): fm6000_bist, fm6000_mrl_fixed,
+# Prereqs on the box (push live: wget http://<mgmt-net-host>:8000/<f>): fm6000_bist, fm6000_mrl_fixed,
 # fm6000_wr128, fm6000reg, scdreg. Build fm6000_bist/mrl from asic/fm6000/fm6000_bist.c + fm6000_mrl.c.
 #
 # STATUS: reproducible bank-VALID read (exp5/exp8). NOT yet a clean win — non-deterministic (needs the

@@ -52,7 +52,7 @@ The new prefix `10.77.77.0` = `0x0a4d4d00` appears at `0x33bfdc`, slotted into a
 ```
 0x33bfd9 = 0x0a140100    10.20.1.0
 0x33bfda = 0x0a150100    10.21.1.0
-0x33bfdb = 0x0a160100    10.22.1.0
+0x33bfdb = 0x0a160100    <admin-net-host>
 0x33bfdc = 0x0a4d4d00    10.77.77.0   <-- inserted here, in sorted order
 0x33bfdd = 0x0a636300    10.99.99.0
 0x33bfde = 0x0a640100    10.100.1.0
@@ -104,7 +104,7 @@ Adding 5 routes (`10.31.0.0` … `10.35.0.0`) rewrote the prefix array repeatedl
 snapshots show exactly how it behaves:
 
 ```
-0x33bfce <- 0x0a020000   10.2.0.0     0x33bfcb <- 0x0a010100   10.1.1.0
+0x33bfce <- 0x0a020000   10.2.0.0     0x33bfcb <- 0x0a010100   <mgmt-net-host>
 0x33bfd9 <- 0x0a1f0000   10.31.0.0    ...
 0x33bfda <- 0x0a200000   10.32.0.0    0x33bfd9 <- 0x0a210000   10.33.0.0
                                       0x33bfda <- 0x0a220000   10.34.0.0

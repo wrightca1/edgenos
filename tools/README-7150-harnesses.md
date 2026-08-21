@@ -14,7 +14,7 @@ those hold credentials and are not in the repo.
 Two different /29s on one peer, so a `/32` route on the peer forces a hairpin —
 in Et2, routed, out Et1 — and `tcpdump` on swp6 captures **what the switch
 emitted**. That is the observation A4 and B1 were blocked on. The peer is
-`10.1.1.238` and has `tcpdump 4.99.4`.
+`<peer>` and has `tcpdump 4.99.4`.
 
 ## What each script is for
 
@@ -200,7 +200,7 @@ ip neigh replace 10.101.101.34 lladdr 44:4c:a8:31:5d:ab dev swp7 nud permanent
 ```
 
 Also note `edgenos-up.sh` is **not** started by `init-m1` — run it by hand after boot, and check
-`ip route` shows `10.22.1.0/24 via 10.1.1.1 dev eth0 metric 5` first or ospfd will take mgmt away.
+`ip route` shows `<admin-net-host>/24 via <mgmt-net-host> dev eth0 metric 5` first or ospfd will take mgmt away.
 
 ## ⛔ Do NOT write `MAPPER_DMAC_CAM` (`0x123xxx`) — it breaks my-MAC chip-wide and only a reboot fixes it
 

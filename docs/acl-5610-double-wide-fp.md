@@ -208,7 +208,7 @@ single-wide entry could never be consulted anywhere. edged's entry at idx 1537 i
 physical slice **8** (not 6); idx 562 is slice **4** (lookup off).
 
 ## PROVEN fix (oracle, live, no reset): single-wide slice 4
-Steps (all RMW, no chip reset — validated on 10.1.1.233):
+Steps (all RMW, no chip reset — validated on <mgmt-net-host>):
 1. `FP_SLICE_ENABLE |= FP_LOOKUP_ENABLE_SLICE_4` (bit 14) → `0x000f73ff`
 2. `FP_PORT_FIELD_SEL[each ingress port]`: `SLICE4_F1=5, SLICE4_F2=1, SLICE4_F3=7`;
    leave `SLICE5_4_PAIRING=0`, `SLICE4_DOUBLE_WIDE_MODE=0`

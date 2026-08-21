@@ -238,7 +238,7 @@ untestable from rules 28-31 alone, since those four are disjoint and never compe
 ## Confirmed on live silicon
 
 The map and field layout came from a stripped binary and a replay file, so they were read back
-off the running 7150 (`10.1.1.77`, via the serial console):
+off the running 7150 (`<switch>`, via the serial console):
 
 | word | silicon | decoded with our layout |
 |---|---|---|

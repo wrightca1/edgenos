@@ -207,7 +207,7 @@ console shows a healthy shell throughout.
 `ospfd` installs ~35 routes via `et1`, and one of them covers the admin subnet:
 
 ```
-10.22.1.0/24 via 10.101.101.25 dev et1  metric 20
+<admin-net-host>/24 via 10.101.101.25 dev et1  metric 20
 ```
 
 That is **more specific than the default route**, so replies to the build host leave by the front
@@ -217,7 +217,7 @@ the box died rather than like a routing change.
 Fix — a static route for the admin network, pinned to `eth0` with a better metric:
 
 ```sh
-ip route add 10.22.1.0/24 via 10.1.1.1 dev eth0 metric 5
+ip route add <admin-net-host>/24 via <mgmt-net-host> dev eth0 metric 5
 ```
 
 `init-m1` now does this at boot (`MGMT_PEER`, `MGMT_GW`), before ospfd exists, and the lower metric
@@ -237,7 +237,7 @@ ports as netdevs. The topology for it already exists and had not been noticed:
 ```
 
 Two *different* subnets on the same peer, so a frame in one port and out the other genuinely
-transits the switch. And the AS5610 (`10.1.1.238`, root/`as5610`) has **`tcpdump 4.99.4`**, which is
+transits the switch. And the AS5610 (`<peer>`, root/`as5610`) has **`tcpdump 4.99.4`**, which is
 the egress capture point `FEATURE-COMPLETE-CHECKLIST.md` A4 says is missing. It is not missing.
 
 ### `edgenos-up.sh` cannot do this on its own
@@ -258,13 +258,13 @@ that fix and does not carry it.** Observed live: `edgenos-up.sh` completes, ospf
 adjacency, and the route table shows
 
 ```
-10.22.1.0/24 via 10.101.101.25 dev et1  metric 20
+<admin-net-host>/24 via 10.101.101.25 dev et1  metric 20
 ```
 
 with no `eth0` route at all — management dies mid-command. Recovery is over serial:
 
 ```
-ip route add 10.22.1.0/24 via 10.1.1.1 dev eth0 metric 5
+ip route add <admin-net-host>/24 via <mgmt-net-host> dev eth0 metric 5
 ```
 
 `up2.sh` now does this immediately after `edgenos-up.sh` returns. **The real fix is a rebuild**; any

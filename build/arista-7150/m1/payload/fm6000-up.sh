@@ -270,7 +270,7 @@ if [ -e /sys/bus/pci/devices/0000:02:00.0/vendor ] && command -v fm6000reg >/dev
         cm "COLD87 WARN: microcode $UC or fm6000load missing"
     fi
     # CRM ECC-fill (off-buses the chip) — GATED so FM6000_NOFILL=1 leaves the chip ALIVE at the M1 shell
-    # for interactive probing (phase90: microcode-loaded, MSB-out, CAM0 alive; SSH root@10.1.1.77).
+    # for interactive probing (phase90: microcode-loaded, MSB-out, CAM0 alive; SSH root@<switch>).
     if [ "${FM6000_NOFILL:-0}" = "1" ]; then
         cm "COLD90 PROBE MODE: chip left ALIVE (microcode loaded, no CRM fill). CAM0=0x$(RG 0x0e000) — SSH in and probe."
         sync 2>/dev/null

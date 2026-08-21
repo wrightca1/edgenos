@@ -19,7 +19,7 @@ and a complete OSPF routing table learned from the network, including a default:
 ```
 default       via 10.101.101.25 dev et1  metric 20
 10.3.1.0/24   via 10.101.101.25 dev et1  metric 20
-10.22.1.0/24  via 10.101.101.25 dev et1  metric 20
+<admin-net-host>/24  via 10.101.101.25 dev et1  metric 20
 10.101.1.0/29 ... 10.101.1.32/29 ...
 ```
 
@@ -38,7 +38,7 @@ hw slot  241:10.3.1.0 242:10.4.1.0 243:10.11.1.0 244:10.12.1.0 ...
 ```
 
 and traffic to an OSPF-learned prefix is forwarded **in silicon** — `ttl 40 -> 39`
-on `10.22.1.0/24` (learned by OSPF, programmed by fibd, decremented by the ASIC).
+on `<admin-net-host>/24` (learned by OSPF, programmed by fibd, decremented by the ASIC).
 
 Bring it all up with `edgenos-up.sh`.
 

@@ -31,7 +31,7 @@ init: systemd
 
 status: planned
 notes: >
-  M0 = boot our kernel+initramfs via Aboot netboot (tftp from 10.1.1.30) to a serial shell, EOS
+  M0 = boot our kernel+initramfs via Aboot netboot (tftp from <mgmt-net-host>) to a serial shell, EOS
   untouched on flash. M1 = mgmt plane: tg3 mgmt NIC up + SSH, SCD board driver (mmap PCI 3475:0001
   BAR0; reproduce version/LED/reset/interrupt regs; blink an LED; read temp/PSU/fan via SCD SMBus).
   M2 = FM6000 dataplane (FocalPoint bring-up). Aboot enforces NO signing (verified live), so an

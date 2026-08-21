@@ -1,8 +1,8 @@
 # Boot procedure: EOS <-> EdgeNOS M1 on the 7150 (hard-won, 2026-07-28)
 
 The 7150 dual-boots **EOS** (flash default) or an **EdgeNOS M1** SWI. Switching direction is done at the
-**Aboot** prompt over the **serial console** (gateway `smiley@10.22.1.56`, `/dev/ttyUSB1 @ 9600 8N1`,
-passwordless sudo). Network SSH: `10.1.1.77` — **EOS = legacy crypto (ssh-rsa/dss), M1 = modern (ed25519)**;
+**Aboot** prompt over the **serial console** (gateway `smiley@<console-host>`, `/dev/ttyUSB1 @ 9600 8N1`,
+passwordless sudo). Network SSH: `<switch>` — **EOS = legacy crypto (ssh-rsa/dss), M1 = modern (ed25519)**;
 the offered host-key type tells you which OS is running.
 
 ## GOLDEN RULES (these bit us repeatedly)
@@ -39,7 +39,7 @@ printf 'enable\r\n'; sleep1.5;  printf 'reload now\r\n'; sleep3; printf '\r\n'  
 setsid bash -c '/tmp/aboot-catch3.sh "boot flash:/edgenos-m1-X.swi" /tmp/aboot.log > /tmp/catch.out 2>&1 &'
 # 3. ~60s later: catch.out shows "aboot-caught=1 after N tries"; aboot.log shows the i2c-bringup + ENUMERATED.
 ```
-`aboot-catch3.sh` spams Ctrl-C until `Aboot#`, then types the boot command. M1 comes up on 10.1.1.77
+`aboot-catch3.sh` spams Ctrl-C until `Aboot#`, then types the boot command. M1 comes up on <switch>
 (root/arista, modern crypto, `UserKnownHostsFile=/dev/null` to skip the changed-host-key error).
 
 ## EdgeNOS M1 -> EOS (recover to the default)

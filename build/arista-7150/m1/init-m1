@@ -88,20 +88,43 @@ echo "  xcvr cages:";  ls -d /sys/bus/platform/devices/scd-xcvr*/sfp* 2>/dev/nul
 echo "--- mgmt NIC (eth0) + network access ---"
 if [ -d /sys/class/net/eth0 ]; then
     ip link set eth0 up 2>/dev/null
-    ip addr add "${MGMT_IP:-10.1.1.77}/24" dev eth0 2>/dev/null
-    # Without a default route the box answers only 10.1.1.0/24: requests from
-    # another subnet arrive, replies have nowhere to go, and it reads exactly
-    # like a dead switch. The build host is on 10.22.1.0/24, so this is the
-    # difference between mgmt SSH working and needing the serial console.
-    ip route add default via "${MGMT_GW:-10.1.1.1}" 2>/dev/null
-    # ...and pin the admin network to eth0 with a better metric. The default
-    # alone is NOT enough: once ospfd is up it installs ~35 routes via et1,
-    # and one of them covers the admin subnet (10.22.1.0/24 via 10.101.101.25),
-    # which is more specific than the default. Replies then leave by the front
-    # panel and never come back -- mgmt dies the moment edgenos-up.sh runs.
-    ip route add "${MGMT_PEER:-10.22.1.0/24}" via "${MGMT_GW:-10.1.1.1}" \
-        dev eth0 metric 5 2>/dev/null
-    echo "    eth0 up, ${MGMT_IP:-10.1.1.77}/24 via ${MGMT_GW:-10.1.1.1}  PHY: $(readlink -f /sys/class/net/eth0/phydev/driver 2>/dev/null | sed 's#.*/##')"
+
+    # --- management addressing: STATIC, with a documented default ----------
+    # The management port comes up on a fixed address so the switch is always
+    # reachable at a known place on a bench, with no dependency on a DHCP server
+    # being present. Nothing about anyone's network is baked in beyond a
+    # conventional private default.
+    #
+    #   default:  192.168.1.1/24, no gateway
+    #   change it: put the values in /mnt/flash/mgmt.conf, which is read here and
+    #              is NOT part of this repository:
+    #
+    #                 MGMT_IP=198.51.100.10/24
+    #                 MGMT_GW=198.51.100.1          # optional default route
+    #                 MGMT_ROUTE=203.0.113.0/24   # optional, see below
+    #
+    #   or at runtime:  ip addr add <a.b.c.d/len> dev eth0
+    #
+    # (An earlier build tried DHCP here. It failed for a reason worth recording:
+    # tg3 brings this link up at t=27s, well after init reaches this point, so
+    # udhcpc broadcast into a dead link and left eth0 with no address at all.
+    # A static default has no such race.)
+    [ -f /mnt/flash/mgmt.conf ] && . /mnt/flash/mgmt.conf 2>/dev/null
+    MGMT_IP="${MGMT_IP:-192.168.1.1/24}"
+
+    ip addr add "$MGMT_IP" dev eth0 2>/dev/null
+    [ -n "$MGMT_GW" ] && ip route add default via "$MGMT_GW" 2>/dev/null
+    echo "    eth0 up, $MGMT_IP${MGMT_GW:+ via $MGMT_GW}  (change: /mnt/flash/mgmt.conf)"
+
+    # ⚠ Once ospfd is up it installs routes via the front panel, and one of them
+    # can be more specific than the default -- replies then leave by the wrong
+    # interface and mgmt dies the moment edgenos-up.sh runs. A site whose admin
+    # network is reachable only via eth0 pins it with MGMT_ROUTE in mgmt.conf.
+    if [ -n "$MGMT_ROUTE" ] && [ -n "$MGMT_GW" ]; then
+        ip route add "$MGMT_ROUTE" via "$MGMT_GW" dev eth0 metric 5 2>/dev/null
+        echo "    pinned $MGMT_ROUTE via $MGMT_GW dev eth0 (metric 5)"
+    fi
+    echo "    PHY: $(readlink -f /sys/class/net/eth0/phydev/driver 2>/dev/null | sed 's#.*/##')"
     sleep 2
     # real SSH (dropbear, root pw 'arista') + telnet + scripted nc-shell (2323)
     if [ -x /usr/sbin/dropbear ]; then
@@ -109,7 +132,13 @@ if [ -d /sys/class/net/eth0 ]; then
             dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1
         [ -f /etc/dropbear/dropbear_rsa_host_key ] || \
             dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key >/dev/null 2>&1
-        /usr/sbin/dropbear -p 22 -R >/dev/null 2>&1 && echo "    dropbear SSH up (root, pw arista)"
+        # DEFAULT CREDENTIAL, documented on purpose: root / arista, matching the
+        # platform's factory default. It is not a secret and is not site-specific;
+        # an operator changes it with passwd, or drops an authorized_keys into
+        # /mnt/flash/authorized_keys. Shipping a documented default beats shipping
+        # somebody's lab password.
+        /usr/sbin/dropbear -p 22 -R >/dev/null 2>&1 && \
+            echo "    dropbear SSH up (default login: root / arista -- change it)"
     fi
     telnetd -l /bin/sh -p 23 2>/dev/null && echo "    telnetd up (:23)"
     [ -x /usr/bin/ncsh.sh ] && { setsid /usr/bin/ncsh.sh >/dev/null 2>&1 & echo "    nc-shell up (:2323)"; }
@@ -171,7 +200,7 @@ elif [ -x /usr/lib/edgenos/platform/fm6000-up.sh ]; then
     # switch core (SOFT_RESET=0) FIRST and programs config (full scheduler incl ESCHED/DRR) over MMIO AFTER
     # release — the untested correct ordering (cold83 wrote ESCHED before release -> off-bus).
     # phase90 PROBE: FM6000_NOFILL=1 loads the microcode (minus MOD) then leaves the chip ALIVE at the M1
-    # shell (no CRM fill) for interactive probing over SSH (root@10.1.1.77). RUNBIST=0 (SPIBOOT_TRUST enum).
+    # shell (no CRM fill) for interactive probing over SSH. RUNBIST=0 (SPIBOOT_TRUST enum).
     FM6000_NOFILL="${FM6000_NOFILL:-1}" FM6000_RUNBIST="${FM6000_RUNBIST:-0}" FM6000_BIST="${FM6000_BIST:-1}" sh /usr/lib/edgenos/platform/fm6000-up.sh > /var/log/fm6000 2>&1
     grep -iE 'ENUMERATED|still absent|PLL_LOL|Si5338 found|smbus_master @|clock RC|BIST|i2c-bringup' /var/log/fm6000 | sed 's/^/    /'
 fi
@@ -275,7 +304,7 @@ echo "    /sys/kernel/kexec_loaded = $(cat /sys/kernel/kexec_loaded 2>/dev/null)
 echo
 echo "=================================================================="
 echo "  COMPREHENSIVE TEST MENU (one boot):"
-echo "  1) mgmt net : ip addr add 10.1.1.78/24 dev eth0; ping 10.1.1.30"
+echo "  1) mgmt net : DHCP by default; for a fixed address put MGMT_IP=a.b.c.d/len in /mnt/flash/mgmt.conf"
 echo "                cat /sys/class/net/eth0/statistics/rx_packets rx_errors"
 echo "  2) SCD LED  : echo 1 > /sys/class/leds/status1/brightness   (declare via scd-setup.sh)"
 echo "  3) M2 fm6000: sh /usr/lib/edgenos/platform/fm6000-up.sh"

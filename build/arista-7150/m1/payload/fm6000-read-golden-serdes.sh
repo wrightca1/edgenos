@@ -3,7 +3,7 @@
 # WARM EOS where Et1 is UP. These are the exact values the cold bring-up must reproduce — especially
 # SERDES_CFG (0xe3834/35, PowerDown+RefSel) and PCS_10GBASER_CFG (0xe3825) which coldlink.sh never wrote.
 #
-# Run on EOS (mgmt 10.1.1.77) as root:  bash fm6000-read-golden-serdes.sh
+# Run on EOS (mgmt <switch>) as root:  bash fm6000-read-golden-serdes.sh
 # Reads FM6000 BAR via the EOS oracle (sudo python2 mmap of resource0). BDF 02:00.0.
 # SPDX-License-Identifier: GPL-2.0-or-later
 BDF=0000:02:00.0

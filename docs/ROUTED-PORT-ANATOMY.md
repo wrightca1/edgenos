@@ -352,7 +352,7 @@ index encodes the entry's *kind*:
 
 | nexthop | kind | precedence | examples |
 |---|---|---|---|
-| 5 | **glean** — a connected subnet's network and broadcast addresses | 2 | `10.1.1.0`, `10.99.99.255`, `10.101.101.31` |
+| 5 | **glean** — a connected subnet's network and broadcast addresses | 2 | `<mgmt-net-host>`, `10.99.99.255`, `10.101.101.31` |
 | 7 | **local** — an address belonging to this box | **3** | `10.99.99.1`, `10.101.101.26`, `10.101.255.1` |
 | 11, 12, 13 | **resolved neighbour**, one entry each | 2 | `10.99.99.2`, `10.101.101.25`, `10.101.101.33` |
 | 16 | **the gateway** — every remote route shares it | 2 | all the OSPF `/24`s and `/29`s |
@@ -392,7 +392,7 @@ Both are validated against the live EOS FIB, and neither validation is circular:
 
 Two differences from EOS are deliberate:
 
-- EOS puts its **management** subnet in the hardware FIB (`10.1.1.0/24` on `Management1`, three
+- EOS puts its **management** subnet in the hardware FIB (`<mgmt-net-host>/24` on `Management1`, three
   boundaries). `fibgen` ignores any interface absent from `--map`, and management is not an ASIC
   port on EdgeNOS. That is the entire difference between 49 and 46.
 - EOS allocates a **separate next-hop index for the gateway role** (16) that duplicates the
@@ -474,7 +474,7 @@ So: recipe validated on both operating systems, forwarding not yet demonstrated 
 
 `Ethernet3` is configured as a routed port with `10.99.99.1/24`, advertised into OSPF area 0 as
 `passive-interface`, and the configuration is saved (`write memory`). The test host at
-`10.22.1.56` has `10.99.99.2/24` on `eth1` plus routes to `10.101.101.24/29` and `10.101.255.1/32`
+`<console-host>` has `10.99.99.2/24` on `eth1` plus routes to `10.101.101.24/29` and `10.101.255.1/32`
 via `10.99.99.1`.
 
 Verified on EOS:

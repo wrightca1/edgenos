@@ -245,7 +245,7 @@ object in the image and the agent that actually drives bring-up. `libFocalpointS
 
 ```
 # image pulled from the switch's own flash, not downloaded
-ssh root@10.1.1.77 'cat /mnt/flash/EOS-4.16.8M.swi' > EOS-4.16.8M.swi
+ssh root@<switch> 'cat /mnt/flash/EOS-4.16.8M.swi' > EOS-4.16.8M.swi
 unzip -o EOS-4.16.8M.swi rootfs-i386.sqsh
 unsquashfs -d rootfs rootfs-i386.sqsh
 

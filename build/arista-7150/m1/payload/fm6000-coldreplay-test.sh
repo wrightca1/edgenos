@@ -6,7 +6,7 @@ scdreg 0x0120 0xC0000BB8 >/dev/null 2>&1
 ( while :; do scdreg 0x0120 0xC0000BB8 >/dev/null 2>&1; sleep 4; done ) & PET=$!
 trap 'kill $PET 2>/dev/null; scdreg 0x0120 0x0 >/dev/null 2>&1' EXIT INT TERM
 echo "[CR] START PIN=$(R 0x1c021)"; cd /tmp
-wget -q -O /tmp/fm6000_coldreplay http://10.1.1.30:8000/fm6000_coldreplay && chmod +x /tmp/fm6000_coldreplay
+wget -q -O /tmp/fm6000_coldreplay http://<mgmt-net-host>:8000/fm6000_coldreplay && chmod +x /tmp/fm6000_coldreplay
 [ "$(R 0x1c021)" = "00000208" ] || { echo "[CR] NOT clean"; exit 1; }
 # NO pre-BM-march: let the coldreplay's own trace-faithful BIST init all memory (as EOS does)
 echo "[CR] no-pre-bist PIN=$(R 0x1c021)"

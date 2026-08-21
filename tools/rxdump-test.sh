@@ -25,7 +25,7 @@ echo "=== reboot to EOS ==="
 if edge 'echo ok' | grep -q ok; then edge 'sync; (sleep 1; reboot -f) >/dev/null 2>&1 &' >/dev/null
 else eos 'bash sync' >/dev/null; eos 'reload now' >/dev/null; fi
 sleep 45
-t=0; until ping -c1 -W2 10.1.1.77 >/dev/null 2>&1 || [ $t -ge 40 ]; do sleep 15; t=$((t+1)); done
+t=0; until ping -c1 -W2 <switch> >/dev/null 2>&1 || [ $t -ge 40 ]; do sleep 15; t=$((t+1)); done
 sleep 60
 eos 'show version | include Uptime' | grep -q Uptime || { echo "no EOS"; exit 1; }
 

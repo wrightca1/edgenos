@@ -69,7 +69,7 @@ decrement all still happen in hardware with our authored csGlort stage in place.
 
 ## Build
 
-Built natively on 10.22.1.5, not in a container. Justified rather than assumed: every payload
+Built natively on <build-host>, not in a container. Justified rather than assumed: every payload
 binary requires at most `GLIBC_2.34` and the image's initrd carries 2.35 — checked across all
 58 tools after the build, and the highest requirement matches the previously shipped
 `fm6000_ffuinit` exactly. Kernel and base initrd extracted from alpha31.swi pulled off the
