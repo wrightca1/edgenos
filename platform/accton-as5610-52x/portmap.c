@@ -752,89 +752,105 @@ int portmap_phys_to_swp(int phys_port)
  * CL49 block_lock assert and drop roughly once a second. portmap_link_poll()
  * believed that, so every dark port flapped "link up/down" forever: each
  * transition ran bmd_port_mode_update(), moved the TAP carrier, churned the
- * L2/L3 tables behind it and wrote two log lines. On this board 43 of 52 cages
- * are typically empty, which was the bulk of the datapath's log volume.
+ * L2/L3 tables behind it and wrote two log lines. On this board 43 of the 52
+ * cages are typically empty, which was the bulk of the datapath's log volume.
  *
  * A port with no module cannot have a link, so gate on presence first.
- * MOD_ABS (active LOW) lives in two PCA9506 GPIO expanders on bus 17 -- the
- * same source onlp/sfpi.c reads. edged does not link the ONLP library, so the
- * layout is restated here rather than shared:
  *
- *   0x20 regs 0..4 : ports 1..40      (bit = (port-1) % 8)
- *   0x23 reg  0    : ports 41..48     (bit = port-41)
- *   0x23 reg  1    : QSFP 49..52      (bit = port-49)
+ * Presence is an EEPROM probe at 0x50 on the port's own mux leg
+ * (port_to_i2c_bus[]) -- an empty cage NAKs, a seated optic returns its SFF
+ * identifier byte. NOT the MOD_ABS GPIO expanders onlp/sfpi.c reads: those
+ * constants (bus 17, PCA9506 @ 0x20/0x23) belong to a different board revision
+ * and nothing answers at them here.
  *
- * Seven byte reads cover the whole front panel, so the bitmap is refreshed on
- * its own slow timer rather than per link poll (which runs every ~30ms).
+ * Two paths, because the at24/optoe driver only binds some cages:
+ *   - a bound cage exposes /sys/bus/i2c/devices/<bus>-0050/eeprom; read one
+ *     byte through it and stay off the mux entirely. The node is instantiated
+ *     whether or not an optic is seated, so existence proves nothing -- only a
+ *     successful read does.
+ *   - an unbound cage has no node, so probe /dev/i2c-<bus> directly. That needs
+ *     I2C_SLAVE_FORCE (0x50 may be claimed), which is the same thing the
+ *     platform layer already does for optic DDM.
  *
- * Fail OPEN: if the expanders cannot be read we keep the last good bitmap, and
- * until the first successful read every port is assumed present. A flapping
- * dark port is a nuisance; a bus hiccup that darkens live ports is an outage.
+ * Fail OPEN: a bus we cannot open at all leaves the port assumed present, and
+ * so does every port until the first refresh completes. A flapping dark port is
+ * a nuisance, while wrongly darkening a live port is an outage.
+ *
+ * Refreshed on its own slow timer, not in the ~30ms link poll: seating an optic
+ * is a human-timescale event, and a miss on an empty cage costs an i2c timeout.
  */
-#define SFP_PRESENCE_BUS        17
-#define SFP_PRESENCE_ADDR_LOW   0x20    /* MOD_ABS, ports 1-40 */
-#define SFP_PRESENCE_ADDR_HIGH  0x23    /* ports 41-48 + QSFP 49-52 */
-#define PCA9506_INPUT_BASE      0x00
-#define SFP_PRESENCE_REFRESH_S  2
+#define SFP_PRESENCE_REFRESH_S  10
 
 static uint64_t sfp_present_mask = ~(uint64_t)0;   /* assume present until read */
 static int      sfp_presence_valid;
 static time_t   sfp_presence_last;
 
-static int pca9506_read(uint8_t addr, uint8_t reg, uint8_t *val)
+/* All three return: 1 = optic seated, 0 = cage empty, -1 = cannot tell. */
+static int sfp_sysfs_probe(int bus)
 {
-    char dev[32];
-    int fd, rv = -1;
+    char path[64];
+    char byte;
+    int fd, n;
 
-    snprintf(dev, sizeof(dev), "/dev/i2c-%d", SFP_PRESENCE_BUS);
-    fd = open(dev, O_RDWR);
+    snprintf(path, sizeof(path),
+             "/sys/bus/i2c/devices/%d-0050/eeprom", bus);
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;                       /* driver never bound this cage */
+    n = (int)read(fd, &byte, 1);
+    close(fd);
+    return n == 1 ? 1 : 0;
+}
+
+static int sfp_i2c_probe(int bus)
+{
+    char path[32];
+    uint8_t reg = 0, val;
+    int fd, present = 0;
+
+    snprintf(path, sizeof(path), "/dev/i2c-%d", bus);
+    fd = open(path, O_RDWR);
     if (fd < 0)
         return -1;
-    if (ioctl(fd, I2C_SLAVE, addr) >= 0 &&
+    if (ioctl(fd, I2C_SLAVE_FORCE, 0x50) >= 0 &&
         write(fd, &reg, 1) == 1 &&
-        read(fd, val, 1) == 1)
-        rv = 0;
+        read(fd, &val, 1) == 1)
+        present = 1;
     close(fd);
-    return rv;
+    return present;
+}
+
+static int sfp_probe(int bus)
+{
+    int rv = sfp_sysfs_probe(bus);
+    return (rv >= 0) ? rv : sfp_i2c_probe(bus);
 }
 
 static void sfp_presence_refresh(void)
 {
     uint64_t mask = 0;
-    uint8_t v;
-    int r, i;
+    int i, n = 0;
 
-    for (r = 0; r < 5; r++) {                       /* ports 1..40 */
-        if (pca9506_read(SFP_PRESENCE_ADDR_LOW, PCA9506_INPUT_BASE + r, &v) != 0)
-            return;                                 /* keep the last good map */
-        for (i = 0; i < 8; i++)
-            if (!(v & (1 << i)))                    /* MOD_ABS is active LOW */
-                mask |= (uint64_t)1 << (r * 8 + i);
-    }
-    if (pca9506_read(SFP_PRESENCE_ADDR_HIGH, PCA9506_INPUT_BASE, &v) != 0)
-        return;
-    for (i = 0; i < 8; i++)                         /* ports 41..48 */
-        if (!(v & (1 << i)))
-            mask |= (uint64_t)1 << (40 + i);
-    if (pca9506_read(SFP_PRESENCE_ADDR_HIGH, PCA9506_INPUT_BASE + 1, &v) != 0)
-        return;
-    for (i = 0; i < 4; i++)                         /* QSFP 49..52 */
-        if (!(v & (1 << i)))
-            mask |= (uint64_t)1 << (48 + i);
+    for (i = 0; i < EDGED_MAX_PORTS; i++) {
+        int bus = port_to_i2c_bus[i];
+        int rv  = (bus > 0) ? sfp_probe(bus) : -1;
 
-    if (!sfp_presence_valid || mask != sfp_present_mask) {
-        int n = 0;
-        for (i = 0; i < EDGED_MAX_PORTS; i++)
-            if (mask & ((uint64_t)1 << i))
+        if (rv != 0) {                       /* present, or undeterminable */
+            mask |= (uint64_t)1 << i;
+            if (rv == 1)
                 n++;
-        syslog(LOG_INFO, "SFP presence: %d module(s) installed (mask=0x%013llx)",
-               n, (unsigned long long)mask);
+        }
     }
-    sfp_present_mask  = mask;
+
+    if (!sfp_presence_valid || mask != sfp_present_mask)
+        syslog(LOG_INFO, "SFP presence: %d module(s) seated (mask=0x%013llx)",
+               n, (unsigned long long)mask);
+
+    sfp_present_mask   = mask;
     sfp_presence_valid = 1;
 }
 
-/* swp is 1-based. Always true until the first successful expander read. */
+/* swp is 1-based. Always true until the first refresh completes. */
 static int sfp_module_present(int swp)
 {
     if (!sfp_presence_valid || swp < 1 || swp > EDGED_MAX_PORTS)
