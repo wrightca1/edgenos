@@ -24,6 +24,14 @@ KERNDIR="${KERNDIR:-$TOP/OpenNetworkLinux/packages/base/armhf/kernels/kernel-4.1
 IMG="${IMG:-edgenos/builder9:1.8-rootless}"
 OUT="$HERE/output/bcmd"
 
+# Toolchain triple comes from the arch seam (arch/armhf/toolchain.mk, which in turn
+# mirrors switchdb/arch/armhf.yml) rather than being spelled out here, so the 4610
+# has one place to change if the toolchain moves. Only CROSS_COMPILE is taken: the
+# SDK links bcm.user with its own makefile and flags, so the fragment's CFLAGS and
+# LDFLAGS are deliberately NOT applied -- this build is unchanged byte-for-byte.
+CROSS_COMPILE="${CROSS_COMPILE:-$(make -sf "$HERE/arch/armhf/toolchain.mk" print-CROSS_COMPILE)}"
+[ -n "$CROSS_COMPILE" ] || { echo "could not read CROSS_COMPILE from arch/armhf/toolchain.mk" >&2; exit 1; }
+
 SOCDIAG="$SDK/systems/linux/user/common/socdiag.c"
 BCMUSER="$SDK/build/linux/user/iproc-4_4/bcm.user"
 [ -f "$BCMD_C" ]  || { echo "bcmd.c missing at $BCMD_C" >&2; exit 1; }
@@ -46,11 +54,12 @@ rm -f "$SDK"/build/*/user/iproc-4_4/socdiag.o "$BCMUSER" "$BCMUSER.dbg" 2>/dev/n
 echo "== building bcmd ($IMG) =="
 docker run --rm -u root:0 \
   -v "$SDK":/sdk -v "$KERNDIR":/kern:ro -w /sdk/systems/linux/user/iproc-4_4 \
+  -e CROSS_COMPILE="$CROSS_COMPILE" \
   "$IMG" bash -lc '
     set -e
-    KINC=$(arm-linux-gnueabihf-gcc -print-file-name=include)
+    KINC=$(${CROSS_COMPILE}gcc -print-file-name=include)
     ADD_TO_CFLAGS="-Wno-error -Wno-cpp -DINCLUDE_KNET -I/sdk/systems/linux/kernel/modules/include" \
-    make SDK=/sdk CROSS_COMPILE=arm-linux-gnueabihf- KERNDIR=/kern \
+    make SDK=/sdk CROSS_COMPILE="$CROSS_COMPILE" KERNDIR=/kern \
          TOOLCHAIN_BASE_DIR=/usr KFLAG_INCLD="$KINC" LINUX_MAKE_USER=1 \
          BUILD_KNET=1 MAKE=make -j"$(nproc)" bcm 2>&1
   ' 2>&1 | tail -20
@@ -58,5 +67,5 @@ docker run --rm -u root:0 \
 [ -f "$BCMUSER" ] || { echo "[bcmd] build did not produce bcm.user" >&2; exit 1; }
 mkdir -p "$(dirname "$OUT")"
 cp -f "$BCMUSER" "$OUT"
-docker run --rm -u root:0 -v "$TOP":"$TOP" "$IMG" arm-linux-gnueabihf-strip "$OUT" 2>/dev/null || true
+docker run --rm -u root:0 -v "$TOP":"$TOP" "$IMG" "${CROSS_COMPILE}strip" "$OUT" 2>/dev/null || true
 echo "== result =="; file "$OUT"; echo "unified bcmd -> $OUT"

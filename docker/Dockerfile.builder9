@@ -1,0 +1,66 @@
+# edgenos/builder9:1.8-rootless — the ARM/ONL builder.
+#
+# Used by (unchanged, they default to this tag):
+#   build/build-bcmd.sh                 arm-linux-gnueabihf-{gcc,strip}, make
+#   build/build-fit-4610.sh             dtc, mkimage
+#   build/build-fit-5610.sh             dtc, mkimage   (arch-agnostic, so same image)
+#   build/build-onie-installer-4610.sh  python2 (ONL mkshar + pyfit), unzip, zip
+#
+# RECONSTRUCTED after the loss of the old build host — the original Dockerfile was
+# never in version control, only the built image was. Rebuilt from what the build
+# scripts actually invoke, not from the original file. Kept at the same name:tag so
+# every build script works untouched.
+#
+# Base: Debian 11 (bullseye). The "9" in the image name is historical (Debian 9 /
+# ONL stretch era); bullseye is used because it is the newest Debian that still
+# ships a python2 interpreter, which ONL's mkshar and pyfit both require. If the
+# 4610 SDK build ever trips over gcc-10 strictness, override at build time:
+#   docker build --build-arg BASE=debian:buster ...
+# (buster/stretch need archive.debian.org sources.)
+ARG BASE=debian:bullseye
+FROM ${BASE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Under rootless docker apt drops privileges to uid 65534 (_apt/nobody), which is
+# outside the subuid range mapped into the build container -- setgroups() then
+# fails with EINVAL and every download dies ("Method http has died unexpectedly").
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/00-no-sandbox
+
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      # --- ARM cross toolchain (bcmd / iProc userspace SDK build) -------------
+      gcc-arm-linux-gnueabihf \
+      g++-arm-linux-gnueabihf \
+      binutils-arm-linux-gnueabihf \
+      # --- FIT image assembly ------------------------------------------------
+      device-tree-compiler \
+      u-boot-tools \
+      # --- ONL installer tooling (mkshar, pyfit) is python2 -------------------
+      python2 \
+      zip \
+      unzip \
+      # --- general build/pack utilities --------------------------------------
+      build-essential \
+      make \
+      perl \
+      file \
+      xz-utils \
+      gzip \
+      cpio \
+      bzip2 \
+      rsync \
+      ca-certificates \
+      bc \
+      kmod \
+    && rm -rf /var/lib/apt/lists/*
+
+# ONL's tools are invoked as `python2 <script>`; some also expect a bare `python`.
+RUN ln -sf /usr/bin/python2 /usr/local/bin/python
+
+# The build scripts call `bash -lc "..."`, i.e. a LOGIN shell. Debian's default
+# /etc/profile.d chatter (mesg/ttyname warnings) pollutes stdout, and
+# build-onie-installer-4610.sh parses container stdout with `read -r OFF LAST`.
+# The scripts grep that noise away; silencing it here makes that unnecessary.
+RUN printf 'test -t 0 || return 0\n' > /etc/profile.d/00-quiet.sh
+
+WORKDIR /work

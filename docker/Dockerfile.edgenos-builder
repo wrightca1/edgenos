@@ -1,0 +1,45 @@
+# edgenos-builder — PowerPC control-plane builder (static Quagga for the AS5610).
+#
+# Used by:
+#   core/control-plane/build-quagga.sh   zebra / ospfd / ospf6d, static, PPC
+#
+# RECONSTRUCTED after the loss of the old build host (image existed, Dockerfile
+# did not).
+# Rebuilt from what build-quagga.sh actually needs.
+#
+# That script installs gawk + wget itself on every run, with this comment:
+#   "configure needs GNU awk (not mawk); container is ephemeral so install each run."
+# Both are baked in here instead, so the build still works with no network and
+# doesn't re-apt on every invocation. The script's apt-get line is harmless when the
+# packages are already present, so it is left alone.
+FROM debian:bullseye
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Under rootless docker apt drops privileges to uid 65534 (_apt/nobody), which is
+# outside the subuid range mapped into the build container -- setgroups() then
+# fails with EINVAL and every download dies ("Method http has died unexpectedly").
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/00-no-sandbox
+
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      # --- PowerPC cross toolchain ------------------------------------------
+      gcc-powerpc-linux-gnu \
+      g++-powerpc-linux-gnu \
+      binutils-powerpc-linux-gnu \
+      # --- autotools: Quagga ships a configure script ------------------------
+      build-essential \
+      make \
+      # GNU awk specifically: Quagga's configure breaks under mawk.
+      gawk \
+      perl \
+      file \
+      patch \
+      pkg-config \
+      # --- fetching + unpacking the release tarball --------------------------
+      wget \
+      ca-certificates \
+      xz-utils \
+      bzip2 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build/src
