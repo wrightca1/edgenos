@@ -2,6 +2,10 @@
 Description=EdgeNOS-4610 L3 config (addrs + static routes from /etc/edged)
 After=bcmd.service
 Wants=bcmd.service
+# See the 5610's swp-l3.service: without PartOf, restarting the datapath
+# daemon leaves this oneshot "active" and the interfaces keep the bare state
+# bcmd recreated them in.
+PartOf=bcmd.service
 ConditionPathExists=/etc/edged/addrs.conf
 
 [Service]
