@@ -56,6 +56,7 @@
 #include <soc/cmext.h>
 #include <soc/drv.h>      /* SOC_PCI_DEV_TYPE */
 #include <soc/devids.h>
+#include <pthread.h>
 
 #define ASIC_PCI  "/sys/bus/pci/devices/0000:01:00.0"
 /* Do not guess the BAR size. mmap on a sysfs `resource0` refuses anything
@@ -670,12 +671,51 @@ static void shim_pci_conf_write(soc_cm_dev_t *dev, uint32 addr, uint32 data)
 /* ---- DMA memory --------------------------------------------------------- */
 
 /*
- * A bump allocator. The SDK frees very little during init and never in a
- * pattern that would fragment, so reclaiming is not worth the complexity --
- * but sfree must not corrupt anything, so it is a no-op rather than a lie
- * about reuse.
+ * A bump allocator WITH REUSE.
+ *
+ * WHY THIS IS NOT STILL A PURE BUMP ALLOCATOR
+ * -------------------------------------------
+ * It used to be, with `sfree` as a documented no-op, on the reasoning that the
+ * SDK "frees very little during init and never in a pattern that would
+ * fragment". That is true of init. It is not true of a switch that stays up.
+ *
+ * Twice now a caller that allocates periodically has walked the pool to zero:
+ *
+ *   Aug  bcm_pkt_alloc per transmitted frame -- transmit died after ~2400
+ *        packets and an OSPF adjacency fell back to Init
+ *   now  the SDK's field-processor counter collection, 6144 bytes per cycle --
+ *        both adjacencies died after hours, while every process stayed up,
+ *        every link stayed up and the LEDs stayed correctly lit
+ *
+ * Each was fixed by changing the caller: reuse one packet, stop collecting the
+ * counter. Both were workarounds for this function, and the second one was
+ * foreseeable from the first. Any future caller that allocates on a timer would
+ * be the third.
+ *
+ * So: `sfree` now actually frees, and `salloc` reuses. The pattern that hurts
+ * is repeated alloc/free of the SAME sizes, so an exact-size free list reclaims
+ * essentially all of it -- no splitting, no coalescing, no fragmentation, and
+ * no way for a block to come back at a different address or size than the
+ * caller had. Blocks are never returned to the bump region, which keeps every
+ * DMA address stable for the life of the process.
+ *
+ * The pointer handed out is unchanged: these are DMA buffers whose physical
+ * address is computed from the offset into the pool, so a header before the
+ * block would move the DMA address. Sizes live in a side table instead.
+ *
+ * Locked, because unlike init this now runs from several SDK threads at once --
+ * counter collection, linkscan and rx all allocate.
  */
-static long salloc_calls;
+#define DMA_MAX_BLOCKS 8192
+
+static struct dma_blk {
+    void   *p;
+    size_t  sz;
+    int     freed;
+} dma_blk[DMA_MAX_BLOCKS];
+static int  dma_nblk;
+static long salloc_calls, salloc_reused, sfree_calls, sfree_unknown;
+static pthread_mutex_t dma_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void *shim_salloc(soc_cm_dev_t *dev, int size, const char *name)
 {
@@ -691,15 +731,56 @@ static void *shim_salloc(soc_cm_dev_t *dev, int size, const char *name)
         return NULL;
     }
     need = ((size_t)size + 4095) & ~4095UL;
+
+    pthread_mutex_lock(&dma_lock);
     salloc_calls++;
+
+    /* Reuse before growing. Exact size only -- see the note above. */
+    {
+        int i;
+        for (i = 0; i < dma_nblk; i++) {
+            if (dma_blk[i].freed && dma_blk[i].sz == need) {
+                dma_blk[i].freed = 0;
+                p = dma_blk[i].p;
+                salloc_reused++;
+                pthread_mutex_unlock(&dma_lock);
+                sal_memset(p, 0, need);
+                if (mmio_trace) {
+                    fprintf(stderr, "bde: salloc %8d -> %p (%s) REUSED\n",
+                            size, p, name ? name : "?");
+                }
+                return p;
+            }
+        }
+    }
+
     if (dma_used + need > dma_size) {
         fprintf(stderr, "bde: salloc(%d, %s) exhausted the %zu MB pool "
-                "(used %zu MB) -- raise the memmap= reservation\n",
-                size, name ? name : "?", dma_size >> 20, dma_used >> 20);
+                "(used %zu MB, %ld blocks, %ld reused) -- raise the memmap= "
+                "reservation\n", size, name ? name : "?", dma_size >> 20,
+                dma_used >> 20, (long)dma_nblk, salloc_reused);
+        pthread_mutex_unlock(&dma_lock);
         return NULL;
     }
     p = dma_virt + dma_used;
     dma_used += need;
+
+    /* A block we cannot record is a block sfree can never reclaim, so say so
+     * once rather than silently reverting to the old leaking behaviour. */
+    if (dma_nblk < DMA_MAX_BLOCKS) {
+        dma_blk[dma_nblk].p = p;
+        dma_blk[dma_nblk].sz = need;
+        dma_blk[dma_nblk].freed = 0;
+        dma_nblk++;
+    } else {
+        static int warned;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr, "bde: ** more than %d DMA blocks; further ones "
+                    "cannot be reclaimed\n", DMA_MAX_BLOCKS);
+        }
+    }
+    pthread_mutex_unlock(&dma_lock);
     sal_memset(p, 0, need);
     if (mmio_trace) {
         fprintf(stderr, "bde: salloc %8d -> %p (%s), pool %zu/%zu MB\n",
@@ -710,14 +791,40 @@ static void *shim_salloc(soc_cm_dev_t *dev, int size, const char *name)
 
 void bde_shim_dma_stats(void)
 {
-    printf("bde: %ld salloc calls, %zu of %zu MB used, %ld out-of-range MMIO\n",
-           salloc_calls, dma_used >> 20, dma_size >> 20, mmio_bad);
+    int i, live = 0;
+    for (i = 0; i < dma_nblk; i++) if (!dma_blk[i].freed) live++;
+    printf("bde: %ld salloc (%ld reused), %ld sfree (%ld not ours), "
+           "%d blocks %d live, %zu of %zu MB used, %ld out-of-range MMIO\n",
+           salloc_calls, salloc_reused, sfree_calls, sfree_unknown,
+           dma_nblk, live, dma_used >> 20, dma_size >> 20, mmio_bad);
 }
 
 static void shim_sfree(soc_cm_dev_t *dev, void *ptr)
 {
+    int i;
+
     COMPILER_REFERENCE(dev);
-    COMPILER_REFERENCE(ptr);
+    if (ptr == NULL) return;
+
+    pthread_mutex_lock(&dma_lock);
+    sfree_calls++;
+    for (i = 0; i < dma_nblk; i++) {
+        if (dma_blk[i].p == ptr) {
+            /* A double free is the SDK telling us something we got wrong, and
+             * silently tolerating it would let the same block be handed to two
+             * owners. Refuse it and say so. */
+            if (dma_blk[i].freed) {
+                fprintf(stderr, "bde: ** double sfree of %p, ignored\n", ptr);
+            } else {
+                dma_blk[i].freed = 1;
+            }
+            pthread_mutex_unlock(&dma_lock);
+            return;
+        }
+    }
+    /* Not ours: the SDK frees plain heap pointers through this path too. */
+    sfree_unknown++;
+    pthread_mutex_unlock(&dma_lock);
 }
 
 /* x86 DMA is coherent; there is nothing to flush or invalidate. Returning 0
