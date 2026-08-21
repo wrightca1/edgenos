@@ -358,12 +358,37 @@ static int fp_add(bcm_field_group_t grp, const char *what,
         printf("fp: %s action_add rv=%d\n", what, rv);
         return -1;
     }
-    /* Counter is best effort -- a chip that will not give us one is not a
-     * reason to refuse to install the rule that carries the traffic. */
-    if (bcm_field_stat_create(l3_unit, grp, 1, stats, stat_id) != BCM_E_NONE)
-        *stat_id = -1;
-    else if (bcm_field_entry_stat_attach(l3_unit, *ent, *stat_id) != BCM_E_NONE)
-        *stat_id = -1;
+    /* COUNTERS ARE OPT-IN, AND OFF BY DEFAULT. THEY COST THE DATA PLANE.
+     *
+     * These were added to answer "is the rule actually being hit", which they
+     * did. What was not noticed is that attaching a field-processor statistic
+     * starts the SDK collecting it, and that collection allocates a DMA buffer
+     * per cycle from the BDE shim's pool -- a bump allocator with no free. It
+     * runs for hours looking healthy and then the pool is gone:
+     *
+     *   bde: salloc(6144, fp_64_bit_counter) exhausted the 64 MB pool
+     *   bde: salloc(1408, sdma_dmabuf_alloc) exhausted the 64 MB pool
+     *
+     * After that the bridge cannot get a buffer to transmit with, so the
+     * routing adjacencies die while every process stays up and every log line
+     * before the wall looks fine. Observed on a box that had been forwarding
+     * correctly for hours: 6.9 million retry messages, a 749 MB log in a RAM
+     * filesystem, and two dead adjacencies.
+     *
+     * The rules themselves do not need the counters -- they punt regardless.
+     * So the counter is a debugging tool you switch on deliberately and watch,
+     * not something a switch runs with. SDKPOC_FP_STATS=1 enables it.
+     *
+     * The real fix is a DMA allocator that can free, which is a bde_shim
+     * change and a bigger job; until then this is the thing that stops a
+     * diagnostic from taking the network down. */
+    *stat_id = -1;
+    if (getenv("SDKPOC_FP_STATS")) {
+        if (bcm_field_stat_create(l3_unit, grp, 1, stats, stat_id) != BCM_E_NONE)
+            *stat_id = -1;
+        else if (bcm_field_entry_stat_attach(l3_unit, *ent, *stat_id) != BCM_E_NONE)
+            *stat_id = -1;
+    }
 
     rv = bcm_field_entry_install(l3_unit, *ent);
     if (!quiet || rv != BCM_E_NONE) {
