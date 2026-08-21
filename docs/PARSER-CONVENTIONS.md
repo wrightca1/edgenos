@@ -1343,8 +1343,831 @@ sizes, enabled and disabled:
 - **`DECREMENT` is still unidentified.** It is a step *after* slice 14 slot 9 in the stream. The same
   perturbation method will find it: it is the entry whose removal stops the TTL changing **without**
   relocating the edit.
+  - ✅ **FOUND 2026-08-17: it is `0xe0`, slice 15 slot 9.** The predicted method did *not* work —
+    removal drops the frame in that slice — so it was identified by **swapping** the command byte
+    instead, keeping the entry Valid. See the section at the end of this file.
 - The value-bank tension **dissolves**: a `SKIP` needs no operands, and the decrement is a transform
   which the datasheet gives 0 value bytes. Both agree with the sweep finding no bank affects the TTL.
 - `mod_decode.py`'s reading of `0x05`/`0x85` as the **MAC rewrite** is now doubtful for the same
   reason my claim was — operand 5 means *skip 6*, not *write 6*. Slices 3/4 stopping the frame needs
   re-attributing to other commands in those slices.
+
+## ★★★ 2026-08-17: `DECREMENT` IDENTIFIED — `0xe0` decrements the byte at the cursor
+
+Found by locating the **firing** entry first, then swapping commands between slices rather than
+disabling them. Measured on live hardware over the transit rig, Et2 → routed → Et1, reading the
+switch's egress bytes off the peer.
+
+### The firing entry is slot 9, in every command bank
+
+Sweeping every live entry one at a time, disabling one and reading the wire:
+
+| bank | live entries | entries that changed anything |
+|---|---|---|
+| 15 | 15 | **only slot 9** |
+| 16 | 7 | **only slot 9** |
+
+Bank 14 also fires slot 9. So for this flow the CAM selects **slot 9 in slices 14, 15 and 16**, and
+14 of 15 entries in bank 15 — and 6 of 7 in bank 16 — are inert. This is the first direct measurement
+of *which* entry fires; it was previously called unknowable without the frame's full 48-bit key.
+
+⚠ **Do not generalise this to "slot 9 always".** It is measured for three banks. Bank 1's slot 9 is
+**empty** (`0x0000`), so slice 1 must fire some other slot or not fire at all — whichever it is, the
+index is not uniform across banks. Slot 9 is a good *first guess* when probing a new slice for this
+flow, and nothing more until swept.
+
+> ⛔ **This explains the old `{0x20, 0xe0}` negative.** That test disabled bank 14 slot 6 and bank 15
+> slot 8 — both `0xe0`, and both **inert**. It measured nothing, and was recorded as a refutation.
+> Hand-picked leave-one-out fails exactly this way.
+
+### The stream, and the cursor
+
+| slice | slot 9 | command | effect |
+|---|---|---|---|
+| 14 | `0x4005` | `0x05` = `SKIP 6` | cursor 16 → 22 (the TTL) |
+| 15 | `0x41E0` | **`0xe0` = `DECREMENT`** | decrements byte at cursor, advances 1 |
+| 16 | `0x4120` | `0x20` = an increment | increments the following byte (the checksum high byte) |
+
+**The decrement is cursor-relative, and slice 14's `SKIP` positions it.** Changing only the skip
+operand moves it exactly as predicted — this was predicted in advance and then measured:
+
+| skip | cursor | observed |
+|---|---|---|
+| `0x04` = `SKIP 5` | 21 | frag byte `00` → **`ff`**, TTL untouched at `40` |
+| `0x05` = `SKIP 6` (stock) | 22 | **TTL `40` → `3f`** |
+| `0x06` = `SKIP 7` | 23 | proto `01` → **`00`**, TTL untouched at `40` |
+| `0x07` = `SKIP 8` | 24 | lands on the checksum — invisible; TTL and proto both untouched |
+
+So the cursor sits at byte 16 before slice 14, and `SKIP` operand *n* advances it to `16 + (n+1)`.
+
+### The identification itself: swap, do not disable
+
+Disabling the firing entry in slice 15 or 16 **drops the frame** — as does disabling the whole slice.
+Those slices require a match, so leave-one-out cannot reveal function there; only slice 14 shows the
+"edit moves and the frame survives" signature. Swapping the command byte while keeping the entry
+Valid keeps the CAM matching and isolates the command:
+
+| slice 15 / slice 16 | TTL (b22) | proto (b23) |
+|---|---|---|
+| `0xe0` / `0x20` (stock) | **`3f`** | `01` |
+| `0x20` / `0x20` | **`40`** — decrement gone | `01` |
+| `0xe0` / `0xe0` | **`3f`** | **`00`** — decremented too |
+
+Putting `0x20` where `0xe0` was removes the decrement; putting `0xe0` in the next slice decrements
+the next byte as well. **`0xe0` = `DECREMENT`.**
+
+⚠ Its **operand is not used**: `0xe0`, `0xe1` and `0xe2` all behave identically (TTL `3f`, checksum
+valid). Same for `0x20`/`0x22`/`0x24`. Neither operand encodes the target or the amount — the cursor
+does. Any generator must not assume operand semantics for these opcodes.
+
+### What is NOT established
+
+- **The checksum mechanism.** `0x20` increments the byte after the cursor, which in stock position is
+  the IP checksum high byte — exactly the RFC 1624 incremental fix for a TTL decrement. But the
+  emitted checksum was **valid in all four cursor positions**, including `SKIP 5` where the two edits
+  do not compensate. Either something recomputes the checksum downstream, or the model is incomplete.
+  Do not record `0x20` as `CHECKSUM` on the strength of the position alone — that is the same
+  reasoning that made `0x05` a `DECREMENT` for two days.
+- Whether slot 9 fires for **all** flows or only this one. Measured for one 84-byte ICMP flow.
+
+## ★★ 2026-08-17 (later): the firing map for a routed IPv4 frame, and the MAC-rewrite pair
+
+Found with `tools/mod-bisect.sh`, which locates a slice's firing entry by bisection — disabling a
+*set* that contains it either changes or drops the frame, so each probe is one bit and a 29-entry
+bank costs 5 probes instead of 29.
+
+> ⚠ **Validate a search harness against a known answer before trusting it.** The first version
+> compared the full header and reported bank 15's firing entry as slot 5; the exhaustive sweep had
+> already proved it is slot 9. The IP **id** and **checksum** change on every packet, so every probe
+> read as CHANGED and the bisection walked into the wrong half. Masking bytes 18-19 and 24-25 fixed
+> it and it then returned slot 9. This is the same defect that once flagged all value banks as
+> changed — an exact-match comparison against a field the sender controls.
+
+### What fires, for the ICMP transit flow
+
+| slice | firing entry | command | disabling it |
+|---|---|---|---|
+| 3 | **slot 4** | `0x85` | drops the frame |
+| 4 | **slot 4** | `0x85` | drops the frame |
+| 5, 6, 7 | **nothing** | — | disabling *every* live entry changes nothing |
+| 14 | slot 9 | `0x05` `SKIP 6` | edit relocates, frame survives |
+| 15 | slot 9 | `0xe0` `DECREMENT` | drops the frame |
+| 16 | slot 9 | `0x20` | drops the frame |
+
+Two things follow immediately:
+
+1. **A slice can be entirely inert for a flow.** Slices 5, 6 and 7 have 15, 29 and 16 live entries and
+   *none* of them act — every entry disabled at once leaves the emitted frame byte-identical. So a
+   slice miss is **benign**, and the drops in slices 3/4/15/16 mean those commands are genuinely
+   load-bearing, not that a miss is fatal. ⛔ This corrects the reading offered earlier the same day
+   ("those slices require a match"), which was inferred from slices 15/16 alone.
+2. **The firing slot is flow- and slice-specific.** Slot 9 in slices 14-16, slot 4 in slices 3-4.
+   Always bisect; never assume an index.
+
+### Slices 3 and 4 are the MAC rewrite
+
+Both fire the **same command, `0x85`** (opcode 4, operand 5), back to back, exactly where the 12-byte
+MAC rewrite has to happen — 6 bytes of destination then 6 of source. Supporting evidence:
+
+- Replacing slice 3's `0x85` with `0xe0` (`DECREMENT`, which advances the cursor by 1) **scrambles the
+  MAC fields and shifts the frame**, and the TTL decrement stops — the signature of replacing a
+  multi-byte advance with a single-byte one.
+- Replacing slice 4's drops the frame outright.
+
+⚠ **Not proven**: that `0x85` writes exactly `operand+1 = 6` bytes, or where the content comes from.
+The obvious next test — vary the operand and count the shift — **cannot be run**: operands 3, 4, 6 and
+7 all drop the frame, and only 5 emits. So `0x85`'s operand is **load-bearing**, in direct contrast to
+`0xe0` and `0x20`, whose operands are ignored entirely. Any generator must treat operand semantics as
+**per-opcode**, established one opcode at a time — there is no global `operand+1` rule.
+
+## ★★★ THE COMPLETE MOD PROGRAM for a routed IPv4 frame
+
+Every one of the 18 command slices bisected against the live transit rig. **Nine slices act; nine are
+entirely inert** — for slices 0, 1, 2, 5, 6, 7, 8, 9 and 10, disabling *every* live entry at once
+leaves the emitted frame byte-identical. Between them those nine hold well over a hundred live
+entries, all for other frame shapes (VLAN, IPv6, MPLS, tunnels).
+
+| slice | firing slot | word | cmd | disabling it | reading |
+|---|---|---|---|---|---|
+| 0,1,2 | — | | | no effect | inert |
+| **3** | 4 | `4785` | `0x85` | DROPPED | write 6 — **dst MAC** |
+| **4** | 4 | `4085` | `0x85` | DROPPED | write 6 — **src MAC** |
+| 5-10 | — | | | no effect | inert |
+| **11** | 0 | `4701` | `0x01` | edits shift **2** early | **`SKIP 2`** |
+| **12** | 9 | `4B20` | `0x20` | DROPPED | increment |
+| **13** | 9 | `41BE` | `0xBE` | DROPPED | unidentified |
+| **14** | 9 | `4005` | `0x05` | edits shift **6** early | **`SKIP 6`** |
+| **15** | 9 | `41E0` | `0xe0` | DROPPED | **`DECREMENT`** at cursor |
+| **16** | 9 | `4120` | `0x20` | DROPPED | **`INCREMENT`** |
+| **17** | 9 | `40D0` | `0xD0` | DROPPED | unidentified |
+
+So a routed IPv4 frame is **nine steps**, not seventeen:
+
+```
+0x85  0x85  0x01  0x20  0xBE  0x05  0xe0  0x20  0xD0
+ dst   src  SKIP2  inc    ?   SKIP6  DEC   INC    ?
+```
+
+### The cursor is cumulative across slices — proved twice, independently
+
+Disabling slice **11**'s `SKIP 2` moves *both* later edits exactly 2 bytes earlier:
+
+```
+baseline    40 00 3f 01      frag frag TTL=63 proto
+slice 11 off 3f 00 41 01
+```
+
+The decrement moves 22 → **20** (`40`→`3f`) and the increment moves 24 → **22**, landing on the TTL
+and driving it *up* to `0x41` = 65. Disabling slice **14**'s `SKIP 6` moves them 6 earlier. Two skips
+in different slices, both feeding one running cursor.
+
+> **This is the first direct observation of `0x20` incrementing anything.** Its effect is normally
+> invisible because it lands on the IP checksum; displacing the cursor by 2 exposes it on the TTL.
+> `0x20` is an **increment**. Whether its role is the RFC 1624 checksum fix for the TTL decrement is
+> still not proven — that it *sits* on the checksum byte is suggestive, not conclusive.
+
+### What this gives the generator, and what it withholds
+
+- The full step list for the commonest frame type, with the firing entry located in each slice.
+- Two confirmed `SKIP`s with `operand+1` semantics (`0x01`→2, `0x05`→6).
+- `0xe0` = `DECREMENT`, `0x20` = increment, `0x85` = the 6-byte MAC writes.
+- ⛔ **`0xBE` (slice 13) and `0xD0` (slice 17) remain unidentified.** Both drop the frame when
+  disabled, so leave-one-out says only that they are load-bearing. They must be identified by
+  swapping, as `0xe0` was.
+- ⛔ Operand semantics are **per-opcode**: load-bearing for `0x85` (only operand 5 emits), ignored for
+  `0xe0` and `0x20`. Do not apply one rule across opcodes.
+
+## ★★★ Operand semantics are per-opcode — the single most important rule for the generator
+
+A4's five converging clues assumed one global rule: `opcode[7:5]:operand[4:0]`, length = `operand+1`.
+**That rule holds for exactly two opcodes.** Measured by substituting commands into the firing entry
+of a live slice, keeping the Valid bit set so the CAM still matches:
+
+| opcode | seen as | operand | evidence |
+|---|---|---|---|
+| **0** `0x0_` | `SKIP n` | **load-bearing**, `n = operand+1` | `0x01`→2, `0x05`→6; changing it moves every later edit by exactly the delta |
+| **4** `0x8_` | write *n* bytes (MAC) | **load-bearing** | only `0x85` emits; `0x83 0x84 0x86 0x87` all drop the frame |
+| **1** `0x2_` | increment | **ignored** | `0x20 0x22 0x24` identical |
+| **5** `0xb_` | structural, advances 1 | **ignored** | `0xBD 0xBE 0xBF` identical (operands 29/30/31) |
+| **6** `0xd_` | structural, final slice | **ignored** | `0xD0 0xD1 0xD2 0xDF` identical |
+| **7** `0xe_` | `DECREMENT` at cursor | **ignored** | `0xe0 0xe1 0xe2` identical |
+
+> **Only the length-carrying opcodes (`SKIP`, write) use their operand. The single-byte and control
+> opcodes ignore it entirely.** A generator that emits `operand+1` semantics across the board will
+> produce working `SKIP`s and writes and meaningless operands everywhere else — which will *appear*
+> to work, because the hardware ignores those bits.
+
+**What each slice requires is the OPCODE, not the byte.** Substituting a different opcode into a
+slice drops the frame; substituting a different operand of the same opcode changes nothing. Slice 13
+needs opcode 5, slice 15 needs opcode 7, slice 17 needs opcode 6.
+
+### `0xBE` and `0xD0`: bounded, not identified
+
+- **`0xBE` (opcode 5, slice 13)** advances the cursor by **1** and does **not** modify the byte at the
+  cursor. Proved by substituting `0xe0`: byte 15 (IP TOS) came out `0x00` → **`0xff`**, decremented,
+  with every downstream edit still in place — so the replacement's advance of 1 matches the
+  original's, and normal operation leaves byte 15 untouched. It is **not** the checksum step (see
+  below). Function still unknown.
+- **`0xD0` (opcode 6, slice 17)** is the **last acting slice**, and bank 17's only live entries are
+  **three identical copies** of it. Nothing else emits there. That shape — final slice, one command,
+  no variety — reads as a terminator/finalise, and it is the best remaining candidate for the
+  checksum recompute. ⚠ **Inference, not measurement**: it cannot be removed (the frame drops), so the
+  claim is unfalsified rather than confirmed. Do not record it as `END` or `CHECKSUM` yet.
+
+### The checksum is fully recomputed, late — so `0x20` is not an RFC 1624 fix
+
+With slice 13 replaced by `0xe0`, the emitted header carried a decremented TOS **and a correctly
+recomputed checksum**. Same in all four cursor positions of the `SKIP` test, including the one where
+the decrement landed on the checksum byte itself. Something recomputes the checksum over the final
+header after the edits.
+
+⛔ **This weakens the reading offered earlier today** that `0x20`'s increment is the incremental
+checksum compensation for the TTL decrement. If a full recompute follows, that compensation is
+redundant. `0x20` is an increment — that is measured — but its *purpose* is now less clear, not more.
+
+## ★★ The cursor arithmetic, verified end to end — and an anomaly the byte model cannot explain
+
+### The cursor, confirmed by three independent perturbations
+
+```
+ 0  --0x85 (write 6)-->  6  --0x85 (write 6)--> 12  --0x01 SKIP 2--> 14
+    --slice 12 (+1)---> 15  --slice 13 (+1)---> 16  --0x05 SKIP 6--> 22  = the TTL
+```
+
+Byte 12 after the two MAC writes is exactly where the ethertype sits, and `SKIP 2` steps over it.
+Each step was measured, not assumed:
+
+| perturbation | prediction | observed |
+|---|---|---|
+| slice 11 `SKIP 2`→disabled | all edits 2 bytes earlier | decrement 22→**20**, increment 24→**22** (TTL `40`→`41`) |
+| slice 11 `SKIP 2`→`SKIP 3` | all edits 1 byte later | decrement 22→**23** (proto `01`→`00`), TTL untouched at `40` |
+| slice 13 `0xBE`→`0xe0` | decrement at slice 13's cursor | byte 15 (**TOS**) `00`→**`ff`**, downstream intact |
+| slice 14 `SKIP 6`→`5`/`7`/`8` | decrement at 21/23/24 | all four confirmed |
+
+That fixes slice 13's cursor at **15** and its advance at **1**, and confirms the cursor is a single
+running position fed by skips in *different* slices.
+
+### ⛔ ANOMALY: two identical `0x20` commands behave differently
+
+`0x20` in **slice 16** increments the byte at cursor+1 — visible on the TTL when the cursor is
+displaced 2 (`0x40`→`0x41`) and on the proto byte when displaced 1 (`0x01`→`0x02`).
+
+`0x20` in **slice 12** does **nothing observable**. Its cursor is 14, so cursor+1 is the TOS byte,
+which emits as `0x00` unchanged. Shifting the whole stream one byte later (`SKIP 3`) should have put
+it on the total-length high byte — `0054` → `0154`. It stayed `0054`.
+
+Everything cheap has been ruled out:
+
+| hypothesis | test | result |
+|---|---|---|
+| the flag bits `[13:8]` select behaviour (`0x4B20` vs `0x4120`) | give slice 12 slice 16's flags | still does nothing |
+| " | give slice 16 slice 12's flags, cursor displaced so the increment is visible | **still increments** (proto `01`→`02`) |
+| slice 12 is not really firing | substitute `0xe0` / `0xBE` | **both drop the frame** — it is load-bearing and requires opcode 1 |
+| the cursor is elsewhere | derived from both ends, three perturbations | 14, consistently |
+
+> **The command byte does not fully determine behaviour.** Two entries with the same command byte,
+> and with the flag bits proven not to matter, do different things in different slices. A generator
+> that emits command bytes alone is therefore **not sufficient**, and this is the single biggest
+> open risk to A4 — bigger than the two unidentified opcodes, because it undermines the encoding
+> model rather than adding to it.
+
+⚠ Do not resolve this by picking whichever story fits. The candidates left are per-slice hardware
+differences, a dependency on the *preceding* command, or state carried in `MOD_CAM`/`MOD_VALUE_RAM`
+that the command word does not show. Each needs its own experiment.
+
+### The checksum is recomputed, not patched — settled
+
+With slice 13 replaced by `0xe0`, the emitted header carried a **decremented TOS** and a **correctly
+recomputed checksum**. A single-byte decrement of the low half of word 14-15 changes the sum by 1;
+slice 16's increment adds `0x0100` to the checksum high byte, which cannot compensate for that. The
+checksum came out valid anyway. So the recompute is unconditional and late, and `0x20`'s increment is
+**not** an RFC 1624 compensation — that reading, offered earlier the same day, is withdrawn.
+
+## ★★★ RESOLVED: `0x20` is a CONDITIONAL increment — it fires only after a `DECREMENT`
+
+The anomaly recorded above — two identical `0x20` commands behaving differently in slices 12 and 16 —
+is not per-slice hardware, and not the flag bits. **`0x20` acts only when the immediately preceding
+command was a decrement.**
+
+Measured by displacing the cursor with `SKIP 5` so slice 16's increment is visible on the proto byte,
+then varying **only** slice 15, the command in front of it:
+
+| slice 15 | opcode | byte 21 | proto |
+|---|---|---|---|
+| `0xe0` | 7 | `ff` decremented | **`02` incremented** |
+| `0xe1` | 7 | `ff` decremented | **`02` incremented** |
+| `0xBE` | 5 | `00` untouched | `01` **untouched** |
+| `0xBD` | 5 | `00` untouched | `01` **untouched** |
+
+Everything else is identical — same slice, same entry, same cursor, same flags. The effect tracks the
+**opcode** of the preceding command, not its operand and not its exact byte.
+
+That explains slice 12 exactly: its `0x20` follows slice 11's `SKIP 2`, so there is no decrement to
+act on and it does nothing — in its normal position *and* when the whole stream is displaced. No
+special-casing required.
+
+> **`0xe0` + `0x20` are a fused pair**, not two independent commands: decrement a byte, then
+> conditionally increment the byte two positions later. With the cursor in its stock position that is
+> the TTL and the IP checksum **high** byte — decrementing the TTL lowers the header sum by `0x0100`,
+> and `+1` on the checksum high byte restores it. That is precisely the RFC 1624 incremental update.
+
+⛔ **This partly reinstates a reading withdrawn earlier the same day.** The pairing is real and now
+measured. What was correctly observed is that the checksum comes out **valid even when the pair does
+not compensate** — e.g. with slice 13 replaced by `0xe0`, an *uncompensated* TOS decrement still
+emitted a valid checksum. So a full recompute also happens somewhere (slice 17's `0xD0` is the
+candidate), which makes the incremental fixup redundant. Both facts are measured; the redundancy is
+unexplained. **Do not collapse them into one story.**
+
+### Why this matters more than the two unnamed opcodes
+
+The generator cannot emit MOD commands independently. A command's behaviour depends on the command
+before it, so the encoding is **stateful across slices** — the cursor was already known to be, and now
+the operations are too. Any generator must model the stream, not a list of independent per-slice
+bytes. This retires the "biggest open risk to A4" flagged above.
+
+## ⛔ `MOD_VALUE_RAM` does NOT supply the MAC rewrite for a routed IPv4 frame
+
+The router MAC's bytes really are in `MOD_VALUE_RAM` — `vbank 5` holds `0xA8315DAB` (bytes 3-6 of
+`44:4c:a8:31:5d:ab`) in eight copies, and `0x444C` (its first two bytes) appears in banks 2, 3 and 6,
+interleaved with `0x20202020` filler. It is the obvious content source for the `0x85` writes.
+
+**It is not the source.** Setting `vbank 5` to `0xA8315DFF` — with the write **read back and
+confirmed** — left the emitted frame's src MAC at `44:4c:a8:31:5d:ab`, unchanged. Tried against all
+eight copies at once and against slot 0 alone.
+
+So for a routed IPv4 frame:
+
+- the **dst MAC** comes from the next-hop entry (it is the peer's address, and nothing resembling
+  `80a2…cab4` appears anywhere in the value RAM), and
+- the **src MAC** comes from somewhere other than `MOD_VALUE_RAM` — a router-MAC register or the
+  next-hop/L3AR side.
+
+⚠ This narrows the earlier "`MOD_VALUE_RAM` feeds content-writing edits only" result rather than
+contradicting it: the value banks are populated and plausibly do feed *some* writes, but **not the
+ones in this flow**. Their contents look like header templates for encapsulation — `0x4500` is an
+IPv4 version/IHL+TOS pair, alongside `0x4011`, `0x0101`, `0xFFD7` — i.e. paths this frame never takes.
+
+**Consequence for A4:** the MAC-rewrite *content* path is still unlocated, and the generator needs it.
+Finding it means following the next-hop side, not the MOD tables.
+
+## Where `0xBE` and `0xD0` stand — levers exhausted, not identified
+
+| lever | `0xBE` (op 5, slice 13) | `0xD0` (op 6, slice 17) |
+|---|---|---|
+| disable | frame drops | frame drops |
+| substitute another opcode | drops | drops (5 opcodes tried) |
+| vary the operand | ignored (`0xBD`/`0xBE`/`0xBF` identical) | ignored (`0xD0`/`0xD1`/`0xD2`/`0xDF` identical) |
+| substitute *into* it (`0xe0`) | works — proves cursor 15, advance 1, byte untouched | drops |
+| `MOD_VALUE_RAM` | not a content path for this flow | same |
+
+Both are bounded but unnamed. Every lever that worked for `0xe0` and `0x20` is exhausted here.
+
+**The next lever is a different frame type.** Every result above is from one 84-byte ICMP flow. Firing
+entries, the cursor, and which slices act are all flow-dependent — nine slices were inert for *this*
+frame. Running the same bisection against an L2-switched frame, a VLAN-tagged frame and an IPv6 frame
+would show what stays constant. `0xD0`'s terminator reading in particular predicts it fires in
+**every** program; that is a real, falsifiable test and it needs traffic we have not yet sent.
+
+## ★★★ THE MODEL IS GENERATIVE — two novel transformations predicted byte-exact, in advance
+
+The strongest test available: use the model to make the chip perform an edit **EOS never programmed**,
+predict the emitted bytes before running it, and compare. Only slice 14's `SKIP` operand was changed.
+
+| slice 14 | predicted | measured | |
+|---|---|---|---|
+| `0x4009` = `SKIP 10` | byte 26 `0a`→`09`, byte 28 `65`→`66` → src IP **9.101.102.33**, ttl `0x40` | `09 65 66 21` → **9.101.102.33**, ttl `0x40` | ✅ |
+| `0x400A` = `SKIP 11` | byte 27 `65`→`64`, byte 29 `21`→`22` → src IP **10.100.101.34**, ttl `0x40` | `0a 64 65 22` → **10.100.101.34**, ttl `0x40`, cksum VALID | ✅ |
+
+Both hit exactly, including *which* byte the conditional increment lands on and the TTL reverting to
+`0x40` because the decrement moved off it. The model — running cursor, `SKIP n = operand+1`,
+`0xe0` decrements at the cursor, `0x20` conditionally increments two bytes later — is **predictive,
+not merely descriptive.** We can now aim a MOD edit at a chosen byte and get it.
+
+### And this explains the pair's design
+
+Byte *N* and byte *N+2* have the **same parity**, so they sit in the same half of their respective
+16-bit words. A `-1` at *N* and a `+1` at *N+2* therefore cancel **exactly** in the one's-complement
+sum: `decrement + increment@+2` is a **checksum-neutral edit by construction**. Both predictions above
+emitted a valid checksum without anything having to know what the header meant.
+
+For the stock program that pair is the TTL and the IP checksum high byte, which is the RFC 1624
+update — but it is the general mechanism, not a TTL special case.
+
+⚠ The tension logged earlier survives: an **uncompensated** decrement (slice 13 → `0xe0`, no `0x20`
+after it) *also* emitted a valid checksum, which the pair cannot explain and which still implies a
+late full recompute. Both are measured. The pair is checksum-neutral **and** something recomputes;
+why both exist is unexplained.
+
+### What this unblocks
+
+A4 no longer needs the remaining opcodes to make progress. For any frame edit expressible as
+`skip → decrement → conditional increment`, the generator can be written **and verified against
+hardware today**, because the prediction can be checked byte-for-byte before shipping. `0xBE`, `0xD0`
+and the MAC-content path remain open, but they no longer gate the parts of the encoding we hold.
+
+## The command word's upper bits are `Jitter`, which is why swapping them did nothing
+
+`CMD_LAYOUT` in `mod_decode.py`, transcribed from the register header, reads:
+
+```
+Command [7:0]   Jitter [13:8]   Valid [14]
+```
+
+So the `0x700` / `0xB00` / `0x100` differences between entries — the ones tested when slice 12's and
+slice 16's `0x20` behaved differently — are the **`Jitter`** field, not an opcode modifier. Swapping
+them in both directions changed nothing on the wire, which is exactly what a timing/scheduling field
+should do. The real explanation was the conditional dependence on the preceding command.
+
+⚠ Worth noting how close that came to a wrong answer: two entries differing in a visible field, and
+behaving differently, is a strong-looking correlation. It was checked in **both** directions — giving
+slice 12 slice 16's bits *and* slice 16 slice 12's bits — and failed both ways. A one-directional test
+would have left `Jitter` looking causal.
+
+`mod_decode.py` now annotates each Command byte with its measured meaning via `describe()`, and
+deliberately prints `-` for the operand of every opcode that ignores it, rather than a number that
+would invite the `0x05`-is-a-MAC-length mistake again.
+
+## ★★★ The src MAC content path: `MOD_VALUE_RAM` vbank 8 slot 8 — found by searching the replay
+
+`MOD_VALUE_RAM` **is** a content source after all; the earlier negative was testing the wrong copy.
+
+Searching the replay for the router MAC (`44:4c:a8:31:5d:ab`) rather than guessing shows it written
+to **three** value-RAM words plus a fourth block:
+
+| address | vbank/slot | effect when modified |
+|---|---|---|
+| `0x159494` | bank 4 slot 20 | none |
+| `0x159502` | bank 8 slot 2 | none |
+| **`0x159508`** | **bank 8 slot 8** | **src MAC changes** ✅ |
+| `0x123106/86`, `0x1231aa`, `0x12338a` | `MAPPER_DMAC_CAM` | ingress my-MAC check, not egress |
+
+Setting `0x159508` to `0xA8315DFF` (write read back and confirmed) changed the emitted source MAC to
+**`44:4c:a8:31:5d:ff`**. The other two copies are decoys.
+
+⛔ **This resolves the long-open "bank 4's unchanged result against its MAC association" as a
+NEGATIVE**: bank 4 holds a copy of the MAC and does not feed the rewrite. The association was
+coincidence — the same constant appears in several banks.
+
+⛔ **And it narrows the earlier "`MOD_VALUE_RAM` is not the source" finding**, which was measured
+against bank 5 only. Bank 5 genuinely does nothing; bank 8 slot 8 does. *One bank tested is not the
+table tested* — the correct claim was always "bank 5 is not the source".
+
+### The template is contiguous frame bytes
+
+```
+0x159508 = A8315DAB     ->  a8 31 5d ab      src MAC bytes 3-6
+0x159509 = 20202020         (DataSelect/Type)
+0x15950a = 08004500     ->  08 00 45 00      ethertype, IP ver/IHL, TOS
+```
+
+So slice 4's `0x85` writes a **6-byte run spanning frame bytes 8-13** — `a8 31 5d ab 08 00` — taking
+4 bytes from one value entry and 2 from the next. Value entries are 2 words: four constant bytes then
+a selects/types word.
+
+⚠ **The MAC's leading `44 4c` is still unlocated.** Three `0x444c`-bearing value words from the replay
+(`0x159456`, `0x15945a`, `0x159466`) were each modified and none moved the emitted MAC. Note the
+egress src MAC equals the **ingress dst MAC**, and `VAL_LAYOUT` supports Type 1 = constant and
+Type 2 = data from a parser channel — so those two bytes are plausibly channel-sourced rather than
+constant. That is the next thing to test, and it is a *hypothesis*, not a finding.
+
+### Method note
+
+The replay is a searchable index of where every constant lives. Grepping it for the MAC found the
+answer in one step after a direct hardware hunt had produced a wrong negative — and a blind MMIO
+sweep, which the project forbids, was never needed.
+
+## `MOD_VALUE_RAM` entry format, decoded on live silicon: constant vs channel
+
+A value entry is **2 words / 64 bits**: word 0 is four constant bytes (`ValD..ValA`), word 1 is a
+per-byte `DataSelect[4:0]` + `Type[7:5]`. Decoding bank 8 as it runs:
+
+```
+entry  addr      constants   selects     per-byte
+  4    0x159508  a8315dab    20202020    A..D: sel0, ty1        <- all CONSTANT
+  5    0x15950a  08004500    20202020    A..D: sel0, ty1
+  6    0x15950c  00000000    59592020    A,B: sel25 ty2 ; C,D: sel0 ty1
+  9    0x159512  00000000    59595a5a    A,B: sel25 ty2 ; C,D: sel26 ty2   <- all CHANNEL
+ 11    0x159516  0000fff3    59592020    A,B: sel25 ty2 ; C,D: sel0 ty1
+```
+
+> **`Type 1` = constant byte from this entry. `Type 2` = byte taken from parser channel
+> `DataSelect`.** A single entry can mix them per byte.
+
+This is confirmed rather than inferred: entry 4 is all `ty1`, and changing its constant is exactly
+what moved the emitted src MAC. Channels **25** and **26** are the ones in use here.
+
+**For the generator this is the missing half of the content model.** A write command's bytes are not
+"constants from a bank" — each byte independently is either a literal or a parser-channel pull, and a
+generator that emits only constants would produce frames that are right for one flow and wrong for
+every other, because the channel-sourced bytes are what make the edit flow-dependent.
+
+⚠ The src MAC's leading `44 4c` is still unlocated. It is **not** the entry before `0x159508`
+(entry 3 is all zeros), and three `0x444c`-bearing words elsewhere had no effect. Given the egress src
+MAC equals the ingress dst MAC, a `ty2` channel pull remains the best hypothesis — the mechanism is
+now decoded, so the search is for *which* entry and channel, not for how it could work.
+
+## `MOD_VALUE_RAM` content census — the table is mostly channel-driven, not constant
+
+All 15 banks read off the running chip and decoded with the entry format above (2 words: four
+constant bytes, then per-byte `DataSelect[4:0]` + `Type[7:5]`):
+
+| | entries |
+|---|---|
+| all-constant (`ty1` x4) | 49 |
+| **mixed** constant + channel | **60** |
+| all-channel (`ty2` x4) | 21 |
+| **total populated** | **130** |
+
+**81 of 130 entries pull at least one byte from a parser channel.** Sixteen distinct channels are
+referenced, by byte count:
+
+```
+sel 16: 36   sel 25: 42   sel 23: 16   sel 30: 15   sel 27: 14   sel 29: 14
+sel 28: 12   sel 19:  8   sel 20:  8   sel 26:  8   sel 21:  6   sel 22:  6
+sel  7:  5   sel 31:  5   sel 17:  4   sel  5:  3
+```
+
+> The egress-edit content model is **predominantly channel-driven**. A generator that emits constants
+> would reproduce fewer than 40% of the populated entries correctly, and the ones it got wrong would
+> be exactly the flow-dependent ones — the bytes that make the edit adapt per packet. This is now the
+> largest single piece of A4 that remains unmodelled.
+
+⚠ The channel numbering here is `DataSelect` as it appears in `MOD_VALUE_RAM`. Mapping those indices
+onto the parser's named halfword channels is **not** done, and should not be assumed to be the same
+numbering the parser tables use — that mapping is the next concrete piece of work, and it is
+read-only/offline: the parser tables and these selects are both already dumped.
+
+## ⛔ MOD's `DataSelect` numbering is NOT the parser's `FIELDS_CHANNEL` numbering
+
+The two index spaces line up seductively. MOD's observed selects map onto `FIELDS_CHANNEL` as
+`20/21` = L3_SIP, `22/23` = L3_DIP, `19` = L3_TTL/PROT, `25` = L4_DST — all plausible egress-edit
+sources — and `sel 7` would be `L2_DMAC[47:32]`, exactly the `44 4c` we were hunting, since the
+egress src MAC equals the ingress dst MAC.
+
+**Tested, and it does not hold.** All three value entries referencing `ch5`/`ch7` were converted from
+Type 2 (channel) to Type 1 (constant `0xFF`), writes read back and confirmed:
+
+| entry | byte | result |
+|---|---|---|
+| bank 0 slot 20 (`0x159414`) | ValA `ch7` → const | src MAC unchanged |
+| bank 0 slot 28 (`0x15941c`) | ValB `ch7` → const | src MAC unchanged |
+| bank 1 slot 4 (`0x159424`) | ValB `ch7` → const | src MAC unchanged |
+
+So either the numbering differs between the two blocks, or these entries belong to data slices this
+flow never uses (they sit in banks 0-1 = data slices 17-18, while the src MAC's constant half lives in
+bank 8 = data slice 25). **Do not translate a MOD `DataSelect` through `FIELDS_CHANNEL`** without
+testing it on hardware first — the coincidence of plausible names is not evidence.
+
+### State of the `44 4c` hunt
+
+Nine candidates eliminated by direct measurement, every write read back and confirmed:
+
+- **constants**: `0x159456`, `0x15945a`, `0x159466` (as `0x444c`), plus `0x159494`, `0x159502`
+  (MAC copies), and the entry preceding `0x159508` (all zeros)
+- **channels**: the three `ch5`/`ch7` entries above
+
+What is established: the src MAC's **low four bytes** are a constant at `0x159508` (bank 8 slot 8),
+confirmed by modification. The leading two bytes come from neither the constants nor the channels
+tested. The remaining hypotheses are a different data slice's value stream, or a source outside
+`MOD_VALUE_RAM` altogether — and the next step is to establish the **value-stream order** (which data
+slice feeds which command-slice write), because address order is demonstrably not stream order.
+
+## ★★★ THE MAC CONTENT PATH IS COMPLETE — and only two data slices feed this flow
+
+Nine candidate constants had been eliminated one at a time. The way through was to stop guessing and
+**map which data slices the flow consumes at all**: mark every constant word in a value bank with
+`0xFFFFFFFF`, leave the selects words alone (so Type-2 channel bytes and the CAM match are untouched),
+and see which banks move the wire. `tools/mod-valuesweep.sh`.
+
+| bank | data slice | result |
+|---|---|---|
+| 0-5, 7, 9-14 | 17-22, 24, 26-31 | **unchanged — not consumed** |
+| **6** | **23** | frame dropped — consumed |
+| **8** | **25** | src MAC low bytes became `ff` — consumed |
+
+**Twelve of the fourteen data slices are inert for a routed IPv4 frame.** That collapsed the search
+from 130 populated entries to two banks, and the answer was in the half never tested.
+
+### The full content map
+
+| frame bytes | source | confirmed by |
+|---|---|---|
+| dst MAC `0-5` | `NEXTHOP` adjacency `0x160014/15` | set `0x3581CAFF` → emitted `80:a2:35:81:ca:ff` |
+| src MAC `0-1` = `44 4c` | **`MOD_VALUE_RAM` bank 6 slot 8 (`0x1594c8`)**, ValC/ValD constants | set `0x0000444D` → emitted **`44:4d`**`:a8:31:5d:ab` |
+| src MAC `2-5` = `a8 31 5d ab` | `MOD_VALUE_RAM` bank 8 slot 8 (`0x159508`) | set `0xA8315DFF` → emitted `44:4c:a8:31:5d:ff` |
+
+Each confirmed by modifying live silicon and reading the emitted frame — not by inference.
+
+So the src MAC is assembled from **two constants in two different data slices**, 2 bytes then 4, and
+the dst MAC comes from the adjacency. The earlier guess that the leading `44 4c` was a parser-channel
+pull of the ingress DMAC was wrong: it is a plain constant, just in a bank nobody had looked in.
+
+### Two loose ends, stated rather than smoothed over
+
+- The **same entry rejects `0x0000454C`** (changing ValC `0x44`→`0x45`): the frame drops instead of
+  emitting `45:4c:…`, while `0x0000444D` (ValD `0x4C`→`0x4D`) works perfectly. One byte of the pair
+  is tolerant and the other is not, which the content model does not explain.
+- Bank 6 slot 2 (`0x1594c2`) holds an **identical** `0x0000444C` with identical selects and does
+  nothing when changed. As with the MAC copies in banks 4 and 5, the table carries decoys; only the
+  entry the fired data slice selects matters.
+
+### ✅ Both loose ends resolved
+
+**1. The `ValC` intolerance is the Ethernet I/G bit, not a content-model gap.** Sweeping the byte:
+
+| `ValC` | parity | result |
+|---|---|---|
+| `0x44` (stock), `0x46`, `0x48`, `0x02`, `0xC4` | even | emits — src MAC follows exactly |
+| `0x43`, `0x45`, `0x47`, `0x01` | **odd** | **frame dropped**, 4 for 4 |
+
+`ValC` is the **first octet of the source MAC**, whose bit 0 is the I/G (individual/group) bit. An odd
+value makes it a *multicast source address*, which is illegal, and the egress path refuses to emit the
+frame. Six even values work and four odd ones fail — the rule is parity, not any particular value.
+
+So nothing is wrong with the content model: the hardware is enforcing Ethernet semantics. ⚠ Worth
+noting for a generator: **it will silently drop frames if it ever computes an odd first SMAC octet**,
+and the failure looks exactly like a broken MOD program.
+
+**2. Bank 6 slot 2 is a decoy.** It holds a byte-identical `0x0000444C` with identical selects and
+changing it does nothing, because **only the entry the fired data slice selects matters** — the same
+rule already measured for `MOD_COMMAND_RAM` (14 of 15 live entries in bank 15 are inert) and for the
+duplicate MAC copies in value banks 4 and 5. The tables are full of alternates for other flows.
+
+## ⛔ CORRECTION: opcode 5's operand is NOT ignored — and opcode 5 can zero a byte
+
+Both earlier claims about opcode 5 were measured where **nothing was observable**, and both are wrong.
+
+The stock program puts `0xBE` at slice 13, whose cursor is the **IP TOS byte** — which is `0x00` in
+ordinary traffic. Any op that writes zero there is invisible, and that is why `0xBD`/`0xBE`/`0xBF`
+looked "identical" and the operand looked ignored.
+
+### opcode 5 zeroes the byte at the cursor — sometimes
+
+Putting `0xBE` at slice **15** (cursor on the TTL, incoming `0x40`), reproduced twice:
+
+```
+stock  s15=0xe0  ->  ttl=0x3f      (decrement)
+       s15=0xBE  ->  ttl=0x00      (zeroed)
+```
+
+### And the operand selects behaviour
+
+At slice 15, cursor on the TTL:
+
+| operand | result |
+|---|---|
+| 0, 2, 4, 29, 30, 31 | TTL → `0x00` |
+| 16, 17 | TTL **unchanged** at `0x40` — no write |
+| 1, 8, 12, 15 | **frame dropped** |
+
+Three distinct behaviours inside one opcode. ⚠ **No pattern fits yet** — it is not bit 4 (16 and 29
+both have it set, and differ), and not the low nibble (0 and 16 share it, and differ). Recorded as a
+measurement, not a model.
+
+### ⚠ And it is context-dependent, like `0x20`
+
+The **same word** `0x41BE` does different things in different slices:
+
+| placement | cursor | result |
+|---|---|---|
+| slice 15 | 22 (TTL) | zeroes the byte |
+| slice 15 with `SKIP 7` | 23 (proto) | **nothing** — proto stays `0x01` |
+| slice 13 (stock) | 15 (TOS) | **nothing** — verified by sending TOS=`0x10`, which emerged as `0x10` |
+
+So opcode 5 joins `0x20` as an operation whose effect depends on where it sits in the stream, not
+just on its own bits. The `0x20` case resolved to "conditional on the preceding command"; the
+analogous test has **not** been run for opcode 5, and the mechanism here is still unknown.
+
+**`0xD0` (opcode 6) remains untouched by all of this** — it drops the frame in every placement tried.
+
+### Method note
+
+The TOS probe (`tools/transit-probe-tos.sh`) exists because a byte that is zero in ordinary traffic
+cannot distinguish "wrote zero" from "did nothing". **Before concluding an operation is inert, check
+that its target carries a value that would show a change.** Two wrong conclusions came from skipping
+that check.
+
+### ⛔ opcode 5 is NOT conditional on the preceding command
+
+The `0x20` mechanism does not transfer. Holding the **cursor fixed at byte 23** and varying only what
+precedes the opcode-5 command:
+
+| placement | predecessor | result |
+|---|---|---|
+| slice 15 with `SKIP 7` | a `SKIP` | proto unchanged |
+| slice 16, stock cursor | a **`DECREMENT`** | proto unchanged, ttl `0x3f` normal |
+
+Same cursor, both predecessors, no effect either way. So the one mechanism with a proven template is
+excluded, and opcode 5's single observed action — zeroing the TTL when placed at slice 15 — is still
+unexplained.
+
+Full placement matrix so far:
+
+| placement | cursor | predecessor | result |
+|---|---|---|---|
+| slice 15 | 22 (TTL) | SKIP | **zeroes the byte** |
+| slice 15 + `SKIP 7` | 23 (proto) | SKIP | nothing |
+| slice 16 | 23 (proto) | DECREMENT | nothing |
+| slice 13 (stock) | 15 (TOS) | `0x20` | nothing |
+
+One acting case out of four, and the acting one is not distinguished by cursor value, predecessor
+opcode, or the command word — all three are controlled for above. The remaining candidates are the
+**value-stream position** (slice 15 and slice 16 consume different value entries) and something
+per-slice in the CAM. Neither has been tested.
+
+⚠ Do not record opcode 5 as "zero the byte at the cursor". It does that in exactly one placement, and
+three controls say the obvious generalisations are wrong.
+
+## ★★★ opcode 5 IDENTIFIED: `REPLACE_MASKED`, and its operand is a DYBBLE MASK
+
+The datasheet lists `REPLACE_MASKED` — *"replace selected bits, dybble mask in the command byte"* —
+and that is exactly opcode 5 (`0xa0`-`0xbf`). Decoded on hardware by placing it at slice 15 with the
+cursor on a bit-rich byte (`0x65`) and sweeping the operand:
+
+| operand | bits | dybbles cleared | result on `0x65` |
+|---|---|---|---|
+| 16 | `10000` | none | `0x65` |
+| 18 | `10010` | 1 | `0x61` |
+| 20 | `10100` | 2 | `0x45` |
+| 24 | `11000` | 3 | `0x25` |
+| 26 | `11010` | 3,1 | `0x21` |
+| 28 | `11100` | 3,2 | `0x05` |
+| 29 | `11101` | 3,2,0 | `0x04` |
+| 30 | `11110` | 3,2,1 | `0x01` |
+
+> **`operand[3:0]` is a 4-bit mask over the byte's four 2-bit dybbles**; a set bit replaces that
+> dybble. `operand[4]` distinguishes clear-from-keep (`opd 0` clears everything, `opd 16` clears
+> nothing).
+
+**Three of these were held-out predictions** — operands 26, 20 and 18 were computed from the model
+*before* running and all three hit exactly. That is the same standard the cursor model was held to.
+
+### It uses the same checksum-neutral pair as `DECREMENT`
+
+Every observed edit is **−X at the cursor, +X at cursor+2**, e.g. cursor 27: `b27 65→01` and
+`b29 21→85`, both `0x64`. N and N+2 share parity, so the one's-complement sum is preserved — the
+identical mechanism documented for `0xe0`/`0x20`. The pair is a general primitive of this engine, not
+a TTL special case.
+
+### ⛔ Two corrections this forced
+
+1. **The "cursor parity" rule I proposed was wrong.** It fitted six observations because I was
+   printing only the TTL and proto bytes; a full-frame diff showed the odd-cursor cases *did* edit —
+   at bytes I was not looking at. **A pattern found in a narrow window is a pattern about the window.**
+2. **The value-stream hypothesis was wrong** — marking all 15 value banks left the written value at
+   zero. The replacement bits do not come from the banks tested. ⚠ The datasheet gives
+   `REPLACE_MASKED` *1 value byte*, so the replacement source is presumably a value byte that is zero
+   here; where it comes from is **not** established.
+
+### Still unexplained
+
+Operands 1, 8, 12 and 15 **drop the frame** rather than editing. They are not distinguished by the
+mask model, and no explanation is offered here.
+
+**`0xD0` (opcode 6) remains the last unidentified command.**
+
+## The MOD opcode map, and what closes A4's command question
+
+Cross-referencing the hardware measurements against the datasheet's nine documented commands
+(5.21.5) now accounts for every opcode this flow uses:
+
+| opcode | command | evidence | confidence |
+|---|---|---|---|
+| **0** `0x0_` | **SKIP n**, n = operand+1 | moving it relocates every later edit by exactly the delta, four cursor positions | **measured** |
+| **1** `0x2_` | **CHECKSUM** | fires *only* after a modifying command, writes at cursor+2 keeping the sum neutral — the datasheet's fixup is `ingress + accumulated - delta`, cleared after use, which is precisely a conditional write | **strong fit** |
+| **4** `0x8_` | **REPLACE n bytes** | `0x85` = operand 5 = 6 bytes = the MAC rewrite; only operand 5 emits | **strong fit** |
+| **5** `0xb_` | **REPLACE_MASKED** | operand[3:0] = dybble mask, three held-out predictions exact | **measured** |
+| **6** `0xd_` | **terminator / END** | see below | **by elimination** |
+| **7** `0xe_` | **DECREMENT** | swapping it in/out switches the TTL decrement on and off | **measured** |
+
+Unobserved in this flow: opcode 2 (`0x4_`, heavily populated in the tables) and opcode 3 (`0x6_`,
+which EOS never uses at all). The datasheet's remaining commands — INSERT, DELETE, DECREMENT_INSERT,
+DECREMENT_REPLACE — must live there.
+
+### opcode 6 is a terminator, by elimination rather than by a positive edit
+
+Six independent observations, all consistent and none of them a demonstration of what it *does*:
+
+1. It appears only in slice **17**, the last acting slice.
+2. Bank 17's only live entries are **three identical copies** of `0x40D0`.
+3. **No other opcode works at slice 17** — `0x20`, `0x01`, `0x05`, `0xBE`, `0xe0` all drop the frame.
+4. It **never edits the frame**: no stable-byte change at the stock cursor or at a cursor displaced
+   onto the source IP, and **no length change** for any operand (wire length 102 bytes throughout),
+   which rules out INSERT and DELETE.
+5. Placed at slice 13 or slice 15 it **drops the frame** at every operand.
+6. Operand `0` is invalid (drops); every operand with bit 4 set behaves identically.
+
+⚠ **This is an inference from absence.** Every test says "it does nothing observable and is
+mandatory in the last position", which is what a terminator looks like — and also what an edit whose
+target we cannot see looks like. That trap has now caught this project twice (opcode 5 hid on a
+zero-valued TOS byte; the parity rule hid outside a narrow print window). **Do not record opcode 6 as
+END without a positive observation**; the honest statement is "mandatory, final-slice, no observed
+frame effect".
+
+The remaining route to a positive result is a frame type whose program uses opcode 6 somewhere other
+than the last slice — which needs the rig reconfigured, not more probing of this flow.
+
+### Still unexplained
+
+Opcode 5 operands **1, 8, 12, 15** drop the frame instead of editing. The dybble-mask model does not
+distinguish them from operands that work, and no account of them is offered here.

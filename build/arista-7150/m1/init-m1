@@ -242,6 +242,23 @@ fi
 # watches PIN_STRAP and the kernel route count. /mnt/flash/wdog.off disables it
 # and the binary honours that itself -- create that file before any experiment
 # that deliberately downs the dataplane.
+# --- kernel self-recovery: set it HERE, not via the cmdline --------------------
+# m0/boot0 kexecs with "panic=10 nosmp reboot=p,force" and dmesg confirms the
+# kernel receives it -- but on alpha42 /proc/sys/kernel/panic still read 0, so a
+# panic would HANG THE BOX FOREVER instead of resetting. Rather than chase why,
+# set it directly: this is verifiable after boot and independent of the cmdline.
+# (Note /proc/cmdline on this box reports Aboot's line, not ours -- use dmesg.)
+#
+# fm6000_wdog cannot cover this: it is userspace and dies with the kernel.
+#   panic=10        reboot 10s after a panic (Aboot then self-reverts to EOS)
+#   panic_on_oops=1 turn an oops into a panic, so a half-dead kernel reboots too
+# ⚠ This kernel has NO lockup detectors -- softlockup_panic, hung_task_panic and
+# nmi_watchdog are all absent from /proc/sys/kernel, so a silent CPU lockup is
+# still unrecoverable; fixing that needs a kernel config change, not a sysctl.
+echo 10 > /proc/sys/kernel/panic 2>/dev/null
+echo 1  > /proc/sys/kernel/panic_on_oops 2>/dev/null
+echo "--- kernel self-recovery: panic=$(cat /proc/sys/kernel/panic 2>/dev/null) panic_on_oops=$(cat /proc/sys/kernel/panic_on_oops 2>/dev/null) ---"
+
 if [ -n "$FWD" ] && [ -x /usr/bin/fm6000_wdog ]; then
     if [ -f /mnt/flash/wdog.off ]; then
         echo "--- dataplane watchdog DISABLED (/mnt/flash/wdog.off present) ---"

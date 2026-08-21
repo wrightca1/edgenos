@@ -9,11 +9,24 @@ if [ -d "${swipath}" ]; then
 else
    unzip -oq "${swipath}" "${kernel}" "initrd-${arch}" -d /tmp
 fi
-# REBOOT (root-caused): the hang is the SMP state around the reset, not the reset
-# method (reboot=p AND reboot=t both froze). Post-kexec the AP cores wedge:
-# reboot -f loops forever in stop_other_cpus(), and CF9/triple-fault won't reset
-# while other cores are alive. Fix: nosmp (only BSP online) + reboot=p,force
-# (skip machine_shutdown teardown, straight to CF9 = EOS's method). Use reboot -f.
+# ⚠ /proc/cmdline LIES ON THIS BOX -- and the append below is NOT the whole story.
+# Measured 2026-08-21 on alpha42/43: /proc/cmdline reports Aboot's own line,
+#   pnpacpi=off pci=nocrs,lastbus=0 intel_iommu=off nr_cpus=1 tsc=reliable console=ttyS0,9600
+# while dmesg's "Command line:" at [0.000000] reports OURS, i.e. the kernel did
+# receive this append. Do not use /proc/cmdline to check what we passed -- use
+# dmesg. (An earlier note here called this line "dead code"; that was wrong.)
+#
+# BUT the append's panic=10 did NOT take effect: on alpha42 /proc/sys/kernel/panic
+# read 0, meaning a panic would hang forever rather than reset. Unexplained, and
+# not worth chasing -- init-m1 now writes panic=10 and panic_on_oops=1 to
+# /proc/sys directly, which is verifiable after the fact and independent of who
+# wins the cmdline. Verified reading 10/1 on alpha43.
+#
+# REBOOT (original note, kept for the diagnosis, not the credit): the hang is the
+# SMP state around the reset, not the reset method (reboot=p AND reboot=t both
+# froze). Post-kexec the AP cores wedge: reboot -f loops forever in
+# stop_other_cpus(), and CF9/triple-fault won't reset while other cores are
+# alive. Only the BSP being online is what makes reboot -f work.
 # (swiotlb=force was tried and did NOT fix tg3 RX — dropped; it's an RGMII PHY
 # issue, fixed by building the Broadcom PHY driver in-kernel.)
 echo "console=ttyS0,9600 earlyprintk=serial,ttyS0,9600 rdinit=/init panic=10 nosmp reboot=p,force" > /tmp/append

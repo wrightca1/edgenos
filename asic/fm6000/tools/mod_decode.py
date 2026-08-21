@@ -87,45 +87,63 @@ them, the two edits routing requires. Every other command carries a flag saying
 whether it contributes to the checksum accumulator, which is cleared after a
 CHECKSUM or at end of frame.
 
-⚠ THE COMMAND SPLIT: A HYPOTHESIS WITH EVIDENCE, NOT A SETTLED FACT.
+THE COMMAND SPLIT -- MEASURED ON HARDWARE, 2026-08-17. Command = opcode[7:5] :
+operand[4:0] is confirmed, but the "length = operand + 1" rule that used to sit
+here is NOT global, and the readings built on it were wrong. See
+docs/PARSER-CONVENTIONS.md for the traces.
 
-The 8-bit Command encodes an opcode AND its operand, and the split is in none of
-the sections read, nor in the register header (which defines Command[7:0] as one
-flat field), nor in the SDK Python (AltaLib.py / fm6000Hal.py are a high-level
-API -- decompiled, with uncompyle grammar tables still in them -- and contain no
-MOD opcodes). So it has to be inferred, and inference in this project has a bad
-record: six wrong guesses, each settled in minutes by an external fact.
+Method: on a live routed flow (Et2 -> routed -> Et1, egress captured on the peer),
+locate the entry that actually FIRES in each slice by bisection, then SWAP its
+command byte with the Valid bit left set, so the CAM still matches and only the
+operation changes. Disabling is useless in most slices -- it drops the frame.
 
-WORKING HYPOTHESIS -- Command = opcode[7:5] : operand[4:0], length/count =
-operand + 1. Evidence, from EOS's 302 valid steps and 47 distinct Command bytes:
+  opcode  seen as                          operand
+  ------  -------------------------------  ---------------------------------
+   0 0x0_ SKIP n                           LOAD-BEARING, n = operand + 1
+   4 0x8_ REPLACE n bytes, n = operand+1   LOAD-BEARING (only 0x85 emits)
+   1 0x2_ CHECKSUM (conditional fixup)     IGNORED (0x20/0x22/0x24 identical)
+   5 0xb_ REPLACE_MASKED                   LOAD-BEARING: [3:0] dybble mask, [4] clr/keep
+   6 0xd_ terminator? final slice only     IGNORED -- inference from absence, see docs
+   7 0xe_ DECREMENT byte at the cursor     IGNORED (0xe0/0xe1/0xe2 identical)
 
-  1. 0x00-0x1F is densely populated -- 17 of the 32 values. SKIP is documented
-     with a repeat count of 1..32, which needs exactly 5 bits and no more.
-  2. EVERY value in 0x40-0x5F is odd. All thirteen: 41 43 45 47 49 4b 4d 53 55
-     57 59 5b 5f. With length = operand+1 that permits only EVEN lengths, which
-     is what MAC (6), VLAN tag (4) and ethertype (2) edits need.
-  3. Why even: the value slices show each DataSelect channel feeding TWO
-     consecutive bytes -- "A:t2/d23 B:t2/d23" -- so channel-sourced data arrives
-     as 2-byte halfwords, the same halfword channels the parser writes. Odd
-     lengths are not expressible from channel data at all.
-  4. Steps whose CAM requires MOD_FLAGS bit 14 -- our MOD_DO_ROUTE, the L3AR
-     handoff -- carry Command 0x05 and 0x85, operand 5 in both, i.e. length 6.
-     That is the MAC length.
-  5. And the value banks supply it: banks 3 and 4 write constants 0x11 0x22 0x33
-     0x44 0x55, a system MAC as literal bytes -- the SMAC rewrite a routed frame
-     needs. Type 1 = constant, Type 2 = data from channel.
+⛔ RETRACTED, and it was stated here as evidence: "Command 0x05 and 0x85, operand
+5 in both, i.e. length 6. That is the MAC length." **0x05 is SKIP 6** -- proved
+three ways, including a payload-size test showing the following edit MOVED six
+bytes rather than disappearing. Its operand is a skip count, not a MAC length.
+The even-length argument for 0x40-0x5F is untested and must not be leaned on.
 
-WHAT THIS DOES NOT ESTABLISH. Which opcode number is which command, beyond SKIP
-almost certainly being 0 and a REPLACE-family sitting at 2 and 4. And there is an
-unresolved tension: 3 opcode bits give 8 slots for 9 documented commands, so
-either one command is encoded differently, or the operand is 4 bits for some
-opcodes with bit 4 acting as a sub-opcode, or SKIP/DELETE share an opcode. EOS
-never uses 0x60-0x7F, so the evidence cannot distinguish these.
+⛔ AND THE OPERAND RULE IS PER-OPCODE. SKIP and the write opcode use theirs as a
+LENGTH; opcode 5 uses its as a DYBBLE MASK; opcodes 1, 6 and 7 ignore theirs. A generator that emits
+operand+1 semantics across the board will produce correct SKIPs and writes and
+meaningless bits everywhere else -- and it will LOOK right, because the hardware
+ignores those bits and a byte-diff against EOS still passes.
 
-THE DECISIVE TEST IS HARDWARE, and it is cheap now that the loop exists: program
-one MOD step with a candidate command, send a frame, and look at what comes out.
-That is what settled L3AR after --diff had been green and wrong. Do not write a
-MOD generator on the strength of the five points above.
+THE ENCODING IS STATEFUL ACROSS SLICES. Two things carry between commands:
+
+  * a running CURSOR, fed by SKIPs in different slices. For a routed IPv4 frame:
+    0 -6-> (write) -12-> (write) -14-> (SKIP 2, over the ethertype) -16-> ...
+    -22-> (SKIP 6) = the TTL.
+  * the PREVIOUS COMMAND. 0x20 increments only when the command before it was a
+    decrement. Two identical 0x20 entries do different things for this reason,
+    which is why slice 12's appears inert and slice 16's does not.
+
+  So 0xe0 + 0x20 are a FUSED PAIR: decrement byte N, increment byte N+2. N and
+  N+2 share parity, so the edits cancel exactly in the one's-complement sum --
+  the pair is CHECKSUM-NEUTRAL BY CONSTRUCTION. On the stock program that is the
+  TTL and the IP checksum high byte, i.e. the RFC 1624 update, but the mechanism
+  is general and not a TTL special case.
+
+THE MODEL IS GENERATIVE AND HARDWARE-VERIFIED. Changing only slice 14's SKIP
+operand, two novel edits were predicted byte-exact BEFORE running: SKIP 10 drove
+the source IP to 9.101.102.33 and SKIP 11 to 10.100.101.34, both with the TTL
+reverting to 0x40 and a valid checksum. Any edit expressible as
+"skip -> decrement -> conditional increment" can be generated and then CHECKED
+against hardware before shipping.
+
+STILL OPEN, and a generator needs them: opcode 5 and opcode 6; and the content
+path for the MAC rewrite. MOD_VALUE_RAM holds the router MAC's bytes (vbank 5 =
+0xA8315DAB) but is NOT the source -- changing it, with the write read back and
+confirmed, left the emitted src MAC unchanged.
 
 PROVENANCE. Reads the image at runtime, embeds nothing.
 
@@ -164,6 +182,40 @@ VAL_LAYOUT = [
     ("ValB_DataSelect", 48, 52), ("ValB_Type", 53, 55),
     ("ValA_DataSelect", 56, 60), ("ValA_Type", 61, 63),
 ]
+
+
+#: opcode[7:5] -> (name, does the operand mean anything?). Measured on hardware
+#: 2026-08-17 by swapping the command byte of the FIRING entry on a live routed
+#: flow; see the header and docs/PARSER-CONVENTIONS.md. Anything absent here was
+#: never observed firing, and is left unnamed rather than guessed.
+OPCODES = {
+    0: ("SKIP", True),          # n = operand + 1; two skips confirmed (0x01->2, 0x05->6)
+    1: ("CHECKSUM", False),     # conditional fixup: acts only after a modifying command
+    4: ("REPLACE", True),       # n = operand+1 bytes; 0x85 = 6 = the MAC rewrite
+    5: ("REPLACE_MASKED", True),  # operand[3:0] = dybble mask, [4] = clear-vs-keep
+    6: ("END?", False),         # mandatory in the final slice; NO observed frame effect
+    7: ("DEC", False),          # decrements the byte at the cursor
+}
+
+
+def describe(cmd_byte):
+    """Render a Command byte with its MEASURED meaning, or leave it unnamed.
+
+    ⚠ The operand is only meaningful for SKIP and the write opcode. For the
+    others the hardware ignores it, so printing 'operand=N' there invites the
+    same mistake that made 0x05 a MAC-length for two days -- it is shown as '-'.
+    """
+    op, opd = cmd_byte >> 5, cmd_byte & 0x1F
+    name, uses_operand = OPCODES.get(op, (f"op{op}?", False))
+    if op == 5:
+        # not a length: [3:0] is a mask over the byte's four 2-bit dybbles,
+        # [4] selects clear-vs-keep. Render the mask, never a count.
+        arg = f"dyb={opd & 0xf:04b}{'' if opd & 0x10 else ' keep'}"
+    elif uses_operand:
+        arg = f"{opd + 1}"
+    else:
+        arg = "-"
+    return f"{cmd_byte:#04x} {name}({arg})"
 
 
 def cam(mem, p, s):
@@ -280,7 +332,8 @@ def main():
                 kf = key_fields(v, care)
                 print(f"      match: {kf or '(any)'}" + ("  DISABLED" if never else ""))
             if cmd:
-                print("      cmd:   " + ", ".join(f"{k}={v}" for k, v in cmd.items()))
+                print("      cmd:   " + ", ".join(f"{k}={v}" for k, v in cmd.items())
+                      + (f"   [{describe(cmd['Command'])}]" if "Command" in cmd else ""))
             if val:
                 print("      val:   " + ", ".join(f"{k}={v:#x}" for k, v in val.items()))
     return 0

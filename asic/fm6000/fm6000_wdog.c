@@ -1,9 +1,21 @@
 /* fm6000_wdog.c - dataplane watchdog for EdgeNOS.
  *
- * ★ WHY. The 7150 already survives a CPU hard lockup: the kernel command line
- * carries nmi_watchdog=panic and reboot=p, so when the ASIC went off-bus during
- * an experiment the CPU wedged, panicked, reset, and came back on EOS via the
- * boot-config self-revert. That path is covered.
+ * ★ WHY. ⚠ CORRECTED 2026-08-21. This file used to claim the 7150 "already
+ * survives a CPU hard lockup" because the kernel command line carries
+ * nmi_watchdog=panic and reboot=p. It does not: m0/boot0 passes
+ * "rdinit=/init panic=10 nosmp reboot=p,force" and no nmi_watchdog at all.
+ * (dmesg confirms the kernel receives that append; /proc/cmdline misleadingly
+ * shows Aboot's own line instead, so check dmesg, not /proc/cmdline.)
+ *
+ * Two things follow, both measured on alpha42:
+ *   - /proc/sys/kernel/panic read 0, so a panic HUNG the box rather than
+ *     resetting it. init-m1 now sets panic=10 and panic_on_oops=1 explicitly.
+ *   - this kernel has NO lockup detectors: softlockup_panic, hung_task_panic
+ *     and nmi_watchdog are all absent from /proc/sys/kernel. A silent CPU
+ *     lockup is still unrecoverable and needs a kernel config change.
+ *
+ * So the CPU-wedge path is only PARTLY covered, and this watchdog carries more
+ * of the load than the original comment assumed.
  *
  * What is NOT covered is the failure mode EdgeNOS actually produces: Linux
  * healthy, dataplane dead. A bad table write can kill forwarding without
@@ -47,6 +59,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <stdarg.h>
+#include <errno.h>
 #include <sys/mman.h>
 
 #define PIN_STRAP   0x1C021u
@@ -69,6 +82,71 @@ static void wlog(const char *fmt, ...)
 	va_start(ap, fmt);
 	fprintf(stderr, "[wdog] "); vfprintf(stderr, fmt, ap); fputc('\n', stderr);
 	va_end(ap);
+}
+
+
+/* capture_pci -- record the ASIC's PCI state into the log before we reboot.
+ *
+ * Reads the raw config space via sysfs, which keeps working after the device
+ * stops responding on MMIO (the upstream bridge answers config cycles). Three
+ * things distinguish the failure modes, and the log now says which one it was:
+ *
+ *   vendor/device == 0xffff  the device is GONE from the bus -- link down, a
+ *                            surprise-remove, or the SCD holding it in reset
+ *   Status register bit 14   signalled system error / parity, i.e. it faulted
+ *   AER uncorrectable status non-zero -> a specific PCIe error was latched
+ *
+ * Failures here are logged and ignored: this runs on the way to a reboot and
+ * must never be what stops the reboot from happening.
+ */
+static void capture_pci(const char *bdf)
+{
+	char path[256];
+	unsigned char cfg[256];
+	int fd, n, i;
+
+	snprintf(path, sizeof path, "/sys/bus/pci/devices/%s/config", bdf);
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		wlog("  pci: cannot open %s (%s) -- device may be de-enumerated",
+		     path, strerror(errno));
+		return;
+	}
+	n = (int)read(fd, cfg, sizeof cfg);
+	close(fd);
+	if (n < 8) {
+		wlog("  pci: short config read (%d bytes)", n);
+		return;
+	}
+	{
+		unsigned ven = cfg[0] | (cfg[1] << 8);
+		unsigned dev = cfg[2] | (cfg[3] << 8);
+		unsigned cmd = cfg[4] | (cfg[5] << 8);
+		unsigned sta = cfg[6] | (cfg[7] << 8);
+		wlog("  pci: vendor=0x%04x device=0x%04x command=0x%04x status=0x%04x%s",
+		     ven, dev, cmd, sta,
+		     ven == 0xffff ? "  <-- DEVICE OFF THE BUS" :
+		     (sta & 0x4000) ? "  <-- SIGNALLED SYSTEM ERROR" : "");
+	}
+	/* first 64 bytes verbatim: cheap, and it is the header that matters */
+	for (i = 0; i < 64 && i < n; i += 16)
+		wlog("  cfg+%02x: %02x %02x %02x %02x %02x %02x %02x %02x "
+		     "%02x %02x %02x %02x %02x %02x %02x %02x", i,
+		     cfg[i+0], cfg[i+1], cfg[i+2], cfg[i+3],
+		     cfg[i+4], cfg[i+5], cfg[i+6], cfg[i+7],
+		     cfg[i+8], cfg[i+9], cfg[i+10], cfg[i+11],
+		     cfg[i+12], cfg[i+13], cfg[i+14], cfg[i+15]);
+
+	/* AER, if the kernel exposes it for this device */
+	snprintf(path, sizeof path,
+	         "/sys/bus/pci/devices/%s/aer_dev_nonfatal", bdf);
+	fd = open(path, O_RDONLY);
+	if (fd >= 0) {
+		char b[512];
+		n = (int)read(fd, b, sizeof b - 1);
+		if (n > 0) { b[n] = 0; wlog("  aer_nonfatal: %s", b); }
+		close(fd);
+	}
 }
 
 static int route_count(void)
@@ -144,6 +222,15 @@ int main(int argc, char **argv)
 		if (asic_bad >= strikes || route_bad >= strikes * 4) {
 			wlog("FIRING: PIN_STRAP=0x%08x (%d strikes) routes=%d (%d strikes)%s",
 			     ps, asic_bad, rc, route_bad, dry ? " [dry-run, not rebooting]" : "");
+			/* Say WHY, not just THAT. The 2026-08-21 firing recorded
+			 * PIN_STRAP=0xffffffff -- the ASIC off the bus -- and nothing
+			 * about the cause, which left it un-root-causable. PCI config
+			 * space survives the ASIC going quiet (the bridge answers), so
+			 * capture it before rebooting: a device that vanished reads
+			 * vendor 0xffff, whereas an AER/DPC event leaves status bits
+			 * set. This is the difference between "it dropped again" and a
+			 * diagnosis. */
+			capture_pci(bdf);
 			if (!dry) {
 				sync();
 				execl("/sbin/reboot", "reboot", "-f", (char *)NULL);

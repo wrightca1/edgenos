@@ -3075,3 +3075,1055 @@ as an absolute threshold, that assumption needs establishing first.
 does under EdgeNOS. **The same measurement under EdgeNOS is the obvious next step** — but it needs
 the SDK, which we deliberately do not link, so it would mean reading the same SerDes registers
 directly (`SerdesStat 0x00100f0f`, `SerdesSigDet 0x000001fe` and the rest are all in the dump above).
+
+---
+
+## ★★★ 2026-08-17: the replay does NOT tear Et2 down. The replay-race hypothesis is dead
+
+The alpha16 hunt captured its pair: one GOOD boot and one DARK boot, sampled every 1,024 ops through
+the interesting region, with the *executed* replay preserved as `/mnt/flash/fwd-executed.txt`
+(220,972 ops). Both boots execute a byte-identical write stream.
+
+| | SerXmit on | lock acquired | outcome |
+|---|---|---|---|
+| GOOD | 163,840 | **175,104** (+11,264) | `LANE_STATUS=0x940` held to the end |
+| DARK | 163,840 | **190,464** (+26,624) | lost ~5,120 ops later |
+
+The transmitter enables at the *same* op on both boots. What varies is how long training takes to
+converge — and the slow convergence is the one that fails.
+
+### The teardown window contains no teardown
+
+`resolve-teardown.py` narrowed the loss to ops 194,560 → 195,584 and resolved that window against the
+executed file. All 1,024 writes are MMIO, all in one region, `0x034xxx` — inside `L2L_BASE 0x30000`.
+Address stride 1, value incrementing by one every other word (`0xcb,0, 0xcc,0, … 0x2ca,0`): a bulk
+fill of 512 sequential L2L entries. No port register, no SBus, no configuration write of any kind.
+
+And the control settles it: **the GOOD boot executed those identical writes with `LANE_STATUS=0x940`
+throughout.** They are exonerated.
+
+### The stronger result: the replay stops touching the port a third of the way from the end
+
+> **The last write to any EPL — any port — in the entire replay is op 157,123.**
+> After it, 63,849 ops (29% of the replay) execute and not one touches a port.
+
+So there is no write to find. The port is configured once and abandoned; everything after is
+autonomous SerDes link training running in hardware, which converges fast on some boots and
+slowly-then-not-at-all on others. The replay's remaining 29% is just wall-clock time during which
+that coin lands.
+
+This retires the whole line of investigation, and retro-explains three dead ends:
+
+- **the splice "root cause"** — splicing a word cannot matter to a port nobody writes;
+- **PACE** — pacing only changes how much time the untouched training gets;
+- **the A/B/A/B alternation** — noise, as the 10-boot run already indicated.
+
+⚠ This does **not** contradict the earlier finding that the outcome is fixed *inside* the replay. It
+is: the replay's duration is when training happens. What is now excluded is that a *write* decides it.
+
+### The tail of Et2's EPL writes is a recorded polling loop
+
+The last ~1,236 writes to Et2's block are one 3-write cycle repeated:
+
+```
+LINK_IP (+0x04) <- 0x07ffffff     write-1-to-clear every pending link interrupt
+LINK_IM (+0x02) <- 0x07fffffe     unmask bit 0
+LINK_IM (+0x02) <- 0x07ffffff     re-mask bit 0
+```
+
+~412 iterations on Et2 against ~153 on Et1. That is EOS servicing link-state interrupts while it
+waited — an **adaptive** loop, of which `fwd4.txt` is a recording of one particular run. We replay a
+fixed iteration count: the number EOS happened to need on capture day. Et2 needs more than Et1
+because it is the copper/DAC port and trains slower.
+
+⚠ Do not over-read this. Clearing an interrupt-pending bit does not drive a training state machine;
+the loop length is a *symptom* of how long training took, not a cause. Replaying more iterations of a
+mask toggle is not obviously a fix. It is recorded because it names `LINK_IM`/`LINK_IP` and shows the
+sequence contains captured waits, which matters for any future generator.
+
+## ★★★ Et2 can be brought to full lock after boot, with no reboot
+
+`fm6000_lanelink 2` (port 2 = alta 20 = EPL16 lane 0 = Et2, SBus dev 0x45, an *observed* mapping) run
+against a live dark Et2:
+
+- 10 trials, **2 reached `LANE_STATUS=0x940`** — the good-boot value — measured at +5s.
+- Lock never appears immediately; it arrives seconds after the op stream ends. Training is asynchronous.
+- It was the **DFE (RX adaptation)** step that did it. After the 168 link ops `PORT_STATUS` was still
+  `0x815`; only after the 94 DFE ops did it move.
+- **Re-running `lanelink` on a locked lane tears the lock down** (trials 8 and 10 started at `0x9D5`
+  and ended dark). Any retry loop must check first and never touch a live link.
+
+This changes the economics of the whole investigation: a trial used to cost a reboot and a 50% coin,
+and now costs seconds. It is also the first time Et2 has been brought up under EdgeNOS at all.
+
+⚠ The locks obtained this way are **marginal**: `PORT_STATUS=0x9D5` has bit 8 `HiBer` set, where a
+good boot reaches a clean `0x8c0`. They also flap — one retry run broke out of its loop on a lock
+that was gone by the very next read. `lanelink`'s DFE finds a worse solution than the boot path.
+
+### ⛔ CORRECTION: that is not a lock rate. The lane oscillates, and single samples measured the flap
+
+Sampling Et2 continuously after driving it up shows `LANE_STATUS` **alternating** between `0x940` and
+`0x0000` indefinitely — 7 of 12 samples locked over two minutes at 10s spacing, then 13 of 22 at 4s
+spacing. `pcsRx` sits at `0x3FF` (all ones) against Et1's clean `0x1`. Simultaneous control on the
+same chip, same sweep:
+
+```
+et1 locked 22/22        et2 locked 13/22
+```
+
+Et1 is rock solid while Et2 oscillates at roughly 60% duty cycle. So:
+
+> **`fm6000_lanelink` does not bring Et2 up. It produces a lane that continuously re-trains and loses
+> lock.** A single delayed read cannot tell "this attempt succeeded" from "this read landed in an up
+> phase", which is exactly what every trial in this section did.
+
+This retracts the framing of the numbers above, and with them the two comparisons built on it:
+
+| reported | what it actually was |
+|---|---|
+| "2/10 attempts reached lock" | 10 single samples of a flapping lane — a duty-cycle estimate, not a success rate |
+| "polarity corrected: 0/10 vs 2/10, p = 0.47" | two sets of single samples of a flapping lane. The test never had the power its framing implied, and the underlying quantity was not what was being compared |
+| "peer-bounce: 0/5" | same defect, fewer samples |
+
+The finding that survives is narrower and still worth having: **the DFE step visibly moves a dark Et2**,
+and the lane can reach `0x940` post-boot without a reboot. What it cannot yet do is *hold* it.
+
+**The right instrument for anything in this area is a duty cycle over a stated window with a
+simultaneous Et1 control, not a single read.**
+
+### ✅ ANSWERED: a good boot's Et2 is rock solid, and the boot outcome really is binary
+
+Measured on freshly booted hardware, duty cycle with Et1 sampled in the same sweep as the control:
+
+| boot | `PORT_STATUS` | Et2 duty | Et1 control |
+|---|---|---|---|
+| dark boot A | `0x0815` | **0 / 20** over 100s | 20/20 |
+| dark boot B | `0x0815` | **0 / 20** over 100s | 20/20 |
+| **good boot** | `0x08C0` | **20 / 20** over 100s, then **60 / 60** over 300s | 20/20, 60/60 |
+
+The good boot's Et2 was still locked ten minutes in, `pcsRx=1`, **`HiBer` clear**. So:
+
+> **A good boot's Et2 is indistinguishable from Et1 — a clean, stable link.** A dark boot's Et2 is
+> genuinely, completely dark: zero locked samples, not a flap that a single read happened to miss.
+
+⚠ **This partly walks back the correction above.** The flapping is real, but it is an artifact of
+`fm6000_lanelink` driving the lane — it was measured on a box that had been up 8 hours and had been
+driven repeatedly. It is **not** what a fresh boot does, in either outcome. Single-sample
+classification is unsound for a *driven* lane and sound for a *fresh boot*, and the historical
+"5 of 10 boots" figure is not impeached by it.
+
+That leaves three distinct states, and the third is ours, not the hardware's:
+
+| state | `PORT_STATUS` | duty | `HiBer` |
+|---|---|---|---|
+| good boot | `0x08C0` | 60/60 | clear |
+| dark boot | `0x0815` | 0/20 | — |
+| `lanelink`-driven | `0x09D5` | 13/22 | **set** |
+
+**`fm6000_lanelink` does not reproduce a good boot.** It produces a qualitatively different, worse
+link. Whatever the boot path does to get a clean lock, the tool's captured sequence does not do it —
+so it is a recovery hack, not a model of bring-up, and it should not be used to infer how bring-up
+works.
+
+### The board's polarity map, and a real bug in our own tool
+
+`SERDES_TX_CFG` (+0x3a) bit 30 is `TxPolarityInvEn`, which compensates a differential pair routed
+P/N-swapped on the PCB. Final values in the replay:
+
+| port | `TX_CFG` w0 | `TxPolarityInvEn` |
+|---|---|---|
+| **Et1** (works) | `0xc0000581` | **1** |
+| **Et2** (coin) | `0x80001581` | **0** |
+
+Two independent sources agree: these exact values appear in **EOS's own `fwd4.txt`** (so our generator
+is faithful — byte-identical on these registers), and EOS's **`CotatiP4.fdl altaSfpPorts`**, already
+transcribed into `fm6000_serdes_ports.h`, records `txpol=1` for port 1 and `txpol=0` for port 2.
+Et1's pair is swapped on the board; Et2's is not. RX polarity (`SERDES_RX_CFG` +0x39 bit 25) is 0 on
+every port in both files — nothing to fix there.
+
+**`fm6000_lanelink` ignored this.** `patch_tx_cfg()` masked only `TxOutputEqPre`/`Post`, so bit 30
+passed through from the Et1-recorded template and every driven port got **Et1's inversion**. Driving
+Et2 inverted a lane that must not be. Under 64b/66b that still locks — inverting the sync header turns
+`01` into `10`, also legal — while the descrambler sees garbage. That is a HiBer lock, and HiBer is
+exactly what driven Et2 reported. Fixed: `patch_tx_cfg()` now sets bit 30 from `p->txpol`.
+
+⚠ **The fix did not measurably help.** With bit 30 corrected: **0/10**, against the 2/10 baseline —
+Fisher p = 0.47, inconclusive in either direction at that power. It is corrected because it is
+demonstrably wrong versus EOS, *not* because it is the cure. Reporting it as the fix would be the
+same error as the splice.
+
+### Two underpowered tests, recorded so they are not mistaken for results
+
+- **Peer-bounce coordination** (down/up the far-end swp7 around our retrain, on the theory that
+  10GBASE-CR training is a mutual handshake and the peer was not retraining): **0/5**. Against the
+  2/10 baseline, Fisher p = 0.52. At a true 20% rate, 0/5 happens by chance a third of the time.
+  This test had almost no power and should not be cited either way. ~30 per arm would be needed.
+- The peer was verified `LOWER_UP`, 10G, link-detected afterwards, so the run of failures is not
+  explained by a downed peer.
+
+⚠ Note the peer reports `Link detected: yes` while our `LANE_STATUS` reads 0. Our transmitter
+(`SerXmit`) stays on even when dark, so the far end locks onto us regardless. **Far-end link state is
+not evidence about our side** — the link is asymmetric, and that is the whole phenomenon.
+
+### New instrument: `tools/fm6000-status.sh`
+
+Reads `PORT_STATUS` / `LANE_STATUS` / `pcsRx` / `TX_CFG` / `RX_CFG` / `LINK_IM` / `LINK_IP` live off
+the chip via `devmem`, any time, without a reboot. Register space is indexed in 32-bit **words**
+(`rd()` does `M[w]` on a `uint32_t*`), so byte address = BAR0 + word*4; BAR0 comes from sysfs rather
+than hardcoded. Every previous link reading came from `/mnt/flash/fullseq.log`, which is written once
+per boot and truncated by the next — that is how two dark traces were lost.
+
+First run recorded Et1 `LINK_IP=0x00001B87`: link interrupts have been accumulating **unserviced**,
+because EdgeNOS never runs the service loop the replay recorded.
+
+## 2026-08-20: the EPL/SerDes side is now provably correct, and the lane is still dark
+
+Re-tested on alpha32, with `fm6000_lanelink` (which postdates everything above).
+
+**`fm6000_lanelink 3` works.** 963 ops, and it moves lane 1's SerDes config to exactly the
+values a working EOS lane 1 holds — including the per-lane `SERDES_TX_CFG` value that this
+document notes cannot be copied from lane 0:
+
+| offset | before | after `lanelink 3` | lane 0 (et1, up) | EOS live lane 1 |
+|---|---|---|---|---|
+| `0x39` | `00280280` | **`002a0281`** | `002a0281` | `002a0281` |
+| `0x3a` | `80000080` | **`c0001581`** | `c0000581` | `c0001581` |
+| `0x3b` | `00000803` | **`00000c83`** | `00000c83` | `00000c83` |
+| `0x3c` | `000001ee` | **`000001fe`** | `000001fe` | `000001fe` |
+
+et1 and et2 are unaffected by the run — no collateral damage.
+
+**And the lane stays dark**: `PORT_STATUS=0x00000015`, `LANE_STATUS=0`, `pcsRx=0`.
+
+What is now ruled out on our side:
+
+- **SerDes is alive.** SBus reads to the lane's device (`0x4a`) all return `result=4`. Lane 0
+  is `0x49`. Registers `0x0f` and `0x14` read identically on both lanes; `0x20`/`0x21` differ,
+  but those are state and we have no bit definitions for them, so nothing is concluded there.
+- **Laser and module state are normal.** SCD `0x5030` reads `0x00000180` — *identical to ports
+  1 and 2, both of which are linked*. Bit 6 clear = laser enabled. (Port 4 reads `0x0187`.)
+- **`+0x04` is not a missing config write.** It reads `0` on lane 1 and `0000bb87` on lane 0,
+  which looks like a gap and is not: `0x04` is `LINK_IP`, *interrupt pending*. Lane 0 has
+  pending interrupts because traffic is flowing. Same trap this document already records for
+  `SERDES_IP`.
+
+⚠ **Do not run `fm6000_i2c_bringup` to inspect the transceiver.** Despite the name it is the
+pre-enumeration sequence — COLD-BIST memory init, PCIe SerDes bring-up, PCI rescan — not an
+EEPROM reader. On a running system it is disruptive.
+
+### The remaining variable is the far end, and it is not measurable from here
+
+Et3 is cabled to `eth1` of the test system at `10.22.1.56`. That host is a **container**: both
+its `eth0` and `eth1` are veth pairs (`eth1@if15`, `ethtool` driver `veth`), so `eth1`'s
+`LOWER_UP` says nothing about the physical NIC — the real interface is the veth peer on the
+container host, which is not reachable from the container.
+
+Corroborating the recable: the AS5610's `swp5` still carries `10.99.99.1/24`, the same subnet
+as the test host's `eth1` (`10.99.99.2/24`), and reads **`NO-CARRIER, state DOWN`** with an
+`INCOMPLETE` ARP entry for `.2`. So that segment moved off swp5.
+
+**Open question for the lab, not for the code:** is the container host's physical NIC up, and
+what media/rate is it? Our lane is configured for 10GBASE-R (a lock is `LANE_STATUS=0x940`).
+A 1G far end would never lock and would look exactly like this.
+
+### ⚠ Correction, same day: the far end is NOT the problem
+
+The section above ended by asking whether the far end was live. It is, and the earlier framing
+was wrong.
+
+The far end is a **Chelsio 10G SFP+** (`enp4s0d1`, OUI `00:07:43`), `UP` and enslaved to bridge
+`vmbr1` together with the test container's `eth1`. It reports `NO-CARRIER` — but that is
+**explained by our side being silent**, not by the far end being dark: `PORT_STATUS` bit 11 is
+`SerXmit`, and Et3 has it clear. et1 reads `0x0ec0` (bit 11 set, transmitting); Et3 reads
+`0x0015`. We never transmit, so the Chelsio can never see us.
+
+**A module is installed in cage 3 and it is receiving light.** The SCD per-port registers split
+cleanly:
+
+| ports | scd | state |
+|---|---|---|
+| 1, 2, **3** | `0x00000180` | 1 and 2 are linked; low bits 0-2 clear |
+| 4-8 | `0x00000187` | empty cages; low bits 0-2 set |
+
+Bits 0-2 are the SFP status group (module-present / TxFault / RxLOS in some order). Port 3
+matches the two *working* ports exactly, so the module is present and not asserting
+loss-of-signal. Bit assignment is inference; the populated-vs-empty contrast is not.
+
+⚠ `PORT_STATUS = 0x15` means nothing on its own. **All six unconfigured ports read exactly
+`0x15` / `LANE_STATUS=0`** — it is the never-brought-up default, not a signal or fault report.
+
+### How far the "identical to a working lane" claim now goes
+
+Read off the live chip, EPL14 lane 0 (et1, up) vs EPL14 lane 1 (Et3, dark), after
+`fm6000_lanelink 3`:
+
+| register | et1 | Et3 |
+|---|---|---|
+| `MAC_CFG` all 4 words (`0x10`-`0x13`) | `2000033c 400003e0 00002414 00001841` | **identical** |
+| `PCS_10GBASER_CFG` (`0x25`) | `00000000` | **identical** |
+| `SERDES_RX_CFG`/`TX_CFG`/`0x3b`/`0x3c` | see table above | **matches EOS's live lane 1** |
+| `EPL_CFG_A`/`CFG_B` (EPL-wide) | `7e0d7899` / `00090003` | identical (same EPL) |
+
+Register *coverage* is identical too: `fm6000_eplinit`'s lane-0 offsets and
+`fm6000_lanelink 3`'s lane-1 offsets are the same set, offset by 0x80 —
+`01 02 04 10 11 12 13 18 19 25 28 34 35 37 39 3a 3b 3c 40 41`.
+
+Only status registers differ (`PCS_10GBASER_RX_STATUS` 1 vs 0). Four consecutive `lanelink 3`
+runs leave `PORT_STATUS` at `0x15` unchanged, and et1/et2 are never disturbed.
+
+Names above are from the SDK register map (`asic/fm6000/tools/sdk_regmap.py`), which is also
+what identified `0x10` as a **4-word** `MAC_CFG` and `0x26`/`0x27` as PCS RX/TX status.
+
+**So the gap is not in the EPL/MAC/PCS register block, and not in the far end.** It is in the
+SerDes analog/SBus domain. Both lanes' SerDes answer SBus reads (`result=4`, dev `0x49` lane 0,
+`0x4a` lane 1) and differ at regs `0x20`/`0x21` (`fe`/`0e` vs `c0`/`80`) — but we have no bit
+definitions for the SerDes-internal registers, and the SDK descriptor table covers MMIO
+registers only, so nothing is concluded from that yet. Recovering those definitions is the
+next concrete step.
+
+⚠ SPICO firmware is **not** the gap: `fm6000_spico` uploads via receiver `0xFD`, the SPICO
+*broadcast* device, so every SerDes instance gets it — lane 1 is not starved.
+
+### The SerDes core, and what the SBus result codes actually mean
+
+`fm6000_sbusdump 0x49,0x4a` (lane 0 = up, lane 1 = dark) reads the SerDes core registers the
+EPL block says nothing about. Several differ. But two things have to be understood before any
+of it is interpreted.
+
+**1. Result code 1 is SUCCESS, not failure.** `fm6000_sbus.c` says bits 28:26 are "a result
+code that `fm6000_lanelink` has always treated as non-zero means the op failed". That reading
+is wrong: **reads return 4 and manifestly work**. These are the standard Avago SBus codes —
+`0x01` write complete, `0x04` read complete, with the failure codes elsewhere. So reads *and*
+writes are both being accepted by the bus.
+
+(`fm6000_lanelink` is not actually damaged by this: its check is `if (r < 0)`, and `sbus()`
+returns the code only when not-Busy, so 1 and 4 never abort it. Only a timeout does.)
+
+**2. A write completes and the readback does not change.** Writing `0x22 <- 0xef` on the dark
+lane (step 8's "set bits 0 and 1") returns `result=1`, and the readback is still `0xec`. Same
+for `0x0d`. The consistent explanation is that read and write address **different internal
+spaces at the same register number**, which is normal for this SerDes family: the read returns
+an *observable*, the write goes to a *control*.
+
+⚠ **Consequence: control state cannot be verified by reading it back**, and an earlier reading
+in this session — that lane 1's `0x22` lacking bits 0,1 while lane 0 has them proved "the
+enable bits were never set" — **does not hold**. That compared observables against a
+control-register step. The lane-to-lane difference is real and is a symptom; it is not proof
+about the enable path.
+
+Corroborating that these are observables: lane 0's values **drift between reads** (`0x22`
+went `0x43` -> `0x67` across two dumps) because its equaliser is adapting on a live link, while
+the dark lane's are static. Control registers would not drift.
+
+**The only valid test of a SerDes write is behavioural.** Setting `0x22` bits 0,1 in isolation
+left `PORT_STATUS` at `0x15` — but step 8 is the eighth of eighteen steps, so that is not
+evidence against the algorithm either.
+
+### Next: `fm6000_serdes_enable`
+
+`EOS-SOURCES.md` already carries the full 18-step lane-enable algorithm recovered from
+`fm6000EnableSerDes`, register by register — the `0x22` clear/set bracket, the `0x0f` PLL-lock
+wait, the `0x14` signal-detect wait, then DFE tuning. Nothing implements it; `fm6000_lanelink`
+replays a captured op list instead, which is why it can be byte-perfect on the EPL side and
+still leave the lane dark.
+
+That tool is the next piece of work, and its acceptance test is already defined: `PORT_STATUS`
+bit 11 (`SerXmit`), 0 today and 1 on a working lane.
+
+### ⚠ The blocker, isolated: SerDes core writes complete and do nothing
+
+`EOS-SOURCES.md` ends its lane-enable section with "before implementing this: verify that our
+SBus writes land". They do not, and this is now measured rather than suspected.
+
+| dev | reg | before | wrote | result | readback |
+|---|---|---|---|---|---|
+| `0x4a` (Et3) | `0x22` | `ec` | `ef` | 1 = write complete | `ec` |
+| `0x4a` | `0x0d` | `a5` | `b5` | 1 | `a5` |
+| `0x4b` (port 5) | `0x3b` | `44` | `5a` | 1 | `44` |
+| `0x4b` | `0x1d` | `f8` | `33` | 1 | `f8` |
+
+Four registers, two devices, every one unchanged. The transaction is well formed — `fm6000_sbus`
+does `0xF002 <- data; 0xF001 <- 0; 0xF001 <- cmd|Exec;` poll Busy, read `0xF003`, which is the
+same routine `fm6000_spico` uses.
+
+**And that routine demonstrably works**: `fm6000_spico` writes device `0xFD` (the SPICO
+broadcast) every boot to upload IMEM, and the chip reports `SPICO LOADED + RUNNING`. So the
+write path is sound in general; the **SerDes core devices specifically ignore writes**.
+
+The likely reading — untested, and not to be acted on until it is — is that these registers are
+owned by the SPICO microcontroller once it is running, and are effectively read-only from the
+SBus. `fm6000_sbus` already has an `irq <target-dev> <code> [arg]` subcommand, which is the
+SPICO-interrupt mechanism such parts use instead of direct register pokes. Whether the lane
+enable must go through interrupts, or whether the SPICO must be halted first, is the question
+to answer next.
+
+⚠ Do **not** test this by writing to `0xFD`. It is the broadcast device: it reaches every SerDes
+on the chip, including et1's and et2's, which are carrying traffic.
+
+**This blocks `fm6000_serdes_enable`.** There is no point implementing an 18-step RMW algorithm
+while every write is a no-op. Sequence: settle the write mechanism first, then implement.
+
+### Correction to an earlier entry in this section
+
+An entry above proposed that read and write hit *different internal spaces* at the same register
+number. That does not survive: the SDK's own steps are **read-modify-writes** on those very
+registers (`fm6000EnableSerDes` reads `0x22`, modifies, writes `0x22`), which is only coherent
+if both halves address the same register. The observed behaviour is not two spaces — it is
+writes having no effect at all.
+
+## Why ports 1 and 2 come up and port 3 does not — the direct answer
+
+Counted straight out of the executed replay:
+
+| device | port | EPL MMIO writes | **SerDes SBus ops** |
+|---|---|---|---|
+| `0x49` | 1 (EPL14 lane 0) | 459 | **44** |
+| `0x45` | 2 (EPL16 lane 0) | 1236 | **45** |
+| `0x4a` | **3 (EPL14 lane 1)** | 391 | **0** |
+| `0x4b` | 5 (EPL14 lane 2) | 391 | **0** |
+
+EOS's capture contains the SerDes lane bring-up for exactly the two ports that were in use when
+it was taken. **Port 3's SerDes device receives zero SBus operations in the entire replay.**
+
+That is the whole asymmetry, and it explains every observation in this document at once:
+
+- Port 3's **EPL/MAC/PCS registers are written** (391 of them), which is why they compare
+  byte-identical to a working lane — the MMIO half of bring-up happens for every lane.
+- Port 3's **SerDes is never enabled**, because the SBus half only ever targeted `0x49` and
+  `0x45`. The lane is not misconfigured; it was never turned on.
+- `fm6000_lanelink 2` works and `fm6000_lanelink 3` does not, and that is not a contradiction:
+  port 2's SerDes was already enabled by the replay, so lanelink only has to **retrain** it.
+  For port 3 lanelink would have to perform a **cold enable**, and it cannot, for the reasons
+  `EOS-SOURCES.md` gives — the sequence is read-modify-write plus two hardware waits, and a
+  replayed capture carries neither.
+
+### ⚠ Correction: "SerDes core writes complete and do nothing" was overbroad
+
+The entry above concluded from four registers (`0x22`, `0x0d`, `0x3b`, `0x1d`) that SerDes
+writes never take effect. That does not hold:
+
+- Those four are registers `fm6000_lanelink` only ever **reads**. Its write set is `0x01`,
+  `0x02`, `0x06`, `0x17`, `0x2a`, `0x2b`; it reads `0x1f`-`0x27`. The test sampled the
+  read-only side of the map.
+- Writes to registers in lanelink's *write* set also leave the readback unchanged — so
+  **readback is not a valid check on this bus at all**, which is the durable lesson and is
+  already recorded in `fm6000_sbus.c`.
+- Judged behaviourally instead, writes plainly do work: `fm6000_lanelink 2` retraining et2 out
+  of a HiBer lock (`0x0CC0`, `pcsRx=1`) is a write sequence having a visible effect.
+
+So the blocker is **not** that writes are ignored. It is that nothing has ever performed the
+cold SerDes enable for lane 1, and the only faithful way to have it remains implementing
+`fm6000_serdes_enable`.
+
+## Running the captured sequence AT BOOT — tested, does not work (alpha33)
+
+The last untested condition was timing: every attempt until now was post-boot, on a chip with
+traffic already flowing. alpha33 wires `fm6000_lanelink 3` into `fm6000-fullseq.sh` in the same
+phase where et2's retrain loop runs, and boots it.
+
+    [fs]   et2 retrain attempts=0 et2=000008c0/00000940 pcsRx=00000001
+    [fs]   et3 attempts=3        et3=00000015/00000000 pcsRx=00000000
+    [fs]   post-spico et1=00000cc0/00000940  et2=000008c0/00000940
+
+Three attempts, still dark. **Harmless** — et1 and et2 came up clean on the same boot — but it
+costs ~24s, so it is left in with `PORT3` defaulting to **0**.
+
+⚠ Also ruled out along the way: **SPICO state is not the discriminator.** The replay starts the
+SPICO at line 131,048 (`dev 0xFD reg 0x0c <- 8`, after the IMEM upload) and does not touch port
+1's SerDes until line 259,139. Ports 1 and 2 were therefore enabled *with the SPICO already
+running* — the same condition as every post-boot attempt. An earlier theory that they got in
+"before the SPICO owned the registers" is wrong.
+
+Also ruled out: pacing (`lanelink -d 2000` and `-d 20000`, no change), and SBus devices
+`0x01`-`0x04` (168 ops each, but all **reads** of regs `0x00`/`0x0f` at lines 7-2002 — early
+readiness polling, not configuration, so lanelink omitting them is correct).
+
+## What EOS actually writes, and whether it is blob
+
+**It is blob.** The SerDes bring-up lives in `fwd4.txt` and executes at boot: 44 ops to device
+`0x49` (port 1) and 45 to `0x45` (port 2). Authoring it therefore serves both goals at once —
+it removes 89 EOS-derived ops *and* is the only route to port 3.
+
+**And the data is fully in hand.** Extracted from the replay, the two sequences are **identical
+in every written value** and differ only by one extra poll of register `0x1f`:
+
+    21 01 1f    21 02 3f    20 00 00    21 17 10    21 06 00
+    22 1f  22 24  22 20  22 21  22 22  22 23  22 24        <- polls
+    21 17 00    21 2a 0e    21 2b 02
+    22 1f  22 24  22 25  22 26  22 27  22 1f               <- polls
+    21 2a 16 / 21 2a 0e  x11                               <- toggle pair
+
+So the values are **lane independent** — the concern that RMW makes them unreplayable does not
+apply to the write half. `21 17 10` is step 7 of the SDK algorithm ("RMW `0x17` set bit 4")
+appearing verbatim, which cross-validates the extraction against the disassembly.
+
+What a capture cannot carry is the **polls**. Port 1 needed one fewer iteration of the `0x1f`
+read than port 2 — on a warm lane. A cold lane needs an unknown number, and a replay issues a
+fixed count and moves on. That is the whole remaining gap, and it is what `fm6000_serdes_enable`
+has to supply: these exact writes, with the reads turned into real wait-until-ready loops.
+
+## `fm6000_serdes_enable` — implemented, and what it proved (2026-08-20)
+
+`asic/fm6000/fm6000_serdes_enable.c` implements the enable as an **algorithm**: the ten RMW
+steps whose operation is known exactly, plus both waits with their real parameters (1 ms
+interval, 5000 retries). Four steps are deliberately skipped and it says so at runtime —
+steps 3-6 write values computed by SDK arithmetic that is not decoded, and steps 2/14/17/18 are
+separate SDK functions.
+
+Run against port 3:
+
+    before: PORT_STATUS=00000015  SerXmit=0
+    rmw  reg 22  00 -> 00   (clear bits 0,1)
+    rmw  reg 17  c0 -> d0   (xor bit 4)
+    rmw  reg 22  00 -> 03   (set bits 0,1)
+    wait reg 0f -> 3f after 1 ms   (PLL lock, b0+b3)
+    rmw  reg 06 / 03 / 1f / 26      (set b3 / set b0 / mask 3f / set b0)
+    rmw  reg 0d  a5 -> b5   (set bits 4,0)
+    wait reg 14 -> d4 after 1 ms   (signal detect, b6)
+    after : PORT_STATUS=00000015  SerXmit=0  LANE_STATUS=00000000
+
+**Both waits pass.** That is the first positive result on this lane:
+
+- **PLL lock** — reg `0x0f` = `0x3f`, bits 0 and 3 set.
+- **Signal detect** — reg `0x14` = **`0xd4`**, bit 6 set. Earlier in the same session that
+  register read `0x14`, bit 6 **clear**. So `sbus_rx_ib_sig_strength_obs` is now asserting:
+  the SerDes is seeing signal from the Chelsio. That independently confirms the cable, the
+  module and the far end, from the silicon's own point of view.
+
+Corollary: **SerDes writes do take effect.** Reg `0x14` changing from `0x14` to `0xd4` across
+our write sequence is an observable moving in response to our writes — which the readback test
+could never have shown.
+
+**The lane still does not transmit**, so the remaining gap is in the skipped steps.
+
+### Next target: `fm6000SetTxConfig`
+
+Step 14, and the obvious candidate for `SerXmit`. Disassembled at `0x483a80` (2904 bytes) it is
+three read-modify-writes on registers **`0x3d`, `0x3e`, `0x41`**, the last of which does
+`or 0x2` then `or 0x1` — enable-shaped. The nibble masks (`and 0xf`, `and 0x3` with `shl 4`)
+line up with the pre/post/drive tx-equalisation fields the port table already carries.
+
+⚠ **But the addressing differs and must be resolved first.** `fm6000EnableSerDes` computes
+`(lane << 8) + 0xd11RR`; `fm6000SetTxConfig` computes `(lane << 8) + 0xb05RR`. Our SBus
+transaction carries only `(op, dev, reg)`, so what distinguishes the `0xd11` and `0xb05`
+prefixes — a different ring, a different device derivation, or something else — has to be
+settled before these three writes can be issued. Do not guess it.
+
+## The SBus device inventory, measured (2026-08-20)
+
+Probing every device 0x00-0x7f with two registers known to vary per device (`0x20`, `0x21`)
+and discarding the bus defaults (`c0`/`80`, `00`/`00`, `01`/`01`) leaves **seven devices**:
+
+| dev | r20 | r21 | what |
+|---|---|---|---|
+| `0x01`-`0x04` | `80` | `80` | the four the replay polls 168x each at init (reads of `0x00`/`0x0f`) |
+| `0x45` | `c6` | `2a` | port 2 SerDes (EPL16 lane 0) |
+| `0x49` | `fe` | `0e` | port 1 SerDes (EPL14 lane 0) |
+| `0x4a` | `fb` | `31` | **port 3 SerDes** (EPL14 lane 1) |
+
+**There is no separate TX-config device.** That settles the `0xd11` / `0xb05` prefix question
+the previous section left open, and settles it against the obvious reading:
+
+- `fm6000ReadSBus` (`0x479794`) dispatches on address *ranges* — `0xd1100..0xd14ff` and
+  `0xb0500..0xc04ff` both fall through to the **same** handler (`0x476cb0`), differing only in
+  which descriptor table they pass (`ebx+0x5754` vs `ebx+0x58f4`, and `ebx` = `0x60420C`).
+  Those tables are `{address, 0}` arrays — bookkeeping, not name tables and not device select.
+- So the prefixes are register **namespaces inside the SDK**, not different rings, masters or
+  devices. `fm6000SetTxConfig`'s registers `0x3d`, `0x41`, `0x3e` are on the **lane device** —
+  `0x4a` for port 3 — the same device `fm6000EnableSerDes` uses.
+- The earlier derivation "TX device = serdes + 0x05" (predicting `0x3d`/`0x3e`) is **falsified**:
+  those device numbers, and arbitrary controls `0x3f` and `0x2c`, all return identical defaults.
+
+⚠ Note only three lane SerDes respond — `0x45`, `0x49`, `0x4a`, i.e. ports 2, 1 and 3, which are
+exactly the three cages with a transceiver installed (SCD `0x180`; ports 4-8 read `0x187`).
+Devices for the other five lanes do not answer. Whether that is power gating or absence is not
+established, and it means an earlier read of "dev 0x4b reg 0x3b = 0x44" was a bus default, not
+port 5's SerDes.
+
+### Tried and insufficient
+
+Setting reg `0x3e` bits 0 and 1 on `0x4a` — the unambiguous `or 0x2; or 0x1` half of
+`SetTxConfig` — changes nothing (`0xbe` -> `0xbf`, `PORT_STATUS` stays `0x15`). et1/et2
+unaffected. The remaining unknowns are the field composition of `SetTxConfig`'s three writes
+(nibble masks over the pre/post/drive parameters) and steps 3-6 of the enable, whose values are
+computed by SDK arithmetic that is still undecoded.
+
+## `SetTxConfig` is NOT the missing piece — closed by measurement
+
+Before decoding its three writes' field arithmetic, the cheaper question: do its target registers
+even differ between a working and a dark lane?
+
+| reg | 0x49 (port 1, up) | 0x4a (port 3, dark) | 0x45 (port 2, up) |
+|---|---|---|---|
+| `0x3d` | `aa` | `aa` | `aa` |
+| `0x3e` | `be` | `be` | `be` |
+| `0x41` | `01` | `01` | `01` |
+
+**Identical across all three.** Port 3's TX configuration is already what the working lanes have,
+so running `fm6000SetTxConfig` would change nothing. That closes the branch and makes decoding
+its bitfield arithmetic unnecessary. (For the record, its first write composes
+`v[1:0] = arg&0x3`, `v[5:2] = arg&0xf` via the `v ^= (v ^ new) & mask` insert idiom.)
+
+## The three-way diff, and what it found
+
+A better instrument than more disassembly: dump all 64 SerDes registers on **both** working lanes
+and the dark one, and keep only registers where the two working lanes **agree** and the dark lane
+**differs**. Agreement between two independent good lanes filters out per-lane state.
+
+| reg | up (0x49, 0x45) | Et3 (0x4a) |
+|---|---|---|
+| `0x01` | `25` | `05` |
+| `0x0b` | `00` | `20` |
+| `0x0c` | `01` | `04` |
+| `0x0d` | `a4` | `a5` |
+| `0x15` | `02` | `00` |
+| `0x1a` | `0f` | `e0` |
+| `0x1e` | `0b` | `07` |
+
+⚠ Note `0x0d` is `a4` on both **working** lanes — bit 0 **clear** — while `fm6000EnableSerDes`
+step 15 sets bits 4 and 0 of `0x0d`. So either that bit is cleared again later in bring-up, or
+step 15's register mapping needs re-checking. Our `fm6000_serdes_enable` currently drives it to
+`b5`, which no working lane holds.
+
+### Writing the working values across: no link, and a mixed result
+
+Writing all seven working-lane values onto `0x4a` left `PORT_STATUS` at `0x15`. Re-running the
+diff shows why it is not a simple story:
+
+- `0x01` and `0x0c` **dropped off the differ-list** — those writes landed.
+- `0x0b`, `0x0d`, `0x15`, `0x1a`, `0x1e` **still differ** — hardware-owned or read-only.
+- **New** differences appeared at `0x0f`, `0x10`, `0x16`, `0x1f`, i.e. the lane's state moved.
+  Et3's `0x0f` fell from `0x3f` to `0x0b`, losing PLL-status bits.
+
+So SerDes writes reach some registers and not others, and the ones that matter for bring-up are
+in the second group. This is consistent with everything else here: the lane is not missing a
+value we can simply write, it is missing a **sequence** that leaves the hardware in the state
+those registers report.
+
+⚠ Port 3's SerDes has been written to by hand during this work. A reboot reprograms it from
+`fm6000-fullseq.sh`; et1 and et2 were never touched and stayed up throughout.
+
+## ⚠ Correction (2026-08-20): "we are not transmitting" was wrong
+
+An entry earlier today read `PORT_STATUS` bit 11 (`SerXmit`) = 0 on Et3 and concluded that the
+far end's `NO-CARRIER` was explained by "our side being silent". That is not what is happening,
+and the optics say so directly. Re-measured live on `i2c-11`, A2h:
+
+| | raw | value |
+|---|---|---|
+| TX bias | `1104` | 8.71 mA |
+| **TX power** | `16f4` | **587.6 µW (−2.31 dBm)** |
+| **RX power** | `14b7` | **530.3 µW (−2.76 dBm)** |
+| status `0x6e` | `30` | no soft LOS, no soft TX fault |
+
+`sfp3_txdisable=0`. **The laser is on and emitting, and light is arriving.** `SerXmit` clear
+means the MAC/PCS is not feeding valid 10GBASE-R encoding into a transmitter that is otherwise
+lit — not that the port is dark. Both directions carry light; neither end can lock to it.
+
+This also re-confirms the earlier finding that the I2C side is fully solved: `scd` +
+`scd_hwmon`, 61 buses, SFP cages on master 3 buses 0-7 = `i2c-9`..`i2c-16` for Ethernet1..8, so
+port 3 is `i2c-11`. Nothing about the laser, the module or the cage needs further work.
+
+## ★ Where to look: the RX equalizer (DFE)
+
+The EPL side is now conclusively excluded. A three-way diff of all 128 words of the lane block —
+et1 and et2 as controls, Et3 as subject, keeping only registers where **both working lanes agree
+and the dark one differs** — yields exactly four, and every one is a *status* register:
+
+| offset | up | Et3 | register |
+|---|---|---|---|
+| `+0x26` | `00000001` | `00000000` | `PCS_10GBASER_RX_STATUS` |
+| `+0x38` | `00000940` | `00000000` | `LANE_STATUS` |
+| `+0x3e` | `00100f0f` | `0c100fe0` | `SERDES_STATUS` |
+| `+0x41` | `000004f0` | `000004b0` | `SERDES_IP` (interrupt pending) |
+
+**No configuration register differs anywhere in the block.**
+
+`SERDES_STATUS` is the only difference that is not simply "not locked", and the SDK field table
+gives its layout (a 19-field run spanning bits 0-42, matching its declared 2-word width):
+
+    bits  0-15  AnalogToCore      bits 26-27  RxSigStrength
+    bits 16-17  Rx_8b10bCommaDet  bit  28     RxElecIdleDetect
+    bits 18-19  Rx_8b10bDisparityErr   bit 37 TxRdy
+    bits 20-21  Rx_8b10bOutOfBandErr   bit 38 RxRdy
+    bits 22-23  Rx_8b10bSlipInProgress bits 39-42 TxPhaseOut
+    bits 24-25  RxPatternCmpPass
+
+Decoded:
+
+| field | up | Et3 |
+|---|---|---|
+| `AnalogToCore` | `0f0f` | **`0fe0`** |
+| `RxSigStrength` | **0** | **3 (saturated)** |
+| `RxElecIdleDetect` | 0 | 0 |
+
+So on the dark lane the receiver has **strong signal** (strength at maximum), a **locked PLL**
+(reg `0x0f` bits 0 and 3), **healthy optical power** (−2.76 dBm, more than the working port
+receives) — and still no block lock, with a different analog-to-core value.
+
+That is the signature of an **RX equalizer that has not adapted**, and it is the one part of
+bring-up we have never performed: `fm6000_serdes_enable` explicitly skips steps 17-18
+(`fm6000StartSerDesDfeTuning`, `fm6000CheckSerDesDfeTuningState`), and DPDK's open FM10000 driver
+lists DFE iCal/pCal as a required stage with 3000 ms / 2000 ms budgets.
+
+### The three things to do, in order
+
+1. **Disassemble `fm6000StartSerDesDfeTuning`** (`0x4877a1`, 2097 bytes) and
+   `fm6000CheckSerDesDfeTuningState` (`0x48d9e2`, 913 bytes). Both are exported symbols; this is
+   the same technique that recovered the two waits exactly.
+2. **Finish the interrupt result path** so the DFE diagnostic works. `fm6000_sbus irq`'s request
+   encoding is now correct, but its *trigger and result read* (`0x0c <- 0x18`, `0x0c <- 0x08`,
+   then reading regs `0x00`/`0x01`/`0x02`) are inherited from the old wrong version and are not
+   verified. The SDK's own result helper is the second static function called by
+   `fm6000InterruptSpicoV2`, at **`0x47793d`**. With that right, interrupt `0x20` gives a live
+   eye-score/DFE readout for a lane that will not train — the diagnostic this whole effort has
+   lacked.
+3. Only then implement DFE tuning, and re-test.
+
+⚠ Do **not** go back to the EPL side, `SetTxConfig`, the optics, the module, or the laser. Each
+has now been excluded by measurement, and the exclusions are recorded above.
+
+## DFE tuning implemented — it converges, and it moved the analog state (2026-08-20)
+
+**What the DFE is.** At 10 Gbps the channel smears each symbol into its successors
+(inter-symbol interference). The decision feedback equaliser subtracts the estimated ISI of
+already-decided bits from the current sample, reopening the eye so the slicer can decide 0 from
+1. Its taps are specific to the physical channel, so they must be *trained* — iCal is the
+initial search, pCal tracks drift afterwards. **An untrained DFE leaves the eye shut even with
+abundant signal**, which is precisely Et3: `RxSigStrength` saturated, PLL locked, −2.76 dBm
+arriving, no block lock.
+
+**Recovered from the SDK**, both exported symbols, same technique as the two waits:
+
+- `fm6000StartSerDesDfeTuning` (`0x4877a1`): read reg `0x17`, clear its low 5 bits, write back;
+  then write `0x2a`; then `0x2b`. Registers confirmed from the address setup at
+  `0x487921-0x48796e` — and they are the same three the EOS capture writes, including its
+  `2a = 0x16/0x0e` alternation.
+- `fm6000CheckSerDesDfeTuningState` (`0x48d9e2`): state read from reg **`0x1f`**, fields
+  extracted with `shr 4` and `shr 2`. Measured: bits 3:2 read **2 on both working lanes** and
+  **1 on the dark lane**, so 2 is converged. That is the SDK's own completion test, and the
+  capture polls `0x1f` repeatedly for exactly this reason.
+
+**Result on port 3:**
+
+    dfe  reg 17  c0 -> c0   (clear low 5 bits)
+    dfe  reg 2a <- 0e, reg 2b <- 02   (start tuning)
+    dfe  reg 1f -> 39, state=2 CONVERGED after 311 ms
+    wait reg 14 -> d4 after 151 ms    (signal detect -- a real wait now, not instant)
+
+**The DFE converges, and the analog state followed**: `SERDES_STATUS.AnalogToCore` moved
+`0fe0` -> `0f0f`, now byte-identical to both working lanes. Reg `0x1f` left the differ-list.
+The lane still does not lock.
+
+### ⚠ New lead: our own sequence drives two registers AWAY from the working value
+
+Re-diffing after the run, two of the remaining differences are ones **we caused**:
+
+| reg | both working lanes | Et3 after our run | note |
+|---|---|---|---|
+| `0x0d` | `a4` (bit 0 **clear**) | `a5` (bit 0 **set**) | our step 15 sets bits 4 and 0 |
+| `0x14` | `14` (bit 6 **clear**) | `d4` (bit 6 **set**) | our step 16 *waits for* bit 6 to set |
+
+Both working lanes sit at values our implementation treats as the target to move away from. So
+either those two steps' register mapping is wrong, or the bits are cleared again later in a part
+of bring-up we have not implemented. `SERDES_STATUS.RxSigStrength` tells the same story: **3
+(saturated) on Et3, 0 on both working lanes** — and the SDK has a `MaskRxSigStrength` field,
+so a working lane may simply have signal-strength reporting masked off.
+
+**That is where to look next**: re-check enable steps 15 and 16 against the disassembly, and find
+what clears `0x0d` bit 0 and `0x14` bit 6 on a lane that ends up working.
+
+## Verified: EOS does NOT run `fm6000EnableSerDes` at boot
+
+All twelve `fm6000EnableSerDes` writes were re-checked against their actual address locals
+(`[ebp-0xc]`=`0x00`, `-0x10`=`0x03`, `-0x14`=`0x06`, `-0x18`=`0x0d`, `-0x1c`=`0x17`,
+`-0x20`=`0x1d`, `-0x24`=`0x1f`, `-0x28`=`0x22`, `-0x2c`=`0x26`, `-0x30`=`0x36`, `-0x34`=`0x3b`).
+**Every mapping is correct**, including step 15 -> reg `0x0d`. So the implementation reads the
+disassembly correctly.
+
+The discrepancy is elsewhere: **EOS's captured boot sequence writes only regs `0x01`, `0x02`,
+`0x17`, `0x06`, `0x2a`, `0x2b` plus a reset.** It never touches `0x0d`, `0x22`, `0x03`, `0x1f`,
+`0x26`, `0x00`, `0x1d`, `0x36` or `0x3b`. `fm6000EnableSerDes` is a different (cold or
+diagnostic) path that the boot flow does not use — so running it drives the lane into a state
+EOS never produces, which is what `fm6000_serdes_enable` without `-D` had been doing.
+
+⚠ One guess corrected by the reboot: `0x0d = a5` on Et3 is **native**, not contamination from our
+writes — a pristine post-`fullseq` lane reads `a5` while both working lanes read `a4`. Only
+`0x14 = d4` was ours (from asserting signal detect), and it returns to `14` after a reboot.
+
+## Current best state: three registers from a working lane
+
+On a pristine lane: `fm6000_lanelink 3` (the captured writes) + `fm6000_serdes_enable -D 3`
+(DFE tuning with the real wait). DFE converges in 76 ms and **reg `0x1f` reaches `0x29`, the
+exact working-lane value**. The whole SerDes core diff is then:
+
+| reg | up | Et3 |
+|---|---|---|
+| `0x0d` | `a4` | `a5` — writing `a4` does not stick; hardware-owned |
+| `0x1e` | `0b` | `07` |
+| `0x2b` | `04` | `03` — the capture writes `02`; working lanes settle at `04`, ours at `03` |
+
+`SERDES_STATUS.AnalogToCore` matches the working lanes, DFE state matches, PLL locked, signal
+present, optics good — and `LANE_STATUS` is still `0`.
+
+`0x2b` is the interesting one: it is *written* `0x02` by the capture and *ends* at `0x04` on a
+working lane, so it advances on its own. Ours stops at `0x03`. That looks like a phase or
+progress counter for a multi-step tuning process that completes on a good lane and stalls one
+step short here — which would fit the capture's `0x2a` alternation (`0x16`/`0x0e` x11) being an
+iteration our single-shot DFE call does not perform.
+
+**Next: replicate the `0x2a` toggle loop**, polling `0x2b` until it reaches `0x04` rather than
+issuing the writes a fixed number of times.
+
+## ★★ The SerDes is up: SERDES_STATUS byte-identical to both working lanes
+
+Adding the iteration the capture cannot carry finished the SerDes side.
+
+`fm6000_serdes_enable -D` now does: start tuning (reg `0x17` low 5 bits cleared, `0x2a <- 0x0e`,
+`0x2b <- 0x02`), poll reg `0x1f` bits 3:2 for state 2, then **toggle reg `0x2a` between `0x16`
+and `0x0e` while polling reg `0x2b` until it reads `0x04`** — the working lanes' value — instead
+of counting to eleven as the trace does.
+
+    dfe  reg 2a <- 0e, reg 2b <- 02   (start tuning)
+    dfe  reg 1f -> 29, state=2 CONVERGED after 107 ms
+    dfe  reg 2b -> 04 after 2 iterations
+
+Result, read straight off the chip:
+
+```
+SERDES_STATUS word0 (+0x3e):  et1=00100f0f  et2=00100f0f  Et3=00100f0f
+SERDES_STATUS word1 (+0x3f):  et1=00000060  et2=00000060  Et3=00000060
+```
+
+**Identical on all three lanes.** Word 1 `0x60` is bits 5 and 6 = **`TxRdy`** (field bit 37) and
+**`RxRdy`** (field bit 38). Et3's SerDes reports transmitter and receiver ready, and
+`AnalogToCore` and `RxSigStrength` now match the working lanes too.
+
+The whole EPL diff is down to three registers, and all three are lock indicators:
+
+| offset | up | Et3 | |
+|---|---|---|---|
+| `+0x26` | `00000001` | `00000000` | `PCS_10GBASER_RX_STATUS` |
+| `+0x38` | `00000940` | `00000000` | `LANE_STATUS` |
+| `+0x41` | `000004f0` | `000004b0` | `SERDES_IP` |
+
+### Where the fault now is
+
+Not the SerDes. Every SerDes-side indicator matches a working lane, yet `PORT_STATUS` bit 11
+(`SerXmit`) is still 0 and the PCS reports no block lock.
+
+The plausible reading — untested — is **ordering**: on ports 1 and 2 the SerDes became ready
+*during* the replay, before and while the EPL was programmed, so the PCS saw a ready SerDes when
+it started. Here the EPL was programmed at boot and the SerDes only became ready afterwards, and
+the PCS has no reason to re-evaluate. If so, what is needed is a **PCS restart** after DFE
+completes, not more SerDes work.
+
+⚠ Do not guess which bit does that. `PCS_10GBASER_CFG` (`+0x25`) and `MAC_CFG` (`+0x10`, 4 words)
+are the candidates, and the way to find it is the same one that has worked throughout: read what
+the SDK's own port-enable path writes, rather than toggling bits on a live chip.
+
+⚠ Also note reg `0x1f` drifts back to `0x25` (state 1) some time after converging. Whether that
+is the DFE re-adapting because the PCS never consumes the recovered data, or a genuine loss of
+convergence, is not established.
+
+## The last step is not a register write — it is an event handler EdgeNOS does not have
+
+Chasing "make the PCS re-evaluate" through the SDK rather than by toggling bits:
+
+- **`fm6000SetPcsRxReset`** (`0x435d82`) computes `(lane << 7) + 0xe0037` — i.e. **lane_base
+  `+0x37`** — and manipulates **bit 23** (`and eax,0x1; shl eax,0x17`). All three lanes read
+  `0x000c0002` with bit 23 clear. **Pulsing bit 23 on Et3 changed nothing.**
+- **`fm6000SetPortState`** (`0x42c5ac`) touches only `0xe0304`. Not the PCS starter.
+- **`fm6000Init10GBaseR`** (`0x362193`) writes `PCS_10GBASER_CFG` (`0xe0025`) — but that register
+  reads `0` on the working lanes too, so it is not the differentiator either.
+- **`fm6000SerDesEventHandler`** (`0x364a89`, **14,726 bytes**) drives exactly six registers:
+
+| reg | |
+|---|---|
+| `0xe0041` (x2) | `SERDES_IP` — interrupt pending, write-1-to-clear |
+| `0xe0040` | `SERDES_IM` — interrupt mask |
+| `0xe003a` / `0xe0039` | `SERDES_TX_CFG` / `SERDES_RX_CFG` |
+| `0xe0037` | the PCS reset above |
+| `0xe0034` | `SERDES_CFG` |
+
+**That is the missing piece, and it is runtime logic, not configuration.** EOS completes port
+bring-up with an interrupt-driven handler that reacts to SerDes state changes — it clears
+`SERDES_IP`, adjusts TX/RX config, and pokes the PCS reset. EdgeNOS has no equivalent: our boot
+programs registers once and never reacts.
+
+The evidence for this being the live gap is `SERDES_IP` itself, one of the three registers still
+differing after the SerDes is fully up:
+
+| reg | working lanes | Et3 |
+|---|---|---|
+| `+0x41` `SERDES_IP` | `000004f0` | `000004b0` — **bit 6 clear** |
+
+The working lanes have that interrupt pending; ours does not. On ports 1 and 2 a SerDes event
+fired during the replay, the handler ran, and bring-up completed. On Et3 the SerDes reaches
+`TxRdy`/`RxRdy` — verified byte-identical — and nothing is listening.
+
+⚠ So the remaining task is **not** "find the missing register write". It is to implement the
+part of `fm6000SerDesEventHandler` that runs when a lane becomes ready. That is a new piece of
+work with a clear specification: six registers, one function, fully disassemblable.
+
+## Replicating the handler's writes is not sufficient — and why
+
+`fm6000SerDesEventHandler`'s two `SERDES_IP` sites write **`0x20`** (`0x3650fb`) and **`0xe0`**
+(`0x366cf1`) — write-1-to-clear on bits 5, and 5/6/7. Its other five registers are held in
+locals `[ebp-0x144]`=`0xe0037`, `-0x140`=`0xe0034`, `-0x13c`=`0xe0039`, `-0x138`=`0xe003a`,
+`-0x134`=`0xe0040`. It also calls `fm6000StartPortLaneDfeTuning` twice, so DFE is part of it.
+
+Replicated on Et3 after a full SerDes bring-up — clear `SERDES_IP` with `0xe0`, rewrite
+`SERDES_CFG`/`RX_CFG`/`TX_CFG` with their (already correct) values so the write happens *after*
+the lane is ready, then pulse the `+0x37` PCS reset. **No link.** The write landed
+(`SERDES_IP` `0x4b0` -> `0x410`), so the mechanism works; the effect does not.
+
+### The actual discriminator: SERDES_IP bit 6
+
+| | `SERDES_IP` (`+0x41`) | bits 5,6,7 |
+|---|---|---|
+| et1, et2 | `000004f0` | **5, 6 and 7 all pending** |
+| Et3 (pristine) | `000004b0` | 5 and 7 pending, **6 never fires** |
+
+Both working lanes hold that interrupt pending. Et3 never raises it, through every sequence
+tried. If `SERDES_IP` shares `SERDES_IM`'s field order — the SDK field table gives IM as
+`MaskRxSigStrength`(4), `MaskKrRxFault`(5), `MaskKrRxTrained`(6), `MaskKrSignalDetect`(7),
+`MaskKrTrainingFailure`(8), `MaskRxRdy`(9) — then bit 6 is **KrRxTrained**. ⚠ That is an
+inference from IM's layout, not established for IP, and KR training is a backplane feature
+whose relevance to a 10GBASE-SR fibre port is unclear. Do not act on it without confirming
+IP's own field layout.
+
+⚠ **Clearing `0xe0` moved Et3 further from the working state, not closer.** The working lanes
+have those bits *set*. A reboot restores the pristine `0x4b0`; do that before the next
+measurement.
+
+### Honest status
+
+The SerDes side is finished and verified. The remaining gap is not a register value — every
+configuration register on both the EPL and SerDes sides now matches a working lane, and
+`SERDES_STATUS` is byte-identical including `TxRdy` and `RxRdy`. What differs is one interrupt
+that never asserts, and the 14 KB of conditional logic in `fm6000SerDesEventHandler` that
+decides what to do about it. Implementing that properly means decoding the handler's control
+flow, not transcribing its six register writes — which has now been tried and does nothing.
+
+## ★★★ Port 3's SerDes appears to be in NEAR-END LOOPBACK
+
+Two decodes converge on this.
+
+**1. `PORT_STATUS` decoded properly.** Its field layout, from the SDK field table (a 9-field run,
+confirming the comments in `tools/fm6000-status.sh` were right):
+
+    bits 0-1 LinkFaultDebounced   bit 6 RxLinkUp    bit  9 Transmitting
+    bits 2-3 LinkFaultMac         bit 7 HeartbeatOk bit 10 Receiving
+    bits 4-5 LinkFaultRx          bit 8 HiBer       bit 11 SerXmit
+
+Et3's `0x15` is therefore **`LinkFaultDebounced`=1, `LinkFaultMac`=1, `LinkFaultRx`=1** — the
+receiver is signalling local fault because the PCS has no 64b/66b block lock, so the MAC emits
+fault ordered-sets instead of data. `SerXmit=0` is a *consequence*, not an independent problem.
+Everything reduces to: **no block lock**.
+
+**2. `fm6000SetSerDesNearLoopback`** (`0x47feed`) writes register **`0x0d`, setting bit 0**
+(`or eax,0x1` at `0x480210`, address `(serdes<<8) + 0xd110d`).
+
+And that is the register this document has repeatedly flagged and repeatedly dismissed:
+
+| reg | et1 (up) | et2 (up) | Et3 (dark) |
+|---|---|---|---|
+| `0x0d` | `a4` — bit 0 **clear** | `a4` — bit 0 **clear** | `a5` — bit 0 **SET** |
+
+**Port 3's SerDes has near-end loopback enabled**: its receiver is fed from its own transmitter
+rather than from the fibre. That single fact would explain the entire symptom set — saturated
+`RxSigStrength`, a DFE that converges quickly on a short internal path, healthy optics that the
+receiver never actually looks at, and no block lock.
+
+It is present on a **pristine** post-`fullseq` lane, so it is not something this investigation
+caused. The likely reading: it is the power-on default, EOS's bring-up clears it for the lanes
+it configures, and nothing in our boot clears it for port 3 — the same shape as every other
+port-3 gap.
+
+### ⚠ The bit will not clear by writing it
+
+`fm6000_sbus write 0x4a 0x0d 0xa4` does not take. That is established against **two controls**
+via the three-way diff (`0x0d` stays `a5` while both working lanes read `a4`), not by readback —
+readback is not a valid check on this bus.
+
+So the next task is to find what gates writes to `0x0d`. The SDK field table shows this SerDes
+family has explicit **gate** registers (`sbus_rx_far_loopback_gate`, `sbus_tx_data_gate`,
+`sbus_rx_data_gate`, `sbus_rx_error_monitor_gate`, `sbus_tx_pre_emphasis_gate`), and
+`fm6000EnableSerDes` step 18 pairs near-loopback with `fm6000SetSerDesRxDataGate(.., 0)`. Read
+`fm6000SetSerDesRxDataGate` and the gate registers next; the write almost certainly has to be
+unlocked rather than repeated.
+
+### ⚠⚠ CORRECTION: bit 0 of reg `0x0d` is NOT the loopback enable
+
+The section above claimed port 3's SerDes is in near-end loopback because reg `0x0d` bit 0 is
+set on Et3 and clear on both working lanes. **That reading is wrong.** Disassembling
+`fm6000SetSerDesNearLoopback` properly (`0x4801f0`-`0x48022a`):
+
+```
+    and  dl,0x7f              ; clear bit 7 of the read value
+    eax = (arg != 0) ? 0x80 : 0
+    or   eax,edx              ; bit 7 := the enable argument
+    or   eax,0x1              ; bit 0 ALWAYS set, regardless of argument
+    write reg 0x0d <- eax
+```
+
+**Bit 7 is the loopback enable. Bit 0 is set unconditionally** — it is a side effect of the
+function having run, not a mode.
+
+And both working lanes *and* Et3 read bit 7 **set** (`a4` and `a5` both have it), so the read
+value cannot be used to decide loopback state at all — consistent with read and write hitting
+different spaces on this bus, which is already recorded in `fm6000_sbus.c`.
+
+What the bit-0 difference does say is narrower but still real: **`SetSerDesNearLoopback` has run
+on Et3 and has not run on either working lane.** On a pristine post-`fullseq` boot Et3 reads
+`a5`, so something in our boot path invokes it — `fm6000_lanelink`'s op list does not write
+`0x0d`, so the caller has not been identified.
+
+⚠ Two failed attempts on this register are now recorded, both from reading a value whose write
+semantics differ: first dismissing `0x0d` as "hardware-owned" on a readback check, then reading
+bit 0 as the loopback mode. **Do not infer this register's meaning from its read value.** The
+only sound approaches are to decode the writer, or to change it and judge by `PORT_STATUS`.
+
+### Also stubbed: `fm6000SetSerDesRxDataGate`
+
+`0x490761`, 19 bytes: it stores its argument and returns 0. It does nothing. The "find the gate
+that unlocks `0x0d`" plan is therefore dead as stated — at least via that function.
+
+## ★ The loopback discriminator: the fault is OURS, downstream of the SerDes
+
+The question the whole investigation reduced to: can our receiver lock to *any* valid signal, or
+is the far end the problem? Near-end loopback answers it without touching the lab.
+
+Using the correct bit (7, per the corrected decode): loopback ON = write `0x0d <- 0xa5`,
+OFF = `0x0d <- 0x25`.
+
+| | DFE convergence | DFE iterations | `LANE_STATUS` |
+|---|---|---|---|
+| loopback **ON** | 64 ms | **4** | `00000000` |
+| loopback **OFF** | 72 ms | **22** | `00000000` |
+
+**No block lock in either state.**
+
+Two things follow.
+
+**The writes are taking effect.** 4 iterations versus 22 is exactly the difference between a
+short internal path and a real fibre channel, so the loopback bit is being honoured even though
+the read value stays `a5` in both cases — more confirmation that readback is meaningless on this
+bus and that behaviour is the only valid instrument.
+
+**The fault is on our side, downstream of the SerDes.** With loopback on, the receiver is fed
+from our own transmitter over a clean internal path. Even in the worst case — the MAC emitting
+local-fault ordered sets because it sees no link — those are still valid 64b/66b symbols with
+correct sync headers, and the PCS should achieve block lock on them. It does not. So the SerDes
+is recovering *something*, the DFE adapts to it, and the PCS never syncs.
+
+That excludes the far end, the Chelsio, the fibre and the optics as causes of the *lock* failure
+(they were already excluded as causes of anything else), and localises the remaining fault to
+the **SerDes -> PCS data path**: either the PCS is held in a state where it does not consume the
+lane, or the lane's data is not being delivered to it.
+
+⚠ Caveat: the loopback bit's state could not be *verified*, only inferred from the iteration-count
+difference. A stronger version of this test would use the SerDes's own PRBS generator and checker
+(`sbus_rx_prbs_data_obs`, `sbus_rx_pattern_cmp_pass_obs`, `RxPatternCmpPass` in `SERDES_STATUS`)
+to prove bit recovery independently of the PCS. That is the recommended next experiment.

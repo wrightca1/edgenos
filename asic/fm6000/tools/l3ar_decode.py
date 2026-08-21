@@ -5,30 +5,55 @@ L3AR is fm6000_l3arinit.c, 3,928 transcribed microcode pairs
 (docs/PROVENANCE.md 2.5). Decoder and encoder in one file because the block is
 small and the two halves share the layout tables.
 
-★ GEOMETRY, from the register header:
+★ GEOMETRY, from the SDK's register descriptor table (NOT the register header).
+
+⚠ PROVENANCE CORRECTION. This file used to say "from the register header". The
+header does not define L3AR at all -- EOS-SOURCES.md:77 records that the 0x10000
+macros are absent from it, which is why this block was reverse-engineered by
+clustering writes. The addresses below now come from a descriptor table found in
+libFocalpointSDK.so (.rodata, 56-byte stride, entries of
+{name_ptr, ..., base_addr, 0, words_per_entry, 0, 0}). Facts about the silicon,
+recorded in our own words; nothing is copied from the SDK.
 
     L3AR_CAM(slice, rule, seg, word) = 0x10000 + 0x200*slice + 0x10*rule + 4*seg
         5 slices x 32 rules x 4 segments x 4 words -- a 256-bit key
     L3AR_RAM1(slice, rule, word)     = 0x11200 + 0x40*slice + 2*rule
     L3AR_RAM2(slice, rule, word)     = 0x11400 + 0x40*slice + 2*rule
+    L3AR_RAM3(slice, rule)           = 0x11600 + 0x20*slice + 1*rule   <-- 1 word
+    L3AR_RAM4(slice, rule, word)     = 0x11800 + 0x40*slice + 2*rule
+    L3AR_RAM5(slice, rule, word)     = 0x11a00 + 0x40*slice + 2*rule
 
-⚠ ADDRESS. L3AR is at 0x10000. Two documents in this repo recorded it at
-0x158000 for months -- that is MOD_CAM. The 0x010000 page REPLAY-TRIAGE.md
-group 3 called "unnamed", and EOS-SOURCES.md later filed as generic microcode,
-is L3AR. It was identified by clustering writes instead of reading
-FM6000_L3AR_BASE.
+⚠⚠ RETRACTION -- "THE ACTION IS A FLAG REWRITE, AND THAT IS ALL IT IS" WAS WRONG.
 
-★ THE ACTION IS A FLAG REWRITE, AND THAT IS ALL IT IS.
+That claim stood because this decoder only ever read RAM1 and RAM2. There are
+FIVE RAM banks, and the datasheet's Table 5-31 lists 6 sequential actions and 21
+output mux actions besides SetFlags -- SetAlu13/46CmdProfile,
+SetL2LookupCmdProfile, SetDestMaskCmdProfile, SetTrapHeaderCmd,
+SetHashKeyProfile, and MuxOutput_* -- whose operands live in RAM3/RAM4/RAM5 and
+point into 19 separate profile tables at 0x11c00-0x120df.
+
+Anything authored from RAM1/RAM2 alone would silently drop those actions. Slice 1
+is the proof: all 32 of its rules are Mask=0x3ffffff/Value=0, a no-op on the
+flags, so by the old reading slice 1 did nothing -- yet every one of its rules
+carries a nonzero RAM5 word.
 
     RAM1  Mask_ACTION_FLAGS_LO[25:0]  Set_ACTION_FLAGS_LO[57:32]
     RAM2  Mask_ACTION_FLAGS_HI[25:0]  Set_ACTION_FLAGS_HI[57:32]
 
-26 + 26 = 52 bits, exactly the width of ACTION_FLAGS in datasheet Table 5-30 --
-which says "the L3AR's SetFlags action enables all configurable flag bits to be
-redefined at this stage of the pipeline". So a rule is: match a 256-bit key
-(overwhelmingly ACTION_FLAGS itself), then mask and set flags. No destination
-mask, no CPU code, no mirror -- none of the entanglement that blocks L2AR's
-generator.
+26 + 26 = 52 bits, exactly the width of ACTION_FLAGS. Datasheet 5.10.5 gives the
+operation exactly:  ACTION_FLAGS' = ACTION_FLAGS & Mask | Value.  So Mask=all-ones
+with Value=0 is a no-op, not a clear.
+
+⚠ RAM3/RAM4/RAM5 FIELD LAYOUT IS NOT ESTABLISHED. The addresses and widths are
+verified; what the bits mean is not. Do not author rules from them yet. Two
+observations that must be explained first:
+  - slice 1 rules 2,3,4,5 are byte-identical across all 16 CAM words, yet carry
+    different RAM5 values. Within a slice the 32 rules are one precedence set
+    (datasheet 5.10.1, "Number of rules per precedence set: 32"), so at most one
+    of four identical keys can ever fire.
+  - slice 1's 32 RAM5 words are (k<<12)|0x040 where k>>1 runs over 0..31 exactly
+    once. A permutation with a valid bit is the signature of a table-init loop,
+    not of hand-authored rules.
 
 VALIDATED before use: RAM words come out at exactly 2x the declared rule count on
 every slice -- 64/64/64/64/50 against the 32/32/32/32/25 slice sizes in
@@ -53,7 +78,43 @@ from l2ar_decode import load_names  # noqa: E402
 L3AR_BASE = 0x10000
 CAM_SLICE_STRIDE, CAM_RULE_STRIDE = 0x200, 0x10
 RAM1_OFF, RAM2_OFF = 0x1200, 0x1400
+RAM3_OFF, RAM4_OFF, RAM5_OFF = 0x1600, 0x1800, 0x1A00
 RAM_SLICE_STRIDE = 0x40
+# ⚠ RAM3 is ONE word per rule, not two, so its slice stride is half the others'.
+# Verified by the data: RAM3 slice 4 stops after 25 words, matching the 25-rule
+# slice in fm6000MicrocodeRuleNames.txt. Reading it at 0x40 silently returns
+# slices 2-3's content under slice 1's label.
+RAM3_WORDS_PER_RULE, RAM3_SLICE_STRIDE = 1, 0x20
+
+# The 19 profile tables the MuxOutput / SetProfile actions index into, with the
+# words-per-entry the SDK descriptor declares. Each holds 32 profiles, matching
+# the "Profile (5 bits)" operand in datasheet Table 5-31. The spacing is
+# self-consistent -- DGLORT at 0x11c00 with 2 words x 32 rules ends exactly where
+# SGLORT begins at 0x11c40, and W8ABCD's 3 words x 32 ends exactly at W8E's
+# 0x11d00 -- which is what makes the widths trustworthy.
+PROFILE_TABLES = {
+    "DGLORT":    (0x11C00, 2), "SGLORT":    (0x11C40, 2),
+    "W8ABCD":    (0x11C80, 3), "W8E":       (0x11D00, 1),
+    "W8F":       (0x11D20, 1), "MA1_MAC":   (0x11D40, 2),
+    "MA2_MAC":   (0x11D80, 2), "VID":       (0x11DC0, 2),
+    "MA_FID":    (0x11E00, 2), "CSGLORT":   (0x11E40, 2),
+    "W16ABC":    (0x11E80, 2), "W16DEF":    (0x11EC0, 2),
+    "W16GH":     (0x11F00, 2), "HASH_ROT":  (0x11F40, 1),
+    "ALU13_OP":  (0x11F80, 4), "ALU46_OP":  (0x12000, 4),
+    "POL1_IDX":  (0x12080, 1), "POL2_IDX":  (0x12090, 1),
+    "POL3_IDX":  (0x120A0, 1), "QOS":       (0x120C0, 2),
+}
+# Not profile tables, but the rest of the block, so nothing here reads as unmapped:
+L3AR_OTHER = {
+    "SLICE_CFG": (0x11000, 1), "KEY_CFG":  (0x11001, 1), "ACTION_CFG": (0x11008, 1),
+    "TRAP_HEADER_RULE": (0x12100, 1), "TRAP_HEADER_DATA": (0x12120, 11),
+    "IP": (0x12140, 1), "IM": (0x12148, 1),
+}
+
+# Slice 4 is short. fm6000MicrocodeRuleNames.txt declares 32/32/32/32/25 = 153
+# rules of the 160 the datasheet says exist, and RAM3 stops after 25 words in
+# slice 4, independently confirming it.
+RULES_IN_SLICE = (32, 32, 32, 32, 25)
 SEGMENTS, NUM_SLICES, RULES_PER_SLICE = 4, 5, 32
 MASK64 = 0xFFFFFFFFFFFFFFFF
 
@@ -90,6 +151,117 @@ KEY_LAYOUT = [
 ]
 RAM_LAYOUT = [("Mask_LO", 0, 25), ("Set_LO", 32, 57)]
 RAM2_LAYOUT = [("Mask_HI", 0, 25), ("Set_HI", 32, 57)]
+
+
+# ★ RAM3/RAM4/RAM5 FIELD LAYOUT, from the SDK's field descriptor table
+# (12-byte stride, {name_ptr, bit_offset, width}; see sdk_regmap.py for how the
+# register table next to it is found). These are the operands of the 6 sequential
+# and 21 output mux actions in datasheet Table 5-31.
+#
+# Each list TILES its register exactly -- RAM3 covers bits 0-31 with no gap and no
+# overlap, RAM4 covers 0-54, RAM5 covers 0-58. That is the check that they are
+# complete and correctly assigned: a wrong grouping does not tile. Two RAM5 fields
+# (SetDestMaskCmdProfile, W8ABCD_PROFILE) were first predicted from the gaps in
+# the tiling and then confirmed against the table at bit 18/w1 and bit 24/w5.
+#
+# Widths cross-check against the datasheet's stated operand sizes: ALU13_CMD_PROFILE
+# 5 bits, L2L_CMD_PROFILE 4 bits, DMASK_CMD_PROFILE 4 bits, every MuxOutput profile
+# 5 bits.
+RAM3_FIELDS = [
+    ("SetTrapHeaderCmd", 0, 1), ("TRAP_HEADER_ENABLE", 1, 1),
+    ("TRAP_HEADER_IDX", 2, 1), ("SetL2LookupCmdProfile", 3, 1),
+    ("L2L_CMD_PROFILE", 4, 4), ("MuxOutput_MA1_MAC", 8, 1),
+    ("MA1_MAC_PROFILE", 9, 5), ("MuxOutput_MA2_MAC", 14, 1),
+    ("MA2_MAC_PROFILE", 15, 5), ("MuxOutput_VID", 20, 1),
+    ("VID_PROFILE", 21, 5), ("MuxOutput_MA_FID", 26, 1),
+    ("MA_FID_PROFILE", 27, 5),
+]
+RAM4_FIELDS = [
+    ("SetHashProfile", 0, 1), ("HASH_PROFILE", 1, 4),
+    ("MuxOutput_HASH_ROT", 5, 1), ("HASH_ROT_PROFILE", 6, 4),
+    ("SetAlu13CmdProfile", 10, 1), ("ALU13_CMD_PROFILE", 11, 5),
+    ("SetAlu46CmdProfile", 16, 1), ("ALU46_CMD_PROFILE", 17, 5),
+    ("MuxOutput_ALU13_OP", 22, 1), ("ALU13_OP_PROFILE", 23, 5),
+    ("MuxOutput_ALU46_OP", 28, 1), ("ALU46_OP_PROFILE", 29, 5),
+    ("MuxOutput_POL1_IDX", 34, 1), ("POL1_IDX_PROFILE", 35, 4),
+    ("MuxOutput_POL2_IDX", 39, 1), ("POL2_IDX_PROFILE", 40, 4),
+    ("MuxOutput_POL3_IDX", 44, 1), ("POL3_IDX_PROFILE", 45, 4),
+    ("MuxOutput_QOS", 49, 1), ("QOS_PROFILE", 50, 5),
+]
+RAM5_FIELDS = [
+    ("MuxOutput_DGLORT", 0, 1), ("DGLORT_PROFILE", 1, 5),
+    ("MuxOutput_SGLORT", 6, 1), ("SGLORT_PROFILE", 7, 5),
+    ("MuxOutput_CSGLORT", 12, 1), ("CSGLORT_PROFILE", 13, 5),
+    ("SetDestMaskCmdProfile", 18, 1), ("DMASK_CMD_PROFILE", 19, 4),
+    ("MuxOutput_W8ABCD", 23, 1), ("W8ABCD_PROFILE", 24, 5),
+    ("MuxOutput_W8E", 29, 1), ("W8E_PROFILE", 30, 5),
+    ("MuxOutput_W8F", 35, 1), ("W8F_PROFILE", 36, 5),
+    ("MuxOutput_W16ABC", 41, 1), ("W16ABC_PROFILE", 42, 5),
+    ("MuxOutput_W16DEF", 47, 1), ("W16DEF_PROFILE", 48, 5),
+    ("MuxOutput_W16GH", 53, 1), ("W16GH_PROFILE", 54, 5),
+]
+
+
+# Profile-table field layouts, same SDK field table (see sdk_regmap.py). Every
+# table is per-channel {Value_X, optional Mask_X, Select_X}, applied as
+#     X = (selected_source & Mask) | Value
+# so Mask=0 is a constant assignment -- DGLORT profiles 2/6 are Value=0xfffe and
+# 0xffff with Mask=0, the reserved flood/drop GLORTs.
+#
+# Cross-check: each layout's highest bit fits the words/entry the register
+# descriptor declares, for all 19 tables. That agreement is what ties each field
+# group to the right register.
+PROFILE_FIELDS = {
+    "DGLORT":   [("Value", 0, 16), ("Mask", 16, 16), ("Select", 32, 3)],
+    "SGLORT":   [("Value", 0, 16), ("Mask", 16, 16), ("Select", 32, 3)],
+    "CSGLORT":  [("Value", 0, 16), ("Mask", 16, 16), ("Select", 32, 2)],
+    "MA1_MAC":  [("Value", 0, 48), ("Select", 48, 3)],
+    "MA2_MAC":  [("Value", 0, 48), ("Select", 48, 2)],
+    "W8E":      [("Value", 0, 8), ("Mask", 8, 8), ("Select", 16, 3)],
+    "W8F":      [("Value", 0, 8), ("Mask", 8, 8), ("Select", 16, 2)],
+    "POL1_IDX": [("Value", 0, 12), ("Select", 12, 4)],
+    "POL2_IDX": [("Value", 0, 12), ("Select", 12, 4)],
+    "POL3_IDX": [("Value", 0, 10), ("Mask", 10, 10), ("Select", 20, 3)],
+    "HASH_ROT": [("Value_HASH_ROT", 0, 20), ("Select_A", 20, 1),
+                 ("Select_B", 21, 1), ("ComputeRotA", 22, 1),
+                 ("ComputeRotB", 23, 1), ("UsePTableRotA", 24, 1),
+                 ("UsePTableRotB", 25, 1), ("RandomizeRotA", 26, 1),
+                 ("RandomizeRotB", 27, 1)],
+}
+# VID / MA_FID / W8ABCD / W16ABC / W16DEF / W16GH / ALU13_OP / ALU46_OP / QOS are
+# multi-channel; their per-channel layouts are in docs/L3AR-STRUCTURE.md. Only the
+# single-channel ones are rendered here, deliberately: a half-transcribed
+# multi-channel layout would print confident wrong field names.
+
+
+def tiles(flds, upto):
+    """True iff flds covers 0..upto with no gap and no overlap."""
+    seen = 0
+    for _, lo, w in flds:
+        m = ((1 << w) - 1) << lo
+        if seen & m:
+            return False
+        seen |= m
+    return seen == (1 << (upto + 1)) - 1
+
+
+def decode_action(val, flds):
+    """Render the nonzero fields of an action word. A MuxOutput_X of 0 means the
+    channel is not driven by this rule, so its profile number is meaningless --
+    print the profile only when its enable is set."""
+    out = []
+    d = {n: (val >> lo) & ((1 << w) - 1) for n, lo, w in flds}
+    for n, lo, w in flds:
+        v = d[n]
+        if not v:
+            continue
+        if n.endswith("_PROFILE"):
+            en = "MuxOutput_" + n[:-8]
+            if en in d and not d[en]:
+                out.append(f"{n}={v}(!unmuxed)")
+                continue
+        out.append(f"{n}={v}" if w > 1 else n)
+    return ", ".join(out) if out else "-"
 
 
 def cam_addr(s, r, seg, w):
@@ -256,6 +428,77 @@ def verify(mem):
     return 0 if good else 1
 
 
+def dump_actions(mem):
+    """Raw dump of the banks the flag decoder never read.
+
+    Deliberately prints words, not fields: the addresses are verified but the bit
+    layout of RAM3/4/5 is not, and rendering invented field names over unverified
+    bits is how the flag-rewrite-only claim survived as long as it did.
+    """
+    for s_ in range(NUM_SLICES):
+        n = RULES_IN_SLICE[s_]
+        r3 = [mem.get(L3AR_BASE + RAM3_OFF + RAM3_SLICE_STRIDE * s_ + r)
+              for r in range(n)]
+        # ⚠ RAM4 and RAM5 are TWO words. Reading only word 0 silently drops
+        # every field above bit 31 -- for RAM4 that is the policer and QoS mux
+        # (MuxOutput_QOS at 49, QOS_PROFILE at 50-54) and the top bits of
+        # ALU46_OP_PROFILE, which spans 29-33. That defect made slice 4 look like
+        # "ALU46 only" when it is really QoS classification, and reported its
+        # rule 24 as operand profile 3 when word 1 bit 0 makes it 11. Caught by
+        # byte-verifying gen_l3ar_slice4.py against the image.
+        def w2(off, r):
+            lo = mem.get(L3AR_BASE + off + RAM_SLICE_STRIDE * s_ + 2 * r)
+            hi = mem.get(L3AR_BASE + off + RAM_SLICE_STRIDE * s_ + 2 * r + 1)
+            if lo is None and hi is None:
+                return None
+            return (lo or 0) | ((hi or 0) << 32)
+
+        r4 = [w2(RAM4_OFF, r) for r in range(n)]
+        r5 = [w2(RAM5_OFF, r) for r in range(n)]
+        def live(v):
+            return sum(1 for x in v if x)
+        print(f"=== slice {s_}  ({n} rules) ===")
+        print(f"  RAM3 nonzero {live(r3):2d}/{n}   RAM4 nonzero {live(r4):2d}/{n}"
+              f"   RAM5 nonzero {live(r5):2d}/{n}")
+        for nm, v, f in (("RAM3", r3, RAM3_FIELDS), ("RAM4", r4, RAM4_FIELDS),
+                         ("RAM5", r5, RAM5_FIELDS)):
+            if not live(v):
+                continue
+            seen = {}
+            for r, x in enumerate(v):
+                if x:
+                    seen.setdefault(decode_action(x, f), []).append(r)
+            print(f"  {nm}:")
+            for txt, rs in seen.items():
+                rr = (f"rules {rs[0]}-{rs[-1]}" if len(rs) > 2 and
+                      rs == list(range(rs[0], rs[-1] + 1))
+                      else "rule" + ("s " if len(rs) > 1 else " ") +
+                      ",".join(map(str, rs)))
+                print(f"    {rr:22s} {txt}")
+    print("=== profile tables ===")
+    for nm, (base, w) in sorted(PROFILE_TABLES.items(), key=lambda kv: kv[1][0]):
+        vals = [mem.get(base + i) for i in range(32 * w)]
+        got = sum(1 for x in vals if x is not None)
+        nz = sum(1 for x in vals if x)
+        print(f"  {nm:10s} 0x{base:05x}  {w} word/entry  "
+              f"written {got:3d}/{32 * w}  nonzero {nz:3d}")
+        flds = PROFILE_FIELDS.get(nm)
+        if not flds:
+            continue
+        for i in range(32):
+            e, ok = 0, True
+            for k in range(w):
+                x = mem.get(base + i * w + k)
+                if x is None:
+                    ok = False
+                    break
+                e |= x << (32 * k)
+            if not ok or not e:
+                continue
+            print(f"      [{i:2d}] " + "  ".join(
+                f"{n}=0x{(e >> lo) & ((1 << wd) - 1):x}" for n, lo, wd in flds))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -264,6 +507,8 @@ def main():
     ap.add_argument("--summary", action="store_true")
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--slice", type=int)
+    ap.add_argument("--actions", action="store_true",
+                    help="dump RAM3/4/5 and the profile tables (layout NOT decoded)")
     args = ap.parse_args()
     mem = load(args.image)
     names = load_names(args.names) if args.names else {}
@@ -285,6 +530,10 @@ def main():
         print("\nkey fields constrained across all rules:")
         for n, c in used.most_common():
             print(f"  {n:<16} {c:>4} rules")
+
+    if args.actions:
+        dump_actions(mem)
+        return 0
 
     if args.verify:
         return verify(mem)

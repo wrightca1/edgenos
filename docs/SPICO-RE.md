@@ -14,6 +14,489 @@ notably RX equaliser adaptation. It is Intel's code, shipped inside `libFocalpoi
 the one blob we cannot redistribute. It is **not required** for a 10GBASE-SR link (proven by
 bisect), which is why it is not in the runtime path today.
 
+## 1.1 Measured 2026-08-21: what actually works with NO Intel firmware
+
+We have no Intel redistribution permission, so this was tested directly by moving
+`/mnt/flash/fm6000_spico_code.bin` aside and cold-booting alpha47. STEP5b degrades silently, as
+designed. Result:
+
+| port | media | PORT_STATUS / LANE_STATUS | outcome |
+|---|---|---|---|
+| et1 | **SFP, fiber (10GBASE-SR)** | `000008c0` / **`00000940`** | clean lock, **forwards** |
+| et2 | **DAC, copper (10GBASE-CR)** | `00000815` / `00000000` | no lock |
+
+et1 carried traffic end to end with zero Intel code present: 5/5 pings from the peer, OSPF
+adjacency up, `fibd: programmed 14 route(s)`. **A fiber-only EdgeNOS needs no Intel firmware at
+all**, which is what makes distribution possible.
+
+### The DAC failure is NOT a missing "start tuning" trigger
+
+Tested on the running no-SPICO box, driving the SerDes over SBus from the host:
+
+- **PLL lock and signal detect are IDENTICAL on both ports** — reg `0x0f` = `0x3f` and reg `0x14`
+  = `0x14` on dev `0x45` (et2) and `0x49` (et1). The DAC is delivering signal; this is not a
+  cabling or squelch problem.
+- The DFE tune state machine **responds to host driving without SPICO**. Toggling reg `0x2a`
+  `0x16`/`0x0e` and polling `0x2b` reaches the completion code `0x04` within 3 iterations, and
+  et2's `0x2b` can be brought to `0x03` — the *same value the working fiber port holds*.
+- **LANE_STATUS stays `0x00000000` regardless.** `0x2b` also oscillates (`0x05` → `0x02` → `0x04`
+  → `0x03`), which reads as adaptation running without converging.
+- SPICO's control register (dev `0xFD` reg `0x0c`) reads `0` on a stripped boot, so the lane is
+  **not** being held down by an empty SPICO left running — that hypothesis is disproved.
+
+Conclusion: SPICO performs **continuous RX equaliser adaptation**, not a one-shot trigger we can
+substitute with a start pulse. Replacing it for copper means implementing an adaptive equaliser on
+the host — reading eye/error metrics and driving the taps (`tap amp (K0)`, `tap pre (KM1)` exist as
+named SerDes fields in the SDK descriptor table) — which is a research problem, not a port of an
+algorithm we already have.
+
+⚠ The reg-`0x2b` field decode below is INFERRED. The SDK's field-name table is located but its
+group-to-register association is unsolved (see `sdk_regmap.py`), so the mapping of that group to
+`0x2b` is a hypothesis consistent with observed values, not a proven layout:
+
+    bit 0    Tune enabled          bits 4-5  Coarse status
+    bit 1    Reserved0             bit 6     Single fine loop done
+    bits 2-3 Fine status
+
+### ★ SPICO IS ONLY NEEDED TO *ACQUIRE* LOCK, NOT TO MAINTAIN IT
+
+Measured 2026-08-21 on a running alpha47 with both ports up. Putting SPICO into reset
+(`dev 0xFD reg 0x0c <- 3`) and leaving it stopped:
+
+| test | SPICO running | SPICO in reset |
+|---|---|---|
+| transit through et2 (DAC) | 6 frames | **6 frames** |
+| paced load through et2 | ~0.25% loss | **1992/2000, 1997/2000** |
+
+The DAC link keeps full performance with the DSP stopped. What SPICO leaves behind is a
+small block of **equaliser coefficients latched in hardware**. Diffing the DAC lane
+(`0x45`) against the fiber lane (`0x49`) shows 21 differing registers, of which
+`0x1f`-`0x28` is a contiguous dual-bank block (`0x21`/`0x25` identical, `0x23`/`0x27`
+identical) — the taps. They visibly drift while SPICO runs and freeze when it stops.
+
+**This changes what "replace SPICO" means.** We do not need to reimplement Intel's
+processor or recover its instruction set. We need to put the right numbers in
+`0x1f`-`0x28` before the lane trains. Two routes, both free of Intel code:
+
+1. **Search.** Sweep the tap block until the lane acquires. A bounded search over a small
+   register block, not an ISA-recovery project.
+2. **Learn once, on the operator's own switch.** Run the vendor firmware a single time from
+   the operator's licensed EOS, capture the converged taps, store them, and boot without it
+   thereafter. This is exactly the established publication standard — *the mechanism ships,
+   the numbers are regenerated on the operator's own hardware* — the same shape as
+   `mkconfigbcm.sh`/`mkpolarity.sh` on the 7050SX2.
+
+### The tap-injection experiment: RUN, and it FAILED
+
+Run 2026-08-21. Captured the converged taps from a working DAC lane
+(`1f=25 20=c8 21=38 22=d8 23=50 24=48 25=38 26=fa 27=50 28=5b`), cold-booted with the blob
+absent, and wrote them into the down lane. **The writes did not stick** -- every register
+read back unchanged (cold defaults are a clean dual-bank `c0 80 00 10` / `c0 80 00 10`).
+
+Then a volatility-controlled writability scan of the WHOLE SBus register space
+(`0x00`-`0xff`, dev `0x45`): read twice to exclude volatile registers, write `0x5a`, read
+back. **Not one register accepted the write.** (`0x00` reported writable but its original
+value was already `0x5a` -- a false positive.)
+
+The SBus tool is not at fault: `fm6000_sbus write` issues `OP_WRITE 0x21` and then prints a
+*readback* line, which is why its output shows op `0x22` -- and the DFE tune loop provably
+takes effect through the same path, driving `0x2b` to its completion code.
+
+**Best explanation:** the registers at `0x1f`-`0x28` are the `_obs` (observe) copies, and
+the hardware tuning engine owns them. The SDK's own field names come in pairs --
+`sbus_dfe_a_ctl_1_cntl` / `sbus_dfe_a_ctl_1_obs`, `sbus_dfe_a_adv_cntl` / `_obs`, and so on
+for ctl_2..ctl_4 -- so a writable **control** side exists. We have not located it, and with
+`Tune enabled` set the engine plausibly overwrites any host value immediately.
+
+### ★ 2026-08-21: the SerDes register names are recovered, and they CORRECT us
+
+`asic/fm6000/tools/sdk_fieldmap.py --sbus` recovers named field layouts for **54
+SBus registers** from `fm6000DbgGetEthWriteRegFields`, an if-chain whose every arm
+names the register by NUMBER (`cmp [ebp+8], <reg>` then `lea` of its field group).
+
+    0x1f  sbus_dfe_a_adv_cntl[3], sbus_dfe_a_dac_cntl
+    0x21  sbus_dfe_a_ctl_1_cntl[3], sbus_dfe_a_ctl_2_cntl, sbus_dfe_a_ctl_3_cntl
+    0x22  sbus_rx_en_cntl, sbus_tx_en_cntl, sbus_ignore_broadcast_cntl
+    0x2a  sbus_dfe_scratch_pad_cntl
+    0x2b  sbus_dfe_scratch_pad_cntl
+    0x2e  sbus_dfe_a_ctl_i_cntl, sbus_dfe_a_ctl_1_cntl
+
+⚠ **`0x2a` AND `0x2b` ARE A SCRATCH PAD, NOT A TUNE ENGINE.** The "DFE tuning"
+loop in `../asic/fm6000/fm6000_serdes_enable.c` -- write `0x2a` = `0x16` then
+`0x0e`, poll `0x2b` for `0x04` -- is not driving hardware. It is a **mailbox to
+the SPICO firmware**: the host posts a command in the scratch pad, SPICO reads it,
+runs the adaptation, and posts status back.
+
+That single fact explains every earlier observation at once:
+
+- the loop "completed" (reached `0x04`) whenever SPICO was loaded -- SPICO was
+  answering the mailbox;
+- on a stripped boot it oscillated and never converged -- **nobody was servicing
+  the mailbox**;
+- and getting `0x2b` to read `0x03`, the same value the working lane holds, meant
+  nothing, because it was only ever a message, not tuning state.
+
+**So the DFE adaptation genuinely IS Intel's algorithm running on Intel's core**,
+reached over a scratch-pad IPC. It is not a hardware state machine we can start
+ourselves. That closes off the cheap route.
+
+⚠ Also corrected: SerDes control registers **are** host-writable, but only on a
+**live** lane. The earlier sweep that concluded "not one register accepts a write"
+was run on a cold, unclocked lane. On a live lane a write to `0x22` stuck
+immediately and destabilised the link (recovered by reboot; `0x22` reads `0xea`
+normally). Do not repeat that probe on a working port.
+
+### The host-side adaptation attempt: written, and BLOCKED (2026-08-21)
+
+`asic/fm6000/fm6000_dfe_adapt.c` implements the loop -- it decodes all seven DFE-A
+parameters (including the `[3]` fields whose top bit lives in a *different*
+register from its low three, an easy way to silently search a quarter of the
+space), measures, and coordinate-descends. It is blocked on two measured facts,
+neither of which is the search itself:
+
+**1. The DFE controls reject writes on a cold lane.** A known-good profile
+captured from this same DAC cable while it was up
+(`ctl_2=12 ctl_3=1 ctl_4=4 adv=14 dac=18`) was injected into the cold lane and
+**nothing moved** -- every value needing a change read back unchanged; only the
+two already at target "stuck". The DFE power-down bits (`0x26` offset_pd /
+data_pd) are already clear on both lanes, so that is not the gate. On a **live**
+lane a write does land -- confirmed by accidentally destabilising et2 with one --
+so writability depends on some lane state we have not identified, plausibly
+something SPICO establishes itself.
+
+**2. The error counter is the wrong metric for acquisition.** `0x08` reads 0 on a
+DEAD lane exactly as on a healthy one: with no lock there is no decoded data to
+count errors in. What separates them is `0x01` -- **`0x25` working vs `0x00`
+dead** -- i.e. `sbus_rx_8b10b_comma_det_obs`. A future search must score comma
+detect first and use the error count only as a tiebreaker.
+
+Parameter values for reference, captured with both lanes up (they differ exactly
+as a copper and a fiber channel should, which is the check that the decode is
+right):
+
+| lane | ctl_1 | ctl_2 | ctl_3 | ctl_4 | adv | dac | ctl_i |
+|---|---|---|---|---|---|---|---|
+| et2 DAC | 4 | 12 | 1 | 4 | 14 | 18 | 4 |
+| et1 fiber | 4 | 7 | 0 | 15 | 15 | 20 | 4 |
+| et2 cold, no SPICO | 4 | 0 | 4 | 0 | 6 | 0 | 4 |
+
+**The ordering is now clear: making the DFE block writable on a cold lane is the
+prerequisite.** Until that is solved a search has nothing to actuate.
+
+⚠ Do not trust `0x22` (`sbus_rx_en_cntl` / `sbus_tx_en_cntl`) readings: it read
+`0xea` on one boot and `0x00` on the next *on a working lane*, so either the
+field mapping or the read path for that register is not what it appears.
+
+### ★ Disassembly, 2026-08-21: what the SDK actually does
+
+Four findings, from `objdump` on the SDK. The first settles a question we had only
+inferred; the rest change what a replacement would have to look like.
+
+**1. "Start DFE tuning" is a mailbox post, proven from vendor code.**
+`fm6000StartSerDesDfeTuning` @0x4877a1 is small: one `SetSerDesRxDataGate`, one
+`ReadSBus`, three `WriteSBus`. Its register addresses are built as
+`(lane << 8) + base` with bases `0xb0517/0xb052a/0xb052b` or
+`0xd1117/0xd112a/0xd112b` -- i.e. SBus registers **0x17, 0x2a and 0x2b only**.
+0x2a/0x2b are the scratch pad. So the SDK starts tuning exactly the way our
+inherited loop does: by posting to SPICO. There is no hardware tuning engine
+anywhere in this path.
+
+**2. But the coefficients ARE host-writable -- `fm6000SetSerDesDfeParams`
+@0x48c29b.** It addresses the full set: `0x1f, 0x20, 0x21, 0x2e` (bank A),
+`0x23, 0x24, 0x25, 0x2f` (bank B) and `0x26`, and writes each with its own
+`WriteSBus`. So placing coefficients from the host is supported by the silicon;
+our failure to do so is a defect in HOW we write, not proof that we cannot.
+
+**3. ⚠ THE COEFFICIENTS ARE GRAY-CODED.** `fm6000SetSerDesDfeParams` calls
+`fmConvertBinaryToGray` **six times** -- once per tunable parameter -- before
+writing. (`fmConvertBinaryToGray` @0x4c5810 is the standard `g = b ^ (b >> 1)`,
+done as a 64-bit loop.) **Writing binary values would be wrong even if they
+landed**, and any search that treats the raw register value as a magnitude is
+searching a scrambled space.
+
+**4. ⚠ THERE ARE TWO SERDES REGISTER BLOCKS, `0xd11xx` AND `0xb05xx`,** selected
+by a function argument, with identical register offsets. Everything we do goes
+through `fm6000_sbus`'s `(op, dev, reg)` form, and `fm6000_serdes_enable.c`
+asserts that is equivalent to `(lane << 8) + 0xd11RR`. That equivalence is an
+ASSUMPTION and has never been tested against the `0xb05xx` block. If our dev
+numbers address the wrong block, reads would still return plausible values while
+writes went nowhere -- which is exactly the symptom we have.
+
+Related functions worth reading next: `fm6000ClearSerDesDfeGates` @0x48e45e,
+`fm6000SetSerDesDacOffset` @0x485fa6, `fm6000EnableSerDes` @0x48131e (which also
+touches 0x1f and 0x26), and `fm6000GetPortLaneEyeScore` -- an EYE SCORE, a far
+better acquisition metric than the error counter, which reads 0 on a dead lane.
+
+⚠ Cold-lane register poking has hit diminishing returns and produces unreliable
+readings: 0x26 never accepts a write, and 0x21 responded to a write by going to 0
+rather than to the written value. Stop poking; read code instead.
+
+### ★★ THE COMPLETE HOST-SIDE DFE RECIPE, read out of the SDK (2026-08-21)
+
+Reading the whole subsystem rather than one function produced an actual
+procedure. Everything below is derived from vendor code, not guessed.
+
+**Addressing is confirmed, and our usage was right.** `fm6000WriteSBus(sw, addr,
+val)` decomposes `addr` as **`dev = (addr >> 8) & 0xff`, `reg = addr & 0xff`**
+(disassembled at 0x479f23). So `(lane << 8) + 0xb051f` with lane `0x40` gives
+dev `0x45`, reg `0x1f` -- exactly what `fm6000_sbus` does. The `0xb05` vs `0xd11`
+blocks differ only in the device byte (`0x05+lane` vs `0x11+lane`), and our
+et2=0x45 / et1=0x49 / port3=0x4a sit in the `0xb05` (Ethernet) block, lanes
+0x40/0x44/0x45. **The "wrong block" worry recorded earlier was unfounded.**
+
+**The write path, from `fm6000SetSerDesDfeParams` @0x48c29b:**
+
+1. Gray-code each parameter -- `fmConvertBinaryToGray` @0x4c5810, the standard
+   `g = b ^ (b >> 1)`. Six calls, one per tunable.
+2. Write the eight coefficient registers, one `WriteSBus` each:
+   bank A `0x1f, 0x20, 0x21, 0x2e`; bank B `0x23, 0x24, 0x25, 0x2f`.
+3. **THEN commit via `0x26`** -- read-modify-write, and this is the step we never
+   did:
+
+       bit 0  sbus_rx_dfe_gate         <- caller's flag
+       bit 2  sbus_sel_dfe_a_data_cntl <- FORCED SET (`or eax,0x4` at 0x48d66c)
+
+`sbus_sel_dfe_a_data_cntl` selects the host-supplied data path. Writing
+coefficients without setting it leaves the hardware using its own values, which
+is consistent with every failed injection: the writes may well have landed, and
+the readback simply kept showing the value actually in use.
+
+**The counterpart, `fm6000ClearSerDesDfeGates` @0x48e45e**, hands control back:
+clears bit 0 of `0x0d` (`sbus_tx_pre_emphasis_gate`), bit 0 of `0x26`
+(`sbus_rx_dfe_gate`), and bits 5 and 6 of `0x17` (the analog-to-core gates). So
+`_gate` bits arbitrate between hardware/SPICO and host-supplied `_cntl` values --
+which is the general rule this whole register file is built on.
+
+⚠ **UNTESTED.** This recipe has not been run on hardware. What it predicts is
+that coefficients can be placed from the host if, and only if, the `0x26` commit
+follows them. That is the next experiment, and it is a much narrower one than
+"implement an adaptive equaliser".
+
+**Still missing for a full replacement:** the adaptation *algorithm*. Even with
+coefficient placement working, something must choose the values. Note
+`fm6000GetPortLaneEyeScore`, `fm6000GetPortLaneEyeScoreHeight/Width` exist -- an
+eye score is the right metric, and far better than the error counter at `0x08`,
+which reads 0 on a dead lane because there is no decoded data to count.
+
+**Map of the subsystem, for whoever reads this next:**
+
+| function | address | what it does |
+|---|---|---|
+| `fm6000StartPortLaneDfeTuning` | 0x430069 | entry; maps lane, stops old tuning, PcsRxReset, SetSignalDetection, then StartSerDesDfeTuning |
+| `fm6000StartSerDesDfeTuning` | 0x4877a1 | **mailbox only** -- regs 0x17, 0x2a, 0x2b |
+| `fm6000SetSerDesDfeParams` | 0x48c29b | the 8 coefficients + the `0x26` commit |
+| `fm6000GetSerDesDfeParams` | 0x48d7ea | readback |
+| `fm6000CheckSerDesDfeTuningState` | 0x48d9e2 | |
+| `fm6000ClearSerDesDfeGates` | 0x48e45e | returns control to hardware |
+| `fm6000WaitForSerDesPllLock` | 0x48eebb | |
+| `fm6000SetSerDesDacOffset` | 0x485fa6 | regs 0x1f, 0x26 |
+| `fm6000EnableSerDes` | 0x48131e | bring-up; also touches 0x1f and 0x26 |
+| `fm6000WriteSBus` | 0x479e09 | dev/reg decomposition |
+| `fmConvertBinaryToGray` | 0x4c5810 | `b ^ (b>>1)` |
+
+### The recipe was IMPLEMENTED and TESTED. Partial movement, still no lock.
+
+`asic/fm6000/fm6000_dfe_adapt.c` now Gray-aware, does the `0x26` commit
+(`sel_dfe_a_data_cntl` forced set), and scores on comma-detect rather than the
+useless error counter. Run on a cold DAC lane with no Intel firmware, injecting
+coefficients captured from the same cable while it was up:
+
+    baseline score = 1000 (err=0 comma=0)     <- metric behaves as designed
+    set ctl_1 = 4  (readback 4)
+    set ctl_2 = 12 (readback 0)   DID NOT STICK
+    set ctl_3 = 1  (readback 4)   DID NOT STICK
+    set ctl_4 = 4  (readback 0)   DID NOT STICK
+    set adv   = 14 (readback 14)  <- STUCK, and did not on the previous attempt
+    set dac   = 20 (readback 0)   DID NOT STICK
+    after set+commit: 1f=01 20=a9 21=c0 2e=88 26=00  status01=04
+    et2 LANE=0x00000000
+
+**What moved:** `adv` took this time; `0x20` went `c0`->`a9` and `0x21` `80`->`c0`,
+so writes DO reach these registers. `status01` moved `00`->`04`.
+
+**What blocks it:** ⚠ **`0x26` reads `00` after the commit -- the commit write
+itself does not land.** Without it `sel_dfe_a_data_cntl` is never set, so whatever
+coefficients do land are not the ones the hardware uses. The values that "stick"
+are also not reliably the ones written (`0x21` changed, but to neither the old nor
+the requested value), consistent with the hardware still driving these bits.
+
+**So the open question is now precise: what makes `0x26` writable?**
+`fm6000EnableSerDes` @0x48131e writes it during bring-up, and sets up the whole
+lane register set -- `0x03, 0x06, 0x0d, 0x17, 0x1d, 0x1f, 0x22, 0x26, 0x36, 0x3b`.
+**We have that algorithm implemented already** in `asic/fm6000/fm6000_serdes_enable.c`
+(recovered from the same function) but it is NOT shipped in the image.
+
+**The next experiment is therefore bounded and concrete:** ship
+`fm6000_serdes_enable`, run it on the cold lane to put the SerDes in the state the
+SDK expects, then inject coefficients and commit. If `0x26` accepts a write after
+a proper enable, the whole recipe follows.
+
+⚠ Also settled: **the eye score is not available to us.**
+`fm6000GetSerDesEyeScore` @0x48a97d goes through `fm6000InterruptSpico` -- it is a
+SPICO service. Any search must acquire on `sbus_rx_8b10b_comma_det_obs`
+(0x01 bit 5) and only then refine on the error counter.
+
+### Ran fm6000_serdes_enable first, then injected. Still no lock -- and a
+### METHODOLOGICAL ERROR that invalidates several earlier conclusions.
+
+`fm6000_serdes_enable` was shipped to /mnt/flash and run on the cold DAC lane
+(port 2, dev 0x45) with no Intel firmware, to put the SerDes in the state the SDK
+expects before injecting. It ran correctly:
+
+    rmw  reg 06  f0 -> f8 ; reg 03  be -> bf ; reg 1f  01 -> 01
+    rmw  reg 26  00 -> 01           <- it DOES write the gate register
+    rmw  reg 0d  a4 -> b5
+    wait reg 14 -> d4 after 1 ms    <- signal detect OK
+    dfe  reg 2a <- 0e, reg 2b <- 02 <- mailbox post
+    dfe  state=0 TIMEOUT after 3000 ms   <- nobody answers it, as expected
+    SerXmit SET -- lane is transmitting
+
+Then coefficients + commit: `0x26` still read `00`, coefficients still "did not
+stick", `LANE_STATUS = 0x00000000`.
+
+⚠⚠ **THE READBACK TEST IS NOT VALID, AND SEVERAL EARLIER CONCLUSIONS RESTED ON
+IT.** `0x26` reads `00` *immediately after* `fm6000_serdes_enable` wrote `01` to
+it, and after a direct write of `0x05`. These registers do not read back what was
+written -- most likely reads return the `_obs`/in-use side while writes go to the
+`_cntl` side, exactly as the `_cntl`/`_obs` naming implies.
+
+**Therefore "DID NOT STICK" never meant "the write failed".** It may have meant
+"the write landed and you cannot see it". Every conclusion in this file of the
+form *"the coefficients are not host-writable"* is downgraded to **unproven**.
+The only trustworthy ground truth here is **does the lane lock** -- and with
+converged coefficients injected after a full SerDes enable, it does not.
+
+**Which leaves the more likely explanation:** SPICO's role in *acquisition* is not
+merely to place final coefficients. A converged snapshot is the OUTPUT of an
+adaptation process run against a live signal; replaying it into a cold lane need
+not reproduce the state the receiver has to pass through to acquire. That is
+consistent with everything observed, including the fact that SPICO can be stopped
+once a link is up with no ill effect at all.
+
+**What would actually settle it:** an independent way to tell whether a write
+landed -- e.g. write a coefficient on a LIVE, locked lane and watch for a
+measurable change in the error counter or in link behaviour. That separates
+"cannot place" from "placement is not sufficient", which is the question this work
+has repeatedly failed to distinguish.
+
+### ★★ SETTLED: THE COEFFICIENTS *ARE* HOST-WRITABLE. The missing step is a PCS
+### re-lock, not equalisation. (2026-08-21)
+
+The experiment that finally separates "cannot place" from "placement is not
+sufficient", run on a LIVE, locked DAC lane with **SPICO stopped** so it could not
+re-adapt over the writes:
+
+| step | LANE_STATUS | st01 | err |
+|---|---|---|---|
+| SPICO running | 0x940 | 0x25 | - |
+| SPICO stopped | 0x940 | 0x24 | 0 |
+| baseline x3 windows | 0x940 stable | 0x24 | 0, 0, 0 |
+| **write dac=0** | **0x000** | 0x24 | 0 |
+| all coefficients 0 | 0x000 | 0x24 | 0 |
+| restore good coefficients | 0x000 | **0x24** | 0 |
+
+**Writing a bad coefficient BROKE a working link.** LANE_STATUS had been stable at
+0x940 across three baseline windows with SPICO already stopped, so nothing else
+was driving it. **Host writes land and have real physical effect.** Every earlier
+claim in this file that the coefficients "are not host-writable" is now
+**DISPROVED** -- they rested on readback, which is not a valid test here.
+
+Two further facts from the same run:
+
+- On a LIVE lane the `0x26` commit IS visible -- it read back `0x82`. On a cold
+  lane it reads `00`. So writability (or at least observability) genuinely differs
+  with lane state, which is why the cold-lane experiments were so confusing.
+- Readback of individual fields is unreliable even when the write works: `dac`
+  reported "DID NOT STICK (readback 18)" in the very same command that took the
+  link down.
+
+★ **AND THE RECOVERY PATH IS NARROWER THAN FEARED.** Writing the known-good
+coefficients back did NOT restore LANE_STATUS -- but `st01` bit 5
+(`sbus_rx_8b10b_comma_det_obs`) **is set**. The SerDes is recovering symbols
+again; it is the **PCS** that has not re-locked. So what is missing after a
+coefficient change is a PCS re-lock, NOT better equalisation.
+
+That is consistent with the SDK: `fm6000StartPortLaneDfeTuning` calls
+**`fm6000SetPcsRxReset`** and `fm6000SetSignalDetection` around its tuning step.
+`fm6000SetPcsRxReset` @0x435d82 maps a logical port to an EPL channel and
+manipulates **bit 17 (`and eax,0x20000`)** of a per-channel register at offset
+`channel * 0x64 + 0x8c` within its block; the full base was not resolved.
+
+**Next experiment:** restore good coefficients, then toggle PCS RX reset (or
+re-run the port's PCS bring-up) and see whether the lane re-locks. If it does,
+host-driven coefficient control is proven end to end on a live lane, and the
+remaining question shrinks to cold-lane ACQUISITION -- for which comma-detect is
+the metric, since the eye score is a SPICO service.
+
+### PCS re-lock tried too. Static coefficient placement is NOT sufficient.
+
+The EPL register map is now fully named (`sdk_fieldmap.py`), which gave the exact
+control:
+
+    LANE_CFG      0xe0037 (+0x4000 for et2)   bit 23 ResetRx, bit 24 ResetTx
+    LANE_STATUS   0xe0038   bit 6 PcsBaserBlockLock, bits 7-12 RxRate
+    PORT_STATUS   0xe0000   bit 6 RxLinkUp, 8 HiBer, 9 Transmitting, 11 SerXmit
+    PCS_10GBASER_RX_STATUS 0xe0026  bit 0 BlockLock, bit 1 HiBer, bits 2-9 BerCnt
+
+(So `LANE_STATUS = 0x940` decodes as PcsBaserBlockLock=1, RxRate=18 -- the "0x940"
+we have used as a magic number for months is simply block lock plus rate.)
+
+Full sequence on a live lane, SPICO stopped: break the link with bad coefficients
+(LANE 0x940 -> 0x000, reproducible), write the good coefficients back, then pulse
+`LANE_CFG.ResetRx`. Result after 15 s: **LANE_STATUS stays 0x000.**
+
+`0x01` reads `0x35` throughout the failed recovery: `comma_det` SET,
+`slip_in_progress` SET, `error_occurred` SET. **The receiver is actively trying to
+align and failing** -- it is not idle, and it is not starved of signal.
+
+**Conclusion: replaying a converged coefficient snapshot does not restore a
+receiver.** Placement works (proved by breaking the link) and PCS reset is
+available, but the DFE evidently carries adaptation state beyond these register
+values, or must converge against the live signal rather than be told the answer.
+That is the same conclusion the acquisition experiments reached from the other
+direction, now with the PCS excuse removed.
+
+**Practical consequence: replacing SPICO requires implementing the ADAPTATION,
+not just coefficient placement** -- and the natural metric, the eye score, is a
+SPICO service (`fm6000GetSerDesEyeScore` -> `fm6000InterruptSpico`). A search
+would have to run on comma-detect plus the 8-bit error counter, both of which are
+weak, and would have to converge on a live link it keeps breaking.
+
+**This line of attack is at a natural stopping point.** The distribution position
+is unchanged and unaffected: fiber ships with zero Intel firmware; copper DAC
+needs an operator-supplied blob.
+
+**Next leads, in order of cost:****Next leads, in order of cost:****Next leads, in order of cost:****Next leads, in order of cost:****Next leads, in order of cost:****Next leads, in order of cost:****Next leads, in order of cost:****Next leads, in order of cost:****Next leads, in order of cost:**
+
+1. ~~Clear `Tune enabled` and retry injection.~~ **Tried, failed** -- writing `0x2a`
+   no longer moves `0x2b`, because `0x2a` is a mailbox, not a control.
+2. ~~Locate the `_cntl` registers.~~ **DONE** -- `sdk_fieldmap.py --sbus`, above.
+   `0x1f`, `0x21`, `0x2e` are the DFE controls; `0x22` is rx/tx enable.
+3. **The remaining route is now clear, and it is the expensive one.** Writing the
+   DFE controls directly means implementing the adaptation loop ourselves: choose
+   coefficients, apply, measure the resulting eye/error rate, iterate. The
+   registers to drive are known; the algorithm is not, and SPICO's version of it is
+   the part we may not have. Alternatively, recover SPICO's instruction set -- 6,000
+   words of 10-bit microcode -- and write our own firmware.
+
+⚠ What is still SOLID: SPICO is dispensable once the link is up (transit and load both
+normal with the DSP held in reset). The obstacle is purely *acquisition* -- getting the
+right coefficients in place on a cold lane without Intel's code.
+
+⚠ `LANE_STATUS 0x940` alone proves nothing here. During this work a lane read `0x940` with
+`PORT_STATUS 0x8c0` and `pcsRx=1` and still forwarded nothing, because portd was not
+running. Always confirm with `tools/transit-test.sh`, never with link registers alone --
+and note that pinging et2's own address from the peer fails even on a healthy link, so it
+is not a valid probe.
+
+### What this means for distribution
+
+**Fiber: ship it.** No Intel firmware, no operator-supplied blob, full function.
+
+**Copper DAC: operator-supplied.** The same "bring your own, from a licensed EOS" model already
+used for `fwd4.txt` — the image must degrade to "copper down", never to a failed boot, which
+STEP5b already does.
+
 ## 2. Delivery protocol — fully decoded
 
 The IMEM upload is a plain SBus transaction sequence on receiver `0xFD`. Per word:
@@ -291,3 +774,52 @@ Replace the "*** SPICO IS REQUIRED for 10GBASE-CR ***" block with:
   proprietary files" remains honest only for a fibre-only build.
 - **C2 "our own equaliser loop over SBus"** — stays on the checklist as real work. It is no longer
   resting on a single boot, which is the change; the scope is unaltered.
+
+## Can the SPICO firmware be reverse engineered? (2026-08-21)
+
+Asked directly while inventorying what is left to remove from the install. Analysed rather than
+guessed.
+
+### What it is, established
+
+- **12,000 bytes = 6,000 words, every one 10 bits wide** (max `0x3ff`, one word per 16-bit slot,
+  461 distinct values, byte entropy 4.70 — structured, not compressed or encrypted).
+- Byte-identical to `fm6000_spico_code`, a 12,000-byte OBJECT at `0x57e500` in
+  `libFocalpointSDK.so`, with `fm6000_spico_code_size` beside it.
+- It is a **program for a microcontroller**, not a configuration table. That is a different
+  category from everything else we have authored.
+
+### Why full reverse engineering does not pay
+
+**The ISA is not recoverable from what we have.** The SDK exports 11 SPICO symbols —
+`fm6000LoadSpicoCode`, `fm6000InterruptSpico(V2)`, `fm6000SetSpicoState`, the eye-score
+accessors — and **none is a disassembler, opcode table, or version string**. The SDK uploads the
+image and thereafter communicates only through the interrupt interface. It does not know the
+instruction set either; that belongs to the SerDes IP vendor.
+
+Deriving a 10-bit ISA from 6,000 instructions with no reference is theoretically possible and
+practically enormous — and the prize is the ability to rewrite **DSP control firmware**: DFE tap
+adaptation, CDR, eye monitoring, running against analog blocks whose control registers we have
+only partially mapped. That is a different discipline from recovering register tables, and it
+would not make the switch better understood in any way that matters.
+
+### What actually matters about it
+
+- **It is only required for 10GBASE-CR (copper/DAC).** Measured: stripped, Et1 (10GBASE-SR
+  fibre) linked on all 17 boots; Et2 (CR) linked 0 of 7 against 5 of 10 with it (Fisher
+  p = 0.041). So the blob is removable **today** at the cost of copper support.
+- **It is 12 KB** — the smallest artefact in the install by three orders of magnitude, against
+  `fwd-executed.txt` at 1.67 MB.
+- It is what runs **DFE adaptation**, which the port-3 work depends on
+  (`docs/PORT3-BRINGUP.md`).
+
+### Recommendation
+
+**Keep it, and stop counting it as a blob to remove.** The standing rule is authorability
+([[edgenos-understanding-over-relocation]]): author what can be understood, and say plainly why
+the rest stays. Firmware for a third-party microcontroller core is in the same category as
+JSS/SBUS board-measured lane tuning — not authorable, and honestly labelled rather than
+pretended away.
+
+If a copper-free build is ever wanted, `tools/strip-spico.py` already produces one and the
+consequence is documented.

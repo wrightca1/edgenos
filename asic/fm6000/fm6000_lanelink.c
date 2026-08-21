@@ -23,6 +23,8 @@
  *   SBus device   = see sbus_dev() below
  *   TX equalisation = FM6000_SERDES_PORTS[].pre / .post, patched into
  *                     SERDES_TX_CFG TxOutputEqPre[14:12] / TxOutputEqPost[11:8]
+ *   TX polarity     = FM6000_SERDES_PORTS[].txpol, patched into
+ *                     SERDES_TX_CFG TxPolarityInvEn[30]. See patch_tx_cfg().
  *
  * The equalisation derivation is not a guess. The captured lane-0 sequence writes
  * SERDES_TX_CFG = 0xc0000581, and port 1's table entry is pre=0 post=5. Port 3's
@@ -58,7 +60,8 @@
 #define SB_REQ  0x0F002u
 #define EPL_BASE 0xE0000u        /* word address; EPL n lane l = +0x400*n +0x80*l */
 
-#define SERDES_TX_CFG_OFF 0x3a   /* TxOutputEqPost[11:8], TxOutputEqPre[14:12] */
+#define SERDES_TX_CFG_OFF 0x3a   /* TxOutputEqPost[11:8], TxOutputEqPre[14:12],
+                                  * TxPolarityInvEn[30] */
 #define SEQ_DEV  0x4au           /* device the captured table was recorded from */
 #define SPICO_BC 0xfdu           /* SPICO broadcast; its reg 3 payload names the target */
 
@@ -1123,10 +1126,30 @@ static const struct fm6000_serdes_port *find_port(unsigned intf)
 }
 
 /* TxOutputEqPre[14:12] and TxOutputEqPost[11:8] come from the port's tuning row. */
+/* TxPolarityInvEn[30] compensates a differential pair routed P/N-swapped on the
+ * PCB. It is a property of the board, not of the link, so it must come from the
+ * port table -- NOT from the captured template, which was recorded on Et1.
+ *
+ * Et1 is swapped (txpol=1) and Et2 is not (txpol=0). Leaving bit 30 to pass
+ * through unpatched gave every port Et1's inversion, so driving Et2 inverted a
+ * lane that must not be inverted. Under 64b/66b that still locks -- inverting
+ * the sync header turns 01 into 10, which is also legal -- but the descrambler
+ * then sees garbage, which is a HiBer lock, and HiBer is exactly what a driven
+ * Et2 reported (PORT_STATUS 0x9d5, bit 8 set).
+ *
+ * Two independent sources agree on the map: the final SERDES_TX_CFG values in
+ * the EOS capture (Et1 0xc0000581 bit30=1, Et2 0x80001581 bit30=0) and EOS's
+ * own CotatiP4.fdl altaSfpPorts, which is where the table came from.
+ *
+ * ⚠ Correcting this did NOT measurably improve Et2's lock rate: 0/10 against a
+ * 2/10 baseline, Fisher p = 0.47 -- inconclusive either way at that power. It is
+ * fixed because it is demonstrably wrong versus EOS, not because it is the cure.
+ */
 static uint32_t patch_tx_cfg(uint32_t v, const struct fm6000_serdes_port *p)
 {
-	v &= ~((0x7u << 12) | (0xfu << 8));
+	v &= ~((0x7u << 12) | (0xfu << 8) | (1u << 30));
 	v |= ((uint32_t)(p->pre & 0x7) << 12) | ((uint32_t)(p->post & 0xf) << 8);
+	v |= (uint32_t)(p->txpol ? 1u : 0u) << 30;
 	return v;
 }
 

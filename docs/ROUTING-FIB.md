@@ -150,3 +150,54 @@ sorted prefix array plus its action entry, and hit the commit strobe.
 
 Note this is also the first concrete evidence that ECMP is expressible: two NEXTHOP entries already
 exist (one per port), which is what the pre-existing `10.99.99.0/24` ECMP route uses.
+
+---
+
+## ★★★ 2026-08-17: NEXTHOP confirmed on hardware — and two corrections
+
+Verified by **modifying the live table and reading the wire**, not by inference.
+
+### The dst MAC really does come from here
+
+Setting the Et1 adjacency's low word to `0x3581CAFF` changed the switch's emitted destination MAC from
+`80:a2:35:81:ca:b4` to **`80:a2:35:81:ca:ff`**, predicted before the run. So the MOD `0x85` write in
+slice 3 sources the destination MAC from `NEXTHOP`. This closes the dst half of the "where does the
+MAC rewrite content come from" question — `MOD_VALUE_RAM` is *not* the source (see
+`PARSER-CONVENTIONS.md`; changing its copy of the router MAC does nothing).
+
+### ⛔ Correction 1: NEXTHOP is a 64-bit RAM — write BOTH words or nothing happens
+
+Writing only `+0` is silently discarded: the value reads back **unchanged, immediately**, with no
+error. Writing `+0` then `+1` commits both. The first attempt here looked like "the table is
+read-only" and was nearly written up as such.
+
+```sh
+devmem <+0> 32 <lo>; devmem <+1> 32 <hi>     # both, in that order
+```
+
+⚠ This is a silent-failure mode of exactly the kind that has bitten this project repeatedly: the
+write returns success, the readback is the *old* value, and any experiment built on it measures
+nothing. **Read back after every NEXTHOP write.**
+
+### ⛔ Correction 2: entries are 2 words apart, not 10
+
+The live table:
+
+```
+0x160014/15  3581CAB4 / 03EF80A2   Et1, GLORT 03ef
+0x160016/17  3581CAB4 / 03EF80A2   (repeat)
+0x160018/19  3581CAB4 / 03EF80A2   (repeat)
+0x16001a/1b  3581CAB5 / 03EE80A2   Et2, GLORT 03ee
+0x16001c/1d  3581CAB5 / 03EE80A2   (repeat)
+```
+
+An adjacency is **2 words / 64 bits**, and indices are contiguous. The earlier "entries are 10 words
+apart (`0x14` → `0x1e`)" was read off two writes in a capture that happened to straddle intervening
+entries — the two *distinct* adjacencies here are 6 words apart, and the same adjacency is repeated
+several times (ECMP members, or one per equal-cost path).
+
+### The src MAC is NOT here
+
+Nothing resembling `44:4c:a8:31:5d:ab` appears in the adjacency table, and it is not in
+`MOD_VALUE_RAM` either. The router/source MAC comes from somewhere else — a per-port or per-VLAN
+router-MAC register is the obvious candidate, and it is the remaining piece of the MAC content path.

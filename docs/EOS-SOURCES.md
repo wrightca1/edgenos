@@ -1184,3 +1184,135 @@ own code, same line the register-header work already respects.
 
 ⚠ Our notes previously dismissed these bindings as "a high-level API … contain no MOD opcodes". True
 for the question asked then. Nobody had checked them for **SerDes diagnostics**.
+
+### The two waits, recovered exactly (2026-08-20)
+
+The table above records steps 9 and 16 only as "wait". They are now disassembled. The SDK
+exports both as dynamic symbols, so no symbol recovery is needed — `objdump -d
+--start-address=...` reads them directly:
+
+| symbol | addr | size |
+|---|---|---|
+| `fm6000EnableSerDes` | `0x48131e` | 10082 |
+| `fm6000WaitForSerDesPllLock` | `0x48eebb` | 891 |
+| `fm6000WaitForSignalDetection` | `0x48f236` | 667 |
+
+**`fm6000WaitForSignalDetection`** — the loop, in full:
+
+```
+    mov  eax,[ebp+0xc]          ; lane
+    shl  eax,0x8
+    add  eax,0xd2114            ; addr = (lane << 8) + 0xd2114   -> SBus reg 0x14
+  loop:
+    mov  DWORD PTR [esp+4],0xf4240
+    call fmDelay                ; fmDelay(0, 1000000 ns) = 1 ms
+    call fm6000ReadSBus
+    and  eax,0x40               ; bit 6 = sbus_rx_ib_sig_strength_obs
+    jne  done
+    add  DWORD PTR [ebp-0x14],1
+    cmp  DWORD PTR [ebp-0x14],0x1387   ; 4999
+    jle  loop
+```
+
+So: **poll reg `0x14` bit 6, 1 ms apart, up to 5000 iterations — a 5 second timeout.**
+
+**`fm6000WaitForSerDesPllLock`** is the same shape at `(lane << 8) + 0xd2110f` (reg `0x0f`),
+`fmDelay(0, 1000000)` again, testing `and eax,0x8` (bit 3) and `and eax,0x1` (bit 0) — which
+confirms the "b0 and b3" reading in the table above from the code rather than from inference.
+
+(The `0xc05...` variants in both functions are the same polls at a second address prefix,
+selected by an argument — the mode split noted above.)
+
+### ⚠ Why this matters more than it looks
+
+A capture cannot contain a wait. `fm6000_lanelink` replays the reads back-to-back, so it
+performs about seven of them and moves on; the real code is prepared to wait **five seconds**
+at millisecond granularity. On a warm lane the difference is invisible — port 1 needed one
+fewer poll than port 2 in EOS's own capture. On a cold lane it is the whole difference.
+
+That also explains a negative result in `PORT3-BRINGUP.md`: `fm6000_lanelink -d 20000` was
+tried and changed nothing. 20 ms across a handful of reads is three orders of magnitude short
+of a 5 s budget, so it was never a test of this hypothesis.
+
+### How `fm6000ReadSBus` decomposes its address — and why that is not the whole story
+
+`fm6000ReadSBus` (`0x479794`) takes the computed address as its second argument and splits it:
+
+```
+    mov  eax,[ebp+0xc]     ; address
+    shr  eax,0x8           ; device  = (addr >> 8) & 0xff
+    and  eax,0xff          ; register = addr & 0xff
+```
+
+So for `addr = (serdes << 8) + PREFIX`, device = `(serdes + PREFIX>>8) & 0xff` and register =
+`PREFIX & 0xff`. Applied to `fm6000EnableSerDes`'s `0xd11RR`, device = `serdes + 0x11`, and the
+hardware-confirmed lane devices `0x49`/`0x4a`/`0x45` then imply serdes indices
+`0x38`/`0x39`/`0x34`. That part is consistent.
+
+⚠ **The same arithmetic applied to `fm6000SetTxConfig`'s `0xb05RR` is FALSIFIED.** It predicts
+device `serdes + 0x05` = `0x3d` for port 1 and `0x3e` for port 3. Measured on hardware:
+
+| dev | r20 | r21 |
+|---|---|---|
+| `0x49` | `fe` | `0e` |
+| `0x4a` | `fb` | `08` |
+| `0x3d` | `c0` | `80` |
+| `0x3e` | `c0` | `80` |
+| `0x3f` | `c0` | `80` |
+| `0x2c` | `c0` | `80` |
+
+`0x49` and `0x4a` are distinct, as real devices should be. `0x3d`, `0x3e` and two arbitrarily
+chosen controls (`0x3f`, `0x2c`) are byte-identical — that is the bus returning a default for
+devices that are not there, not four devices that happen to agree.
+
+**So the prefix carries something our transaction does not express.** Four prefixes appear —
+`0xd11` (enable path), `0xb05` (TX config), `0xd21` and `0xc05` (the two waits, mode-selected) —
+and `fm6000_sbus` issues a bare `(op, dev, reg)` against the single JSS master at `0xF001`.
+A plausible reading is that bits [23:16] select an SBus ring or master (`0x0d` vs `0x0b` vs
+`0x0c`), but that is **not established**, and the naive derivation is now known to be wrong.
+
+⚠ Do not issue `SetTxConfig`'s three writes (regs `0x3d`, `0x41`, `0x3e`, in that order, the
+last carrying `or 0x2` then `or 0x1`) until this is settled. Writing them to a device that does
+not exist is harmless; writing them to the wrong *real* device is not.
+
+Note the waits argue the same way: `fm6000WaitForSignalDetection` computes `0xd2114`, which by
+this arithmetic is device `serdes + 0x21` — yet polling register `0x14` on the confirmed device
+`0x4a` demonstrably works (it asserted bit 6 in response to our own writes). So the mapping
+from prefix to device is more than an addition, and reading the SBus master's own address
+decoder is the way to settle it.
+
+### The FM6000 SPICO interrupt encoding, recovered (2026-08-20)
+
+Asked "how do we find it" after DPDK's FM10000 encoding failed to transfer. The answer was
+already half in the tree: `fm6000_spico.c` cites `fm6000InterruptSpico @0x47935a`. That is a
+71-byte wrapper which forwards to **`fm6000InterruptSpicoV2 @0x478eef`**, and the request write
+is a static helper at **`0x47707c`**. It issues **three** SBus writes, all to the SPICO
+broadcast device `0xfd`:
+
+```
+    edx = ((code  >> 8) & 3) << 2        ; lea edx,[eax*4]
+    eax = ((param >> 8) & 3)
+    write 0xfd01 <- eax | edx            ; high bits of both
+    write 0xfd02 <- code  & 0xff
+    write 0xfd03 <- param & 0xff
+```
+
+So a **10-bit code and 10-bit parameter split across three 8-bit registers**. That is exactly
+what FM6000's 8-bit SerDes register file forces, and it is why FM10000's `(code << 16) | param`
+into a single 32-bit register does not transfer (docs/OPEN-SOURCE-FOCALPOINT.md).
+
+⚠⚠ **`fm6000_sbus irq` was wrong and has been corrected.** It wrote `arg`->`0x01`,
+`code`->`0x02`, `target`->`0x03`. Two of the three are wrong: `0x01` takes the high bits of code
+*and* parameter, and `0x03` takes the parameter's low byte, not a device number. Every interrupt
+that subcommand has ever issued was malformed — including the `irq 0x4a 0x01 0x03` tried
+earlier, which the hardware would have read as code `0x01`, param `0x4a`, high bits `0x03`.
+
+⚠ **There is no target field.** The writes go to the broadcast device. How a single SerDes is
+selected is **not established** — for some codes the parameter is itself a lane selector, which
+would explain `fm6000_lanelink`'s note that "the SPICO broadcast's reg-0x03 payload names the
+device the following block targets": reg `0x03` is the parameter, and for that particular code
+the parameter happens to be a device. That reading is consistent but unproven.
+
+Remaining to find: FM6000's interrupt **code numbers**. DPDK gives FM10000's (`0x01` enable
+TX/RX, `0x05` bit rate, `0x15` tx eq, `0x0a` DFE) and the bring-up order, but the codes
+themselves must be confirmed against callers of `fm6000InterruptSpico` in this binary.

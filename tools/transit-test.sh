@@ -36,6 +36,22 @@ if ! edge '/mnt/flash/fmdump 0xe4000 1' | grep -qE '0(8|a|c|e)c0'; then
     exit 1
 fi
 
+# ⚠ PRIME ARP IN BOTH DIRECTIONS FIRST.
+#
+# The peer must resolve 10.101.101.34 (the switch's et2) to send anything at all.
+# Once a Linux neighbour entry goes FAILED, the kernel backs off and drops the
+# pings rather than re-ARPing immediately -- so the capture comes back EMPTY and
+# looks exactly like broken forwarding. That cost a false "alpha38 breaks the
+# dataplane" on 2026-08-21: the same test also failed on the known-good image.
+#
+# Switch-initiated pings refresh both sides' entries. Cheap, and it removes the
+# most likely reason for this harness to lie.
+edge 'ping -c 2 -W 1 -I et2 10.101.101.33 >/dev/null 2>&1
+      ping -c 2 -W 1 -I et1 10.101.101.25 >/dev/null 2>&1' >/dev/null 2>&1
+peer "ping -c 2 -W 1 -I 10.101.101.33 10.101.101.34 >/dev/null 2>&1" >/dev/null 2>&1
+echo "=== 1b. neighbour state (must not be FAILED) ==="
+peer "ip neigh show dev swp7 | grep -F 10.101.101.34 || echo '  (no entry for 10.101.101.34)'"
+
 echo "=== 2. switch route for $DEST (must leave via et1) ==="
 edge "ip route get $DEST"
 

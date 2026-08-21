@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 """l3ar_program.py - author an FM6000 L3AR program from named rules.
 
-Replaces fm6000_l3arinit.c (3,928 transcribed microcode pairs). L3AR is the
-easiest of the three remaining blocks to author because its action is only a
-mask/set over ACTION_FLAGS -- no destination mask, no CPU code, no mirror, and
-none of the table entanglement that blocks L2AR.
+Replaces fm6000_l3arinit.c (3,928 transcribed microcode pairs), for SLICE 0.
+
+⚠⚠ RETRACTION (2026-08-20). This file used to open by saying L3AR "is the easiest
+of the three remaining blocks to author because its action is only a mask/set over
+ACTION_FLAGS". That is FALSE, and it is the premise this whole tool was designed
+around. There are FIVE RAM banks; the old decoder read two. Besides SetFlags,
+datasheet Table 5-31 lists 6 sequential actions and 21 output mux actions whose
+operands live in RAM3/RAM4/RAM5 and index 19 profile tables. See
+docs/L3AR-STRUCTURE.md for the verified map.
+
+⚠ CONSEQUENCE FOR --emit: what this tool emits covers RAM1/RAM2 only. For slice 0,
+EOS writes a nonzero RAM3, RAM4 and RAM5 word for all 32 rules. Emitting this
+program in place of EOS's slice 0 therefore DROPS those 96 action words. That is
+not currently a live hazard -- nothing in fm6000-fullseq.sh runs this tool -- but
+--emit must not be spliced until RAM3/4/5 are covered.
 
     l3ar_program.py --check
     l3ar_program.py --emit            # <addr> <value> writes
@@ -335,8 +346,20 @@ C_TEMPLATE = r"""/* fm6000_l3arinit.c - program the L3AR block ourselves.
  * L3AR: L3 action resolution. Replaces %(eos)d transcribed microcode pairs from
  * the previous generator with %(ours)d writes, of which %(nonzero)d are non-zero.
  *
- * SCOPE: SLICE 0 ONLY -- the forwarding rules. Slices 1-4 are csGlort
- * assignment, policers, storm control and L3 QoS: separate functions EdgeNOS
+ * SCOPE: SLICE 0 ONLY -- the forwarding rules.
+ *
+ * ⚠ The line that used to stand here -- "slices 1-4 are csGlort assignment,
+ * policers, storm control and L3 QoS" -- was UNCITED, and reading it as fact is
+ * what produced alpha30, which deleted those slices and killed the dataplane.
+ * Decoded 2026-08-20 with the real RAM3/4/5 field layout (docs/L3AR-STRUCTURE.md):
+ * slice 1 IS csGlort assignment -- every rule is MuxOutput_SGLORT +
+ * MuxOutput_CSGLORT with a distinct CSGLORT_PROFILE -- so the claim was right for
+ * slice 1, but it was uncited when it was acted on, and it is wrong for the rest:
+ * slice 2 is VID assignment and trap header, slice 3 is the ALU13/ALU46 command
+ * and operand profiles, slice 4 is ALU46 alone. Policers and QoS are RAM4 fields
+ * spread across slices, not a slice of their own. alpha30 deleted all four.
+ * Separate
+ * functions EdgeNOS
  * does not author, left in the replay exactly as EOS wrote them. `-a` therefore
  * lists all %(ours)d slice-0 addresses and nothing else, so the boot script
  * strips EOS's slice 0 and only that.
@@ -418,8 +441,8 @@ def slice_writes(rules, slice_=0):
     CAM word pair is Key=0,KeyInvert=0, the never-match state, so the 20 rules we
     do not author are written off explicitly rather than left behind.
 
-    This replaces slice 0 only. Slices 1-4 are csGlort assignment, policers,
-    storm control and L3 QoS -- separate functions we do not author, left in the
+    This replaces slice 0 only. Slices 1-4 are functions we do not author and do
+    not claim to have identified (see the retraction above), left in the
     replay exactly as EOS wrote them.
     """
     authored = {r.index for r in rules if r.slice == slice_}

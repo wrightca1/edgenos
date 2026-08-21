@@ -1,0 +1,10 @@
+11:57:23 === Et2 base rate: N=10, sample 180s, arm = EOS->EdgeNOS unspliced ===
+11:57:23 --- boot 1/10 ---
+12:00:43 === Et2 base rate: N=10, sample 180s, arm = EOS->EdgeNOS unspliced ===
+12:00:43 --- boot 1/10 ---
+12:02:38   boot 1: FAILED to reach EOS
+12:02:38 --- boot 2/10 ---
+12:04:03 === Et2 base rate: N=10, sample 180s, arm = EOS->EdgeNOS unspliced ===
+12:04:03 --- boot 1/10 ---
+12:06:15   boot 1: FAILED to reach EOS
+12:06:15 --- boot 2/10 ---

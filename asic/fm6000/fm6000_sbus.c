@@ -59,9 +59,22 @@
 static volatile uint32_t *M;
 
 /* The command register's own verdict on the last transaction. Bit 25 is Busy;
- * bits 28:26 are a result code that fm6000_lanelink has always treated as
- * "non-zero means the op failed" -- and which this tool used to discard. If the
- * bus is refusing writes to a device, this is where it says so. */
+ * bits 28:26 are a result code.
+ *
+ * ⚠ NON-ZERO IS NOT FAILURE. These are the standard Avago SBus codes: 0x01 is
+ * "write complete" and 0x04 is "read complete", both SUCCESS. Measured 2026-08-20
+ * on the 7150: every read returns 4 and every write returns 1, on a lane that is
+ * up and passing traffic as well as on a dark one. Treating non-zero as failure
+ * would call every successful transaction a failure.
+ *
+ * (fm6000_lanelink is unaffected in practice -- it tests `r < 0`, and sbus()
+ * returns the code only once Busy has cleared, so 1 and 4 never trip it.)
+ *
+ * ⚠ A COMPLETED WRITE DOES NOT MEAN THE READBACK CHANGES. Writing 0x22 and 0x0d
+ * on a lane returns "write complete" and reads back the old value, because read
+ * and write hit different internal spaces at the same register number -- reads
+ * return observables, writes go to controls. Verify SerDes writes by their
+ * EFFECT (PORT_STATUS bit 11, SerXmit), never by reading them back. */
 static uint32_t last_status;
 
 static uint32_t rd(uint32_t w) { uint32_t v = M[w]; __sync_synchronize(); return v; }
@@ -113,7 +126,7 @@ int main(int argc, char **argv)
 		    "usage: fm6000_sbus [-b bdf] read  <dev> <reg>\n"
 		    "       fm6000_sbus [-b bdf] write <dev> <reg> <data>\n"
 		    "       fm6000_sbus [-b bdf] reset <dev>\n"
-		    "       fm6000_sbus [-b bdf] irq   <target-dev> <code> [arg]\n");
+		    "       fm6000_sbus [-b bdf] irq   <code> <param>\n");
 		return 2;
 	}
 
@@ -136,13 +149,31 @@ int main(int argc, char **argv)
 		printf("SBus reset of device 0x%02x\n", a[0]);
 		show("reset", sbus(OP_RESET, a[0], 0x00, 0));
 	} else if (!strcmp(cmd, "irq")) {
-		unsigned target = a[0], code = a[1], arg = a[2];
+		/* ⚠ CORRECTED 2026-08-20. This used to write arg->0x01, code->0x02,
+		 * target->0x03, which is NOT the encoding and never issued a valid
+		 * interrupt. Decoded from fm6000InterruptSpicoV2 (@0x478eef, via the
+		 * thin wrapper fm6000InterruptSpico @0x47935a):
+		 *
+		 *   reg 0x01 = ((param >> 8) & 3) | (((code >> 8) & 3) << 2)
+		 *   reg 0x02 = code  & 0xff
+		 *   reg 0x03 = param & 0xff
+		 *
+		 * i.e. a 10-bit code and a 10-bit parameter split across three 8-bit
+		 * registers -- which is what FM6000's 8-bit SerDes register file forces,
+		 * and why FM10000's (code<<16)|param encoding does not transfer.
+		 * See docs/OPEN-SOURCE-FOCALPOINT.md.
+		 *
+		 * ⚠ There is no "target" field here. The writes go to the SPICO
+		 * BROADCAST device (0xfd); how one SerDes is selected is NOT established
+		 * -- for some codes the parameter is itself a lane selector. The third
+		 * argument is therefore the PARAMETER, not a device. */
+		unsigned code = a[0], param = a[1];
 
-		printf("SPICO interrupt: target 0x%02x code 0x%02x arg 0x%02x\n",
-		       target, code, arg);
-		sbus(OP_WRITE, SPICO_BC, 0x01, arg);
-		sbus(OP_WRITE, SPICO_BC, 0x02, code);
-		sbus(OP_WRITE, SPICO_BC, 0x03, target);
+		printf("SPICO interrupt: code 0x%03x param 0x%03x\n", code, param);
+		sbus(OP_WRITE, SPICO_BC, 0x01,
+		     ((param >> 8) & 3u) | (((code >> 8) & 3u) << 2));
+		sbus(OP_WRITE, SPICO_BC, 0x02, code & 0xffu);
+		sbus(OP_WRITE, SPICO_BC, 0x03, param & 0xffu);
 		sbus(OP_WRITE, SPICO_BC, 0x0c, 0x18);
 		sbus(OP_WRITE, SPICO_BC, 0x0c, 0x08);
 		show("resp reg 0x01", sbus(OP_READ, SPICO_BC, 0x01, 0));

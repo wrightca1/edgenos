@@ -48,8 +48,13 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
 - [x] ~~**A3. L3AR generator.**~~ **Done, hardware-validated.** `l3ar_program.py` authors 13 rules
       as named intents; `--c` emits 640 writes (242 non-zero) replacing 3,928 transcribed pairs.
       All 13 match EOS exactly. On the 7150: full slice-0 replacement forwards at 0% loss over
-      et1, 640/640 readback, routes 34. Scope is **slice 0 only** — slices 1-4 are csGlort,
-      policers, storm control and L3 QoS, left in the replay.
+      et1, 640/640 readback, routes 34. Scope is **slice 0 only**.
+      ⛔ **The description of slices 1-4 that used to sit here — "csGlort, policers, storm control
+      and L3 QoS" — is UNCITED and contradicted by the datasheet.** §5.10.1 gives L3AR "5 serial
+      application stages" whose "changes accumulate serially from one stage to the next": they are
+      stages of one resolution, not separate features. Deleting slices 1-4 killed forwarding
+      (see `BLOB-REMOVAL-PLAN.md`). Slices 1-4 are left in the replay because they are **not yet
+      authored**, not because they are unused.
       ⚠ 242 of 242 non-zero writes coincide with EOS, against 1 of 1,568 for the parser. L3AR has
       almost no encoding freedom, so agreement is expected and is NOT the evidence of
       independence it was for the parser. Audit the process, not the diff.
@@ -68,6 +73,54 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
       the CPU port, which needs the mirror table and therefore lands in A2, (b) a second
       connected port, or (c) a capture host on the et1 segment. **Do not write the generator on
       the strength of the five clues.**
+      - ✅ **UNBLOCKED since 2026-08-15** by option (b): Et2 links, and the transit rig captures the
+        switch's egress on the peer's swp6. The "no egress capture point" text above is stale.
+      - ✅ **2026-08-17: `0xe0` = `DECREMENT`**, identified positively — `PARSER-CONVENTIONS.md`.
+        Also measured: the firing entry is **slot 9 in slices 14, 15 and 16** (14 of 15 live entries
+        in bank 15 are inert), which is what "needs the frame's 48-bit key" was blocking on. ⚠ not
+        uniform across banks — bank 1's slot 9 is empty.
+      - ✅ **The full step list is mapped**: a routed IPv4 frame is **9 commands**, with the firing
+        entry located in each slice (9 of 18 slices are entirely inert). `0x85` x2 = MAC rewrite,
+        `0x01`/`0x05` = skips, `0xe0` = decrement, `0x20` = increment. Only `0xBE` and `0xD0` remain.
+      - ✅ **The `operand+1` premise is refuted as a global rule** — it holds only for `SKIP` and the
+        write opcode; opcodes 1, 5, 6 and 7 ignore their operand entirely. This was the assumption
+        under A4's "five converging lines of evidence", and it is the thing to fix first.
+      - ✅ **RESOLVED**: `0x20` is a **conditional** increment that fires only after a decrement, so
+        the two `0x20` entries differ because slice 12's follows a `SKIP`. The encoding is therefore
+        **stateful across slices** — the generator must model the command *stream*, not emit
+        independent per-slice bytes. `0xe0`+`0x20` are a fused decrement/checksum-fixup pair.
+      - ✅ **The encoding model is GENERATIVE and hardware-verified**: two novel edits predicted
+        byte-exact before running. Any edit expressible as `skip -> decrement -> conditional
+        increment` can be generated *and verified against hardware* now. The remaining unknowns no
+        longer gate this part. Also: the program is **not L4-dependent** (UDP == ICMP).
+      - ✅ **MAC content path COMPLETE** (2026-08-17): src `44 4c` ← value bank 6 slot 8, src
+        `a8 31 5d ab` ← bank 8 slot 8, dst ← `NEXTHOP`; all confirmed on live silicon. Only **2 of
+        14 data slices** feed a routed IPv4 frame, so a generator needs two value entries here, not
+        a populated table.
+      - (superseded) **MAC content path essentially FOUND.** dst MAC ← `NEXTHOP` adjacency (`0x160000`); src
+        MAC low 4 bytes ← `MOD_VALUE_RAM` **bank 8 slot 8** (`0x159508`) — both confirmed by
+        modifying live silicon and watching the emitted frame. ⛔ Only the leading `44 4c` remains;
+        it is plausibly parser-channel-sourced rather than constant. Also settles B-item "bank 4's
+        MAC association" as a **negative** (bank 4 holds a copy, feeds nothing).
+      - ⛔ **`0xBE` / `0xD0` unidentified**, all substitution levers exhausted. Next step is to run
+        the same bisection against an L2-switched / VLAN / IPv6 frame — 9 of 18 slices were inert for
+        the ICMP flow, so a second frame type is what separates constant structure from flow-specific.
+      - ✅ **Value-entry content model decoded**: per byte, `Type 1` = constant / `Type 2` = parser
+        channel (`DataSelect`), mixable inside one 2-word entry. Confirmed on hardware. A generator
+        must emit both forms — constants alone are wrong for any flow but the one captured.
+      - ✅ **The opcode map is closed for a routed IPv4 frame**: 0=SKIP, 1=CHECKSUM, 4=REPLACE,
+        5=REPLACE_MASKED (dybble mask, three held-out predictions), 7=DECREMENT. Opcode 6 is
+        mandatory in the final slice with **no observed frame effect** — a terminator by elimination,
+        deliberately NOT recorded as confirmed. Opcodes 2/3 are unused by this flow and must hold
+        INSERT / DELETE / DECREMENT_INSERT / DECREMENT_REPLACE; reaching them needs a second frame type.
+      - (superseded) **opcode 5 partially cracked**: it can zero the byte at the cursor, its operand selects
+        between zero / no-write / frame-drop, and it is context-dependent like `0x20`. The earlier
+        "operand ignored" reading is RETRACTED — it was measured on the TOS byte, which is zero in
+        normal traffic and so cannot show a zeroing write.
+      - ⛔ Still open for the generator: what `0x20` is (it increments the byte after the cursor,
+        which *sits* on the IP checksum but is not proven to be the checksum step), and the fact that
+        **operands are unused** for `0xe0` and `0x20` — so the `operand+1` length rule does **not**
+        hold for every opcode. A generator written on that rule would be wrong for these two.
 - [ ] ~~**A4-old. MOD generator.**~~ One unknown left: the 8-bit `Command` packs an opcode **and** its
       operand, and that split is not in the datasheet sections read. EOS uses 47 distinct values.
       Each command's required value-byte count is documented, which constrains the split — a step's
@@ -140,10 +193,25 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
 
 ## E. Build and packaging
 
-- [x] ~~**E0. Dataplane watchdog.**~~ **Written and validated** (`asic/fm6000/fm6000_wdog.c`).
-      The box already survives a CPU hard lockup — the kernel cmdline carries `nmi_watchdog=panic`
-      and `reboot=p`, which is why an ASIC wedge on 2026-08-11 rebooted the switch onto EOS by
-      itself rather than needing physical access. What was missing is the EdgeNOS failure mode:
+- [x] ~~**E0. Dataplane watchdog.**~~ **Written, validated, and PROVEN IN THE FIELD**
+      (`asic/fm6000/fm6000_wdog.c`).
+      ⚠ **CORRECTION 2026-08-21: the kernel cmdline does NOT carry `nmi_watchdog=panic` or
+      `reboot=p`.** Measured on the running alpha42 image, it is exactly:
+      `pnpacpi=off pci=nocrs,lastbus=0 intel_iommu=off nr_cpus=1 tsc=reliable console=ttyS0,9600`.
+      So the claim that "the box already survives a CPU hard lockup" is **false for this image** —
+      with no `/dev/watchdog` either, a genuine CPU lockup hangs indefinitely and needs physical
+      access. Whatever rebooted the box on 2026-08-11, it was not this mechanism.
+      **Adding `nmi_watchdog=panic reboot=p` to the cmdline is now the open item**, and it is the
+      only thing standing between us and self-recovery from a CPU wedge.
+
+      **It fired for real on 2026-08-21T14:28:22** and did exactly the right thing:
+      `FIRING: PIN_STRAP=0xffffffff (3 strikes) routes=43 (0 strikes)` — the FM6000 dropped off
+      the PCI bus while the control plane stayed healthy at 43 routes, and the watchdog rebooted
+      the box unattended. That is 2 firings in the log's whole history (the other, 2026-08-12, was
+      the route floor). `/mnt/flash/wdog.log` is on flash and survives the reboot, which is what
+      made the event diagnosable at all — EOS's own `show reload cause` reports nothing.
+      ⚠ **The log does not record WHY the ASIC dropped.** Capturing PCI config space / AER state
+      at FIRING time is what would make the next occurrence root-causable. What was missing is the EdgeNOS failure mode:
       **Linux healthy, dataplane dead**, which nothing watched (there is no `/dev/watchdog`; the
       `scd` driver exposes only `interrupt_mask_watchdog5/6/7`).
       Checks `PIN_STRAP == 0x208` (unambiguous: a downed device reads `0xffffffff`) on a 3-strike
@@ -152,8 +220,10 @@ mod_gen.py         MOD encoder, --verify 684 CAM + 369 cmd + 329 value; --keymap
       experiment that deliberately downs the dataplane.
       Validated on hardware in dry-run: healthy → exit 0; forced route floor → `BELOW FLOOR`,
       exit 1; disable file honoured; logs to `/mnt/flash/wdog.log`.
-      - [ ] **E0a. Start it at boot.** Currently must be launched by hand; needs to go in the SWI
-            alongside E1. Until then a wedge is only self-healing if the watchdog was started.
+      - [x] ~~**E0a. Start it at boot.**~~ **DONE** — `init-m1:245` starts it detached when a
+            replay is present (`setsid /usr/bin/fm6000_wdog &`). Confirmed running on alpha42 as
+            pid 1609, and it is what caught the 14:28 ASIC drop. This entry previously said it
+            "must be launched by hand"; that was stale.
 
 
 - [ ] **E1. Fold the image edit into the build.** Proven by hand: a SWI is a zip containing a gzip
@@ -350,6 +420,22 @@ readings of the command split, and what B1 needs to see which frame bytes affect
 `PORT3-BRINGUP.md`, where a single-boot reading of exactly this produced two days of wrong
 conclusions. `transit-test.sh` refuses to run without an et2 carrier rather than returning a
 confusing null; if it refuses, reboot and retry, and do not diagnose it.
+
+**2026-08-17 — when Et2 does come up, it is a real link, and the cause is not in the replay.**
+Measured on a fresh good boot: Et2 held `LANE_STATUS=0x940` for **60 of 60 samples over 5 minutes**,
+`PORT_STATUS=0x08C0` with `HiBer` clear, against an Et1 control at 60/60 — still locked ten minutes
+in. A dark boot is equally unambiguous at 0/20. **So `transit-test.sh` gating on Et2 is sound: reboot
+until it comes up (~1 in 2) and the link you get is trustworthy for the whole session.**
+
+⚠ Do **not** substitute `fm6000_lanelink 2` for a good boot. It reaches `0x940` but produces a third,
+worse state — a `HiBer` lock that oscillates (13 of 22 samples) — and **re-running it on a lane that
+is already up tears the link down**. Check `tools/fm6000-status.sh` first and never drive a locked
+port. See `tools/README-7150-harnesses.md` for the three silent reboot traps.
+
+The replay itself is exonerated as the cause: **its last write to any EPL is op 157,123**, after
+which 29% of the replay executes without touching a port. Good and dark boots run byte-identical
+streams and differ only in how long autonomous SerDes training takes to converge. This closes the
+"Et2 replay race" line with a negative — there is no write to find.
 
 ### ⛔ E0a was understated: the watchdog was not in the image at all
 
