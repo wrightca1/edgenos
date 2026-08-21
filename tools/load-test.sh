@@ -26,6 +26,11 @@
 # usage: [COUNT=2000] [PASSES=3] tools/load-test.sh
 # SPDX-License-Identifier: GPL-2.0-or-later
 set -u
+# ⚠ eg.sh/p5.sh require explicit hosts (no lab addresses in this tree). If they
+# are unset, every send silently does nothing and this reports 100% loss, which
+# looks exactly like a dead dataplane. Fail loudly instead.
+: "${EG_HOST:?set EG_HOST to the switch under test}"
+: "${P5_HOST:?set P5_HOST to the traffic peer}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 COUNT="${COUNT:-2000}"
 PASSES="${PASSES:-3}"
