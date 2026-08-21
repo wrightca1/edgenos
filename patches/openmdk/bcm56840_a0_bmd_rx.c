@@ -30,7 +30,12 @@
 #include <cdk/chip/bcm56840_a0_defs.h>
 #include <cdk/arch/xgsd_cmic.h>
 #include <cdk/arch/xgsd_chip.h>
-#include <cdk/arch/xgs_cmic.h>   /* CMIC_CONFIGr (COS_RX_EN) — XGS packed CMIC */
+/* NOT <cdk/arch/xgs_cmic.h>: it defines CMIC_CONFIGr_t unconditionally, and
+ * bcm56840_a0_defs.h already aliases the chipless CMIC_CONFIGr names to the
+ * chip's own -- including both is a hard "conflicting types" error. The two
+ * definitions are byte-identical anyway (reg 0x0000010c, COS_RX_EN at bit 24,
+ * mask 0x1), so the chip defs above give exactly the XGS packed-CMIC layout
+ * this file wants. Verified 2026-08-21 against OpenMDK db9c678. */
 
 #include "bcm56840_a0_bmd.h"
 #include "bcm56840_a0_internal.h"
