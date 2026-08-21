@@ -3,6 +3,10 @@ Description=EdgeNOS edged - Switch Daemon (BCM56846 Trident+)
 After=platform-init.service local-fs.target
 Requires=platform-init.service
 ConditionPathExists=/dev/linux-kernel-bde
+# swp-l3 is PartOf us, which propagates stop/restart but NOT start -- so after a
+# stop/start cycle (a package upgrade) the swp addresses would stay unset. Wants
+# pulls it back in; its own After=edged.service keeps the ordering right.
+Wants=swp-l3.service
 
 [Service]
 Type=simple

@@ -10,4 +10,5 @@ files:
   - {src: edgenos/core/datapath/config/journald-datapath.conf, dst: /etc/systemd/journald.conf.d/30-edgenos-datapath.conf, mode: "0644"}
   - {src: edgenos/platform/accton-as4610-54/services/bcmd.service, dst: /etc/systemd/system/bcmd.service, mode: "0644"}
 hooks:
-  postinst: "#!/bin/sh\nsystemctl daemon-reload 2>/dev/null || true\n"
+  preinst: "#!/bin/sh\n# ETXTBSY: cannot overwrite /opt/edgenos/bcmd while it runs.\nsystemctl stop bcmd 2>/dev/null || true\n"
+  postinst: "#!/bin/sh\nsystemctl daemon-reload 2>/dev/null || true\nsystemctl restart bcmd 2>/dev/null || true\n"
