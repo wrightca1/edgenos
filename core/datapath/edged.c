@@ -315,8 +315,15 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Open syslog */
-    openlog("edged", LOG_PID | (foreground ? LOG_PERROR : 0), LOG_DAEMON);
+    /* LOG_PERROR echoes every message to stderr on top of syslog. Under
+     * systemd stderr is the journal too, so -f alone would write every line
+     * twice -- doubling the cost of an already chatty datapath. Gate it on a
+     * real terminal so an interactive `edged -f` still echoes.
+     * (2026-08-21: the AS5610 was spending ~11% of a core in journald on
+     * duplicated SDK DMA-timeout spam.) */
+    openlog("edged", LOG_PID |
+            ((foreground && isatty(STDERR_FILENO)) ? LOG_PERROR : 0),
+            LOG_DAEMON);
     syslog(LOG_INFO, "EdgeNOS edged starting");
 
     /* OpenMDK/CDK debug prints go through CDK_PRINTF → printf → stdout.
