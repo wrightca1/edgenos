@@ -58,3 +58,9 @@ build/*/m0/initrd-i386
 # compiled diagnostic tools (source is tracked)
 asic/fm6000/tools/fm6000_l2scan
 asic/fm6000/fm6000_sbus
+
+# Captured vendor bring-up sequences -- operator-supplied, never committed.
+# fm6000_lanelink reads these at runtime; regenerate from your own switch with
+# tools/seg_lane_trace.py. See docs/PROVENANCE.md.
+*.ops
+fm6000_lanelink.ops

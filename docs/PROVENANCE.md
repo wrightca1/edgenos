@@ -38,6 +38,66 @@ Accordingly:
 
 ---
 
+## 1.0 AUDIT, 2026-08-21 — file by file, and it is not all good news
+
+The previous inventory dated from 2026-08-07 and predates nearly all of the
+generator work. This is a re-audit of the tree as it stands, produced by
+`asic/fm6000/tools/provenance_audit.py` so it can be re-run rather than trusted.
+
+Every `{ address, value }` literal in a tracked C file was counted and graded. The
+address is a fact about the chip. **The value is a fact only if we can say why it
+has that value** — which is the whole difference between authoring and copying.
+
+| grade | pairs | files | meaning |
+|---|---:|---:|---|
+| **AUTHORED** | 7,532 | 10 | structure recovered and named; values follow from stated intent, or there are no value literals at all |
+| **TABLE** | 55,953 | 27 | our code decides where each entry goes, values are still the vendor's — defensible as configuration, and the weakest "keep" |
+| **RELOCATED** | **83,790** | **5** | **the file's own header says it REPLAYS a captured sequence. This is transcription.** |
+
+### ⚠ The five files that are transcription
+
+`fm6000_l2arseq.c` (29,110), `fm6000_l2arpre.c` (25,426), `fm6000_eplseq.c`
+(22,051), `fm6000_mapperpre.c` (5,662), `fm6000_mgmt2pre.c` (1,541).
+
+They describe themselves accurately — *"replay the … bring-up SEQUENCE, in
+order"*. They are the vendor's write sequence, moved from a data file into our
+binary. Moving bytes from `fwd4.txt` into a `.c` does not change what they are.
+
+**This is the honest statement of where the project is: 97.7% of writes at boot
+come from our code, but a large fraction of that code is still the vendor's
+sequence wearing our filename.** Both facts are true and both should be said.
+
+**Decision:** these five stay for now, flagged, because the switch does not work
+without them and removing them would be a regression, not a cleanup. They must
+not grow, and the audit tool exists so that is checkable. Retiring them means the
+same treatment the others got — recover the structure, emit from named intent —
+and `docs/BLOB-REMOVAL-PLAN.md` ranks that work.
+
+### Fixed in this pass
+
+`asic/fm6000/fm6000_lanelink.c` used to carry **963 captured ops** (a segmented
+capture of the vendor OS bringing a lane up: 701 INIT, 168 SEQ, 94 DFE). Those
+were a straight transcription of vendor behaviour and are now **out of the
+repository entirely**. The tool loads them at runtime from an operator-supplied
+`/mnt/flash/fm6000_lanelink.ops`, regenerated on the operator's own switch with
+`tools/seg_lane_trace.py`, and **degrades to "lane retrain unavailable" and exit
+0 when the file is absent** — it is only ever a fallback, and on a healthy boot
+it is never called at all (measured: `et2 retrain attempts=0`).
+
+That is the same "bring your own, from a licensed EOS" model the register replay
+uses, and the same shape as the 7050SX2's `mkconfigbcm.sh`: **the mechanism
+ships, the vendor-derived numbers are regenerated locally.**
+
+### Also cleaned in this pass
+
+- Every real lab address removed from tracked files (31 files). Examples use RFC
+  5737 documentation ranges; harness helpers require an explicit host.
+- Management addressing is a documented default (`192.168.1.1/24`) overridden by
+  `/mnt/flash/mgmt.conf`, which is not in the tree.
+- Default credentials stated deliberately (`root` / `arista`, the platform's
+  factory default) rather than left as an incidental lab password.
+  See `platform/arista-7150s-52/ACCESS.md`.
+
 ## 1.1 Was the FocalPoint SDK used?
 
 Worth stating precisely, because the answer is "no" and "yes" depending on what is being asked.
