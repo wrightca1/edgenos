@@ -259,12 +259,19 @@ if { [ -n "$FWD" ] || [ "${STANDALONE:-0}" = "1" ]; } && [ -x /usr/bin/fm6000_co
     # experiment change arms without rebuilding and reflashing an image, the
     # same reason pace.conf exists. It is a plain shell fragment:
     #     echo 'L2ARSEQ_PRELOOP=1' > /mnt/flash/fullseq.conf
+    #
+    # ⚠ set -a around the source, so every assignment in the file is EXPORTED.
+    # Sourcing alone sets plain shell variables, and the call below names its
+    # environment explicitly, so an un-exported variable never reaches the
+    # script. That is not theoretical: PRESPLIT=0 was set this way, read
+    # cleanly, and had no effect whatsoever on the boot.
+    set -a
     [ -r /mnt/flash/fullseq.conf ] && . /mnt/flash/fullseq.conf 2>/dev/null
+    set +a
     [ -n "${PACE:-}" ] || PACE=1500000
     echo "    PACE=$PACE"
     FWD="$FWD" PACE="$PACE" STANDALONE="${STANDALONE:-0}" \
         RESIDUAL_FIRST="$( [ -f /mnt/flash/residual-first.conf ] && echo 1 || echo 0 )" \
-        L2ARSEQ="${L2ARSEQ:-}" L2ARSEQ_PRELOOP="${L2ARSEQ_PRELOOP:-}" L2ARPRE="${L2ARPRE:-}" \
         sh /usr/lib/edgenos/platform/fm6000-fullseq.sh > /var/log/fm6000-fullseq 2>&1
     grep -E 'PORT_STATUS|t=40s|DONE' /var/log/fm6000-fullseq | tail -3 | sed 's/^/    /'
     for p in "Et1 0xe3800 0xe3826" "Et2 0xe4000 0xe4026"; do

@@ -52,12 +52,24 @@ has that value** — which is the whole difference between authoring and copying
 |---|---:|---:|---|
 | **AUTHORED** | 7,532 | 10 | structure recovered and named; values follow from stated intent, or there are no value literals at all |
 | **TABLE** | 55,953 | 27 | our code decides where each entry goes, values are still the vendor's — defensible as configuration, and the weakest "keep" |
-| **RELOCATED** | **58,364** | **4** | **the file's own header says it REPLAYS a captured sequence. This is transcription.** |
+| **RELOCATED** | **52,702** | **3** | **the file's own header says it REPLAYS a captured sequence. This is transcription.** |
 
-### ⚠ The four files that are transcription
+### ⚠ The three files that are transcription
 
-`fm6000_l2arseq.c` (29,110), `fm6000_eplseq.c` (22,051), `fm6000_mapperpre.c`
-(5,662), `fm6000_mgmt2pre.c` (1,541).
+`fm6000_l2arseq.c` (29,110), `fm6000_eplseq.c` (22,051), `fm6000_mgmt2pre.c` (1,541).
+
+**`fm6000_mapperpre.c` (5,662) has also been retired** (alpha63), by the same test
+that retired `l2arpre`: `mapperinit` + `mapper` already wrote all 712 of its
+addresses, and on the 124 where they disagreed a working-boot register snapshot
+matched the other two on all 124 and `mapperpre` on none.
+
+**`fm6000_eplseq.c` will not go the same way, and it is worth understanding why.**
+It and `eplinit` write the same 1,027 addresses and reach exactly the same final
+values — zero disagreements. But `eplseq` is 22,051 writes over those 1,027
+addresses: **21.5 writes each**. EPL is the port and SerDes bring-up, so the repeats
+are link training. Identical end state is expected and proves nothing. A file whose
+content is fully reproduced elsewhere can still be irreplaceable for its sequence,
+and that distinction is what this whole effort turns on.
 
 **`fm6000_l2arpre.c` (25,426) was the fifth and has been retired**, which is why
 this total fell from 83,790. It and `l2arseq` were alternatives for the same

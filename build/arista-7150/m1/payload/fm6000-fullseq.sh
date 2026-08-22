@@ -337,7 +337,7 @@ gen_after() {          # $1 = prefix to drop, $2 = generator, $3 = label
 STANDALONE_ORDER="
 fm6000_cminit fm6000_safinit fm6000_ffuinit fm6000_l2linit
 fm6000_parserinit fm6000_modinit fm6000_eplseq fm6000_l2arseq
-fm6000_l2arinit fm6000_mapperpre fm6000_mgmt2pre
+fm6000_l2arinit fm6000_mgmt2pre
 fm6000_hashinit fm6000_cmwm fm6000_mapper fm6000_smalltables
 fm6000_cmrest fm6000_parserfields fm6000_esched fm6000_modports
 fm6000_erl fm6000_safmatrix fm6000_sweeperinit fm6000_cmminit fm6000_monitorinit
@@ -500,11 +500,15 @@ if [ "${GENBLK:-1}" = "1" ]; then
 		else
 			[ -x "$BIN/fm6000_l2arinit" ] && gen_list_early fm6000_l2arinit L2AR
 		fi
-		# MAPPER and MGMT2 take the same pre-loop split as L2AR: 5,662 of
-		# MAPPER's 6,644 writes and all 1,541 of MGMT2's are before the loop.
-		# The write-once generators only reached 361 and 502 respectively.
-		[ "${PRESPLIT:-1}" = "1" ] && [ -x "$BIN/fm6000_mapperpre" ] && \
-			gen_preloop '0012' fm6000_mapperpre MAPPER
+		# MAPPER's pre-loop split is GONE, and fm6000_mapperpre.c with it.
+		# fm6000_mapperinit + fm6000_mapper already covered every one of its 712
+		# addresses, and where the three disagreed -- 124 addresses, mostly
+		# MAPPER_SRC_PORT_TABLE -- a register diff against a working boot chose
+		# the other two on all 124, never mapperpre. It was already redundant at
+		# runtime too: mapper runs later via gen_list and overwrote it.
+		# Measured with it disabled: 1,125 of 1,125 sampled addresses matching a
+		# reference working boot, including all 712 of its own, plus 44 routes,
+		# 14 in silicon and 0% unicast loss to and through the switch.
 		# MGMT2 pre-split: OFF pending bisect -- it holds chip-level control
 		# (PIN lives at 0x1c021) and coldreplay writes this range during clock
 		# and BOOT_CTRL setup, so relocating it is far more invasive than a
