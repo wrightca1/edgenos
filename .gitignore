@@ -64,3 +64,6 @@ asic/fm6000/fm6000_sbus
 # tools/seg_lane_trace.py. See docs/PROVENANCE.md.
 *.ops
 fm6000_lanelink.ops
+
+# extracted kernel/initrd used as SWI build inputs (19MB, reproducible from any .swi)
+build/arista-7150/m1/ex/

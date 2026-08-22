@@ -316,18 +316,35 @@ gen_after() {          # $1 = prefix to drop, $2 = generator, $3 = label
 # once configured -- the L2L sweeper is the clearest case -- so the open question
 # this mode exists to ANSWER is how much of it actually matters at boot.
 # Treat a standalone boot as an experiment until it is shown to forward.
+# ⚠ TWO ORDERING RULES, both established by a working-vs-standalone state diff
+# (3,884 registers compared; 413 config addresses ended at their reset default).
+#
+# 1. fm6000_l2arpre is NOT here. It and fm6000_l2arseq are MUTUALLY EXCLUSIVE
+#    alternatives -- the replay path picks one (L2ARSEQ vs L2ARPRE). Running
+#    both put the INCOMPLETE one last: l2arpre holds 25,426 writes to l2arseq's
+#    29,110, because it captured only the FIRST write of two-write sequences.
+#    It re-wrote 352 addresses back to their reset value, 328 of them
+#    L2AR_CAM_DMASK -- an all-ones mask is a CAM entry that matches EVERYTHING,
+#    so those were live wildcard rules sitting in front of the real ones.
+#    l2arseq is the superset and the only correct choice with no replay behind it.
+#
+# 2. fm6000_sweepinit runs LAST, after fm6000_eplinit. This is the same
+#    constraint gen_split documents above: the L2F sweep is the port map being
+#    recomputed after the ports are configured. Run before eplinit, all 61
+#    L2F_TABLE_256 words lost bit 20 -- the map was written against ports that
+#    did not exist yet.
 STANDALONE_ORDER="
 fm6000_cminit fm6000_safinit fm6000_ffuinit fm6000_l2linit
 fm6000_parserinit fm6000_modinit fm6000_eplseq fm6000_l2arseq
-fm6000_l2arpre fm6000_l2arinit fm6000_mapperpre fm6000_mgmt2pre
+fm6000_l2arinit fm6000_mapperpre fm6000_mgmt2pre
 fm6000_hashinit fm6000_cmwm fm6000_mapper fm6000_smalltables
 fm6000_cmrest fm6000_parserfields fm6000_esched fm6000_modports
 fm6000_erl fm6000_safmatrix fm6000_sweeperinit fm6000_cmminit fm6000_monitorinit
 fm6000_statsarinit fm6000_eaclinit fm6000_laginit fm6000_glortinit
 fm6000_tbl3init fm6000_crmdrop fm6000_l3arinit fm6000_l3arslice1
 fm6000_l3arslice4 fm6000_l3arslice3 fm6000_l3arslice2 fm6000_l3artables
-fm6000_sweepinit fm6000_mgmt2init fm6000_eplinit fm6000_mapperinit
-fm6000_ffubstinit
+fm6000_mgmt2init fm6000_eplinit fm6000_mapperinit
+fm6000_ffubstinit fm6000_sweepinit
 "
 # ---- residual extraction -----------------------------------------------------
 # Writes the replay lines NO generator covers to /mnt/flash/residual.txt, so a

@@ -44,6 +44,15 @@ done
 [ -n "$KERNEL" ] || { echo "error: set KERNEL=<bzImage> (see the header)" >&2; exit 1; }
 [ -f "$KERNEL" ] || { echo "error: no kernel at $KERNEL" >&2; exit 1; }
 
+# Both inputs are read from inside a scratch dir we cd into, so a relative path
+# would resolve against the wrong directory and fail with a confusing message
+# ("no such file" naming a file that plainly exists). Absolutise them here.
+KERNEL="$(cd "$(dirname "$KERNEL")" && pwd)/$(basename "$KERNEL")"
+if [ -n "$BASE_INITRD" ]; then
+    [ -f "$BASE_INITRD" ] || { echo "error: no initrd at $BASE_INITRD" >&2; exit 1; }
+    BASE_INITRD="$(cd "$(dirname "$BASE_INITRD")" && pwd)/$(basename "$BASE_INITRD")"
+fi
+
 P="$HERE/payload"
 A="$EROOT/asic/fm6000"
 echo "=== EdgeNOS 7150 release $VERSION ($GITSHA) ==="
@@ -82,7 +91,9 @@ trap 'rm -rf "$WORK"' EXIT
 if [ -n "$BASE_INITRD" ] && [ -f "$BASE_INITRD" ]; then
     # Overlay onto a known-good initramfs so the kernel modules match the kernel.
     echo "--- overlaying onto $BASE_INITRD ---"
-    ( cd "$WORK" && zcat "$BASE_INITRD" | cpio -idm --quiet 2>/dev/null )
+    # gzip -cd < FILE, not zcat FILE: zcat appends .gz to a name that lacks a
+    # known suffix, so a base initrd named "initrd-i386" is reported missing.
+    ( cd "$WORK" && gzip -cd < "$BASE_INITRD" | cpio -idm --quiet 2>/dev/null )
 else
     echo "error: set BASE_INITRD=<initrd-i386 matching KERNEL> (module vermagic must match)" >&2
     exit 1
