@@ -107,6 +107,30 @@ happens to equal 6 reads as "TCP". The 16-bit EtherType hits above are trustwort
 because a full 16-bit field must be cared-for to register. Do not quote the 8-bit
 inventory as fact without confirming an entry's context.
 
+
+## The parser feeds a 42-register extracted-field file
+
+`Halfword0Dest` and `Halfword1Dest` are 6-bit destination register numbers, and
+across the whole program the destinations actually used are **r1..r42, contiguous**.
+That register file is the parser's output and the input to every downstream lookup
+stage — L2AR, L3AR and the FFU all match on it rather than on raw packet bytes.
+
+The counts show it is not 42 independent scalars. Destinations are written in
+adjacent pairs by the same rules:
+
+    r22 / r23   174 rules each
+    r24 / r25   190 each
+    r28 / r29    30 each
+    r30 / r31    28 each
+    r32 / r33    17 each
+    r34 / r35    44 each
+
+A pair of halfwords is a 32-bit field, which is what an IPv4 address, or half a MAC,
+looks like. Establishing which registers hold which protocol field — by reading which
+parser rule writes them and at what depth — is what would let the lookup stages'
+ternary keys be read as protocol rather than as bit patterns. See
+`docs/L2AR-STRUCTURE.md`, where that is the one missing piece.
+
 ## What this changes
 
 This does not remove a blob. It establishes that the largest remaining unexamined
