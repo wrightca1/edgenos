@@ -237,10 +237,18 @@ FWD=""
 # fwd4.txt present at all -- 90,396 writes instead of 283,339, of which only
 # 13,035 are vendor writes no generator covers. PREBUILT=1 tells the sequence to
 # replay it verbatim rather than transforming it again.
-PREBUILT=0
-for f in /mnt/flash/bringup.txt /mnt/flash/fwd4.txt /mnt/flash/fwd5.txt; do
-    [ -f "$f" ] && { FWD="$f"; [ "$f" = /mnt/flash/bringup.txt ] && PREBUILT=1; break; }
-done
+# Preference order, most-ours first:
+#   schedule.txt  our generators run LIVE, residual interleaved  (SCHEDULED)
+#   bringup.txt   the transformation's frozen output, no generator runs (PREBUILT)
+#   fwd4/fwd5     the vendor replay, transformed at boot
+PREBUILT=0; SCHEDULED=0
+if [ -s /mnt/flash/schedule.txt ] && [ -s /mnt/flash/resid.txt ]; then
+    SCHEDULED=1; FWD=""
+else
+    for f in /mnt/flash/bringup.txt /mnt/flash/fwd4.txt /mnt/flash/fwd5.txt; do
+        [ -f "$f" ] && { FWD="$f"; [ "$f" = /mnt/flash/bringup.txt ] && PREBUILT=1; break; }
+    done
+fi
 # ★ With no replay set on flash, attempt the bring-up ANYWAY, from our own
 # generators (fm6000-fullseq.sh STANDALONE). Previously a missing vendor file
 # meant the dataplane was skipped entirely, which made "how much of the replay do
@@ -253,7 +261,7 @@ if [ -z "$FWD" ]; then
     STANDALONE=1
     echo "--- no replay set on flash: attempting STANDALONE bring-up from generators ---"
 fi
-if { [ -n "$FWD" ] || [ "${STANDALONE:-0}" = "1" ]; } && [ -x /usr/bin/fm6000_coldreplay ] && \
+if { [ -n "$FWD" ] || [ "${STANDALONE:-0}" = "1" ] || [ "$SCHEDULED" = "1" ]; } && [ -x /usr/bin/fm6000_coldreplay ] && \
    [ -x /usr/lib/edgenos/platform/fm6000-fullseq.sh ]; then
     echo "--- FM6000 dataplane auto bring-up (replay $FWD, log /var/log/fm6000-fullseq) ---"
     # PACE is settable from flash so an experiment can change arms without a
@@ -279,7 +287,7 @@ if { [ -n "$FWD" ] || [ "${STANDALONE:-0}" = "1" ]; } && [ -x /usr/bin/fm6000_co
     set +a
     [ -n "${PACE:-}" ] || PACE=1500000
     echo "    PACE=$PACE"
-    FWD="$FWD" PACE="$PACE" STANDALONE="${STANDALONE:-0}" PREBUILT="$PREBUILT" \
+    FWD="$FWD" PACE="$PACE" STANDALONE="${STANDALONE:-0}" PREBUILT="$PREBUILT" SCHEDULED="$SCHEDULED" \
         RESIDUAL_FIRST="$( [ -f /mnt/flash/residual-first.conf ] && echo 1 || echo 0 )" \
         sh /usr/lib/edgenos/platform/fm6000-fullseq.sh > /var/log/fm6000-fullseq 2>&1
     grep -E 'PORT_STATUS|t=40s|DONE' /var/log/fm6000-fullseq | tail -3 | sed 's/^/    /'

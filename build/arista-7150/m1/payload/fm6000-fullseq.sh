@@ -391,6 +391,60 @@ make_residual() {
 	return 0
 }
 
+# run_scheduled: follow a SCHEDULE instead of a frozen stream.
+#
+# alpha64 got the dataplane up with no vendor replay by replaying bringup.txt --
+# the transformation's frozen output. It worked, and it was not shippable: no
+# generator ran ("0 of 90396 executed writes come from our generators"), and the
+# file carries the vendor's values inline.
+#
+# The schedule keeps the ORDER, which is the part that mattered, and throws the
+# frozen values away. Each step is one of:
+#
+#     RES <n>       apply the next n writes from resid.txt
+#     GEN <tool>    run that generator LIVE, from our own source
+#
+# 20 generator blocks cover 81.8% of the stream; the 16,432 writes left in
+# resid.txt are what no generator covers yet, and they are the only vendor data
+# in the path. Built by asic/fm6000/tools/build_schedule.py.
+#
+# ⚠ The schedule is read on fd 9, not stdin. The generators and fullreplay are
+# ordinary programs and will happily eat stdin, which would swallow the rest of
+# the schedule and silently truncate the bring-up.
+run_scheduled() {
+	_sched=/mnt/flash/schedule.txt; _resid=/mnt/flash/resid.txt
+	[ -s "$_sched" ] && [ -s "$_resid" ] || return 1
+	_off=0; _ran=0; _applied=0; _bad=0
+	exec 9< "$_sched"
+	while read -r _kind _arg <&9; do
+		case "$_kind" in
+		\#*|"") continue ;;
+		RES)
+			sed -n "$((_off + 1)),$((_off + _arg))p" "$_resid" > /tmp/sched.chunk
+			$BIN/fm6000_fullreplay /tmp/sched.chunk $B 0 >> $LOG 2>&1 \
+				|| { _bad=$((_bad + 1)); say "    RES chunk @$_off rc=$?"; }
+			_off=$((_off + _arg)); _applied=$((_applied + _arg))
+			;;
+		GEN)
+			if [ -x "$BIN/$_arg" ]; then
+				# two argument conventions, same fallback as run_standalone
+				$BIN/$_arg -b $B >> $LOG 2>&1
+				[ $? -eq 2 ] && $BIN/$_arg $B >> $LOG 2>&1
+				_ran=$((_ran + 1))
+			else
+				say "    MISSING $_arg -- its writes are NOT in resid.txt, bring-up is incomplete"
+				_bad=$((_bad + 1))
+			fi
+			;;
+		esac
+	done
+	exec 9<&-
+	rm -f /tmp/sched.chunk
+	say "  SCHEDULED: $_ran generators run live, $_applied residual writes applied ($_bad problem(s))"
+	say "  provenance: $(wc -l < "$_resid") of $(( $(wc -l < "$_resid") + 0 )) residual writes are the only vendor data in this path"
+	return 0
+}
+
 run_standalone() {
 	_ran=0; _miss=0; _bad=0
 	# RESIDUAL_FIRST=1 applies the residual BEFORE the generators instead of
@@ -827,7 +881,11 @@ if [ "${SMALL_DIRECT:-1}" = "1" ]; then
 fi
 # STANDALONE takes precedence, and a missing replay selects it automatically --
 # a boot with no vendor file should attempt the generators rather than do nothing.
-if [ "${STANDALONE:-0}" = "1" ] || [ ! -s "$CUR" ]; then
+if [ "${SCHEDULED:-0}" = "1" ]; then
+	say "STEP5-ALT SCHEDULED: generators run live, residual interleaved by schedule"
+	run_scheduled; RC=$?
+	[ "$RC" -ne 0 ] && { say "  schedule unusable -- falling back to STANDALONE"; run_standalone; RC=$?; }
+elif [ "${STANDALONE:-0}" = "1" ] || [ ! -s "$CUR" ]; then
 	say "STEP5-ALT STANDALONE (no replay): generators only"
 	run_standalone; RC=$?
 else
