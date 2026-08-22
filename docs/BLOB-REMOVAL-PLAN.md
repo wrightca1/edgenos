@@ -1387,10 +1387,42 @@ some of them are load-bearing for the forwarding path. The optimistic reading --
 "the sweeper runs itself, the bitmaps accumulate, so the residual does not matter"
 -- is now disproved for forwarding, while confirmed for link.
 
-**The next question is therefore precise and answerable:** which of the residual
-addresses does forwarding actually need? A bisect over the residual set, with
-transit as the oracle, would name them. That is a far smaller search than
-authoring blocks blind, and it is the shortest path to a replay-free dataplane.
+**ANSWERED 2026-08-22, and the answer is not "which writes" -- it is ORDER.**
+
+`make_residual()` extracts every replay line no generator covers: **46,611 writes,
+839 KB against the replay's 5.1 MB**. A boot with no replay at all, running the 41
+generators and then applying that residual, gives:
+
+    STANDALONE: ran 41 generators directly (0 non-zero, 0 absent)
+    STANDALONE: applied residual.txt (46611 writes) rc=0
+    post-spico  et1=000008c0/00000940  et2=000008c0/00000940   BOTH PORTS UP
+
+    edgenos-up.sh: kernel routes=5 (not 39), et1 rx=0
+    transit: 0 frames
+
+**Generators + residual is the COMPLETE write set** -- by construction, since the
+residual is defined as everything the generators do not cover. Every write the
+replay performs is performed. It still does not forward.
+
+So the missing ingredient is not content. It is **sequence**: in a normal boot our
+writes are spliced INTO the vendor's stream at specific positions, and in
+standalone they are batched -- all 41 generators, then all 46,611 residual writes.
+That is a different order, and the forwarding path does not survive it.
+
+This is consistent with everything else this project has learned the hard way:
+`gen_list_early` exists precisely because the CM watermarks landing at the loop
+end instead of the block's first write caused measurable loss; ERL and
+CM_PAUSE_CFG are two-phase; SSCHED is a token-push protocol. Ordering has been
+load-bearing at every level, and it is load-bearing here too.
+
+**What a replay-free dataplane actually needs is therefore a SEQUENCE MODEL** --
+knowing not just what each block's writes are but where they must fall relative
+to the others. The current architecture gets that ordering for free by borrowing
+the vendor's stream. Recovering it independently is the remaining work, and it is
+a different kind of problem from authoring tables.
+
+**What is already established:** the LINK layer needs no vendor file at all --
+both ports reach clean lock from our generators alone.
 
 ⚠ Restoring either replay file returns the box to normal (39 routes, transit 6/6),
 so this mode is safe to experiment with.
