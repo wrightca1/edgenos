@@ -284,29 +284,41 @@ it held.
 
 **The microcode *content* is nonetheless committed**, re-encoded as C arrays by our own generators:
 
-| file | non-trivial microcode pairs reproduced exactly |
-|---|---:|
-| `fm6000_parserinit.c` | the whole file — 16,960 pairs, 100% microcode |
-| `fm6000_l2arseq.c` | 12,473 (`fm6000_l2arpre.c` carried the same 12,473 and is retired) |
-| `fm6000_l3arinit.c` | 3,928 |
-| `fm6000_modinit.c` | 3,626 |
-| `fm6000_l2arinit.c` | 1,878 |
-| + 9 smaller files | ~1,600 |
+⚠ **This table has been measured twice by hand and been wrong twice. It is now produced by
+`asic/fm6000/tools/ucode_overlap.py`, and the figures below are that tool's output.**
 
-Counting **distinct, non-trivial** pairs — excluding `0x00000000`/`0xffffffff` fill, which is not
-meaningfully anybody's program — **18,332 of the microcode's 18,984 non-trivial pairs (96.6%) are
-present, across 1,613 distinct values.**
+| file | non-trivial microcode pairs reproduced exactly | share of that file |
+|---|---:|---:|
+| `fm6000_l2arseq.c` | 2,747 | 11% |
+| `fm6000_modinit.c` | 2,604 | **68%** |
+| `fm6000_l2arinit.c` | 1,128 | 24% |
+| `fm6000_l3arslice2.c` | 342 | 43% |
+| `fm6000_l3artables.c` | 301 | 67% |
+| `fm6000_statsarinit.c` | 296 | 31% |
+| `fm6000_l3arslice3.c` | 257 | 32% |
+| `fm6000_mapperinit.c` | 180 | 50% |
+| + 11 smaller files | 715 | |
 
-*(A first pass reported 38,416 pairs / 97.5%. That counted 20,084 fill values and overstated it.
-18,332 is the honest figure.)*
+**8,570 of the microcode's 18,984 non-trivial pairs (45.1%) are present, across 19 files.**
+The top three carry 6,479 of the 8,570 — **76%** — so this is concentrated, not diffuse.
+
+*(Two earlier hand counts were wrong. A first pass reported 38,416 pairs / 97.5% by counting
+20,084 fill values. The revision to "18,332 / 96.6%" fixed the fill problem but claimed
+`fm6000_parserinit.c` was "the whole file — 16,960 pairs, 100% microcode"; that file is 1,657
+lines holding 1,576 pairs, of which **5** are non-trivial microcode pairs. Whatever was measured,
+it was not this tree. Run the tool.)*
 
 This contradicts §1 — "no file in this repository may contain … a verbatim transcription of a
 proprietary program's data tables" — and §2.1, which classifies parser + L2AR + MOD as
 "**no — Intel's program**".
 
-**Clean, for the avoidance of doubt:** `fm6000_eplseq.c` (22,051 writes), `fm6000_ffuinit.c`
-(8,680) and `fm6000_l2linit.c` (24,568) have **zero** microcode overlap. This is confined to the
-blocks §2.1 already identified as microcode.
+**Clean, for the avoidance of doubt:** `fm6000_eplseq.c` and `fm6000_ffuinit.c` have **zero**
+non-trivial microcode pairs, `fm6000_l2linit.c` has 9 of 24,568, and `fm6000_parserinit.c` has 5
+of 1,576.
+
+Note what that means for the two gradings: `eplseq` is graded **RELOCATED** — it is transcription
+of the vendor's *replay* — and yet carries none of the vendor's *microcode*. The two questions are
+independent, and shipping is governed by this one, not by the RELOCATED count.
 
 #### How it happened, because the reasoning is instructive
 
