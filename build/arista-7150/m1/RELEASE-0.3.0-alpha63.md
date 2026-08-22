@@ -66,6 +66,16 @@ The eighth is not obviously inert: `CRM_CTRL` gets `00000001` and reads back
 would silently stop whatever it starts. Retiring `mgmt2pre` means moving that strobe
 into `mgmt2init`, not deleting it — small work, but work, and it is not done here.
 
+> ⚠ **Corrected after release.** The paragraph above is wrong. It reasons from final
+> values, which say nothing about a command register. Those 8 addresses carry **130
+> writes each** — 1,039 of the file's 1,541 — and in order they read as **129
+> iterations of load `CRM_REGISTER`, load `CRM_COMMAND`, strobe `CRM_CTRL`**: an
+> indirect access engine being driven. `mgmt2pre` is a sequence, like `eplseq`, and
+> is not retirable by moving a strobe. The writes-per-address test used on `l2arseq`
+> and `eplseq` in this same analysis would have said so at once; it was not applied
+> here because the address count was small enough to eyeball. See
+> `docs/PROVENANCE.md`.
+
 ## ⚠ The config hook did not work, and read as if it did
 
 alpha61 added `/mnt/flash/fullseq.conf` so generator gates could change without a

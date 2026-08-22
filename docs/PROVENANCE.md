@@ -63,7 +63,35 @@ that retired `l2arpre`: `mapperinit` + `mapper` already wrote all 712 of its
 addresses, and on the 124 where they disagreed a working-boot register snapshot
 matched the other two on all 124 and `mapperpre` on none.
 
-**`fm6000_eplseq.c` will not go the same way, and it is worth understanding why.**
+**`fm6000_mgmt2pre.c` will not go either, and the reason is a mistake worth keeping.**
+The alpha63 notes said it writes "8 addresses `mgmt2init` does not", that 7 of them
+are inert because the CRM engine owns those registers, and that retiring it means
+moving one start strobe — "small work, but work".
+
+That was reasoned entirely from **final values**, and final values are meaningless
+for a command register. Those 8 addresses carry **130 writes each**:
+
+    writes per address:  1 -> 502 addresses
+                       129 ->   1 address
+                       130 ->   7 addresses
+
+1,039 of the file's 1,541 writes are those 8 addresses, and 96% of the file is CRM.
+Reading them in order shows what they are:
+
+    iter 0:  CRM_REGISTER=97d00200  CRM_COMMAND=03800000  CRM_CTRL=1
+    iter 1:  CRM_REGISTER=0f508000  CRM_COMMAND=00130000  CRM_CTRL=1
+    iter 2:  CRM_REGISTER=11508200  CRM_COMMAND=00260000  CRM_CTRL=1
+
+**129 iterations of load-register, load-command, strobe** — an indirect access
+engine being driven, not a table being filled. It is a sequence, like `eplseq`, and
+it is not retirable by moving a strobe.
+
+The writes-per-address test would have said so immediately, and it was not applied.
+It was applied to `l2arseq` and `eplseq` in the same analysis and gave the right
+answer for both; `mgmt2pre` was judged by a different and worse method because its
+address count was small enough to look at by hand.
+
+**`fm6000_eplseq.c` will not go the same way either, and it is worth understanding why.**
 It and `eplinit` write the same 1,027 addresses and reach exactly the same final
 values — zero disagreements. But `eplseq` is 22,051 writes over those 1,027
 addresses: **21.5 writes each**. EPL is the port and SerDes bring-up, so the repeats
