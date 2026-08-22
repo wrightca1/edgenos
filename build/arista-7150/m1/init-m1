@@ -231,7 +231,16 @@ fi
 # total and is effectively unpaced. The default adds ~34 s. Copper (Et2) seems
 # to need it; evidence is still thin. See docs/ET2-COPPER-LINK.md.
 FWD=""
-for f in /mnt/flash/fwd4.txt /mnt/flash/fwd5.txt; do [ -f "$f" ] && { FWD="$f"; break; }; done
+# bringup.txt is a PRE-TRANSFORMED stream: the deterministic output of the
+# generator transformation, computed once on a machine that had the vendor
+# replay. Preferring it means a switch can bring its dataplane up with no
+# fwd4.txt present at all -- 90,396 writes instead of 283,339, of which only
+# 13,035 are vendor writes no generator covers. PREBUILT=1 tells the sequence to
+# replay it verbatim rather than transforming it again.
+PREBUILT=0
+for f in /mnt/flash/bringup.txt /mnt/flash/fwd4.txt /mnt/flash/fwd5.txt; do
+    [ -f "$f" ] && { FWD="$f"; [ "$f" = /mnt/flash/bringup.txt ] && PREBUILT=1; break; }
+done
 # ★ With no replay set on flash, attempt the bring-up ANYWAY, from our own
 # generators (fm6000-fullseq.sh STANDALONE). Previously a missing vendor file
 # meant the dataplane was skipped entirely, which made "how much of the replay do
@@ -270,7 +279,7 @@ if { [ -n "$FWD" ] || [ "${STANDALONE:-0}" = "1" ]; } && [ -x /usr/bin/fm6000_co
     set +a
     [ -n "${PACE:-}" ] || PACE=1500000
     echo "    PACE=$PACE"
-    FWD="$FWD" PACE="$PACE" STANDALONE="${STANDALONE:-0}" \
+    FWD="$FWD" PACE="$PACE" STANDALONE="${STANDALONE:-0}" PREBUILT="$PREBUILT" \
         RESIDUAL_FIRST="$( [ -f /mnt/flash/residual-first.conf ] && echo 1 || echo 0 )" \
         sh /usr/lib/edgenos/platform/fm6000-fullseq.sh > /var/log/fm6000-fullseq 2>&1
     grep -E 'PORT_STATUS|t=40s|DONE' /var/log/fm6000-fullseq | tail -3 | sed 's/^/    /'

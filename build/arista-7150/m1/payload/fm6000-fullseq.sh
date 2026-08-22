@@ -28,6 +28,21 @@ say(){ echo "[fs] $*" >> $LOG; echo "[fs] $*"; sync; }
 # the number Goal B in docs/BLOB-REMOVAL-PLAN.md actually cares about.
 GENW=0
 DIRECTW=0        # subset of GENW applied by direct MMIO, not present in the file
+# PREBUILT=1 executes a PRE-TRANSFORMED stream and performs no transformation of
+# its own. Every gen_* helper below returns immediately, so $CUR stays as handed
+# in and STEP5 replays it verbatim.
+#
+# The point is to get a working dataplane WITHOUT the 5.1 MB vendor replay. The
+# transformation the helpers perform is deterministic, so its OUTPUT can be
+# computed once on a machine that has the vendor file and kept:
+# /mnt/flash/fwd-executed.txt is 90,396 writes against fwd4.txt's 283,339, and
+# only 13,035 of those pairs are vendor writes no generator covers.
+#
+# ⚠ This deliberately does NOT disable the direct-MMIO blocks (l2linit, ffuinit,
+# hashinit, coldreplay, initsbus, memfill, SPICO). Those run outside the
+# transform and their writes are NOT in the stream, because gen_drop removed
+# their lines from it. Skipping them would leave exactly the tables the stream's
+# own ATOMIC_APPLY strobes expect to commit sitting uninitialised.
 gen_emit() {           # $1 = generator, $2.. = args; appends to /tmp/gen.head
 	_gtool=$1; shift
 	$BIN/$_gtool "$@" > /tmp/gen.out 2>/dev/null || return 1
@@ -138,6 +153,7 @@ say "STEP5 FULL REPLAY of EOS's port+forwarding bring-up (299803 writes: BOTH po
 #
 # GENBLK=0 replays EOS's writes unchanged.
 gen_split() {          # $1 = prefix to drop, $2 = generator, $3 = label
+	[ "${PREBUILT:-0}" = "1" ] && return 1   # pre-built stream: no filtering, no splicing
 	_a0=$(grep -n '^001a0c00 ' "$CUR" | head -1 | cut -d: -f1)
 	[ -n "$_a0" ] || return 1
 	_f=$(tail -n +$_a0 "$CUR" | grep -n "^$1" | head -1 | cut -d: -f1)
@@ -202,6 +218,7 @@ drop_range() {         # $1 = low addr (8 hex, no 0x), $2 = high, $3 = label
 }
 
 gen_drop() {           # $1 = generator, $2 = label
+	[ "${PREBUILT:-0}" = "1" ] && return 1   # pre-built stream: no filtering, no splicing
 	$BIN/$1 -a > /tmp/gen.addr 2>/dev/null || return 1
 	[ -s /tmp/gen.addr ] || return 1
 	awk 'NR==FNR { d[$1]; next } !($1 in d)' /tmp/gen.addr "$CUR" > "$NEXT" || return 1
@@ -216,6 +233,7 @@ gen_drop() {           # $1 = generator, $2 = label
 }
 
 gen_list() {           # $1 = generator, $2 = label
+	[ "${PREBUILT:-0}" = "1" ] && return 1   # pre-built stream: no filtering, no splicing
 	$BIN/$1 -a > /tmp/gen.addr 2>/dev/null || return 1
 	[ -s /tmp/gen.addr ] || return 1
 	_a1=$(grep -n '^001a0c00 ' "$CUR" | tail -1 | cut -d: -f1)
@@ -254,6 +272,7 @@ gen_list() {           # $1 = generator, $2 = label
 # write-once registers reached just 4,606. Splitting on the loop boundary takes
 # the bulk and leaves the interleaved part alone.
 gen_preloop() {        # $1 = prefix to drop, $2 = generator, $3 = label
+	[ "${PREBUILT:-0}" = "1" ] && return 1   # pre-built stream: no filtering, no splicing
 	_a0=$(grep -n '^001a0c00 ' "$CUR" | head -1 | cut -d: -f1)
 	[ -n "$_a0" ] || return 1
 	head -n $((_a0 - 1)) "$CUR" | grep -v "^$1" > /tmp/gen.head
@@ -266,6 +285,7 @@ gen_preloop() {        # $1 = prefix to drop, $2 = generator, $3 = label
 }
 
 gen_list_early() {     # $1 = generator, $2 = label
+	[ "${PREBUILT:-0}" = "1" ] && return 1   # pre-built stream: no filtering, no splicing
 	$BIN/$1 -a > /tmp/gen.addr 2>/dev/null || return 1
 	[ -s /tmp/gen.addr ] || return 1
 	_f=$(awk 'NR==FNR { d[$1]; next } ($1 in d) { print FNR; exit }' /tmp/gen.addr "$CUR")
@@ -282,6 +302,7 @@ gen_list_early() {     # $1 = generator, $2 = label
 }
 
 gen_after() {          # $1 = prefix to drop, $2 = generator, $3 = label
+	[ "${PREBUILT:-0}" = "1" ] && return 1   # pre-built stream: no filtering, no splicing
 	_a1=$(grep -n '^001a0c00 ' "$CUR" | tail -1 | cut -d: -f1)
 	[ -n "$_a1" ] || return 1
 	head -n $((_a1 - 1)) "$CUR" | grep -v "^$1" > /tmp/gen.head
