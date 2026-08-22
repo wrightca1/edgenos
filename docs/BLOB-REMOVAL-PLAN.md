@@ -1424,6 +1424,43 @@ a different kind of problem from authoring tables.
 **What is already established:** the LINK layer needs no vendor file at all --
 both ports reach clean lock from our generators alone.
 
+### What the residual actually IS (2026-08-22)
+
+Characterising all 46,611 residual writes by block settles what kind of problem
+this is:
+
+| block | writes | addrs | span (position in the replay) |
+|---|---:|---:|---|
+| **SAF** | **34,668** | 168 | 2,895 -> 41,938 |
+| SBUS | 3,721 | **4** | **1 -> 46,611** |
+| FFU | 3,545 | 909 | 2,286 -> 46,125 |
+| L2L | 1,357 | 144 | 3,202 -> 45,204 |
+| PARSER | 970 | 110 | 2,342 -> 32,864 |
+| MOD | 771 | 202 | 2,452 -> 43,942 |
+
+**74% of it is SAF_MATRIX**, and the heaviest addresses are **idx 20 and idx 40 --
+et2 and et1** (the physical-to-logical mapping recovered from
+PARSER_INIT_FIELDS) -- **218 writes each**. That is the store-and-forward /
+cut-through matrix being rewritten again and again as the two live ports change
+state. SBUS is 4 addresses spanning the ENTIRE boot, position 1 to 46,611: the
+SerDes indirect port, in use throughout.
+
+**So the residual is not configuration applied at a moment. It is the switch
+REACTING TO ITS OWN BRING-UP** -- SAF recomputed as links come up, the SerDes
+port driven continuously, the L2L sweeper aging, FFU updated as state changes.
+
+That is why batching it fails, and it is a stronger statement than "we need a
+sequence model": **you cannot replay a conversation as a monologue.** Reproducing
+it means implementing the logic that PRODUCES those updates -- a port bring-up
+state machine that maintains SAF, drives the SerDes, and services the sweeper --
+not recording and replaying what that logic once emitted.
+
+**Which reframes the remaining work.** The table-authoring seam is essentially
+exhausted and was never going to remove the file. What would remove it is a
+bring-up state machine. That is a substantial piece of new software, not a
+continuation of the generator programme, and it should be scoped as such.
+
+
 ⚠ Restoring either replay file returns the box to normal (39 routes, transit 6/6),
 so this mode is safe to experiment with.
 
