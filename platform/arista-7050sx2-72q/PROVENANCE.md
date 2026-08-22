@@ -56,11 +56,44 @@ off. `crow-fan-driver.c` publishes the whole map -- tach at `0x00..0x07`, PWM at
 `CrowFanCpld, addr=scd.i2cAddr(hwmonBus, 0x60)`, which is where ours answers.
 Nothing was probed to obtain it.
 
-The port LED encoding is ours by measurement rather than transcription: read off
-a running vendor OS, connected ports hold `0x10000000` and disconnected ones
-hold `0`. `scd-led.c` documents a richer scheme (a colour table in bits 26..28,
-blink at 25) but this board was never observed using it, so `ledsync.c` writes
-bit 28 and nothing else rather than inventing behaviour.
+**The port LED encoding is ours by measurement, and it disagrees with the
+driver.** `scd-led.c` documents a colour table in bits 26..28 with blink at 25
+and an intensity field in the low bytes. On this SCD generation:
+
+```
+bit 28  green      bit 27  amber (amber wins)      bit 24  BLINK
+bits 26, 25  implemented, no visible effect
+bits 29-31   do not exist -- write 0xffffffff, read back 0x1f000000
+low 0x06ff00 intensity field  does not exist -- writes read back as zero
+```
+
+Blink is **bit 24, not bit 25**. Every line of that was produced by writing a
+pattern to the register and having someone look at the panel, then reading the
+register back. Taking the driver's `SCD_BLINK_MASK BIT(25)` on trust would have
+shipped a blink option that silently did not blink.
+
+The four words in each 16-byte LED block are one lamp: writing `0x6124` changes
+`0x6120`, `0x6128` and `0x612c`.
+
+**The chassis status LEDs are the exception, and their addresses are NOT here.**
+System status, the two PSU lamps, the fan lamp and the blue beacon are one-byte
+registers on the same StandbyCpld as the fans. Unlike the fan registers, they
+are in none of Arista's open sources — every status LED in
+`arista/platforms/*.py` is on the SCD at `0x6050`-`0x6090`, and this board's are
+not on the SCD at all. They come from the board description file, which puts
+them in the same category as the port map: `tools/mkstatusleds.sh` regenerates
+them from your own switch, and `scdreset.c` carries the mechanism with no
+addresses in it. Without the generated header it still builds and the status LED
+commands say what to run.
+
+What the mechanism *does* contain is ours: the encoding is active high with
+green and red on two bits, established by looking at the panel, and it is the
+opposite of the fan tray LEDs on the same part, which `crow-fan-driver.c` drives
+active low. One CPLD, two conventions.
+
+PSU presence keeps its address in source — SCD `0x5000` bits 0 and 1, which
+Arista publishes in `arista/platforms/upperlake.py` as
+`GpioDesc("psu1_present", 0x5000, 1)`.
 
 Every SCD offset this platform uses is genuinely published by Arista in the
 GPL-2.0 `aristanetworks/sonic` tree — watchdog `0x0120`, reset `0x4000`, power
@@ -80,6 +113,7 @@ close, unrelated to whether the rest is ours.
 | SerDes polarity table (62 lanes) | read live from the vendor OS | **REMOVED** — generate with `tools/mkpolarity.sh` |
 | `serdes_preemphasis` (96 lanes) | vendor's TX equaliser values | **REMOVED** — not load-bearing; see below |
 | CL72 config, front-panel port map from `.fdl` | vendor board description file | **REMOVED** |
+| chassis status/PSU/fan/beacon LED offsets | vendor board description file | **REMOVED** — generate with `tools/mkstatusleds.sh` |
 | counter/memory base tables | harvested from the vendor's own libraries | **REMOVED** |
 | S-Channel captures, register dumps, logs | vendor OS running | **NOT PUBLISHED** |
 

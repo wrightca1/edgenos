@@ -13,12 +13,32 @@
  *
  *   0x6100 + 0x10*n            SFP+  port n+1,  n = 0..47   (Et1..Et48)
  *   0x6400 + 0x10*(i*4 + j)    QSFP  port 49+i lane j+1     (Et49..Et54)
- *   bit 28 is on; 0 is off
  *
- * Arista's GPL scd-led.c carries a richer encoding for these registers -- a
- * seven-entry colour table in bits 26..28 and a blink bit at 25 -- but this
- * board's own software only ever used bit 28, so that is all this writes.
- * Inventing a colour the hardware was never observed to show would be guessing.
+ * THE PALETTE, mapped by writing patterns and having someone watch the panel:
+ *
+ *   bit 28  green      bit 27  amber (amber wins when both are set)
+ *   bit 24  blink      bits 26, 25  implemented, no visible effect
+ *   bits 29-31 do not exist: write 0xffffffff, read back 0x1f000000
+ *
+ * Blink is bit 24, NOT bit 25. Arista's GPL scd-led.c defines SCD_BLINK_MASK as
+ * BIT(25), and on this SCD generation that bit does nothing while 24 flashes.
+ * Trusting the driver's constant would have given a blink that silently did not
+ * blink. Its low 0x06ff00 intensity field does not exist here either -- write
+ * it and it reads back zero. Both are for a later SCD, not this one.
+ *
+ * WHAT THE COLOURS MEAN HERE:
+ *
+ *   off     no link
+ *   green   link up and the chip is forwarding on this port
+ *   amber   link up but NOT forwarding -- the cable is fine and the switch is
+ *           not using the port, which is the one condition that looks like
+ *           working hardware and is not
+ *
+ * Blink is deliberately unused by this loop. The obvious meaning is traffic,
+ * and traffic means reading per-port counters every interval -- which is
+ * exactly the shape of the field-processor counter collection that exhausted
+ * the DMA pool and took both adjacencies down. It is available to leddance and
+ * to `scdreset ledshow`, where nothing depends on the box staying up.
  *
  * The link state comes from the SDK, which is the only thing that knows it for
  * all 72 ports, which is why this lives in the bridge rather than in a
@@ -38,12 +58,14 @@
 #include <bcm/error.h>
 #include <bcm/port.h>
 #include <bcm/link.h>
+#include <bcm/stg.h>
 
 #define SCD_MAP     0x80000u
 #define SFP_BASE    0x6100u
 #define QSFP_BASE   0x6400u
 #define LED_STRIDE  0x10u
-#define LED_ON      0x10000000u
+#define LED_GREEN   0x10000000u
+#define LED_AMBER   0x08000000u
 #define SFP_PORTS   48
 #define QSFP_LANES  24                 /* 6 QSFP x 4 lanes */
 #define LED_PORTS   (SFP_PORTS + QSFP_LANES)
@@ -157,7 +179,19 @@ void ledsync_poll(void)
         if (bcm_port_link_status_get(led_unit, port, &link) != BCM_E_NONE)
             link = 0;
 
-        want = link ? LED_ON : 0;
+        /* Green needs the link AND forwarding. A failed STP query falls back to
+         * green rather than amber -- the reverse of the rule the chassis LEDs
+         * use, and deliberately so. There, an unreadable sensor is a safety
+         * matter and must not be painted green. Here it would repaint all 72
+         * ports amber over a query that failed, turning one unknown into a
+         * panel that cries wolf. */
+        want = 0;
+        if (link) {
+            int stp = BCM_STG_STP_FORWARD;
+            if (bcm_port_stp_get(led_unit, port, &stp) != BCM_E_NONE)
+                stp = BCM_STG_STP_FORWARD;
+            want = (stp == BCM_STG_STP_FORWARD) ? LED_GREEN : LED_AMBER;
+        }
         have = scd[off / 4];
         if (have != want) {
             scd[off / 4] = want;

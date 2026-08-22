@@ -19,7 +19,8 @@ user-space BDE shim — no vendor kernel modules, no vendor agents.
 | IPv4 + IPv6 routing **in the switch chip** | working, measured below |
 | OSPFv2 + OSPFv3 (FRR) on multiple ports | Full adjacencies |
 | Sensors, PSU | working |
-| Port LEDs follow link | working |
+| Port LEDs follow link, in green and amber | working |
+| Chassis status / PSU / fan LEDs and beacon | working, driven from measured health |
 | Fan control and cooling loop | working |
 | ONIE installer | **not implemented** — boots by `kexec` from the factory OS |
 
@@ -88,6 +89,19 @@ POLARITY=1 ./tools/mkconfigbcm.sh <switch-ip> > config.bcm
 That reads the board's port map and SerDes polarity from the machine in front of
 you and writes a `config.bcm` EdgeNOS can boot with. It is read-only — every
 command it issues is a show command or a register read.
+
+The chassis status LEDs need the same treatment, for the same reason — their
+CPLD offsets are in the board description and nowhere Arista publishes:
+
+```sh
+./tools/mkstatusleds.sh <switch-ip> > crow-statusled-map.h
+```
+
+Then build `scdreset.c` with that header on the include path. Without it
+everything else still works and the status LED commands tell you to run this.
+The generator reads three text files over ssh and issues no register access at
+all — nothing it does goes near the CPLD, which has powered this box off twice
+when swept.
 
 **The polarity table is not optional.** Without it links come *up* and carry
 garbage: inverting a 64b/66b stream turns the sync header `01` into `10`, which

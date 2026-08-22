@@ -44,6 +44,10 @@ LOG=/tmp/txtest.out
 # below renews it. If anything wedges hard enough to stop the loop, the SCD
 # resets the box back into the factory image on its own -- that is the real
 # protection and it is CONDITIONAL on something actually being wrong.
+# The loop is a supervisor, not a spawner: `scdreset pet` keeps a pidfile and
+# returns immediately if a petter is already alive, so this restarts a dead one
+# and does nothing otherwise. It did not always -- it used to leave a new
+# immortal process behind every 30 seconds, ~2,900 of them after a day.
 /bin/scdreset pet 600
 ( while true; do sleep 30; /bin/scdreset pet 600 >/dev/null 2>&1; done ) &
 
