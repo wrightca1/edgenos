@@ -257,6 +257,7 @@ if { [ -n "$FWD" ] || [ "${STANDALONE:-0}" = "1" ]; } && [ -x /usr/bin/fm6000_co
     [ -n "${PACE:-}" ] || PACE=1500000
     echo "    PACE=$PACE"
     FWD="$FWD" PACE="$PACE" STANDALONE="${STANDALONE:-0}" \
+        RESIDUAL_FIRST="$( [ -f /mnt/flash/residual-first.conf ] && echo 1 || echo 0 )" \
         sh /usr/lib/edgenos/platform/fm6000-fullseq.sh > /var/log/fm6000-fullseq 2>&1
     grep -E 'PORT_STATUS|t=40s|DONE' /var/log/fm6000-fullseq | tail -3 | sed 's/^/    /'
     for p in "Et1 0xe3800 0xe3826" "Et2 0xe4000 0xe4026"; do

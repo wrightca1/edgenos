@@ -1482,6 +1482,35 @@ That is worth stating plainly because it kills the tempting inference: the
 forwarding gap is not proportional to how much of the replay is left. Shrinking
 the residual further, by itself, is not evidence of getting closer.
 
+### The ordering question is now CLOSED: fine interleaving is required
+
+Four standalone configurations were tested, all with both replays absent and the
+COMPLETE write set available in one form or another:
+
+| configuration | ports | forwarding |
+|---|---|---|
+| generators only | both 0x940 | routes 5, rx 0, transit 0 |
+| generators, then the full residual (11,943) | both 0x940 | routes 5, rx 0, transit 0 |
+| generators, then FFU-only residual | both 0x940 | routes 5, rx 0, transit 0 |
+| **residual FIRST, then generators** | both 0x940 | routes 5, rx 0, transit 0 |
+
+⚠ **A subset bisect was started and abandoned as logically void**: the FULL
+residual already fails, and every subset is contained in it, so no subset can
+succeed. Bisecting only makes sense when the whole set works and you want the
+minimum. That mistake is recorded because it is an easy one to repeat.
+
+**Neither coarse order forwards.** So the interleaving the vendor stream provides
+is finer-grained than "all generators then the rest" or "the rest then all
+generators" -- it is not a matter of picking the right batch order. That closes
+the ordering question and leaves only one honest reading:
+
+**Reproducing the bring-up requires driving it as a sequence of interdependent
+steps -- a state machine -- not applying a set of writes in some order.**
+
+The symptom is consistently `et1 rx=0`: nothing is punted to the CPU, so OSPF
+never hears a hello, so only 5 kernel routes appear. The link is perfect and the
+CPU path is dead. That is where a state-machine effort should start.
+
 **Which reframes the remaining work.** The table-authoring seam is essentially
 exhausted and was never going to remove the file. What would remove it is a
 bring-up state machine. That is a substantial piece of new software, not a

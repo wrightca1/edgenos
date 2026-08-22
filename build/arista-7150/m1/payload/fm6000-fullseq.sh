@@ -354,6 +354,15 @@ make_residual() {
 
 run_standalone() {
 	_ran=0; _miss=0; _bad=0
+	# RESIDUAL_FIRST=1 applies the residual BEFORE the generators instead of
+	# after. This exists to test the ordering hypothesis: generators + the
+	# COMPLETE residual, batched either way, is the whole write set, so if
+	# neither order forwards then the interleaving is finer-grained than any
+	# coarse ordering and a state machine really is required.
+	if [ "${RESIDUAL_FIRST:-0}" = "1" ] && [ -s /mnt/flash/residual.txt ]; then
+		$BIN/fm6000_fullreplay /mnt/flash/residual.txt $B 0 >> $LOG 2>&1
+		say "  STANDALONE: residual applied FIRST ($(wc -l < /mnt/flash/residual.txt) writes) rc=$?"
+	fi
 	for _t in $STANDALONE_ORDER; do
 		if [ -x "$BIN/$_t" ]; then
 			# ⚠ TWO ARGUMENT CONVENTIONS. The older tools take the BDF as a
@@ -376,7 +385,7 @@ run_standalone() {
 	done
 	say "  STANDALONE: ran $_ran generators directly ($_bad non-zero, $_miss absent)"
 	# A site may keep the small residual instead of the whole vendor replay.
-	if [ -s /mnt/flash/residual.txt ]; then
+	if [ "${RESIDUAL_FIRST:-0}" != "1" ] && [ -s /mnt/flash/residual.txt ]; then
 		$BIN/fm6000_fullreplay /mnt/flash/residual.txt $B ${PACE:-0} >> $LOG 2>&1
 		say "  STANDALONE: applied residual.txt ($(wc -l < /mnt/flash/residual.txt) writes) rc=$?"
 	fi
