@@ -115,21 +115,61 @@ across the whole program the destinations actually used are **r1..r42, contiguou
 That register file is the parser's output and the input to every downstream lookup
 stage — L2AR, L3AR and the FFU all match on it rather than on raw packet bytes.
 
-The counts show it is not 42 independent scalars. Destinations are written in
-adjacent pairs by the same rules:
+The counts show it is not 42 independent scalars. Twelve adjacent pairs are written
+by an equal number of rules — `r3/r4`, `r6/r7`, `r12/r13`, `r20/r21`, `r22/r23`,
+`r24/r25`, `r28/r29`, `r30/r31`, `r32/r33`, `r34/r35`, `r36/r37`, `r38/r39` — and a
+pair of halfwords is a 32-bit field, which is what an IPv4 address or half a MAC
+looks like.
 
-    r22 / r23   174 rules each
-    r24 / r25   190 each
-    r28 / r29    30 each
-    r30 / r31    28 each
-    r32 / r33    17 each
-    r34 / r35    44 each
+`parser_disasm.py --regs` profiles the file: for each register, how many rules write
+it, at which parse depths, and what EtherType those rules were matching.
 
-A pair of halfwords is a 32-bit field, which is what an IPv4 address, or half a MAC,
-looks like. Establishing which registers hold which protocol field — by reading which
-parser rule writes them and at what depth — is what would let the lookup stages'
-ternary keys be read as protocol rather than as bit patterns. See
-`docs/L2AR-STRUCTURE.md`, where that is the one missing piece.
+    reg   rules  slices   EtherType context of the rules that write it
+    r1    43     3-11     S-VLAN x18, C-VLAN x18
+    r2    20     3-12     S-VLAN x10, C-VLAN x10
+    r6    69     0-15     -
+    r7    69     0-15     -
+    r15   124    3-20     IPv4 x22, IPv6 x20, ARP x20
+    r22   174    8-23     -
+    r23   174    8-23     -
+    r24   190    9-27     -
+    r25   190    9-27     -
+    r42   26     3-11     S-VLAN x9, C-VLAN x9
+
+Three readings are well supported:
+
+- **`r6`/`r7` are the destination MAC.** They are the only registers written from
+  **slice 0**, and every slice-0 rule writes exactly `hw0->r7 hw1->r6`. Slice 0 is
+  the first 64-bit window of the frame, and its keys match destination-MAC prefixes
+  (`01:80:c2:00` IEEE reserved, `01:1b:19:00` PTP peer-delay). The stage that
+  examines DMAC is the stage that extracts it.
+- **`r1`, `r2` and `r42` are VLAN tag fields.** They are written almost exclusively
+  by rules matching `8100`/`88a8`, and only at shallow depths (slices 3–12).
+- **`r15` is the L3 dispatch field.** It is written by the rules matching IPv4, IPv6
+  and ARP in near-equal numbers (22/20/20) — the EtherType demultiplex point.
+
+⚠ Everything below that is inference from position and pairing, not established.
+`r22`/`r23` and `r24`/`r25` are 32-bit fields extracted deep in the parse (slices
+8–23 and 9–27) by more rules than anything else, which is what source and destination
+IP addresses would look like — but nothing here proves it. They are labelled as
+unknown until a rule is traced end to end or the chip is observed classifying a
+crafted frame.
+
+### The consumer side is muxed, and readable
+
+`FFU_SLICE_SCENARIO_CFG` carries `ByteMux_0..3` (6 bits each) and `Top4Mux[5]`, so
+the FFU builds each scenario's key by **selecting sources into key positions** rather
+than using a fixed layout. Across the 151 populated scenario entries only **16
+distinct selectors** are ever used: r1, r2, r3, r8, r17, r18, r21, r24, r32, r33,
+r34, r35, r40, r53, r58, r60.
+
+⚠ Three of those — r53, r58, r60 — are **outside** the r1..r42 range the parser
+writes, so the mux source space is not only parser destinations; it must also reach
+metadata the parser does not produce. The selector space is 6 bits (64 sources) and
+the mapping from selector number to source is not established.
+
+`L2AR` has no such register: its key layout appears fixed in hardware, so it cannot
+be read out the way the FFU's can.
 
 ## What this changes
 

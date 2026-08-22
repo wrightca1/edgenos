@@ -65,12 +65,64 @@ def assemble(words, base, slice_, entry):
             v |= w << (32 * i); n += 1
     return v, n
 
+# EtherTypes whose 16-bit field is fully cared-for. Only 16-bit matches are used:
+# an 8-bit scan reports any cared byte equal to 6 as "TCP" and is not evidence.
+ETH = {0x0800: "IPv4", 0x0806: "ARP", 0x8100: "C-VLAN", 0x88a8: "S-VLAN",
+       0x86dd: "IPv6", 0x8847: "MPLS", 0x8906: "FCoE", 0x88f7: "PTP",
+       0x6558: "GRE-TEB", 0x8808: "PAUSE"}
+
+def regs_report(w):
+    """Profile the parser's extracted-field register file.
+
+    Halfword0Dest/Halfword1Dest are 6-bit destination register numbers. That
+    register file is the parser's output and the input to every lookup stage,
+    so knowing which register holds which protocol field is what lets an L2AR
+    or FFU ternary key be read as protocol instead of as bit patterns.
+
+    There is no field table for it in the SDK, so this reports only what the
+    program itself shows: how many rules write each register, at which parse
+    depths, and what EtherType the writing rules were matching."""
+    info = collections.defaultdict(
+        lambda: {"slices": set(), "eth": collections.Counter(), "n": 0})
+    for s in range(NSLICE):
+        for e in range(NENTRY):
+            cam, c = assemble(w, CAM_BASE, s, e)
+            if not c: continue
+            ram, rn = assemble(w, RAM_BASE, s, e)
+            if not rn: continue
+            key = (cam >> 64) & ((1 << 64) - 1)
+            care = key ^ (cam & ((1 << 64) - 1))
+            tags = set()
+            for sh in range(0, 64, 8):
+                if ((care >> sh) & 0xffff) == 0xffff and ((key >> sh) & 0xffff) in ETH:
+                    tags.add(ETH[(key >> sh) & 0xffff])
+            for hw in (0, 1):
+                d = fld(ram, "Halfword%dDest" % hw)
+                if not d: continue
+                i = info[d]; i["slices"].add(s); i["n"] += 1
+                for t in tags: i["eth"][t] += 1
+    print("extracted-field register file: %d registers in use, r%d..r%d\n"
+          % (len(info), min(info), max(info)))
+    print("%-5s %-6s %-8s %s" % ("reg", "rules", "slices", "EtherType context"))
+    for d in sorted(info):
+        i = info[d]; sl = sorted(i["slices"])
+        ctx = ", ".join("%s x%d" % (k, v) for k, v in i["eth"].most_common(3)) or "-"
+        print("r%-4d %-6d %-8s %s" % (d, i["n"], "%d-%d" % (sl[0], sl[-1]), ctx))
+    pairs = [(d, d + 1) for d in sorted(info)
+             if d + 1 in info and info[d]["n"] == info[d + 1]["n"]]
+    print("\nadjacent registers written by an equal number of rules (a 32-bit field "
+          "is two halfwords):")
+    print("   " + "  ".join("r%d/r%d" % p for p in pairs))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("file", help="ucode_l2.raw (or any ADDR VALUE list)")
     ap.add_argument("--slice", type=int, default=None, help="disassemble one slice")
     ap.add_argument("--max", type=int, default=12, help="entries to print per slice")
     ap.add_argument("--summary", action="store_true", help="occupancy only")
+    ap.add_argument("--regs", action="store_true",
+                    help="profile the extracted-field register file instead")
     a = ap.parse_args()
 
     w = read(a.file)
@@ -82,6 +134,8 @@ def main():
             if c: n += 1
         occ[s] = n
 
+    if a.regs:
+        return regs_report(w)
     used = [s for s, n in occ.items() if n]
     print("parser program: %d of %d slices used, %d CAM entries populated"
           % (len(used), NSLICE, sum(occ.values())))
