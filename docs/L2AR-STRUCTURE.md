@@ -89,24 +89,59 @@ these profiles" — and a real one disassembles as:
 `SetTrapHeader` and `SetCpuCode` are the CPU-punt controls, which is why this block
 is where "does anything reach the CPU" is decided.
 
-## ⚠ What is still missing: the key layout
+## ⚠ What is still missing: the key layout — and it is not the parser's output
 
 The 384-bit key has **no field table in the SDK** and no key-format register in the
-L2AR block — unlike the action side, nothing names its fields. Care masks are small
-and clearly structured, so each rule tests only a few fields, but which fields they
-are is not yet established.
+L2AR block. The working assumption was that it is fed from the parser's
+extracted-field register file, which `parser_walk.py` has since named through the
+IPv4 header (`r7/r6/r5` DMAC, `r14/r13/r12` SMAC, `r15` EtherType, `r21/r20` source
+IP, `r23/r22` destination IP, `r24` L4 source port).
 
-The most promising bridge is the parser. `PARSER_RAM` extracts halfwords to
-`Halfword0Dest`/`Halfword1Dest`, 6-bit destination register numbers, and across the
-whole parser program those destinations are **r1..r42, contiguous, 42 in use**. The
-pairing is visible in the counts — r22/r23 are written by 174 rules each, r24/r25 by
-190 each, r28/r29 by 30 each — so **adjacent registers form 32-bit fields**, which
-is what an IPv4 address or a MAC half looks like.
+**That assumption is wrong, and the test that broke it is worth recording.** All 404
+rules were searched for lab constants whose values are known exactly — this switch's
+router MAC `44:4c:a8:31:5d:ab`, the port GLORTs `03ee` and `03ef`, and the EtherTypes
+`0800` and `0806` — at every byte offset, requiring the bytes to be fully cared-for.
 
-That register file is the input to every lookup stage, so establishing which of the
-42 land in which of the 24 halfword slots of an L2AR key is the next concrete step,
-and it is what turns 404 readable-but-opaque rules into 404 rules you could rewrite
-from intent. It is not done.
+**Zero hits, for every constant.**
+
+The distribution of cared-for bytes says the same thing. Across all 404 rules the
+care mask concentrates in the **low 12 bytes** of the 384-bit key, where roughly 100
+rules apiece care, against a handful in the high bytes:
+
+    byte  36  37  38  39  40  41  42  43  44  45  46  47
+    rules 128 99 135  98  98 100 101 100  98 103 100 106
+
+So L2AR does not match on packet fields. It matches on **action-resolution
+metadata** — the results of the L2 lookup and the flags raised by earlier stages —
+which is consistent with `FLAGS_TAG` in its action word and with `L2AR_FLAGS_CAM`
+existing as a separate structure alongside the main CAM. The name was the clue:
+this is L2 *action resolution*, not L2 lookup.
+
+Naming those 96 bits means tracing what the L2 lookup stage and the parser's
+`SetFlags` (38 bits) deposit, not mapping packet offsets. That is the real next step
+and it has not been done.
+
+## The FFU is the stage that keys on packet fields
+
+`FFU_SLICE_SCENARIO_CFG` has `ByteMux_0..3` (6 bits each) and `Top4Mux[5]`, so unlike
+L2AR the FFU **selects** its key sources. Reading the 151 populated scenarios and
+interpreting each selector as a parser register number gives groupings that look
+right for a classifier:
+
+    slice 1  scen 0-2   r60(?)  r24(L4 sport)  r18(IP total len)  r18(IP total len)
+    slice 2  scen 0-2   r21(SIP[0:1])  r21(SIP[0:1])  r8(?)  r58(?)
+
+⚠ **But the selector index space is not established, and there are two reasons to
+doubt the direct reading.** Selectors 53, 58 and 60 appear, and the parser only ever
+writes r1..r42 — so either the space is not register numbers, or the FFU can also
+reach metadata the parser does not produce. And selectors repeat across adjacent byte
+positions (`r21 r21`, `r18 r18`, and four-way repeats like `r1 r1 r1 r1`), which fits
+a **halfword** register supplying two consecutive key bytes better than it fits four
+independent byte picks.
+
+Both readings are consistent with the data available here. This is left unresolved
+rather than guessed, because the same shortcut — a plausible mapping that fit every
+case checked — has already had to be corrected twice on the parser side.
 
 ## Honest scope
 
@@ -116,7 +151,9 @@ This does not remove `fm6000_l2arseq.c`. It establishes that:
    so unlike `eplseq` it is not disqualified from being authored;
 2. the table is **404 real rules in 8 slices**, not 29,110 opaque pairs;
 3. the action half of every rule is already fully named;
-4. the key half needs the parser's extracted-field register file mapped first.
+4. the key half is **not** packet fields and needs the L2 lookup's outputs and the
+   parser's 38 `SetFlags` bits traced instead — established by searching all 404
+   rules for known lab constants and finding none.
 
 That is the same position L3AR was in before `l3arslice1`, which went on to replace
 1,088 replay lines with 6 authored rules where EOS shipped 32.
