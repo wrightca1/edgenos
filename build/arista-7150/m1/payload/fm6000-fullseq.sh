@@ -322,7 +322,7 @@ fm6000_parserinit fm6000_modinit fm6000_eplseq fm6000_l2arseq
 fm6000_l2arpre fm6000_l2arinit fm6000_mapperpre fm6000_mgmt2pre
 fm6000_hashinit fm6000_cmwm fm6000_mapper fm6000_smalltables
 fm6000_cmrest fm6000_parserfields fm6000_esched fm6000_modports
-fm6000_erl fm6000_sweeperinit fm6000_cmminit fm6000_monitorinit
+fm6000_erl fm6000_safmatrix fm6000_sweeperinit fm6000_cmminit fm6000_monitorinit
 fm6000_statsarinit fm6000_eaclinit fm6000_laginit fm6000_glortinit
 fm6000_tbl3init fm6000_crmdrop fm6000_l3arinit fm6000_l3arslice1
 fm6000_l3arslice4 fm6000_l3arslice3 fm6000_l3arslice2 fm6000_l3artables
@@ -544,6 +544,14 @@ if [ "${GENBLK:-1}" = "1" ]; then
 		# ways (asic/fm6000/tools/gen_modports.py).
 		[ "${MODPORTS:-1}" = "1" ] && [ -x "$BIN/fm6000_modports" ] && \
 			gen_list_early fm6000_modports MOD-ports
+		# SAF_MATRIX: the store-and-forward port matrix, 74% of everything the
+		# replay still supplied (34,668 writes over 168 addresses) because it
+		# TRACKS LINK STATE and is rewritten as ports come up. We emit its
+		# CONVERGED state -- four distinct values over 56 entries, verified
+		# 168/168 against the replay (asic/fm6000/tools/gen_safmatrix.py).
+		# ⚠ Config-dependent: LINKED_PORTS in the generator is the cabling.
+		[ "${SAFMATRIX:-1}" = "1" ] && [ -x "$BIN/fm6000_safmatrix" ] && \
+			gen_list_early fm6000_safmatrix SAF-matrix
 		# ERL: the egress rate limiter, INCLUDING its two-phase init. This is
 		# the first block with no write-once part at all -- every one of its 967
 		# addresses is written twice, 636 with two different values -- so it is

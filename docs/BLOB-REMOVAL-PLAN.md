@@ -1455,6 +1455,33 @@ it means implementing the logic that PRODUCES those updates -- a port bring-up
 state machine that maintains SAF, drives the SerDes, and services the sweeper --
 not recording and replaying what that logic once emitted.
 
+### SAF_MATRIX authored -- 74% of the residual gone, and it did NOT fix forwarding
+
+`gen_safmatrix.py` emits the matrix's **converged** state as a rule. Verified
+168/168 against the replay, and the effect on the residual is exactly as
+predicted:
+
+    residual before: 46,611 writes
+    residual after:  11,943 writes      (-74%)
+    provenance:      123,068 / 124,533 = 98.8%
+
+The rule is small because the matrix is a **port bitmap** and its converged state
+has only four values:
+
+    ports 0, 2        all bits
+    port 1            bits 0..81
+    ports 3, 20, 40   {0,1,2}                 the cages with a transceiver
+    other 50 front    {0,1,2,3} | {20,40}     CPU/mgmt ports + the linked ports
+
+⚠ **And a standalone boot with the reduced residual STILL does not forward** --
+both ports reach 0x940, `kernel routes=5`, `et1 rx=0`, transit 0. So SAF was the
+BULK of the residual, not the BLOCKER. Removing 34,668 writes changed the volume
+and nothing else.
+
+That is worth stating plainly because it kills the tempting inference: the
+forwarding gap is not proportional to how much of the replay is left. Shrinking
+the residual further, by itself, is not evidence of getting closer.
+
 **Which reframes the remaining work.** The table-authoring seam is essentially
 exhausted and was never going to remove the file. What would remove it is a
 bring-up state machine. That is a substantial piece of new software, not a
