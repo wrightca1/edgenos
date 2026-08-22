@@ -329,6 +329,29 @@ fm6000_l3arslice4 fm6000_l3arslice3 fm6000_l3arslice2 fm6000_l3artables
 fm6000_sweepinit fm6000_mgmt2init fm6000_eplinit fm6000_mapperinit
 fm6000_ffubstinit
 "
+# ---- residual extraction -----------------------------------------------------
+# Writes the replay lines NO generator covers to /mnt/flash/residual.txt, so a
+# site can keep a small operator file instead of the whole vendor replay
+# (measured: ~240 KB against 5.1 MB).
+#
+# ⚠ ONLY EVER ITERATE STANDALONE_ORDER HERE. /usr/bin/fm6000_* also contains
+# probes and bring-up tools that do NOT accept -a, and which fall through to
+# their default action -- writing to the chip. Running the whole directory with
+# -a to collect addresses wedged the switch hard enough to need a power cycle
+# (2026-08-22). The list of generators is known; use it.
+make_residual() {
+	[ -s "$1" ] || return 1
+	: > /tmp/res.addr
+	for _t in $STANDALONE_ORDER; do
+		[ -x "$BIN/$_t" ] && $BIN/$_t -a >> /tmp/res.addr 2>/dev/null
+	done
+	sort -u /tmp/res.addr -o /tmp/res.addr
+	awk 'NR==FNR { d[$1]; next } !($1 in d)' /tmp/res.addr "$1" > /mnt/flash/residual.txt
+	say "  residual: $(wc -l < /mnt/flash/residual.txt) writes not covered by any generator"
+	rm -f /tmp/res.addr
+	return 0
+}
+
 run_standalone() {
 	_ran=0; _miss=0; _bad=0
 	for _t in $STANDALONE_ORDER; do
@@ -352,6 +375,11 @@ run_standalone() {
 		fi
 	done
 	say "  STANDALONE: ran $_ran generators directly ($_bad non-zero, $_miss absent)"
+	# A site may keep the small residual instead of the whole vendor replay.
+	if [ -s /mnt/flash/residual.txt ]; then
+		$BIN/fm6000_fullreplay /mnt/flash/residual.txt $B ${PACE:-0} >> $LOG 2>&1
+		say "  STANDALONE: applied residual.txt ($(wc -l < /mnt/flash/residual.txt) writes) rc=$?"
+	fi
 	return 0
 }
 
@@ -726,6 +754,7 @@ if [ "${STANDALONE:-0}" = "1" ] || [ ! -s "$CUR" ]; then
 	run_standalone; RC=$?
 else
 	$BIN/fm6000_fullreplay "$CUR" $B ${PACE:-1500000} >> $LOG 2>&1; RC=$?
+	[ "${MKRESIDUAL:-1}" = "1" ] && make_residual "$FWD"
 fi
 # ⚠ KEEP the generated replay. fm6000_fullreplay's progress counters index THIS
 # file, not /mnt/flash/fwd4.txt -- the generators filter blocks out and hand it a
