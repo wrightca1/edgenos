@@ -76,6 +76,14 @@ echo " kernel: $(cat /proc/version 2>/dev/null | cut -c1-60)"
 echo "=================================================================="
 echo
 
+# --- loopback --------------------------------------------------------------
+# ⚠ `lo` came up DOWN in this initrd, and nothing noticed for a long time.
+# Everything that matters here talks over real interfaces or unix sockets, so
+# the only symptom was elsewhere: OSPF would not advertise a loopback address
+# because ospfd ignores addresses on a down interface, and anything binding
+# 127.0.0.1 would have failed too.
+ip link set lo up 2>/dev/null
+
 # --- management network ----------------------------------------------------
 # Two bugs bit us on the first boot (docs/EDGENOS-FIRST-BOOT.md); both are
 # handled here rather than by hoping boot0 got it right.
@@ -214,8 +222,16 @@ cat "$OUT"
 # FRR and anything else that calls getpwnam need these to exist. The initrd had
 # no /etc/passwd at all, which is what made Quagga fail with
 # "privs_init: could not lookup user root" (docs/OSPF-CONTROL-PLANE.md).
-[ -e /etc/passwd ] || printf 'root:x:0:0:root:/root:/bin/sh\nfrr:x:92:92:frr:/var/run/frr:/bin/false\n' > /etc/passwd
-[ -e /etc/group ]  || printf 'root:x:0:\nfrr:x:92:\nfrrvty:x:85:frr\n' > /etc/group
+# ⚠ Written UNCONDITIONALLY, not "only if absent". The image ships a minimal
+# /etc/group, so an `[ -e ] ||` guard skipped these entries entirely and FRR
+# died with "privs_init: could not lookup vty group frrvty" -- after the boot
+# had otherwise brought the whole datapath up. We own these two files; there is
+# nothing to preserve.
+#
+# root must be IN frrvty: FRR checks membership of its vty group, and running
+# the daemons as root does not exempt them from that check.
+printf 'root:x:0:0:root:/root:/bin/sh\nfrr:x:92:92:frr:/var/run/frr:/bin/false\n' > /etc/passwd
+printf 'root:x:0:\nfrr:x:92:\nfrrvty:x:85:root,frr\n' > /etc/group
 
 # --- flash -----------------------------------------------------------------
 # ⚠ /mnt/flash was a bare directory in the tmpfs rootfs until 2026-08-19, and
@@ -336,6 +352,25 @@ echo " ASIC: /bin/asic-release.sh (report) | --release (deassert)"
 echo " Backstop reboot in ${BACKSTOP}s.  'reboot -f' returns to EOS now."
 echo "=================================================================="
 echo
+
+# --- datapath and routing, from a config file on flash ---------------------
+# Everything below this used to be typed by hand after every boot. It is now
+# declarative: /mnt/flash/datapath.conf says which ports to bring up, how to
+# address them, and whether to start the routing daemons.
+#
+# ⚠ LAUNCHED DETACHED, DELIBERATELY. The SDK agent's bcm_init can take twenty
+# minutes with the copper PHY bus enabled and sometimes stalls outright, so this
+# must never sit between the box and a usable console. Progress and failures go
+# to /tmp/datapath.log.
+#
+# ⚠ The config ships with enable=no. A plain boot stays ASIC-dark; that safety
+# property predates all of this and is not given up for convenience.
+if [ -x /bin/datapath-up.sh ] && [ -r /mnt/flash/datapath.conf ]; then
+    echo "EdgeNOS: datapath-up.sh launched (see /tmp/datapath.log)"
+    ( /bin/datapath-up.sh /mnt/flash/datapath.conf ) &
+else
+    echo "EdgeNOS: no /mnt/flash/datapath.conf -- datapath not started"
+fi
 
 # --- shell on the console --------------------------------------------------
 while true; do

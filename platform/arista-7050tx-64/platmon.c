@@ -26,6 +26,8 @@
  *   platmon led auto              drive all four from what is actually measured
  *   platmon cool                  show what the cooling curve would command
  *   platmon cool --apply          set fan PWM from the inlet temperature
+ *   platmon fan <pwm>             set fan PWM by hand, for measurement
+ *   platmon psufan <bus> <pct>    set a PSU's own fan duty over PMBus
  *
  * ⚠ --sweep reads registers the FDL does not describe. It is how the tach and
  * PWM offsets were found -- the FDL stops at presence/ID/LED and hands speed to
@@ -91,6 +93,19 @@ struct i2c_smbus_ioctl_data {
  * to Fan and PSU2 lit them, and the blue beacon at 0x6090 ignored bit 27 too.
  * Value 1 was then written to all four blocks at once and all four went green,
  * which is what makes this a palette rather than four coincidences. */
+/* QSFP link LEDs. The board description defines these as one block per LANE,
+ * not per port: four ports x four lanes, based at 0xA000 with a 0x10 stride,
+ * so Ethernet49/1 is 0xA000 and Ethernet52/4 is 0xA0F0. Transceiver control
+ * starts at 0xA100 and must not be caught by an off-by-one here.
+ *
+ * ⚠ Nothing wrote these until now, which is the whole reason the QSFP LEDs
+ * were dark: not a fault, an omission. The chassis LEDs worked because
+ * `led auto` drove them and these were simply never in the list.
+ */
+#define LED_QSFP_BASE  0xA000
+#define LED_QSFP_STEP  0x10
+#define LED_QSFP_LAST  0xA0F0
+
 #define LED_OFF   0x0006ff00u
 #define LED_GREEN 0x1006ff00u
 #define LED_RED   0x0806ff00u
@@ -140,8 +155,23 @@ static int cpld_writable(uint8_t reg)
  * can make this box LOUD but cannot make it hot. The floor is EOS's own observed
  * setting at this ambient. Nothing may write below it. */
 #define PWM_BASE  0x10
-#define PWM_FLOOR 127
+/* ⚠ Was 127 (71%), chosen when the PWM scale was still uncertain so that a bug
+ * would make the box loud rather than hot. The scale is now known and measured:
+ * dropping the trays from 73% to 53% for six minutes moved board temperature by
+ * 1 C and CPU by 1 C the other way, at 31 C ambient. There is real headroom.
+ *
+ * 108 is 60%, which is the LOWEST the board's own curve ever asks for on this
+ * chassis (level 2 at 25 C inlet). So the floor is no longer an arbitrary
+ * safety number -- it is "never quieter than the vendor's own policy would be".
+ *
+ * This is only safe alongside the over-temperature override below, which was
+ * added at the same time. Do not lower one without the other. */
+#define PWM_FLOOR 108
 #define PWM_MAX   180
+/* Lower bound for the MANUAL `fan` command only. Below the loop's floor,
+ * because measuring the thermal response means going there, but not to zero:
+ * these are the only fans in the chassis. */
+#define FAN_MANUAL_MIN 70
 
 static int wr_byte(int fd, uint8_t reg, uint8_t val)
 {
@@ -391,6 +421,10 @@ static int fan_leds_read(int fd, int colour[4]);
 static int fan_leds_apply(int fd, const int colour[4]);
 static const char *fan_colour_name(int c);
 
+static int tap_is_up(const char *tap);
+static int qsfp_led_set(int fp_port, uint32_t colour);
+extern const struct qsfp_port_s { int fp; const char *tap; } QSFP_PORTS[4];
+
 static void led_auto(void)
 {
     uint32_t p = scd_read(0x5000);
@@ -422,6 +456,15 @@ static void led_auto(void)
     scd_write(LED_PSU2, c2);
     scd_write(LED_FAN, cf);
     scd_write(LED_STATUS, cs);
+
+    /* QSFP link LEDs, from the tap's operstate. Absent taps mean the agent is
+     * not up, and then we say nothing rather than asserting "no link" -- a
+     * dark LED should mean the port is down, not that platmon ran early. */
+    for (int i = 0; i < 4; i++) {
+        int up = tap_is_up(QSFP_PORTS[i].tap);
+        if (up < 0) continue;
+        qsfp_led_set(QSFP_PORTS[i].fp, up ? LED_GREEN : LED_OFF);
+    }
 
     printf("  psu1   %s\n", s1 < 0 ? "absent -> off" : s1 ? "ok -> green" : "FAULT -> red");
     printf("  psu2   %s\n", s2 < 0 ? "absent -> off" : s2 ? "ok -> green" : "FAULT -> red");
@@ -533,6 +576,46 @@ static int fan_leds_apply(int fd, const int colour[4])
     return 0;
 }
 
+/* Front-panel Ethernet49..52 are SDK ports 49, 53, 57, 61, and the tap for a
+ * port is "xe" + (port-1) -- so Et49 is xe48 and Et52 is xe60. That is the only
+ * link state a userspace tool can see here; the agent owns the chip. */
+const struct qsfp_port_s QSFP_PORTS[4] = {
+    { 49, "xe48" }, { 50, "xe52" }, { 51, "xe56" }, { 52, "xe60" },
+};
+
+static int tap_is_up(const char *tap)
+{
+    char path[128], buf[32];
+    FILE *f;
+    size_t n;
+
+    snprintf(path, sizeof path, "/sys/class/net/%s/operstate", tap);
+    f = fopen(path, "r");
+    if (f == NULL) return -1;
+    n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    if (!strncmp(buf, "up", 2)) return 1;
+    if (!strncmp(buf, "unknown", 7)) return 1;   /* tap devices sit here */
+    return 0;
+}
+
+/* One QSFP port is four lane blocks. A 40G port is one logical link, so drive
+ * all four together; break this apart if the box is ever run in 4x10G. */
+static int qsfp_led_set(int fp_port, uint32_t colour)
+{
+    int i = fp_port - 49;
+    int lane, rc = 0;
+
+    if (i < 0 || i > 3) return -1;
+    for (lane = 0; lane < 4; lane++) {
+        uint32_t off = LED_QSFP_BASE + (uint32_t)(i * 4 + lane) * LED_QSFP_STEP;
+        if (off > LED_QSFP_LAST) return -1;      /* never stray into 0xA100 */
+        if (scd_write(off, colour) != 0) rc = -1;
+    }
+    return rc;
+}
+
 static int led_cmd(const char *which, const char *colour)
 {
     struct { const char *n; uint32_t off; } leds[] = {
@@ -559,6 +642,28 @@ static int led_cmd(const char *which, const char *colour)
         return rc ? 1 : 0;
     }
 
+    /* QSFP link LEDs: platmon led qsfp<49-52> <colour> */
+    if (!strncmp(which, "qsfp", 4)) {
+        int fp = atoi(which + 4);
+        uint32_t v = !strcmp(colour, "green") ? LED_GREEN
+                   : !strcmp(colour, "red")   ? LED_RED
+                   : !strcmp(colour, "off")   ? LED_OFF : 0xffffffffu;
+        if (fp < 49 || fp > 52) {
+            fprintf(stderr, "  qsfp ports are 49-52\n");
+            return 2;
+        }
+        if (v == 0xffffffffu) {
+            fprintf(stderr, "  qsfp colours: off|green|red\n");
+            return 2;
+        }
+        if (qsfp_led_set(fp, v) == 0) {
+            printf("  Ethernet%d (0x%04x..) = %s\n", fp,
+                   LED_QSFP_BASE + (fp - 49) * 4 * LED_QSFP_STEP, colour);
+            return 0;
+        }
+        return 1;
+    }
+
     for (size_t i = 0; i < sizeof leds / sizeof leds[0]; i++) {
         if (strcmp(which, leds[i].n)) continue;
         for (size_t j = 0; j < sizeof cols / sizeof cols[0]; j++) {
@@ -570,6 +675,7 @@ static int led_cmd(const char *which, const char *colour)
     }
     fprintf(stderr, "usage: platmon led <status|fan|psu1|psu2> <off|green|red>\n"
                     "       platmon led fan<1-4> <off|green|red|amber>\n"
+                    "       platmon led qsfp<49-52> <off|green|red>\n"
                     "       platmon led auto\n");
     return 2;
 }
@@ -663,13 +769,84 @@ static int read_temp(int bus, int addr, int reg)
     return v < 0 ? -1000 : v;
 }
 
+/* ⚠ The curve reads ONE sensor -- the inlet -- because that is what the vendor's
+ * policy does. That is fine while inlet temperature tracks everything else, and
+ * useless if it does not: a hot ASIC or a hot CPU behind a cool intake would
+ * never move the fans at all.
+ *
+ * This is the backstop. Every board sensor is checked against the alert
+ * threshold the board's own description gives it, and any one of them reaching
+ * it takes the fans to full regardless of what the curve wanted. It costs four
+ * i2c reads a minute.
+ *
+ * Thresholds, from the board description:
+ *   board sensor    55    front panel  55
+ *   cpu board       55    back panel   75
+ * The CPU die is read from hwmon (k10temp) with its own limit of 90. */
+struct tsensor { int bus, addr, reg, alert; const char *name; };
+static const struct tsensor TSENSORS[] = {
+    { 3, 0x4c, 0x00, 55, "board" },
+    { 3, 0x4c, 0x01, 55, "front panel" },
+    { 4, 0x4c, 0x00, 55, "cpu board" },
+    { 4, 0x4c, 0x01, 75, "back panel" },
+};
+
+/* Returns the hottest over-threshold sensor, or NULL. */
+static const char *overtemp(int *valp, int *limp)
+{
+    size_t i;
+    for (i = 0; i < sizeof TSENSORS / sizeof TSENSORS[0]; i++) {
+        int t = read_temp(TSENSORS[i].bus, TSENSORS[i].addr, TSENSORS[i].reg);
+        if (t > -1000 && t >= TSENSORS[i].alert) {
+            *valp = t; *limp = TSENSORS[i].alert;
+            return TSENSORS[i].name;
+        }
+    }
+    /* CPU die, via hwmon rather than i2c. */
+    {
+        int h;
+        for (h = 0; h < 8; h++) {
+            char path[80], name[32];
+            FILE *f;
+            snprintf(path, sizeof path, "/sys/class/hwmon/hwmon%d/name", h);
+            f = fopen(path, "r");
+            if (!f) continue;
+            if (!fgets(name, sizeof name, f)) name[0] = 0;
+            fclose(f);
+            if (strncmp(name, "k10temp", 7)) continue;
+            snprintf(path, sizeof path, "/sys/class/hwmon/hwmon%d/temp1_input", h);
+            f = fopen(path, "r");
+            if (!f) continue;
+            {
+                int milli = 0;
+                if (fscanf(f, "%d", &milli) == 1 && milli / 1000 >= 90) {
+                    fclose(f);
+                    *valp = milli / 1000; *limp = 90;
+                    return "cpu die";
+                }
+            }
+            fclose(f);
+        }
+    }
+    return NULL;
+}
+
 static int cool_run(int apply)
 {
     int inlet = read_temp(INLET_BUS, INLET_ADDR, INLET_REG);
+    int hot_val = 0, hot_lim = 0;
+    const char *hot = overtemp(&hot_val, &hot_lim);
 
     double pct;
     const char *why;
-    if (cooling_load() < 0) {
+    if (hot != NULL) {
+        /* Nothing below this point may reduce the answer. */
+        printf("  ** OVER TEMPERATURE: %s at %d C (alert %d) -> full speed\n",
+               hot, hot_val, hot_lim);
+        pct = 100.0;
+        why = "over-temperature override";
+        inlet = -1;
+    } else if (cooling_load() < 0) {
         printf("  no usable %s -- failing to full speed\n", COOLING_CONF);
         printf("  generate one with tools/fdl-extract.sh on this switch\n");
         inlet = -1;
@@ -735,6 +912,90 @@ int main(int argc, char **argv)
     }
 
     if (!strcmp(cmd, "buses")) { list_buses(); return 0; }
+
+    /* Manual fan duty, for characterising the thermal response. Deliberately
+     * NOT bounded by PWM_FLOOR -- the point of the exercise is to go below the
+     * loop's floor and see what the temperature actually does. It has its own,
+     * lower hard bound instead, and it is a one-shot: the 60 s loop will put the
+     * curve's value back on its next pass, so nothing here can leave the box
+     * quiet by accident. Stop the loop first if you want a value to persist. */
+    if (!strcmp(cmd, "fan") && argc > 2) {
+        int want = atoi(argv[2]);
+        if (want < FAN_MANUAL_MIN || want > PWM_MAX) {
+            fprintf(stderr, "  refusing %d -- manual range is %d-%d\n",
+                    want, FAN_MANUAL_MIN, PWM_MAX);
+            return 2;
+        }
+        int fd = open_dev(4, CPLD_ADDR);
+        if (fd < 0) return 1;
+        int bad = 0;
+        for (int f = 0; f < 4; f++) {
+            union i2c_smbus_data d;
+            d.byte = (uint8_t)want;
+            if (xfer(fd, 0, (uint8_t)(PWM_BASE + f), I2C_SMBUS_BYTE_DATA, &d) < 0) bad++;
+        }
+        int got = rd_byte(fd, PWM_BASE);
+        close(fd);
+        printf("  fan pwm = %d (%d%%)%s, reads back %d\n", want,
+               (want * 100 + PWM_MAX / 2) / PWM_MAX, bad ? " [some writes failed]" : "", got);
+        return bad ? 1 : 0;
+    }
+
+    /* A PSU's own fan, over PMBus FAN_COMMAND_1 (0x3b).
+     *
+     * ⚠ This is a power supply's thermal protection, not a chassis fan. The
+     * failure mode is not noise, it is a supply shutting down -- and on this
+     * bench PSU2 has no AC feed, so PSU1 is the ONLY supply and taking it out
+     * takes the box with it. Hence a hard floor of 40%, a check that the supply
+     * is actually cool before honouring anything low, and a refusal to touch a
+     * supply that is carrying load unless --force is given.
+     *
+     * FAN_CONFIG_1_2 (0x3a) reads 0x90 here: bit 7 fan installed, bit 6 clear,
+     * so the command is a DUTY PERCENTAGE rather than an RPM target. */
+    if (!strcmp(cmd, "psufan") && argc > 3) {
+        int bus = atoi(argv[2]);
+        int pct = atoi(argv[3]);
+        int force = argc > 4 && !strcmp(argv[4], "--force");
+        if (pct < 40 || pct > 100) {
+            fprintf(stderr, "  refusing %d%% -- PSU fan range is 40-100\n", pct);
+            return 2;
+        }
+        int fd = open_dev(bus, PSU_ADDR);
+        if (fd < 0) return 1;
+
+        int cfg = rd_byte(fd, 0x3a);
+        int status = rd_word(fd, 0x79);
+        int pout = rd_word(fd, 0x96);
+        double watts = pout < 0 ? -1.0 : linear11((uint16_t)pout);
+        int hot = rd_word(fd, 0x8d);
+        double hotc = hot < 0 ? -1.0 : linear11((uint16_t)hot);
+
+        printf("  i2c-%d: FAN_CONFIG=0x%02x STATUS=0x%04x out=%.1f W hotspot=%.0f C\n",
+               bus, cfg, status, watts, hotc);
+        if ((cfg & 0x40) != 0) {
+            fprintf(stderr, "  ** bit 6 set: this supply wants an RPM target, "
+                            "not a percentage -- refusing\n");
+            close(fd); return 1;
+        }
+        if (watts > 10.0 && !force) {
+            fprintf(stderr, "  ** supply is carrying %.1f W. Slowing the fan on a\n"
+                            "     LOADED supply is a thermal decision, not a noise\n"
+                            "     one. Pass --force if that is what you mean.\n", watts);
+            close(fd); return 1;
+        }
+        union i2c_smbus_data d;
+        d.word = (uint16_t)pct;          /* LINEAR11, exponent 0 */
+        if (xfer(fd, 0 /* write */, 0x3b, I2C_SMBUS_WORD_DATA, &d) < 0) {
+            fprintf(stderr, "  ** write failed\n"); close(fd); return 1;
+        }
+        usleep(200000);
+        int back = rd_word(fd, 0x3b);
+        int rpm  = rd_word(fd, 0x90);
+        printf("  commanded %d%%, reads back %d, fan now %.0f rpm\n",
+               pct, back, rpm < 0 ? -1.0 : linear11((uint16_t)rpm));
+        close(fd);
+        return 0;
+    }
 
     if (!strcmp(cmd, "cool")) {
         int apply = argc > 2 && !strcmp(argv[2], "--apply");

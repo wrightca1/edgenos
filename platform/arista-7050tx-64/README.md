@@ -23,6 +23,8 @@ reference.
 | L3 | routed ports EOS-style — one VLAN and one L3 interface per port |
 | Control plane | FRR 8.4.4, OSPF Full, 35 routes |
 | Hardware FIB | adds, next-hop changes and withdrawals all verified against the chip |
+| Front panel | chassis, QSFP and copper port LEDs all driven — see [LEDS.md](LEDS.md) |
+| Platform | PSU/fan/thermal monitoring, EOS's cooling curve, hardware watchdog |
 | Platform | 5 hwmon devices, 2 PSUs over PMBus, 4 fan trays, chassis + tray LEDs |
 | Cooling | closed loop on the inlet sensor, clamped `[127, 180]`, refreshed every 60 s |
 | Watchdog | **hardware** — `sp5100_tco`, 60 s timeout, fed by `init`; resets the box if it wedges |

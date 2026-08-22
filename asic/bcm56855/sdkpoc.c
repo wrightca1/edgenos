@@ -563,9 +563,39 @@ static void scd_wr(unsigned long off, uint32_t v)
     scd_bar[off / 4] = v;
 }
 
+/* ⚠ Instrumentation, because "bcm_init stalls with the PHY bus" was diagnosed
+ * three times from an absence -- a frozen log and a busy process -- and never
+ * from a number. Each failing transaction costs ~1 s of exponential backoff and
+ * there are TWO per PHY register access, so a small failure rate is
+ * indistinguishable from a hang unless it is counted. */
+static unsigned long scd_mdio_xacts, scd_mdio_fails, scd_mdio_usec;
+static unsigned long scd_mdio_slowest;
+
+static void scd_mdio_note(unsigned long t_start, int failed)
+{
+    unsigned long took = sal_time_usecs() - t_start;
+
+    scd_mdio_xacts++;
+    scd_mdio_usec += took;
+    if (failed) scd_mdio_fails++;
+    if (took > scd_mdio_slowest) scd_mdio_slowest = took;
+
+    /* Report often enough that a stalled-looking run shows whether it is
+     * progressing, and rarely enough not to drown the log. */
+    if ((scd_mdio_xacts % 2000) == 0) {
+        printf("  MDIO: %lu xacts, %lu failed (%lu%%), %lu ms total, "
+               "slowest %lu us\n",
+               scd_mdio_xacts, scd_mdio_fails,
+               scd_mdio_fails * 100 / scd_mdio_xacts,
+               scd_mdio_usec / 1000, scd_mdio_slowest);
+        fflush(stdout);
+    }
+}
+
 static int scd_mdio_xact(int accel, int bus, int prtad, int devad, int op,
                          uint16_t data)
 {
+    unsigned long t_start = sal_time_usecs();
     unsigned long base = scd_accel_base[accel];
     uint32_t cs_def = (uint32_t)(scd_mdio_speed & 3) << 26;
     unsigned long delay = 1;
@@ -589,19 +619,23 @@ static int scd_mdio_xact(int accel, int bus, int prtad, int devad, int op,
             break;
         }
         if (res != 0) {
+            scd_mdio_note(t_start, 1);
             return -1;
         }
         sal_usleep(delay);
         delay *= 2;
     }
     if (delay >= 1000000UL) {
+        scd_mdio_note(t_start, 1);
         return -1;
     }
     scd_wr(base + MDIO_CS, cs_def | (1u << 30));
     resp = scd_rd(base + MDIO_RESP);
     if (((resp >> 31) & 1) != 1 || ((resp >> 30) & 1) != 0) {
+        scd_mdio_note(t_start, 1);
         return -1;
     }
+    scd_mdio_note(t_start, 0);
     return (int)(resp & 0xffff);
 }
 
@@ -741,6 +775,9 @@ static struct fib_nh fib_nhs[FIB_MAX_NH];
 static struct fib_rt fib_rts[FIB_MAX_ROUTES];
 static int  fib_unit;
 static long fib_routes_added, fib_nh_added, fib_errors, fib_pending;
+/* Resolved once at start. Addresses on this interface are terminated in the
+ * chip even though it is not a front port -- see fib_handle(). */
+static int  fib_lo_ifindex;
 static long fib_routes_deleted;   /* withdrawals actually removed from the chip */
 static long fib_hosts_added;
 static pthread_t fib_thread;
@@ -1026,14 +1063,31 @@ static void fib_handle(struct nlmsghdr *nh)
         struct rtattr *rta = (struct rtattr *)((char *)ifa + NLMSG_ALIGN(sizeof *ifa));
         int len = nh->nlmsg_len - NLMSG_LENGTH(sizeof *ifa);
 
-        if (ifa->ifa_family != AF_INET ||
-            fib_intf_by_ifindex(ifa->ifa_index) == NULL) {
+        /* ⚠ This used to accept an address ONLY if it sat on a routed front
+         * port, which silently excluded the LOOPBACK -- and a loopback is
+         * exactly the address you most want terminated in hardware, because it
+         * is the router-id and the one address that survives a link flap.
+         *
+         * The symptom was subtle: the loopback pinged fine locally (that is the
+         * kernel talking to itself) and OSPF advertised it correctly, so
+         * neighbours installed a route to it -- and every packet they sent
+         * arrived at the chip, found no host entry telling it to punt, and was
+         * dropped in silicon. Reachable everywhere except from the network. */
+        if (ifa->ifa_family != AF_INET) {
+            return;
+        }
+        if (fib_intf_by_ifindex(ifa->ifa_index) == NULL &&
+            (int)ifa->ifa_index != fib_lo_ifindex) {
             return;
         }
         for (; RTA_OK(rta, len); rta = RTA_NEXT(rta, len)) {
             if (rta->rta_type == IFA_LOCAL || rta->rta_type == IFA_ADDRESS) {
                 uint32_t a = 0;
                 sal_memcpy(&a, RTA_DATA(rta), 4);
+                /* 127.0.0.0/8 is the kernel's own business, not the chip's. */
+                if ((ntohl(a) >> 24) == 127) {
+                    return;
+                }
                 fib_local_addr_add(a);
                 return;
             }
@@ -1175,6 +1229,14 @@ static int fib_start(int unit)
     struct sockaddr_nl sa;
 
     fib_unit = unit;
+
+    /* The loopback. Its addresses are terminated in the chip like a routed
+     * port's, because the router-id lives there and neighbours will route to
+     * it. Resolved by name rather than assuming ifindex 1. */
+    fib_lo_ifindex = (int)if_nametoindex("lo");
+    printf("  loopback: ifindex %d (its addresses terminate in hardware)\n",
+           fib_lo_ifindex);
+
     /* Resolve every routed port's tap ifindex so netlink events can be matched
      * to the interface they belong to. */
     {
@@ -1253,11 +1315,16 @@ static int fib_start(int unit)
  *
  *   SDKPOC_TAP=61        one tap for port 61, named xe60
  *   SDKPOC_TAP=48,61     several
+ *   SDKPOC_TAP=1-61      a range -- every front-panel port on this board
+ *   SDKPOC_TAP=1-48,61   ranges and singles mixed
  *
  * The interface is named for the SDK port (xe<port-1>) so it lines up with
  * `ps` and with EOS's numbering.
  */
-#define MAX_TAPS 8
+/* One per front-panel port. This board presents 61: 48 RJ45 plus the four QSFP
+ * cages, three broken out as 4x10G and one as 40G. It was 8, which silently
+ * dropped everything after the eighth port. */
+#define MAX_TAPS 64
 
 struct tap_port {
     int   fd;
@@ -1447,6 +1514,428 @@ static bcm_rx_t sdkpoc_rx_cb(int unit, bcm_pkt_t *pkt, void *cookie)
  * cold init, so without batching, every command would cost a chip reset and
  * nothing could be sequenced. Used by both SDKPOC_CMD (before port bring-up)
  * and SDKPOC_POSTCMD (after it). */
+
+/*
+ * BCM84848 front-panel LEDs.
+ *
+ * The 48 RJ45 ports on this box light from the PHY, not from anywhere we had
+ * been looking. Three mechanisms were candidates and two are now ruled out by
+ * measurement rather than by argument:
+ *
+ *  - NOT the SCD. Arista's own board description creates exactly six LED
+ *    blocks -- FlashRate1, Status1 (plus the blue beacon), MultiFan1,
+ *    PowerSupply1-2 -- and then 16 link LEDs for the four QSFP ports at
+ *    0xA000. There is no block for Ethernet1..48.
+ *  - NOT the switch chip's LED processors. CMIC_LEDUP0/1 read LEDUP_EN=0 and
+ *    LEDUP_RUNNING=0 on this box, and byte-identical values appear in the
+ *    EOS-time register dump -- so they are reset defaults that EOS never
+ *    turned on either.
+ *
+ * That leaves the BCM84848's own LED outputs, which are driven by the PHY's
+ * firmware and configured through its top-level command interface. Two things
+ * then explain a dark panel exactly:
+ *
+ *  1. _phy_8481_halt (phy8481.c:6367-6404) parks the LED control block at
+ *     0xa82c-0xa83d before halting the ARM core for the MDIO firmware
+ *     download, and phy_ext_rom_boot=0 means that download always happens.
+ *     Nothing in the SDK ever writes that block again.
+ *  2. The SDK's own LED entry points, _phy_848xx_led_type_get/set
+ *     (phy8481.c:8910,8931), are declared, defined, and called from nowhere.
+ *     They are a hook left for the platform vendor. EOS calls the equivalent
+ *     out of Strata; we called nothing at all.
+ *
+ * So this is the piece the SDK deliberately leaves to us. The handshake
+ * itself is the SDK's -- _phy84834_top_level_cmd_{set,get}_v2 are non-static
+ * (phy8481.c:616-617) despite the commented-out STATIC, so we drive the
+ * vendor's own protocol rather than reimplementing a scratch-register dance.
+ */
+extern int _phy84834_top_level_cmd_set_v2(int unit, phy_ctrl_t *pc,
+                                          uint16 cmd, uint16 arg[], int size);
+extern int _phy84834_top_level_cmd_get_v2(int unit, phy_ctrl_t *pc,
+                                          uint16 cmd, uint16 arg[], int size);
+
+/* phy8481.h:2129-2130 */
+#define PHY848XX_CMD_GET_LED_TYPE  0x8021
+#define PHY848XX_CMD_SET_LED_TYPE  0x8022
+
+/* The get handshake waits up to 7 s for the firmware to be ready for a
+ * command (phy8481.c:2843). Across 48 ports a wedged PHY would hold the
+ * command FIFO for five minutes, so give up on the sweep once the failures
+ * stop looking like one bad port. */
+#define PHYLED_MAX_FAILS  3
+
+static int phyled_one(int unit, int port, int set, int type, int mode,
+                      int *typep, int *modep)
+{
+    phy_ctrl_t *pc = EXT_PHY_SW_STATE(unit, port);
+    uint16 args[5];
+    int rv;
+
+    if (pc == NULL) {
+        return SOC_E_NOT_FOUND;      /* no external PHY: QSFP or unused */
+    }
+
+    sal_memset(args, 0, sizeof args);
+    if (set) {
+        args[0] = (uint16)type;
+        args[1] = (uint16)mode;
+        rv = _phy84834_top_level_cmd_set_v2(unit, pc, PHY848XX_CMD_SET_LED_TYPE,
+                                            args, 2);
+    } else {
+        rv = _phy84834_top_level_cmd_get_v2(unit, pc, PHY848XX_CMD_GET_LED_TYPE,
+                                            args, 2);
+        if (SOC_SUCCESS(rv)) {
+            if (typep != NULL) *typep = args[0];
+            if (modep != NULL) *modep = args[1];
+        }
+    }
+    return rv;
+}
+
+/*
+ *   phyled                    read the LED type from every PHY
+ *   phyled <port>             read one
+ *   phyled set <type> [mode]  write every PHY
+ *   phyled set <port> <type> [mode]
+ *
+ * Read first. Nothing here knows what the type values mean -- that mapping is
+ * in the PHY firmware and not in any document we have -- so the honest first
+ * move is to ask 48 PHYs what they currently think and see whether they all
+ * agree.
+ */
+static int phyled_fix_one(int unit, int port);
+static void phyled_fix_all(int unit);
+
+static void phyled_cmd(int unit, char *args)
+{
+    int set = 0, port = -1, type = 0, mode = 0;
+    int fails = 0, ok = 0, skipped = 0;
+    char *tok;
+
+    tok = strtok(args, " \t");
+    if (tok != NULL && !strcmp(tok, "fix")) {
+        tok = strtok(NULL, " \t");
+        if (tok != NULL) {
+            int p = (int)strtol(tok, NULL, 0);
+            int rv = phyled_fix_one(unit, p);
+            printf("  phyled fix: port %d %s\n", p,
+                   SOC_SUCCESS(rv) ? "ok" : soc_errmsg(rv));
+            fflush(stdout);
+        } else {
+            phyled_fix_all(unit);
+        }
+        return;
+    }
+    if (tok != NULL && !strcmp(tok, "set")) {
+        set = 1;
+        tok = strtok(NULL, " \t");
+    }
+    if (tok != NULL) {
+        long v = strtol(tok, NULL, 0);
+        char *next = strtok(NULL, " \t");
+        if (set && next == NULL) {
+            type = (int)v;                    /* "set <type>" -- all ports */
+        } else {
+            port = (int)v;                    /* "<port> ..." */
+            if (set) {
+                if (next == NULL) {
+                    printf("  phyled: set <port> needs a type\n");
+                    fflush(stdout);
+                    return;
+                }
+                type = (int)strtol(next, NULL, 0);
+                next = strtok(NULL, " \t");
+            }
+        }
+        if (set && next != NULL) {
+            mode = (int)strtol(next, NULL, 0);
+        }
+    } else if (set) {
+        printf("  phyled: set needs a type\n");
+        fflush(stdout);
+        return;
+    }
+
+    for (int p = (port >= 0 ? port : 1); p <= (port >= 0 ? port : 64); p++) {
+        int t = -1, m = -1, rv;
+
+        rv = phyled_one(unit, p, set, type, mode, &t, &m);
+        if (rv == SOC_E_NOT_FOUND) {
+            skipped++;
+            continue;
+        }
+        if (SOC_FAILURE(rv)) {
+            printf("  port %2d: %s failed (%s)\n", p, set ? "set" : "get",
+                   soc_errmsg(rv));
+            if (++fails >= PHYLED_MAX_FAILS && port < 0) {
+                printf("  ** %d failures, stopping the sweep\n", fails);
+                break;
+            }
+            continue;
+        }
+        ok++;
+        if (set) {
+            printf("  port %2d: led type <- %d mode %d\n", p, type, mode);
+        } else {
+            printf("  port %2d: led type %d mode %d\n", p, t, m);
+        }
+    }
+    printf("  phyled: %d ok, %d failed, %d without an external PHY\n",
+           ok, fails, skipped);
+    fflush(stdout);
+}
+
+/* Clause-45 register access straight through the PHY driver's own accessors.
+ *
+ * The diag shell's "phy raw c45" cannot see these parts -- it returns 0xffff
+ * for everything, including the PMA/PMD ID at 1.2/1.3 that "phy info" reads
+ * correctly as 600d/84f9, because raw goes at the switch chip's internal MIIM
+ * controller and Arista hangs the copper PHYs off the SCD's three MDIO
+ * accelerators instead. pc->read/pc->write are the pointers the driver itself
+ * uses, so they land on the same bus our shim serves.
+ *
+ * Address encoding is the SDK's: devad in bits 21:16, regad in 15:0
+ * (shared/phyreg.h:37).
+ */
+#define C45_ADDR(_devad, _reg)  ((((uint32)(_devad) & 0x3f) << 16) | \
+                                 ((uint32)(_reg) & 0xffff))
+
+static int phyreg_rd(int unit, int port, int devad, int reg, uint16 *val)
+{
+    phy_ctrl_t *pc = EXT_PHY_SW_STATE(unit, port);
+
+    if (pc == NULL || pc->read == NULL) {
+        return SOC_E_NOT_FOUND;
+    }
+    return pc->read(unit, pc->phy_id, C45_ADDR(devad, reg), val);
+}
+
+static int phyreg_wr(int unit, int port, int devad, int reg, uint16 val)
+{
+    phy_ctrl_t *pc = EXT_PHY_SW_STATE(unit, port);
+
+    if (pc == NULL || pc->write == NULL) {
+        return SOC_E_NOT_FOUND;
+    }
+    return pc->write(unit, pc->phy_id, C45_ADDR(devad, reg), val);
+}
+
+/*   phyreg <port> <devad> <reg> [value]
+ *   phyreg dump <port>            the LED control block, 0xa82c-0xa83d
+ */
+static void phyreg_cmd(int unit, char *args)
+{
+    char *tok = strtok(args, " \t");
+    int port, devad, reg;
+    uint16 val;
+    int rv;
+
+    if (tok == NULL) {
+        printf("  usage: phyreg <port> <devad> <reg> [value] | phyreg dump <port>\n");
+        fflush(stdout);
+        return;
+    }
+
+    if (!strcmp(tok, "dump")) {
+        tok = strtok(NULL, " \t");
+        port = tok ? (int)strtol(tok, NULL, 0) : 1;
+        printf("  port %d LED control block:\n", port);
+        for (reg = 0xa82c; reg <= 0xa83d; reg++) {
+            rv = phyreg_rd(unit, port, 1, reg, &val);
+            if (SOC_FAILURE(rv)) {
+                printf("    0x%04x: read failed (%s)\n", reg, soc_errmsg(rv));
+                break;
+            }
+            printf("    0x%04x: 0x%04x\n", reg, val);
+        }
+        fflush(stdout);
+        return;
+    }
+
+    port = (int)strtol(tok, NULL, 0);
+    tok = strtok(NULL, " \t");
+    if (tok == NULL) { printf("  phyreg: need a devad\n"); fflush(stdout); return; }
+    devad = (int)strtol(tok, NULL, 0);
+    tok = strtok(NULL, " \t");
+    if (tok == NULL) { printf("  phyreg: need a register\n"); fflush(stdout); return; }
+    reg = (int)strtol(tok, NULL, 0);
+    tok = strtok(NULL, " \t");
+
+    if (tok != NULL) {
+        val = (uint16)strtol(tok, NULL, 0);
+        rv = phyreg_wr(unit, port, devad, reg, val);
+        printf("  port %d %d.0x%04x <- 0x%04x: %s\n", port, devad, reg, val,
+               SOC_SUCCESS(rv) ? "ok" : soc_errmsg(rv));
+    } else {
+        rv = phyreg_rd(unit, port, devad, reg, &val);
+        if (SOC_SUCCESS(rv)) {
+            printf("  port %d %d.0x%04x = 0x%04x\n", port, devad, reg, val);
+        } else {
+            printf("  port %d %d.0x%04x: %s\n", port, devad, reg, soc_errmsg(rv));
+        }
+    }
+    fflush(stdout);
+}
+
+/* The four registers EOS programs and the SDK does not.
+ *
+ * Read off this same silicon, under EOS, with the panel lit -- not derived and
+ * not guessed. `platform trident diag phy xe45 0x<reg> 1` on this 7050TX-64
+ * running EOS 4.14 gives:
+ *
+ *        reg      EdgeNOS   EOS xe0 (dark)   EOS xe45 (linked)
+ *        0xa82c   0x0008    0x0020           0x0020
+ *        0xa82f   0x0010    0x0020           0x0020
+ *        0xa835   0x0040    0x0020           0x0020
+ *        0xa83b   0x0400    0x4924           0x4922
+ *
+ * The first three read the same on a linked and an unlinked port, so they are
+ * configuration. 0xa83b is configuration in its upper bits and state in its
+ * low ones -- 0x4924 with no link, 0x4922 with link -- so write the no-link
+ * form and let the firmware drive the rest.
+ *
+ * ⚠ Apply the whole set, never a subset. The SDK default and EOS's config
+ * disagree about which register even carries the LED mask: on the default
+ * 0xa83c tracks link and 0xa83b is frozen, and under EOS it is the exact
+ * reverse. An earlier attempt to force LEDs on by writing masks into 0xa83c
+ * lit nothing at all, for exactly that reason.
+ */
+static const struct { int reg; uint16 val; } LED_CFG[] = {
+    { 0xa82c, 0x0020 },
+    { 0xa82f, 0x0020 },
+    { 0xa835, 0x0020 },
+};
+
+/* 0xa83b is five 3-bit LED mode fields, and it is the drive.
+ *
+ * Established by writing it and looking at the panel, which is the only way
+ * any of this got settled:
+ *
+ *   mode 0  the SDK's default for most fields -- dark
+ *   mode 2  LIT. All five fields set to 2 (0x2492) lights the port.
+ *   mode 3  what _phy_8481_halt writes to all five (0xb6db) -- the parked state
+ *   mode 4  what EOS sets, and dark on our box
+ *
+ * EOS holds all five at 4 and its firmware rewrites field 0 to 2 when the port
+ * gains link: 0x4924 down, 0x4922 up. Ours never rewrites anything, because
+ * mode 4 means "let the firmware drive it" and our firmware does not. That is
+ * the whole fault -- not the configuration, which we now match exactly, but
+ * that nothing was ever going to write this register.
+ *
+ * So we write it ourselves, from linkscan, using EOS's own two values. The
+ * other four fields stay at 4: they are the LEDs EOS's firmware drives for
+ * activity and speed, and we have no honest source for those. Leaving them at
+ * 4 keeps them dark rather than lighting them with something invented.
+ */
+#define LED_A83B_LINK_UP    0x4922
+#define LED_A83B_LINK_DOWN  0x4924
+
+static void phyled_link_set(int unit, int port, int up)
+{
+    if (EXT_PHY_SW_STATE(unit, port) == NULL) {
+        return;                       /* QSFP: the SCD drives those, via platmon */
+    }
+    (void)phyreg_wr(unit, port, 1, 0xa83b,
+                    up ? LED_A83B_LINK_UP : LED_A83B_LINK_DOWN);
+}
+
+/* Runs on the linkscan thread, which already does MDIO through the same shim. */
+static void led_linkscan_cb(int unit, bcm_port_t port, bcm_port_info_t *info)
+{
+    int speed = 0;
+
+    if (info == NULL || info->linkstatus != BCM_PORT_LINK_STATUS_UP) {
+        phyled_link_set(unit, port, 0);
+        return;
+    }
+    /* See the sync thread: link without speed is not link on this platform. */
+    if (bcm_port_speed_get(unit, port, &speed) != BCM_E_NONE || speed <= 0) {
+        phyled_link_set(unit, port, 0);
+        return;
+    }
+    phyled_link_set(unit, port, 1);
+}
+
+static int phyled_fix_one(int unit, int port)
+{
+    size_t i;
+    int rv;
+
+    if (EXT_PHY_SW_STATE(unit, port) == NULL) {
+        return SOC_E_NOT_FOUND;      /* QSFP or unused: no external PHY */
+    }
+    for (i = 0; i < sizeof LED_CFG / sizeof LED_CFG[0]; i++) {
+        rv = phyreg_wr(unit, port, 1, LED_CFG[i].reg, LED_CFG[i].val);
+        if (SOC_FAILURE(rv)) {
+            return rv;
+        }
+    }
+
+    /* Start dark. Seeding from bcm_port_link_status_get here reads UP on ports
+     * with nothing plugged in -- this runs before linkscan has settled, and an
+     * LED that is wrong is worse than one that is late. The sync thread turns
+     * on whatever is genuinely up, within a couple of seconds. */
+    phyled_link_set(unit, port, 0);
+    return SOC_E_NONE;
+}
+
+/* Reconcile every port's LED with its link, forever.
+ *
+ * A linkscan callback alone is not enough: it reports CHANGES, so a port that
+ * is already up when we register never generates one and would stay dark until
+ * it flapped. Polling the cached link state costs nothing -- HW linkscan keeps
+ * it in software, no MDIO -- and we only write the PHY when our own view
+ * changes, so the steady state is silent. It is also self-healing, which a
+ * callback is not: one missed event does not leave an LED lying indefinitely. */
+static void *phyled_sync_thread(void *arg)
+{
+    int unit = (int)(intptr_t)arg;
+    signed char last[65];
+    int p;
+
+    memset(last, -1, sizeof last);
+    for (;;) {
+        for (p = 1; p <= 64; p++) {
+            int link = 0, speed = 0, up;
+            if (EXT_PHY_SW_STATE(unit, p) == NULL) continue;
+            if (bcm_port_link_status_get(unit, p, &link) != BCM_E_NONE) continue;
+            /* ⚠ A link with no speed is not a link -- the same trap the routed
+             * port loop documents below. With the BCM84848 driver loaded every
+             * unconnected copper port reports "Link Up with Speed 0M!", so
+             * link status ALONE lights all 48 LEDs with nothing plugged in.
+             * That is exactly what it did on the first attempt. */
+            if (bcm_port_speed_get(unit, p, &speed) != BCM_E_NONE) speed = 0;
+            up = (link == BCM_PORT_LINK_STATUS_UP && speed > 0) ? 1 : 0;
+            if (up != last[p]) {
+                phyled_link_set(unit, p, up);
+                last[p] = (signed char)up;
+            }
+        }
+        sal_sleep(2);
+    }
+    return NULL;
+}
+
+static void phyled_fix_all(int unit)
+{
+    int p, ok = 0, failed = 0;
+
+    for (p = 1; p <= 64; p++) {
+        int rv = phyled_fix_one(unit, p);
+        if (rv == SOC_E_NOT_FOUND) continue;
+        if (SOC_FAILURE(rv)) {
+            if (failed < 3) {
+                printf("  phyled fix: port %d failed (%s)\n", p, soc_errmsg(rv));
+            }
+            failed++;
+            continue;
+        }
+        ok++;
+    }
+    printf("  phyled fix: LED config applied to %d PHYs, %d failed\n", ok, failed);
+    fflush(stdout);
+}
+
 static void run_diag_cmds(int unit, const char *list)
 {
     char buf[4096];
@@ -1952,23 +2441,179 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* The EOS PCS-replay path has been REMOVED on this branch.
+    /* ---- replay EOS's PCS write sequence -------------------------------
      *
-     * The reverse-engineering repo carries a table of 63 PCS register writes
-     * captured from EOS, replayable with SDKPOC_PCSSEQ. It is a faithful,
-     * verified-executable capture and it was useful as an instrument -- but it
-     * is EOS-derived material, and keeping it here would mean this platform
-     * could never be published as our own work.
+     * The 63 writes below are EOS's own, captured on this board by hooking
+     * soc_miim_write / soc_esw_miim_write in tools/stratatrace.c and issuing
+     * shutdown / no shutdown on Ethernet52/1. They are transcribed verbatim
+     * from /mnt/flash/pcs-writes.txt, in order, repeats included --
+     * docs/EOS-PCS-WRITE-SEQUENCE.md has the full listing and the analysis.
      *
-     * Deleting it costs nothing, and that is not an assumption: a control run
-     * with SDKPOC_PCSSEQ unset reaches link=1 exactly the same, and in the
-     * replay run the PCS oracle at 0xc137 already read 0x0001 BEFORE the 63
-     * writes were issued -- the link had come up during the ordinary
-     * bcm_port_* sequence. The replay was never the cause.
+     * Nothing here is invented or interpolated. The shape is a
+     * hold -> configure -> release that our bcm_port_* bring-up never
+     * performs: 0xc010.0x17 = 0xa000 per lane and 0xc010.0x1a = 1 to hold,
+     * the 0xc100/0xc110/0xc130/0xc180 config on lane 6, then
+     * 0xc010.0x17 = 0x2000, 0xc010.0x1a = 0 and 0xc100.0x10 = 0x4021 to
+     * release.
      *
-     * The capture stays in the private research repo as evidence. It does not
-     * belong in the platform. */
+     * We replay through soc_esw_miim_write because that is the exact layer
+     * the trace was taken at -- bcm_port_phy_get was tried first and was
+     * demonstrably not decoding the register address (it returned identical
+     * values for different addresses), so the bcm_port_phy_set counterpart
+     * is not trustworthy for this.
+     *
+     * ⚠ TWO ASSUMPTIONS, both stated rather than hidden:
+     *
+     *   1. Registers 0x1e (lane/AER) and 0x1f (block) are pure selectors with
+     *      no side effects, so re-emitting them before every data write is
+     *      equivalent to EOS's behaviour of writing them only when they
+     *      change. The capture collapsed them out, so this cannot be read
+     *      back off the trace.
+     *   2. No inter-phase delay or poll-until-ready is needed. The trace has
+     *      1,133 MIIMR reads interleaved with these writes that have NOT been
+     *      correlated, so if EOS waits on a status bit somewhere in here, we
+     *      do not yet know where. If the replay fails this is the first thing
+     *      to go and look at.
+     *
+     * This writes to one port's SerDes only. Worst case that port stays down;
+     * re-running init or a reboot restores it. It is not a blind sweep -- every
+     * value is one EOS itself writes to this exact chip.
+     *
+     *   SDKPOC_PCSSEQ=1                 replay, then read the 0xc137 oracle
+     *   SDKPOC_PCSSEQ_PHY=0x1a1         override the phy_id
+     *   SDKPOC_PCSSEQ_DRYRUN=1          print the writes, issue none
+     */
+    if (getenv("SDKPOC_PCSSEQ")) {
+        static const struct { uint16 blk; uint8 lane; uint8 reg; uint16 val; }
+        pcsseq[] = {
+            { 0xc180, 6, 0x10, 0x4000 },
+            { 0xc130, 6, 0x18, 0x000d },
+            { 0xc100, 6, 0x14, 0x0000 },
+            { 0xc100, 6, 0x10, 0x0021 },
+            { 0xc100, 6, 0x14, 0x0000 },
+            { 0xc100, 6, 0x10, 0x0000 },
+            { 0xc110, 6, 0x13, 0xc1c8 },
+            { 0xc110, 6, 0x13, 0xc1c8 },
+            { 0xc010, 0, 0x17, 0xa000 },
+            { 0xc010, 1, 0x17, 0xa000 },
+            { 0xc010, 2, 0x17, 0xa000 },
+            { 0xc010, 3, 0x17, 0xa000 },
+            { 0xc010, 6, 0x1a, 0x0001 },
+            { 0xc130, 6, 0x17, 0x0000 },
+            { 0xc100, 6, 0x10, 0x0021 },
+            { 0xc100, 6, 0x11, 0x9800 },
+            { 0xc100, 6, 0x12, 0x0040 },
+            { 0xc100, 6, 0x13, 0x0001 },
+            { 0xc100, 6, 0x14, 0x0000 },
+            { 0xc100, 6, 0x15, 0x0000 },
+            { 0xc100, 6, 0x10, 0x0021 },
+            { 0xc110, 6, 0x11, 0x0010 },
+            { 0xc110, 6, 0x13, 0xc1c8 },
+            { 0xc110, 6, 0x14, 0x0000 },
+            { 0xc130, 6, 0x10, 0x33c0 },
+            { 0xc130, 6, 0x16, 0x0004 },
+            { 0xc130, 6, 0x14, 0x2072 },
+            { 0xc130, 6, 0x11, 0x0000 },
+            { 0xc110, 6, 0x13, 0xc1c8 },
+            { 0xc130, 6, 0x14, 0x2072 },
+            { 0xc010, 0, 0x17, 0xa000 },
+            { 0xc010, 0, 0x17, 0xa000 },
+            { 0xc010, 0, 0x17, 0xa000 },
+            { 0xc010, 1, 0x17, 0xa000 },
+            { 0xc010, 1, 0x17, 0xa000 },
+            { 0xc010, 1, 0x17, 0xa000 },
+            { 0xc010, 2, 0x17, 0xa000 },
+            { 0xc010, 2, 0x17, 0xa000 },
+            { 0xc010, 2, 0x17, 0xa000 },
+            { 0xc010, 3, 0x17, 0xa000 },
+            { 0xc010, 3, 0x17, 0xa000 },
+            { 0xc010, 3, 0x17, 0xa000 },
+            { 0xc180, 6, 0x18, 0x0000 },
+            { 0xc110, 6, 0x13, 0xc1ca },
+            { 0xc110, 6, 0x13, 0xc1cb },
+            { 0xc100, 6, 0x10, 0x4021 },
+            { 0xc010, 0, 0x17, 0xa000 },
+            { 0xc010, 1, 0x17, 0xa000 },
+            { 0xc010, 2, 0x17, 0xa000 },
+            { 0xc010, 3, 0x17, 0xa000 },
+            { 0xc010, 0, 0x17, 0xa000 },
+            { 0xc010, 1, 0x17, 0xa000 },
+            { 0xc010, 2, 0x17, 0xa000 },
+            { 0xc010, 3, 0x17, 0xa000 },
+            { 0xc130, 6, 0x18, 0x0009 },
+            { 0xc010, 6, 0x1a, 0x0000 },
+            { 0xc010, 0, 0x17, 0x2000 },
+            { 0xc010, 1, 0x17, 0x2000 },
+            { 0xc010, 2, 0x17, 0x2000 },
+            { 0xc010, 3, 0x17, 0x2000 },
+            { 0xc110, 6, 0x13, 0xc1cb },
+            { 0xc110, 6, 0x13, 0xc1cb },
+            { 0xc100, 6, 0x10, 0x4021 },
+        };
+        const int nseq = (int)(sizeof pcsseq / sizeof pcsseq[0]);
+        uint32 phy = 0x1a1;   /* what the SDK passes for xe60 on this board */
+        int dry = getenv("SDKPOC_PCSSEQ_DRYRUN") != NULL;
+        uint16 before = 0, after = 0;
+        int i, prv, nerr = 0;
 
+        if (getenv("SDKPOC_PCSSEQ_PHY")) {
+            phy = (uint32)strtoul(getenv("SDKPOC_PCSSEQ_PHY"), NULL, 0);
+        }
+
+        STEP("5h. replay EOS's PCS write sequence");
+        printf("  phy_id 0x%x, %d writes%s\n", phy, nseq,
+               dry ? "  (DRY RUN -- nothing is issued)" : "");
+
+        /* The oracle. 0xc137 is block 0xc130 offset 0x17; EOS writes 0 to it
+         * during configure and never again, so a 1 here is the hardware
+         * reporting PCS lock. Read it the same three-step way EOS does. */
+        if (!dry) {
+            (void)soc_esw_miim_write(unit, phy, 0x1e, 6);
+            (void)soc_esw_miim_write(unit, phy, 0x1f, 0xc130);
+            prv = soc_esw_miim_read(unit, phy, 0x17, &before);
+            printf("  0xc137 before = 0x%04x (rv=%d)\n", before, prv);
+        }
+
+        for (i = 0; i < nseq; i++) {
+            if (dry) {
+                printf("    [%2d] lane %d  blk 0x%04x  reg 0x%02x = 0x%04x\n",
+                       i, pcsseq[i].lane, pcsseq[i].blk,
+                       pcsseq[i].reg, pcsseq[i].val);
+                continue;
+            }
+            prv = soc_esw_miim_write(unit, phy, 0x1e, pcsseq[i].lane);
+            if (prv >= 0) {
+                prv = soc_esw_miim_write(unit, phy, 0x1f, pcsseq[i].blk);
+            }
+            if (prv >= 0) {
+                prv = soc_esw_miim_write(unit, phy, pcsseq[i].reg,
+                                         pcsseq[i].val);
+            }
+            if (prv < 0) {
+                printf("    [%2d] lane %d blk 0x%04x reg 0x%02x = 0x%04x"
+                       "  ERROR rv=%d\n", i, pcsseq[i].lane, pcsseq[i].blk,
+                       pcsseq[i].reg, pcsseq[i].val, prv);
+                nerr++;
+            }
+        }
+
+        if (!dry) {
+            printf("  %d writes issued, %d errors\n", nseq * 3, nerr);
+            sal_sleep(3);
+            (void)soc_esw_miim_write(unit, phy, 0x1e, 6);
+            (void)soc_esw_miim_write(unit, phy, 0x1f, 0xc130);
+            prv = soc_esw_miim_read(unit, phy, 0x17, &after);
+            printf("  0xc137 after  = 0x%04x (rv=%d)%s\n", after, prv,
+                   (after & 1) ? "   <- PCS LOCK" : "   <- still no PCS lock");
+
+            if (getenv("SDKPOC_PORTUP")) {
+                int link = -1, p = atoi(getenv("SDKPOC_PORTUP"));
+                prv = bcm_port_link_status_get(unit, p, &link);
+                printf("  bcm_port_link_status_get  rv=%d  link=%d\n",
+                       prv, link);
+            }
+        }
+    }
 
     /* ---- TSC register reads -------------------------------------------
      *
@@ -2035,18 +2680,43 @@ int main(int argc, char *argv[])
      * After RX is registered (the callback feeds them) and before port mode,
      * so a routed port already has its netdev when addresses are assigned. */
     if (getenv("SDKPOC_TAP")) {
-        char buf[128];
+        /* ⚠ This buffer was 128 bytes, which is smaller than a list of all 61
+         * ports (~230 chars). Asking for every port would have been TRUNCATED
+         * mid-number and silently given a partial set. Ranges exist so the
+         * common case is short, and the buffer is now big enough for the long
+         * one either way. */
+        char buf[512];
         char *p2, *next;
 
         STEP("5l. tap interfaces (Linux netdev per ASIC port)");
         sal_snprintf(buf, sizeof buf, "%s", getenv("SDKPOC_TAP"));
         for (p2 = buf; p2 != NULL; p2 = next) {
+            char *dash;
             next = strchr(p2, ',');
             if (next != NULL) {
                 *next++ = '\0';
             }
             while (*p2 == ' ') p2++;
-            if (*p2 != '\0') {
+            if (*p2 == '\0') {
+                continue;
+            }
+            /* "a-b" is an inclusive range; anything else is a single port. */
+            dash = strchr(p2, '-');
+            if (dash != NULL) {
+                int lo, hi, port;
+                *dash = '\0';
+                lo = atoi(p2);
+                hi = atoi(dash + 1);
+                if (lo > 0 && hi >= lo) {
+                    for (port = lo; port <= hi; port++) {
+                        if (tap_add(port) < 0) {
+                            printf("  ** stopped at port %d: no tap slots left "
+                                   "(MAX_TAPS=%d)\n", port, MAX_TAPS);
+                            break;
+                        }
+                    }
+                }
+            } else {
                 (void)tap_add(atoi(p2));
             }
         }
@@ -2389,6 +3059,22 @@ int main(int argc, char *argv[])
      * forward nothing, so counters before and after a tx are the evidence,
      * not `link=1`.
      */
+    /* The front-panel copper LEDs. The SDK never configures them and neither
+     * did we, which is the whole reason 48 ports sat dark while forwarding. */
+    if (getenv("SDKPOC_PHYBUS")) {
+        pthread_t led_tid;
+        int lrv = bcm_linkscan_register(unit, led_linkscan_cb);
+        printf("  phyled: linkscan handler rv=%d\n", lrv);
+        phyled_fix_all(unit);
+        if (pthread_create(&led_tid, NULL, phyled_sync_thread,
+                           (void *)(intptr_t)unit) == 0) {
+            pthread_detach(led_tid);
+            printf("  phyled: link sync thread started\n");
+        } else {
+            printf("  ** phyled: could not start the link sync thread\n");
+        }
+    }
+
     if (getenv("SDKPOC_POSTCMD")) {
         STEP("5i. diag shell, after port bring-up");
         /* Bracket the commands with the DMA counters. The totals alone cannot
@@ -2514,6 +3200,16 @@ int main(int argc, char *argv[])
                         printf("  quit requested\n");
                         running = 0;
                         break;
+                    }
+                    if (strncmp(line, "phyreg", 6) == 0 &&
+                        (line[6] == '\0' || line[6] == ' ')) {
+                        phyreg_cmd(unit, line + 6);
+                        continue;
+                    }
+                    if (strncmp(line, "phyled", 6) == 0 &&
+                        (line[6] == '\0' || line[6] == ' ')) {
+                        phyled_cmd(unit, line + 6);
+                        continue;
                     }
                     if (strcmp(line, "status") == 0) {
                         printf("  RX: %ld callbacks, %ld bytes\n",
