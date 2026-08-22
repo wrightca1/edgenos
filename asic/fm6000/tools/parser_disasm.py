@@ -115,26 +115,42 @@ def regs_report(w):
     print("   " + "  ".join("r%d/r%d" % p for p in pairs))
 
 
-# The window model, derived from the program and checked against it.
+# The key model, derived from the program and checked against it.
 #
-# The 64-bit CAM window is BIG-ENDIAN -- window byte 0 is the most significant
-# byte -- and at slice s it covers packet bytes [4s-4 .. 4s+3]. So the window
-# advances 4 bytes per slice and the four NEWLY arrived bytes are [4s .. 4s+3];
-# hw0 takes [4s, 4s+1] and hw1 takes [4s+2, 4s+3].
+# The 64-bit CAM key is BIG-ENDIAN (key byte 0 is the most significant) and is
+# NOT eight bytes of packet. It is four bytes of parser STATE followed by four
+# bytes of packet:
 #
-# This is not assumed. It was fixed by four rules that must hold simultaneously:
+#   key byte 0..3  =  State3, State2, State1, State0
+#   key byte 4..7  =  packet bytes [4s .. 4s+3]
 #
-#   slice 0 rule 6   care ..ff ff ff ff ff  key ..00 01 80 c2 00
+# so the parse advances 4 bytes per slice, hw0 takes [4s, 4s+1] and hw1 takes
+# [4s+2, 4s+3].
+#
+# The packet half is fixed by four rules that must hold simultaneously:
+#
+#   slice 0 rule 6   key bytes 4..7 = 01 80 c2 00
 #                    -> DMAC 01:80:c2 at packet bytes 0,1,2
-#   slice 3 rule 6   window bytes 4,5 = 08 00   -> EtherType at packet bytes 12,13
-#   slice 3 rule 9   window bytes 4,5 = 81 00   -> same position, C-VLAN
-#   slice 3 rule 5   window bytes 4,5 = 86 dd   -> same position, IPv6
+#   slice 3 rule 6   key bytes 4,5 = 08 00   -> EtherType at packet bytes 12,13
+#   slice 3 rule 9   key bytes 4,5 = 81 00   -> same position, C-VLAN
+#   slice 3 rule 5   key bytes 4,5 = 86 dd   -> same position, IPv6
 #
-# and corroborated by those same slice-3 rules caring for the HIGH NIBBLE of
-# window byte 6 with values 4 and 6 -- the IP version, at packet byte 14, which
-# is exactly where the L3 header begins.
-BASE_OFFSET = -4        # packet byte covered by window byte 0 at slice 0
-NEW_BYTES = 4           # bytes the window advances per slice
+# corroborated by those same slice-3 rules caring for the HIGH NIBBLE of key
+# byte 6 with values 4 and 6 -- the IP version, at packet byte 14, exactly where
+# the L3 header begins.
+#
+# The state half is fixed independently: PARSER_INIT_STATE is all zeros on all
+# 76 ports, and EVERY slice-0 rule cares for key byte 3 == 0x00 and for nothing
+# else in bytes 0..2 -- "state0 is still the initial state" -- while each sets a
+# DIFFERENT StateValue0 (0x03, 0x07, 0x05, 0x02, ...), dispatching on the
+# destination MAC into different states for the slices that follow.
+#
+# ⚠ An earlier version of this file described bytes 0..3 as packet bytes
+# [4s-4 .. 4s-1]. That was wrong: it would have made slice-3 rules care about
+# the middle of the source MAC, which is not what they are doing. The packet
+# mapping below is unaffected by the correction.
+STATE_BYTES = 4         # key bytes 0..3, holding State3..State0
+NEW_BYTES = 4           # packet bytes per slice, key bytes 4..7
 
 def offsets_report(w):
     """Map each extracted-field register to the packet byte offset it receives."""
@@ -231,7 +247,22 @@ def main():
             if fld(ram, "ShiftNextSlice"): acts.append("shift=%d" % fld(ram, "ShiftNextSlice"))
             if fld(ram, "Terminate"): acts.append("TERMINATE")
             elif fld(ram, "TerminateAllowed"): acts.append("term-ok")
-            print("  [%3d] key=%016x care=%016x | %s" % (e, key, care, "  ".join(acts) or "-"))
+            kb = [(key >> (8 * (7 - i))) & 0xff for i in range(8)]
+            cb = [(care >> (8 * (7 - i))) & 0xff for i in range(8)]
+            st = []
+            for i in range(STATE_BYTES):          # byte 0 is State3 .. byte 3 is State0
+                if cb[i]:
+                    st.append("st%d%s=%02x" % (STATE_BYTES - 1 - i,
+                                               "" if cb[i] == 0xff else "&%02x" % cb[i],
+                                               kb[i] & cb[i]))
+            pk = []
+            for i in range(STATE_BYTES, 8):
+                if cb[i]:
+                    pk.append("[%d]%s%02x" % (NEW_BYTES * s + i - STATE_BYTES,
+                                              "=" if cb[i] == 0xff else "&%02x=" % cb[i],
+                                              kb[i] & cb[i]))
+            print("  [%3d] when %-26s pkt %-30s | %s"
+                  % (e, " ".join(st) or "any", " ".join(pk) or "any", "  ".join(acts) or "-"))
             shown += 1
             if shown >= a.max:
                 print("  ... %d more" % (occ[s] - shown)); break

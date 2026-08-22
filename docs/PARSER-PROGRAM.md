@@ -148,27 +148,71 @@ Three readings are well supported:
 - **`r15` is the L3 dispatch field.** It is written by the rules matching IPv4, IPv6
   and ARP in near-equal numbers (22/20/20) — the EtherType demultiplex point.
 
-### The window model, and the Ethernet header solved
+### The key model, and the Ethernet header solved
 
-Those readings can be replaced by a derivation. The 64-bit CAM window is
-**big-endian** — window byte 0 is the most significant byte — and **at slice `s` it
-covers packet bytes `[4s-4 .. 4s+3]`**. The window therefore advances 4 bytes per
-slice, the four newly-arrived bytes are `[4s .. 4s+3]`, and `hw0` takes `[4s, 4s+1]`
-while `hw1` takes `[4s+2, 4s+3]`.
+Those readings can be replaced by a derivation. The 64-bit CAM key is **big-endian**
+(key byte 0 is the most significant) and is **not eight bytes of packet**. It is four
+bytes of parser state followed by four bytes of packet:
 
-This is fixed, not assumed. Four rules have to hold at once, and all four do:
+    key byte 0..3  =  State3, State2, State1, State0
+    key byte 4..7  =  packet bytes [4s .. 4s+3]
 
-    slice 0 rule 6   key ..00 01 80 c2 00  care ..ff ff ff ff ff
+so the parse advances 4 bytes per slice, `hw0` takes `[4s, 4s+1]` and `hw1` takes
+`[4s+2, 4s+3]`.
+
+The state half is fixed by two facts that agree. `PARSER_INIT_STATE` is **all zeros
+on all 76 ports**, and **every** slice-0 rule cares for key byte 3 `== 0x00` and for
+nothing else in bytes 0–2 — "state0 is still the initial state" — while each sets a
+*different* `StateValue0`, dispatching into different states for the slices that
+follow.
+
+The packet half is fixed by four rules that have to hold at once, and all four do:
+
+    slice 0 rule 6   key bytes 4..7 = 01 80 c2 00
                      -> DMAC 01:80:c2 at packet bytes 0,1,2
-    slice 3 rule 6   window bytes 4,5 = 08 00   -> EtherType at packet bytes 12,13
-    slice 3 rule 9   window bytes 4,5 = 81 00   -> same position, C-VLAN
-    slice 3 rule 5   window bytes 4,5 = 86 dd   -> same position, IPv6
+    slice 3 rule 6   key bytes 4,5 = 08 00   -> EtherType at packet bytes 12,13
+    slice 3 rule 9   key bytes 4,5 = 81 00   -> same position, C-VLAN
+    slice 3 rule 5   key bytes 4,5 = 86 dd   -> same position, IPv6
 
-and the same slice-3 rules independently care for the **high nibble of window byte
-6** with values `4` and `6` — the IP version, at packet byte 14, exactly where the L3
+and the same slice-3 rules independently care for the **high nibble of key byte 6**
+with values `4` and `6` — the IP version, at packet byte 14, exactly where the L3
 header begins.
 
-`parser_disasm.py --offsets` then resolves the entire Ethernet header, in order:
+⚠ **Correction.** An earlier version of this document described key bytes 0–3 as
+packet bytes `[4s-4 .. 4s-1]`. That was wrong, and testing it against deeper rules is
+what exposed it: it would have made the slice-3 rules care about the middle of the
+source MAC, which is not what they are doing. The packet mapping below is unaffected.
+
+With both halves known, the disassembler renders rules as conditions. Slice 0 is a
+complete destination-MAC classifier, in precedence order:
+
+    [  1] when st0=00  pkt any                          | hw0->r7 hw1->r6  st0=op1(0x03)
+    [  2] when st0=00  pkt [0]=00 [1]=00 [2]=de [3]=ad  | ...              st0=op1(0x07)
+    [  3] when st0=00  pkt [0]=00 [1]=00 [2]=00 [3]=00  | ...              st0=op1(0x06)
+    [  4] when st0=00  pkt [0]&01=01                    | ...              st0=op1(0x04)
+    [  5] when st0=00  pkt [0]=01 [1]=1b [2]=19 [3]=00  | ...              st0=op1(0x0b)
+    [  6] when st0=00  pkt [0]=01 [1]=80 [2]=c2 [3]=00  | ...              st0=op1(0x05)
+    [  7] when st0=00  pkt [0]=ff [1]=ff [2]=ff [3]=ff  | ...              st0=op1(0x02)
+
+Read in order: the PTP peer-delay group address, the IEEE reserved group address, an
+all-zero MAC, a `00:00:de:ad` sentinel, **the multicast bit alone** (`[0]&01`),
+broadcast, and a default. Every one of them captures the same two halfwords to
+`r7`/`r6` and differs only in the state it leaves behind. That is a classifier, and
+it is now readable as one.
+
+Slice 3 is the EtherType dispatch, guarded by the state slice 0 set:
+
+    [  5] when st3&20=20 st0&f0=10  pkt [12]=86 [13]=dd [14]&f0=60 | flags=0x300 shift=2
+    [  6] when st3&20=20 st0&f0=10  pkt [12]=08 [13]=00 [14]&f0=40 | flags=0x100 shift=2
+    [  7] when st3&20=20 st0&f0=10  pkt [12]=08 [13]=06            | flags=0x4000000
+    [  8] when st1&08=08 st0&f0=10  pkt [12]=88 [13]=a8            | st1=op1(0xf1) flags=0x8000
+    [  9] when st1&08=08 st0&f0=10  pkt [12]=81 [13]=00            | st1=op1(0xf1) flags=0x8000
+
+IPv6 and IPv4 each check the EtherType **and** the version nibble in the byte that
+follows it; ARP checks only the EtherType; both VLAN tags share a state guard and a
+flag.
+
+`parser_disasm.py --offsets` resolves the entire Ethernet header, in order:
 
     byte 0   DMAC[0:1]    r7
     byte 2   DMAC[2:3]    r6
