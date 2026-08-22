@@ -60,28 +60,34 @@ echo "=== EdgeNOS 7150 release $VERSION ($GITSHA) ==="
 # ---- 1. build every tool from tracked source -------------------------------
 echo "--- building tools from source ---"
 built=0
+# Names of the tools this run actually compiled. Staging uses THIS list and not
+# a glob of the payload directory, because the payload directory keeps binaries
+# from previous builds: when fm6000_l2arpre.c was deleted from the tree, its
+# stale binary still shipped in the image and still ran. An image must not
+# contain a tool whose source is gone.
+BUILT=""
 # standalone, single-file
 for t in fm6000_coldreplay fm6000_initsbus fm6000_memfill fm6000_fullreplay \
          fm6000_spico fm6000_mrl fm6000_ucode_dbg fm6000_i2c_bringup \
-         fm6000_safinit fm6000_cminit fm6000_sweepinit fm6000_l2finit fm6000_eplinit fm6000_ffuinit fm6000_l2linit fm6000_eplseq fm6000_l2arseq fm6000_l2arpre fm6000_mapperpre fm6000_mgmt2pre fm6000_tbl3init fm6000_crmdrop \
+         fm6000_safinit fm6000_cminit fm6000_sweepinit fm6000_l2finit fm6000_eplinit fm6000_ffuinit fm6000_l2linit fm6000_eplseq fm6000_l2arseq fm6000_mapperpre fm6000_mgmt2pre fm6000_tbl3init fm6000_crmdrop \
          fm6000_mgmt2init fm6000_sweeperinit fm6000_cmminit fm6000_monitorinit fm6000_statsarinit fm6000_eaclinit fm6000_laginit fm6000_glortinit \
          fm6000_l2arinit fm6000_parserinit fm6000_modinit fm6000_l3arinit fm6000_hashinit fm6000_mapperinit \
          fm6000_route fm6000_fibd fm6000_rport fm6000_bst fm6000_fibgen fm6000_lanelink fm6000_sbusdump \
          fm6000_wdog fm6000_sbus fm6000_ffubstinit fm6000_l3arslice1 fm6000_l3arslice4 fm6000_l3arslice3 fm6000_l3arslice2 fm6000_cmwm fm6000_l3artables fm6000_mapper fm6000_smalltables fm6000_cmrest fm6000_parserfields fm6000_esched fm6000_erl fm6000_modports fm6000_safmatrix; do
     [ -f "$A/$t.c" ] || continue
-    cc -O2 -I"$A" -o "$P/$t" "$A/$t.c" 2>/dev/null && built=$((built+1)) \
+    cc -O2 -I"$A" -o "$P/$t" "$A/$t.c" 2>/dev/null && { built=$((built+1)); BUILT="$BUILT $t"; } \
         || echo "    WARN: $t failed to build"
 done
 # multi-object (need the DMA/hw helpers)
 DEPS="$A/fpdma.c $A/fpdma_kmod.c $A/fm6000_hw.c"
 for t in fm6000_txinline fm6000_l3 fm6000_portd fm6000_rxdump; do
     [ -f "$A/$t.c" ] || continue
-    cc -O2 -I"$A" -o "$P/$t" "$A/$t.c" $DEPS 2>/dev/null && built=$((built+1)) \
+    cc -O2 -I"$A" -o "$P/$t" "$A/$t.c" $DEPS 2>/dev/null && { built=$((built+1)); BUILT="$BUILT $t"; } \
         || echo "    WARN: $t failed to build"
 done
 # payload-local helpers
 for t in fm6000reg fm6000load pcicfg scddump si5338 scdreg resettool kexec; do
-    [ -f "$P/$t.c" ] && { cc -O2 -o "$P/$t" "$P/$t.c" 2>/dev/null && built=$((built+1)); }
+    [ -f "$P/$t.c" ] && { cc -O2 -o "$P/$t" "$P/$t.c" 2>/dev/null && { built=$((built+1)); BUILT="$BUILT $t"; }; }
 done
 echo "    built $built tools"
 
@@ -116,8 +122,29 @@ done
 
 mkdir -p "$WORK/usr/bin" "$WORK/usr/lib/edgenos/platform"
 n=0
-for b in "$P"/fm6000_* "$P"/scdreg "$P"/resettool "$P"/kexec "$P"/pcicfg "$P"/scddump "$P"/si5338; do
+for t in $BUILT; do
+    b="$P/$t"
     [ -f "$b" ] && [ -x "$b" ] && { cp "$b" "$WORK/usr/bin/"; n=$((n+1)); }
+done
+# Anything sitting in payload/ that we did not just build is stale: name it, so
+# a deleted source cannot quietly keep shipping.
+for b in "$P"/fm6000_*; do
+    [ -f "$b" ] || continue
+    case " $BUILT " in *" $(basename "$b") "*) ;; *)
+        echo "    stale binary NOT staged: $(basename "$b") (no source in tree)" ;;
+    esac
+done
+# ...and prune the SAME thing out of the base initramfs we overlaid onto. Not
+# staging a stale binary is not enough on its own: the base image is a previous
+# release, so it already carries the tool, and the overlay leaves it in place.
+# fm6000_l2arpre survived exactly this way after its source was deleted.
+for b in "$WORK"/usr/bin/fm6000_*; do
+    [ -f "$b" ] || continue
+    _n="$(basename "$b")"
+    case " $BUILT " in *" $_n "*) continue ;; esac
+    [ -f "$A/$_n.c" ] && continue     # source exists but did not build: already warned
+    rm -f "$b"
+    echo "    pruned from base image: $_n (no source in tree)"
 done
 cp "$P"/*.sh "$WORK/usr/lib/edgenos/platform/" 2>/dev/null || true
 

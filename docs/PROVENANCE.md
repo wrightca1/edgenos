@@ -52,12 +52,23 @@ has that value** — which is the whole difference between authoring and copying
 |---|---:|---:|---|
 | **AUTHORED** | 7,532 | 10 | structure recovered and named; values follow from stated intent, or there are no value literals at all |
 | **TABLE** | 55,953 | 27 | our code decides where each entry goes, values are still the vendor's — defensible as configuration, and the weakest "keep" |
-| **RELOCATED** | **83,790** | **5** | **the file's own header says it REPLAYS a captured sequence. This is transcription.** |
+| **RELOCATED** | **58,364** | **4** | **the file's own header says it REPLAYS a captured sequence. This is transcription.** |
 
-### ⚠ The five files that are transcription
+### ⚠ The four files that are transcription
 
-`fm6000_l2arseq.c` (29,110), `fm6000_l2arpre.c` (25,426), `fm6000_eplseq.c`
-(22,051), `fm6000_mapperpre.c` (5,662), `fm6000_mgmt2pre.c` (1,541).
+`fm6000_l2arseq.c` (29,110), `fm6000_eplseq.c` (22,051), `fm6000_mapperpre.c`
+(5,662), `fm6000_mgmt2pre.c` (1,541).
+
+**`fm6000_l2arpre.c` (25,426) was the fifth and has been retired**, which is why
+this total fell from 83,790. It and `l2arseq` were alternatives for the same
+block, differing in two ways at once — the write set *and* where it was spliced.
+Only the placement was ever implicated in the earlier `L2ARSEQ` failure, so
+keeping `l2arpre`'s placement and swapping in `l2arseq`'s complete write set was
+the untried third arm. It measured clean: 413 of 413 previously-divergent
+addresses matching a reference working boot, OSPF up with 44 routes and 14
+programmed in silicon, and 0% unicast loss both to the switch and through it.
+Retiring a transcribed file by showing another already covers it is the cheapest
+kind of progress available here, and it is worth looking for more of it.
 
 They describe themselves accurately — *"replay the … bring-up SEQUENCE, in
 order"*. They are the vendor's write sequence, moved from a data file into our
@@ -236,8 +247,7 @@ it held.
 | file | non-trivial microcode pairs reproduced exactly |
 |---|---:|
 | `fm6000_parserinit.c` | the whole file — 16,960 pairs, 100% microcode |
-| `fm6000_l2arpre.c` | 12,473 |
-| `fm6000_l2arseq.c` | 12,473 (same rules, different placement) |
+| `fm6000_l2arseq.c` | 12,473 (`fm6000_l2arpre.c` carried the same 12,473 and is retired) |
 | `fm6000_l3arinit.c` | 3,928 |
 | `fm6000_modinit.c` | 3,626 |
 | `fm6000_l2arinit.c` | 1,878 |

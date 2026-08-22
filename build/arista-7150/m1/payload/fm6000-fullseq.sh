@@ -319,14 +319,15 @@ gen_after() {          # $1 = prefix to drop, $2 = generator, $3 = label
 # ⚠ TWO ORDERING RULES, both established by a working-vs-standalone state diff
 # (3,884 registers compared; 413 config addresses ended at their reset default).
 #
-# 1. fm6000_l2arpre is NOT here. It and fm6000_l2arseq are MUTUALLY EXCLUSIVE
-#    alternatives -- the replay path picks one (L2ARSEQ vs L2ARPRE). Running
-#    both put the INCOMPLETE one last: l2arpre holds 25,426 writes to l2arseq's
-#    29,110, because it captured only the FIRST write of two-write sequences.
-#    It re-wrote 352 addresses back to their reset value, 328 of them
-#    L2AR_CAM_DMASK -- an all-ones mask is a CAM entry that matches EVERYTHING,
-#    so those were live wildcard rules sitting in front of the real ones.
-#    l2arseq is the superset and the only correct choice with no replay behind it.
+# 1. fm6000_l2arpre used to be here alongside fm6000_l2arseq, and they are
+#    MUTUALLY EXCLUSIVE alternatives, so running both put the INCOMPLETE one
+#    last: l2arpre held 25,426 writes to l2arseq's 29,110 because it captured
+#    only the FIRST write of two-write sequences. It re-wrote 352 addresses back
+#    to their reset value, 328 of them L2AR_CAM_DMASK -- an all-ones mask is a
+#    CAM entry that matches EVERYTHING, so those were live wildcard rules
+#    sitting in front of the real ones, pointing at action RAM nobody writes.
+#    l2arpre has since been retired from the tree entirely; l2arseq is the
+#    superset and now serves both paths.
 #
 # 2. fm6000_sweepinit runs LAST, after fm6000_eplinit. This is the same
 #    constraint gen_split documents above: the L2F sweep is the port map being
@@ -474,10 +475,28 @@ if [ "${GENBLK:-1}" = "1" ]; then
 		#
 		# The write-once generator (4,606 registers) works and stays the
 		# default. L2ARSEQ=1 to retry the full sequence.
+		#
+		# L2ARSEQ_PRELOOP=1 is the untried third arm, and it exists because the
+		# two above differ in TWO ways at once, which is why the first result
+		# was read wrongly. gen_list_early hoists EVERY L2AR write to the front;
+		# gen_preloop hoists only the pre-anchor ones and leaves the in-loop
+		# writes where the replay put them. So L2ARSEQ=1 changed both the write
+		# SET and its PLACEMENT, and only placement was ever implicated.
+		#
+		# l2arseq was a strict superset of l2arpre by address -- 15,201 vs
+		# 15,185, with zero exclusive to l2arpre -- and they disagreed on the
+		# final value at 422 addresses, where a working-boot register diff showed
+		# l2arseq was the correct one (l2arpre had captured only the first write
+		# of two-write sequences). Keeping l2arpre's placement and swapping in
+		# the complete write set MEASURED CLEAN: 413 of 413 previously-divergent
+		# addresses matched the reference working boot, OSPF came up with 44
+		# routes and 14 programmed in silicon, and unicast was 0% loss both TO
+		# the switch and THROUGH it. So fm6000_l2arpre is gone, and with it
+		# 25,426 transcribed pairs.
 		if [ "${L2ARSEQ:-0}" = "1" ] && [ -x "$BIN/fm6000_l2arseq" ]; then
 			gen_list_early fm6000_l2arseq L2AR
-		elif [ "${L2ARPRE:-1}" = "1" ] && [ -x "$BIN/fm6000_l2arpre" ]; then
-			gen_preloop '0014' fm6000_l2arpre L2AR
+		elif [ "${L2ARSEQ_PRELOOP:-1}" = "1" ] && [ -x "$BIN/fm6000_l2arseq" ]; then
+			gen_preloop '0014' fm6000_l2arseq L2AR
 		else
 			[ -x "$BIN/fm6000_l2arinit" ] && gen_list_early fm6000_l2arinit L2AR
 		fi

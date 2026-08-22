@@ -254,10 +254,17 @@ if { [ -n "$FWD" ] || [ "${STANDALONE:-0}" = "1" ]; } && [ -x /usr/bin/fm6000_co
     # recorded evidence for pacing is thin ("unpaced 2/5, genuinely paced 1/1"),
     # so this is the knob that experiment needs.
     [ -r /mnt/flash/pace.conf ] && PACE=$(tr -dc 0-9 < /mnt/flash/pace.conf)
+    # Generator gates (L2ARSEQ, FFU_DIRECT, SWEEPGEN, ...) are read from the
+    # environment by fm6000-fullseq.sh. Sourcing a file from flash lets an
+    # experiment change arms without rebuilding and reflashing an image, the
+    # same reason pace.conf exists. It is a plain shell fragment:
+    #     echo 'L2ARSEQ_PRELOOP=1' > /mnt/flash/fullseq.conf
+    [ -r /mnt/flash/fullseq.conf ] && . /mnt/flash/fullseq.conf 2>/dev/null
     [ -n "${PACE:-}" ] || PACE=1500000
     echo "    PACE=$PACE"
     FWD="$FWD" PACE="$PACE" STANDALONE="${STANDALONE:-0}" \
         RESIDUAL_FIRST="$( [ -f /mnt/flash/residual-first.conf ] && echo 1 || echo 0 )" \
+        L2ARSEQ="${L2ARSEQ:-}" L2ARSEQ_PRELOOP="${L2ARSEQ_PRELOOP:-}" L2ARPRE="${L2ARPRE:-}" \
         sh /usr/lib/edgenos/platform/fm6000-fullseq.sh > /var/log/fm6000-fullseq 2>&1
     grep -E 'PORT_STATUS|t=40s|DONE' /var/log/fm6000-fullseq | tail -3 | sed 's/^/    /'
     for p in "Et1 0xe3800 0xe3826" "Et2 0xe4000 0xe4026"; do
@@ -317,7 +324,7 @@ echo "    /sys/kernel/kexec_loaded = $(cat /sys/kernel/kexec_loaded 2>/dev/null)
 echo
 echo "=================================================================="
 echo "  COMPREHENSIVE TEST MENU (one boot):"
-echo "  1) mgmt net : DHCP by default; for a fixed address put MGMT_IP=a.b.c.d/len in /mnt/flash/mgmt.conf"
+echo "  1) mgmt net : STATIC 192.168.1.1/24 by default; change it in /mnt/flash/mgmt.conf (MGMT_IP=a.b.c.d/len)"
 echo "                cat /sys/class/net/eth0/statistics/rx_packets rx_errors"
 echo "  2) SCD LED  : echo 1 > /sys/class/leds/status1/brightness   (declare via scd-setup.sh)"
 echo "  3) M2 fm6000: sh /usr/lib/edgenos/platform/fm6000-up.sh"
