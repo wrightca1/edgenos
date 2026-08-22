@@ -148,12 +148,50 @@ Three readings are well supported:
 - **`r15` is the L3 dispatch field.** It is written by the rules matching IPv4, IPv6
   and ARP in near-equal numbers (22/20/20) — the EtherType demultiplex point.
 
-⚠ Everything below that is inference from position and pairing, not established.
-`r22`/`r23` and `r24`/`r25` are 32-bit fields extracted deep in the parse (slices
-8–23 and 9–27) by more rules than anything else, which is what source and destination
-IP addresses would look like — but nothing here proves it. They are labelled as
-unknown until a rule is traced end to end or the chip is observed classifying a
-crafted frame.
+### The window model, and the Ethernet header solved
+
+Those readings can be replaced by a derivation. The 64-bit CAM window is
+**big-endian** — window byte 0 is the most significant byte — and **at slice `s` it
+covers packet bytes `[4s-4 .. 4s+3]`**. The window therefore advances 4 bytes per
+slice, the four newly-arrived bytes are `[4s .. 4s+3]`, and `hw0` takes `[4s, 4s+1]`
+while `hw1` takes `[4s+2, 4s+3]`.
+
+This is fixed, not assumed. Four rules have to hold at once, and all four do:
+
+    slice 0 rule 6   key ..00 01 80 c2 00  care ..ff ff ff ff ff
+                     -> DMAC 01:80:c2 at packet bytes 0,1,2
+    slice 3 rule 6   window bytes 4,5 = 08 00   -> EtherType at packet bytes 12,13
+    slice 3 rule 9   window bytes 4,5 = 81 00   -> same position, C-VLAN
+    slice 3 rule 5   window bytes 4,5 = 86 dd   -> same position, IPv6
+
+and the same slice-3 rules independently care for the **high nibble of window byte
+6** with values `4` and `6` — the IP version, at packet byte 14, exactly where the L3
+header begins.
+
+`parser_disasm.py --offsets` then resolves the entire Ethernet header, in order:
+
+    byte 0   DMAC[0:1]    r7
+    byte 2   DMAC[2:3]    r6
+    byte 4   DMAC[4:5]    r5
+    byte 6   SMAC[0:1]    r14
+    byte 8   SMAC[2:3]    r13, r10
+    byte 10  SMAC[4:5]    r12
+    byte 12  EtherType    r15
+
+Three independent lines agree on this. Slice 0 matches destination-MAC prefixes and
+writes `r7`/`r6`. `r15` is written by the IPv4, IPv6 and ARP rules in near-equal
+numbers, which is the EtherType demultiplex point. And the geometric model, derived
+without reference to either, places `r7 r6 r5 r14 r13 r12 r15` at bytes
+0, 2, 4, 6, 8, 10, 12 — contiguous and in the right order.
+
+⚠ **Registers written past the Ethernet header are not resolved.** Their offset
+depends on how deeply the frame is encapsulated, and a single "most common" offset
+across the whole program conflates the untagged, VLAN, QinQ, MPLS and tunnel paths.
+`r22`/`r23` and `r24`/`r25` are 32-bit fields extracted deep in the parse by more
+rules than anything else, which is what source and destination IP addresses would
+look like — but that remains inference. Naming them needs a path-aware walk of the
+state machine, following `ShiftNextSlice` along one encapsulation at a time. That is
+the next step and it is not done.
 
 ### The consumer side is muxed, and readable
 

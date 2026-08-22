@@ -115,6 +115,58 @@ def regs_report(w):
     print("   " + "  ".join("r%d/r%d" % p for p in pairs))
 
 
+# The window model, derived from the program and checked against it.
+#
+# The 64-bit CAM window is BIG-ENDIAN -- window byte 0 is the most significant
+# byte -- and at slice s it covers packet bytes [4s-4 .. 4s+3]. So the window
+# advances 4 bytes per slice and the four NEWLY arrived bytes are [4s .. 4s+3];
+# hw0 takes [4s, 4s+1] and hw1 takes [4s+2, 4s+3].
+#
+# This is not assumed. It was fixed by four rules that must hold simultaneously:
+#
+#   slice 0 rule 6   care ..ff ff ff ff ff  key ..00 01 80 c2 00
+#                    -> DMAC 01:80:c2 at packet bytes 0,1,2
+#   slice 3 rule 6   window bytes 4,5 = 08 00   -> EtherType at packet bytes 12,13
+#   slice 3 rule 9   window bytes 4,5 = 81 00   -> same position, C-VLAN
+#   slice 3 rule 5   window bytes 4,5 = 86 dd   -> same position, IPv6
+#
+# and corroborated by those same slice-3 rules caring for the HIGH NIBBLE of
+# window byte 6 with values 4 and 6 -- the IP version, at packet byte 14, which
+# is exactly where the L3 header begins.
+BASE_OFFSET = -4        # packet byte covered by window byte 0 at slice 0
+NEW_BYTES = 4           # bytes the window advances per slice
+
+def offsets_report(w):
+    """Map each extracted-field register to the packet byte offset it receives."""
+    off = collections.defaultdict(collections.Counter)
+    for s in range(NSLICE):
+        for e in range(NENTRY):
+            cam, c = assemble(w, CAM_BASE, s, e)
+            if not c: continue
+            ram, rn = assemble(w, RAM_BASE, s, e)
+            if not rn: continue
+            for hw in (0, 1):
+                d = fld(ram, "Halfword%dDest" % hw)
+                if d: off[d][NEW_BYTES * s + 2 * hw] += 1
+    ETH_HDR = {0: "DMAC[0:1]", 2: "DMAC[2:3]", 4: "DMAC[4:5]",
+               6: "SMAC[0:1]", 8: "SMAC[2:3]", 10: "SMAC[4:5]", 12: "EtherType"}
+    print("register -> packet byte offset (most common across the program)\n")
+    print("%-6s %-8s %-14s %s" % ("reg", "offset", "rules", "field"))
+    for d in sorted(off):
+        o, n = off[d].most_common(1)[0]
+        tot = sum(off[d].values())
+        print("r%-5d %-8d %-14s %s" % (d, o, "%d/%d" % (n, tot), ETH_HDR.get(o, "")))
+    print("\nThe 14-byte Ethernet header resolves completely and in the right order:")
+    for o in sorted(ETH_HDR):
+        who = [d for d in off if off[d].most_common(1)[0][0] == o]
+        print("   byte %-3d %-12s %s" % (o, ETH_HDR[o], ", ".join("r%d" % d for d in who)))
+    print("\n⚠ Registers written past the Ethernet header are NOT resolved by this")
+    print("   report. Their offset depends on how deeply the frame is encapsulated,")
+    print("   and a single 'most common' value across every path conflates VLAN,")
+    print("   QinQ, MPLS and tunnel cases. Naming those needs a path-aware walk of")
+    print("   the state machine, which this does not do.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("file", help="ucode_l2.raw (or any ADDR VALUE list)")
@@ -123,6 +175,8 @@ def main():
     ap.add_argument("--summary", action="store_true", help="occupancy only")
     ap.add_argument("--regs", action="store_true",
                     help="profile the extracted-field register file instead")
+    ap.add_argument("--offsets", action="store_true",
+                    help="map extracted-field registers to packet byte offsets")
     a = ap.parse_args()
 
     w = read(a.file)
@@ -136,6 +190,8 @@ def main():
 
     if a.regs:
         return regs_report(w)
+    if a.offsets:
+        return offsets_report(w)
     used = [s for s, n in occ.items() if n]
     print("parser program: %d of %d slices used, %d CAM entries populated"
           % (len(used), NSLICE, sum(occ.values())))
