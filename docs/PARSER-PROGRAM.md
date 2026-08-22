@@ -228,14 +228,69 @@ numbers, which is the EtherType demultiplex point. And the geometric model, deri
 without reference to either, places `r7 r6 r5 r14 r13 r12 r15` at bytes
 0, 2, 4, 6, 8, 10, 12 — contiguous and in the right order.
 
-⚠ **Registers written past the Ethernet header are not resolved.** Their offset
-depends on how deeply the frame is encapsulated, and a single "most common" offset
-across the whole program conflates the untagged, VLAN, QinQ, MPLS and tunnel paths.
-`r22`/`r23` and `r24`/`r25` are 32-bit fields extracted deep in the parse by more
-rules than anything else, which is what source and destination IP addresses would
-look like — but that remains inference. Naming them needs a path-aware walk of the
-state machine, following `ShiftNextSlice` along one encapsulation at a time. That is
-the next step and it is not done.
+A "most common" offset across the whole program cannot resolve anything past the
+Ethernet header, because it conflates the untagged, VLAN, QinQ, MPLS and tunnel
+paths. That needs a walk of one path, which is what `parser_walk.py` does.
+
+### Walking one path resolves the IPv4 header
+
+Two more things had to be established, and both are checked rather than assumed.
+
+**Highest matching index wins.** Rule 0 of every slice is the all-ones universal
+default with an empty action, so lowest-index-wins would make the parser do nothing.
+On slice 0, highest-index-wins gives the semantically correct classification in every
+case: broadcast picks rule 7, `01:80:c2:00` picks rule 6, `01:1b:19:00` picks rule 5,
+an ordinary unicast picks rule 1, and an IPv4 multicast picks rule 4 on the multicast
+bit alone.
+
+**The initial state is per-port, and it comes from the replay — not from the ucode
+file.** `ucode_l2.raw` writes `PARSER_INIT_STATE` as **zero** for all 76 ports;
+`fwd4.txt` then programs it. Ports 20 and 40 — et2 and et1 — get `0x61c70000`, so
+`State3=0x61` and `State2=0xc7`.
+
+That is load-bearing. Slice 3's IPv4, IPv6 and ARP rules are all guarded on
+`st3&20=20`, and `0x61` has bit 5 set. **Walking with an all-zero state instead
+terminates at slice 3 and extracts nothing past the MAC header** — which is exactly
+what happened on the first attempt, and is how the seed was found.
+
+With those in place the walk runs end to end on an untagged IPv4/TCP frame:
+
+    slice off   rule  captures
+      0    0     0     r7 <- [0] DMAC[0:1]      r6 <- [2] DMAC[2:3]
+      1    4     0     r5 <- [4] DMAC[4:5]      r14 <- [6] SMAC[0:1]
+      2    8     0     r13 <- [8] SMAC[2:3]     r12 <- [10] SMAC[4:5]
+      3    12    7     r15 <- [12] EtherType    r16 <- [14] IP ver/IHL + TOS
+      4    16    1     r18 <- [16] IP total length
+      5    20    9     r19 <- [22] IP TTL + protocol
+      6    24    0     r21 <- [26] SIP[0:1]
+      7    28    0     r20 <- [28] SIP[2:3]     r23 <- [30] DIP[0:1]
+      8    32    0     r22 <- [32] DIP[2:3]     r24 <- [34] L4 source port
+
+Identical for port 40. The register file on this path is therefore:
+
+| register | field | | register | field |
+|---|---|---|---|---|
+| r7, r6, r5 | destination MAC | | r19 | IP TTL + protocol |
+| r14, r13, r12 | source MAC | | r21, r20 | source IP |
+| r15 | EtherType | | r23, r22 | destination IP |
+| r16 | IP version/IHL + TOS | | r24 | L4 source port |
+| r18 | IP total length | | | |
+
+⚠ **This corrects an inference stated earlier in this document.** `r22`/`r23` and
+`r24`/`r25` were guessed to be "source and destination IP addresses". The walk says
+`r21`/`r20` are the source IP, `r23`/`r22` are the destination IP, and `r24` is the
+**L4 source port**, not part of an address at all. The pairing observation was sound;
+the assignment was wrong. It was labelled as inference, and this is why that mattered.
+
+⚠ Two limits on the walk itself. `ShiftNextSlice` is **not modelled** — the parse
+advances a flat 4 bytes per slice, which reproduces the entire IPv4 header correctly,
+so on this path shift is either zero or does not affect the advance; that may not
+hold for tunnelled paths. And only `StateOp==1` is treated as assignment; slice 1
+uses `op0` on `State3` and the encoding of ops 0, 2 and 3 is still unknown. No path
+walked here depends on them.
+
+Only the untagged IPv4/TCP path has been walked. VLAN, QinQ, IPv6, MPLS and tunnel
+paths are the obvious next runs, and each needs a frame built for it.
 
 ### The consumer side is muxed, and readable
 
