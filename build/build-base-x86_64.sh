@@ -55,8 +55,21 @@ mkdir -p "$O"
 echo "==> configure (edgenos_x86_64_defconfig, BR2_EXTERNAL=$EXT)"
 make -C "$BR_DIR" O="$O" BR2_EXTERNAL="$EXT" edgenos_x86_64_defconfig >/dev/null
 echo "==> build (-j$JOBS) — log: $O/build.log"
-make -C "$BR_DIR" O="$O" -j"$JOBS" 2>&1 | tee "$O/build.log" | grep -E '^>>> |edgenos:|Error|error:' || true
-test -f "$O/images/rootfs.squashfs" || { echo "build failed — see $O/build.log"; exit 1; }
+# Buildroot is resumable: a second pass only retries what failed (typically a transient source
+# download on a CI runner), so try twice before giving up, and on failure show the real error
+# (wget/curl lines don't match the progress filter below).
+: > "$O/build.log"
+for attempt in 1 2; do
+    make -C "$BR_DIR" O="$O" -j"$JOBS" 2>&1 | tee -a "$O/build.log" | grep -E '^>>> |edgenos:|Error|error:' || true
+    test -f "$O/images/rootfs.squashfs" && break
+    echo "==> build attempt $attempt did not produce images/rootfs.squashfs"
+    [ "$attempt" = 1 ] && echo "==> retrying once (resumable; downloads are retried)"
+done
+if [ ! -f "$O/images/rootfs.squashfs" ]; then
+    echo "build failed — last 80 lines of $O/build.log:"; tail -n 80 "$O/build.log"
+    echo "--- errors (grep -iE 'error|fail|cannot|no such'):"; grep -iE 'error|fail|cannot|no such' "$O/build.log" | grep -v 'config.guess' | tail -n 30
+    exit 1
+fi
 
 echo "==> collecting base artefacts -> $OUT"
 rm -rf "$OUT"; mkdir -p "$OUT"
