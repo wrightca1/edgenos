@@ -1,0 +1,22 @@
+# EdgeNOS switch "ASIC": vswitch — no switch silicon; the front-panel ports are plain
+# Linux netdevs and forwarding is done by the Linux kernel (or, M2, a software datapath
+# daemon behind the asic_ops seam). First ASIC-less entry in EdgeNOS.
+# Used by: qemu-kvm-x86_64 (x86_64-kvm_x86_64-r0).
+id: vswitch
+name: Linux software datapath (no switch ASIC)
+vendor: none
+family: linux-netdev
+sdk: none                  # new enum value: no vendor SDK at all
+sdk_chip: none
+cmic: none
+datapath: none             # M1: the kernel forwards; M2: edged-vswitch (asic_ops backend over netdevs)
+kernel_modules: []         # everything needed is built into the x86_64 base kernel
+on_die_cpu: false
+reference: platform/qemu-kvm-x86_64/README.md
+notes: >
+  In a VM each NIC after the first (ma1, management) is a front-panel port ge0..geN-1,
+  named by PCI order by platform-svc. Quagga (zebra/ospfd/ospf6d/bgpd) programs the
+  kernel FIB directly, so the control plane is identical to the hardware boards; only
+  the "chip" is the kernel. The M2 edged-vswitch daemon will drive the same ports
+  through core/datapath/asic_ops.h so the BCM/FM6000 unification can be tested without
+  hardware.

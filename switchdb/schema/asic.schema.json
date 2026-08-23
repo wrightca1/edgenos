@@ -12,7 +12,7 @@
     "vendor":   {"type": "string", "description": "e.g. 'broadcom'."},
     "family":   {"type": "string", "description": "Silicon family / codename, e.g. 'trident-plus', 'helix4'."},
     "device_id":{"type": "string", "description": "PCI/SoC device id, e.g. '0xb846'."},
-    "sdk":      {"type": "string", "enum": ["openmdk", "openbcm", "openbcm+knet"], "description": "Which SDK stack drives this ASIC."},
+    "sdk":      {"type": "string", "enum": ["openmdk", "openbcm", "openbcm+knet", "none"], "description": "Which SDK stack drives this ASIC ('none' = no switch silicon: Linux software datapath)."},
     "sdk_chip": {"type": "string", "description": "SDK chip variant the symbols come from, e.g. 'bcm56840_b0'."},
     "cmic":     {"type": "string", "description": "CMIC variant, e.g. 'cmicm', 'cmicd-iproc'."},
     "datapath": {"type": "string", "description": "Default datapath daemon package for this ASIC, e.g. 'edged', 'bcmd' (platform may override)."},

@@ -1,0 +1,36 @@
+# EdgeNOS platform: QEMU/KVM x86_64 virtual switch (EVE-NG, containerlab, plain qemu).
+# The switch-DB key is ONIE's own machine string for its kvm_x86_64 reference VM
+# (`onie-sysinfo -p` inside that VM prints x86_64-kvm_x86_64-r0), so the ONIE install
+# flow works unchanged: boot the ONIE KVM image, `onie-nos-install http://.../EdgeNOS-...bin`.
+# A ready-to-boot disk image (qcow2) is also emitted for labs that skip ONIE.
+onie_platform: x86_64-kvm_x86_64-r0
+vendor: qemu
+model: kvm-x86-64
+aliases:
+  - edgenos-vm
+  - eve-ng
+  - containerlab
+
+arch: x86_64
+asic: vswitch
+kernel: "6.1"                # 6.1 LTS own-build (Buildroot + systemd), see arch/x86_64/buildroot
+
+datapath: none               # default mode: the kernel forwards. /etc/edgenos/datapath=vswitch -> edged-vswitch
+components:
+  - platform-svc             # port naming (ma1 + ge0..N), networkd defaults, platform class, L3 config
+  - quagga                   # zebra + ospfd + ospf6d + bgpd (native x86_64 static build)
+  - edgenos-cli              # on-box CLI (version, platform/HAL, epkg)
+  - edged-vswitch            # M2 software datapath (asic_ops L2 switch), opt-in via edgenos-datapath-mode
+firmware: []
+
+platform_dir: platform/qemu-kvm-x86_64
+
+installer: onie-x86          # x86 ONIE self-extracting installer (.bin); recipe also emits a qcow2
+persistence: squashfs-overlay
+init: systemd
+
+status: experimental
+notes: >
+  Runs on Intel and AMD hosts (generic x86-64 baseline), under BIOS or UEFI firmware.
+  Mgmt = first NIC (ma1, DHCP). Front-panel = every further NIC, ge0..geN-1 in PCI order,
+  1G virtio/e1000/vmxnet3. Default login root/edgenos. Console on ttyS0 (115200) and tty0.
