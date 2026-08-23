@@ -1,0 +1,208 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Juniper EX2200-C-12T-2G
+ *
+ * Marvell Kirkwood 88F6281 (Feroceon 88FR131, ARMv5TE, 800 MHz), 512 MB DRAM,
+ * 8 MB SPI NOR, USB root device, Marvell Prestera DX (Cheetah-3) switch ASIC
+ * on the internal bus.
+ *
+ * Every address and IRQ below was taken from a live Junos boot on the target,
+ * not from a datasheet. See the junos-ex2200-static-analysis repo,
+ * findings/16 (memory map) and findings/38 (ASIC port map).
+ *
+ * STATUS: first draft. Not yet compiled with dtc, not yet booted.
+ */
+
+/dts-v1/;
+
+#include "kirkwood.dtsi"
+#include "kirkwood-6281.dtsi"
+
+/ {
+	model = "Juniper EX2200-C-12T-2G";
+	compatible = "juniper,ex2200-c-12t-2g", "marvell,kirkwood-88f6281",
+		     "marvell,kirkwood";
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x20000000>;	/* 512 MB, confirmed at boot */
+	};
+
+	chosen {
+		bootargs = "console=ttyS0,9600 earlyprintk";
+		stdout-path = &uart0;
+	};
+
+	/*
+	 * Junos reserves 8 MB at physical 0x100000 and hands it to userland
+	 * through /dev/mpfe region 0 for DMA buffers and descriptor rings
+	 * (machdep.iomem_physaddr / iomem_size; findings/30, findings/34).
+	 * Reserve the same region so the future dataplane shim has it.
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		pfe_dma: pfe-dma@100000 {
+			reg = <0x00100000 0x00800000>;	/* 8 MB */
+			no-map;
+		};
+	};
+
+	/*
+	 * Front-panel button, on the SysPLD rather than a SoC GPIO.
+	 * Junos reaches it via /dev/button. Left disabled until the SysPLD
+	 * driver exists.
+	 */
+};
+
+/* Console: 9600 8N1. The Kirkwood BootROM uses 115200, but only for kwboot. */
+&uart0 {
+	status = "okay";
+};
+
+/*
+ * I2C: IDPROM at 0x72 (boot.ideeprom in the U-Boot environment), plus the
+ * SysPLD and, on -12P- variants, the PoE controller. No PoE controller is
+ * fitted on the 12T (/dev/poe is absent; poe0 attach fails at boot).
+ */
+&i2c0 {
+	status = "okay";
+	clock-frequency = <100000>;
+
+	idprom: eeprom@72 {
+		compatible = "atmel,24c02";
+		reg = <0x72>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		read-only;
+		/*
+		 * Layout: ad 01 00 40 ec 3e f7 5b bb 40
+		 *   count 0x40 (64 MACs), base ec:3e:f7:5b:bb:40.
+		 * The management MAC is base + 0x3f = ec:3e:f7:5b:bb:7f.
+		 */
+	};
+
+	/* syspld@?? - CPLD: resets, LEDs, SFP LOS. Address not yet confirmed. */
+};
+
+/* Management port: the SoC's own GbE MAC, wired to the ASIC's CPU port. */
+&mdio {
+	status = "okay";
+
+	ethphy0: ethernet-phy@0 {
+		/* Marvell 88E1118, named by the Junos boot log */
+		reg = <0>;
+	};
+};
+
+&eth0 {
+	status = "okay";
+	ethernet0-port@0 {
+		phy-handle = <&ethphy0>;
+		/* MAC comes from the IDPROM; U-Boot also sets ethaddr. */
+	};
+};
+
+/* Root filesystem device is USB mass storage (Junos da0). */
+&usb0 {
+	status = "okay";
+};
+
+/*
+ * 8 MB SPI NOR, memory-mapped at 0xf8000000 (boot.flash.start/size).
+ * Layout from the U-Boot environment; see findings/29 and findings/45.
+ * Marked read-only by default - nothing in bring-up should write it.
+ */
+&spi0 {
+	status = "okay";
+
+	flash@0 {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <20000000>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "uboot-golden";
+				reg = <0x000000 0x080000>;
+				read-only;
+			};
+			partition@80000 {
+				label = "loader-golden";
+				reg = <0x080000 0x080000>;
+				read-only;
+			};
+			partition@100000 {
+				label = "uboot-upgrade";
+				reg = <0x100000 0x080000>;
+			};
+			partition@180000 {
+				label = "loader-upgrade";
+				reg = <0x180000 0x080000>;
+			};
+			/* 0x200000-0x6fffff is erased and unused: 5 MB free. */
+			partition@200000 {
+				label = "spare";
+				reg = <0x200000 0x500000>;
+			};
+			partition@700000 {
+				label = "upgrade-state";
+				reg = <0x700000 0x0e0000>;
+			};
+			partition@7e0000 {
+				label = "opqenv";
+				reg = <0x7e0000 0x010000>;
+			};
+			partition@7f0000 {
+				label = "u-boot-env";
+				reg = <0x7f0000 0x002000>;
+			};
+		};
+	};
+};
+
+/*
+ * There is no PCIe on this board - 'pcieprobe' at the U-Boot prompt returns
+ * "No PCIE supported" (findings/44). The Prestera is on the internal bus.
+ */
+&pciec {
+	status = "disabled";
+};
+
+/*
+ * Marvell Prestera DX (Cheetah-3) switch ASIC.
+ *
+ * Junos reports it as:
+ *   mpfe0: <Juniper EX-series Packet Forwarding Engine>
+ *          at mem 0xf4000000-0xf7ffffff irq 113 on mbus0
+ *
+ * i.e. a 64 MB aperture = 4 x 16 MB register windows (findings/34), IRQ 113.
+ *
+ * ============================ NOT YET WRITABLE ============================
+ * This node is deliberately left out, because the mbus target/attribute pair
+ * for the ASIC is NOT yet known, and guessing it is worse than omitting it:
+ *
+ *   - kirkwood.dtsi already assigns MBUS_ID(0x01, 0x2f) to NAND flash at
+ *     0xf4000000 (64 KB). That ID is taken and means something else.
+ *   - kirkwood.dtsi also warns: "If a board file needs to change this ranges
+ *     it must replace it completely" - so this board must restate the whole
+ *     ranges property, not append to it.
+ *
+ * TO RESOLVE: read the mbus window registers on a running unit. The mbus
+ * controller is at internal-regs +0x20000 (0xf1020000) - the same 4 KB window
+ * Junos maps to userland as /dev/mpfe region 3 precisely so CPSS can program
+ * its own decode windows (findings/30, findings/34). Decode which window
+ * covers 0xf4000000 and read back its target/attribute.
+ *
+ * Until then there is nothing to gain from a placeholder: the ASIC has no
+ * driver either, so phase 1 (console, eth0, USB root) is unaffected.
+ * ==========================================================================
+ */

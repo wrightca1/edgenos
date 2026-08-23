@@ -1,0 +1,48 @@
+# Board manifest: Juniper EX2200-C-12T-2G
+# Read alongside switchdb/platforms/juniper-ex2200-c-12t-2g.yml.
+platform: arm-juniper-ex2200-c-12t-2g-r0
+arch: armv5te
+asic: prestera_dxch3
+
+datapath:
+  target: none                       # no dataplane driver yet
+  build: ~
+  sources:
+    asic: asic/prestera_dxch3        # to be written
+  layout: /opt/edgenos
+
+config:    platform/juniper-ex2200-c-12t-2g/config
+dts:       platform/juniper-ex2200-c-12t-2g/dts/kirkwood-ex2200-c-12t-2g.dts
+services:  platform/juniper-ex2200-c-12t-2g/services
+
+# Board control that the platform layer must provide, all reverse-engineered
+# from Junos chassism. References are to the junos-ex2200-static-analysis repo.
+board_control:
+  syspld:    "I2C + mbus CPLD; 18-entry id->offset register table (findings/22)"
+  resets:    "8 PLD-bit resets on regs 0x0a/0x0b + one GPIO reset on pin 39, all 10 ms (findings/22)"
+  idprom:    "I2C 0x72; base MAC ec:3e:f7:5b:bb:40, count 0x40 (findings/45)"
+  leds:      "front-panel status/speed/duplex, driven from the SysPLD"
+  button:    "front-panel button on the SysPLD (/dev/button under Junos)"
+  watchdog:  "board watchdog is DISARMED at power-on and needs no attention during
+              bring-up. To enable later: GPIO 45, 12-step pattern
+              00 00 01 01 00 00 00 00 00 00 01 01, 180 s timeout (findings/26).
+              The SoC watchdog is separate and free (marvell,orion-wdt)."
+  poe:       "not fitted on the 12T variant; /dev/poe absent, poe0 attach fails at boot"
+
+boot:
+  console:      "9600 8N1"
+  bootrom_baud: 115200               # kwboot only; the console itself stays at 9600
+  autoboot:     "silent 1 s window, no prompt printed, any character interrupts, prompt is '=>'"
+  method:       "stock U-Boot tftpboot - no flash write needed for bring-up"
+  recovery:
+    - "kwboot over the console (proven; findings/25)"
+    - "read-only golden bootloader bank at 0x000000"
+    - "a known-good image in the upgrade bank at 0x100000"
+  warning: "Never run 'saveenv' during bring-up - it writes the environment at 0x7f0000.
+            Set ipaddr/serverip in RAM each boot instead."
+
+notes: >
+  Phase 1 (boot Linux, no switching) needs only this DTS plus mvebu_v5_defconfig;
+  every peripheral driver is already upstream. Expect one usable interface (the
+  SoC's own GbE) and no front-panel switching until the Prestera driver exists -
+  all 14 front ports are behind the ASIC.
