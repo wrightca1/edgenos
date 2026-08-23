@@ -33,6 +33,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Free runner disk (Buildroot needs ~15 GB while building)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost 2>/dev/null || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
+
       - name: Host dependencies (Buildroot + genimage + qemu)
         run: |
           sudo apt-get update -qq
@@ -47,7 +53,7 @@ jobs:
       - name: Switch DB
         run: bin/edgenos db validate && bin/edgenos db show x86_64-kvm_x86_64-r0
 
-      - name: Cache Buildroot output (keyed on the external tree)
+      - name: Cache Buildroot output (trimmed - host tools, target, images, stamps, downloads)
         uses: actions/cache@v4
         with:
           path: |
@@ -57,9 +63,12 @@ jobs:
           restore-keys: br-x86_64-
 
       - name: Build everything (base, quagga, edged-vswitch, packages, image)
+        env:
+          BR_TRIM: "1"
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           build/build-vm-image.sh
+          df -h / | tail -1
 
       - name: Smoke test (BIOS)
         run: tools/qemu/smoke-test.py output/images/EdgeNOS-*-x86_64-kvm_x86_64-r0.qcow2 -n 3 --port 4555

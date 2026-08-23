@@ -19,6 +19,10 @@
 #       O         Buildroot output dir (default output/br-x86_64)
 #       PLATFORM  switch-DB key the base is captured for (default x86_64-kvm_x86_64-r0)
 #       JOBS      parallelism (default nproc)
+#       BR_TRIM   =1: after a successful build delete the big intermediate source trees
+#                 (toolchain, kernel, glibc...) keeping only Buildroot's .stamp_* files, so
+#                 the output dir stays incremental-rebuild-capable but ~1 GB instead of ~14 GB
+#                 (for CI caches / small disks; a changed package still rebuilds)
 set -euo pipefail
 TOP=$(cd "$(dirname "$0")/.." && pwd)
 BR_DIR=${BR_DIR:-$TOP/../buildroot}
@@ -63,6 +67,17 @@ cp "$O/images/grub.img" "$O/images/boot.img" "$OUT/" 2>/dev/null || true
 cp "$O/.config" "$OUT/buildroot.config"
 ( cd "$O/images" && sha256sum bzImage initrd.img rootfs.squashfs ) > "$OUT/SHA256SUMS"
 ls -l "$OUT"
+
+if [ "${BR_TRIM:-0}" = 1 ]; then
+    echo "==> BR_TRIM: dropping intermediate source trees (keeping .stamp_* files)"
+    for d in "$O"/build/*/; do
+        case "$(basename "$d")" in
+            buildroot-config|buildroot-fs) continue ;;
+        esac
+        find "$d" -mindepth 1 -maxdepth 1 ! -name '.stamp_*' -exec rm -rf {} + 2>/dev/null || true
+    done
+    du -sh "$O" | sed 's/^/    /'
+fi
 
 echo "==> capturing base .epk for $PLATFORM"
 "$TOP/bin/edgenos" pkg base --from "$OUT/rootfs.sqsh" --platform "$PLATFORM"
