@@ -19,3 +19,4 @@ __pycache__/
 # in-tree build artifacts (Makefile builds objects in CWD)
 *.o
 platform/*/edged
+platform/*/edged-vswitch
