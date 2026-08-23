@@ -39,9 +39,28 @@ install -m 0755 "$BOARD_DIR/initramfs/init" "$WORK/init"
 ( cd "$WORK" && find . -print0 | cpio --null -o -H newc --quiet --owner=0:0 ) | gzip -9n > "$OUT/initrd.img"
 echo "edgenos: initrd.img $(du -h "$OUT/initrd.img" | cut -f1)"
 
-# GRUB first stage (BIOS MBR code) for genimage: Buildroot leaves it in the grub2 build tree
-bootimg=$(ls "$BUILD_DIR"/grub2-*/build-i386-pc/grub-core/boot.img 2>/dev/null | head -1)
-[ -n "$bootimg" ] || bootimg=$(find "$HOST_DIR/lib/grub" "$TARGET/lib/grub" -name boot.img 2>/dev/null | head -1)
-[ -n "$bootimg" ] || { echo "edgenos: GRUB boot.img not found (BIOS MBR stage)" >&2; exit 1; }
-cp -f "$bootimg" "$OUT/boot.img"
+# GRUB images with the early config INSIDE them (memdisk, prefix=(memdisk)/boot/grub — the
+# grub-mkstandalone model): no dependence on an embedded rescue-mode config or on a grub.cfg
+# at a fixed disk path. Built from the grub2 package's build trees; if those are gone
+# (BR_TRIM), the previously generated images are kept.
+GRUB_SRC=$(ls -d "$BUILD_DIR"/grub2-*/ 2>/dev/null | head -1)
+MKIMAGE=$HOST_DIR/bin/grub-mkimage
+if [ -n "$GRUB_SRC" ] && [ -x "$MKIMAGE" ] && [ -d "$GRUB_SRC/build-i386-pc/grub-core" ] && [ -d "$GRUB_SRC/build-x86_64-efi/grub-core" ]; then
+    MEM="$BUILD_DIR/edgenos-grub-memdisk"; rm -rf "$MEM"; mkdir -p "$MEM/boot/grub"
+    install -m 0644 "$BOARD_DIR/grub-early.cfg" "$MEM/boot/grub/grub.cfg"
+    ( cd "$MEM" && tar --owner=0 --group=0 --mtime=@0 -cf "$BUILD_DIR/edgenos-grub-memdisk.tar" boot )
+    COMMON="memdisk tar normal linux boot ext2 fat squash4 part_msdos part_gpt search search_label search_fs_uuid configfile echo test sleep serial terminal"
+    "$MKIMAGE" -O i386-pc -d "$GRUB_SRC/build-i386-pc/grub-core" -m "$BUILD_DIR/edgenos-grub-memdisk.tar" \
+        -p '(memdisk)/boot/grub' -o "$OUT/grub.img" biosdisk $COMMON
+    mkdir -p "$OUT/efi-part/EFI/BOOT"
+    "$MKIMAGE" -O x86_64-efi -d "$GRUB_SRC/build-x86_64-efi/grub-core" -m "$BUILD_DIR/edgenos-grub-memdisk.tar" \
+        -p '(memdisk)/boot/grub' -o "$OUT/efi-part/EFI/BOOT/bootx64.efi" efi_gop efi_uga $COMMON
+    # the same early config as the ESP's plain grub.cfg too (harmless; helps manual chainloads)
+    install -m 0644 "$BOARD_DIR/grub-early.cfg" "$OUT/efi-part/EFI/BOOT/grub.cfg"
+    cp -f "$BOARD_DIR/grub-early.cfg" "$OUT/grub-early.cfg"
+    echo "edgenos: GRUB images regenerated with the memdisk early config"
+else
+    echo "edgenos: grub2 build trees not present — keeping existing grub.img / bootx64.efi"
+fi
+
 ls -l "$OUT/bzImage" "$OUT/initrd.img" "$OUT/rootfs.squashfs" "$OUT/grub.img" "$OUT/boot.img" "$OUT/efi-part/EFI/BOOT/bootx64.efi" 2>/dev/null || true

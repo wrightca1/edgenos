@@ -369,6 +369,11 @@ def emit_qemu_disk(recipe, sqsh, ident, args, outdir):
         _stage_x86_boot(cfg, sqsh, ident, args, os.path.join(root, "boot", "edgenos"))
         os.makedirs(os.path.join(root, "boot", "grub"))
         shutil.move(os.path.join(root, "boot", "edgenos", "grub.cfg"), os.path.join(root, "boot", "grub", "grub.cfg"))
+        # BIOS prefix fallback ((hd0,msdos2)/boot/grub): the fallback config that searches the label
+        fb = _src(args, cfg, "grub_fallback", required=False)
+        if fb and os.path.exists(fb):
+            os.makedirs(os.path.join(root, "boot", "boot", "grub"))
+            shutil.copy(fb, os.path.join(root, "boot", "boot", "grub", "grub.cfg"))
         shutil.copytree(efidir, os.path.join(root, "efi"))
         os.makedirs(os.path.join(root, "data"))
         with open(os.path.join(root, "data", ".edgenos-data"), "w") as f:

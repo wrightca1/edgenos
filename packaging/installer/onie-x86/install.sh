@@ -97,18 +97,31 @@ mkdir -p "$mnt/edgenos" "$mnt/grub"
 say "extracting payload to $boot_dev"
 sed -e '1,/^__ARCHIVE_BELOW__$/d' "$0" | tar xf - -C "$mnt/edgenos"
 mv "$mnt/edgenos/grub.cfg" "$mnt/grub/grub.cfg"
+mkdir -p "$mnt/boot/grub" && cp "$mnt/grub/grub.cfg" "$mnt/boot/grub/grub.cfg"   # prefix-style fallback path
 echo "$NOS_VERSION" > "$mnt/edgenos/VERSION"
 sync
 
 # --- bootloader --------------------------------------------------------------------------
 if [ "$FW" = uefi ]; then
-    esp=$(blkid | sed -n 's/^\([^:]*\):.*TYPE="vfat".*/\1/p' | grep "^$disk" | head -1)
-    [ -n "$esp" ] || fail "no EFI System Partition found on $disk"
+    # The ESP: ONIE mounts it at /boot/efi in UEFI mode; otherwise find it by GPT type code
+    # (busybox blkid prints no TYPE=, so don't rely on that) or by its "EFI System" label.
+    esp=$(awk '$2=="/boot/efi"{print $1; exit}' /proc/mounts)
+    em=""
+    if [ -n "$esp" ]; then
+        em=/boot/efi; mounted_esp=1
+    else
+        esp_n=$(sgdisk -p "$disk" | awk '$6=="EF00"{print $1; exit}')
+        [ -n "$esp_n" ] || esp_n=$(blkid | sed -n "s|^$disk\([0-9p]*\):.*LABEL=\"EFI System\".*|\1|p" | sed 's/^p//' | head -1)
+        [ -n "$esp_n" ] || fail "no EFI System Partition found on $disk"
+        esp=$(partdev "$disk" "$esp_n")
+        em=/tmp/edgenos-esp; mkdir -p "$em"; mount "$esp" "$em" || fail "cannot mount ESP $esp"
+        mounted_esp=0
+    fi
     esp_n=$(echo "$esp" | sed 's/.*[a-z]\([0-9]*\)$/\1/')
-    em=/tmp/edgenos-esp; mkdir -p "$em"; mount "$esp" "$em"
     mkdir -p "$em/EFI/$ESP_DIR"
     cp "$mnt/edgenos/bootx64.efi" "$em/EFI/$ESP_DIR/grubx64.efi"
-    sync; umount "$em"
+    sync
+    [ "$mounted_esp" = 1 ] || umount "$em"
     if command -v efibootmgr >/dev/null 2>&1; then
         for b in $(efibootmgr | sed -n "s/^Boot\([0-9A-F]\{4\}\)\*\? *$NOS_NAME.*/\1/p"); do
             efibootmgr -q -b "$b" -B || true

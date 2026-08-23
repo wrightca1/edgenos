@@ -17,7 +17,8 @@ qemu_disk:                       # ALSO emit a bootable disk image for EVE-NG / 
   genimage: output/br-x86_64/host/bin/genimage    # falls back to `genimage` on PATH
   grub_bios_mbr:  output/base-x86_64/boot.img     # GRUB stage 1 (MBR code)
   grub_bios_core: output/base-x86_64/grub.img     # GRUB core.img (embedded: search EDGENOS-BOOT)
-  grub_efi_dir:   output/base-x86_64/efi-part     # EFI/BOOT/bootx64.efi
+  grub_efi_dir:   output/base-x86_64/efi-part     # EFI/BOOT/bootx64.efi + fallback grub.cfg
+  grub_fallback:  output/base-x86_64/grub-early.cfg      # also placed at EDGENOS-BOOT:/boot/grub/grub.cfg
   efi_mib: 16
   boot_mib: 384                  # EDGENOS-BOOT: kernel + initrd + rootfs.sqsh + grub.cfg
   data_mib: 2048                 # EDGENOS-DATA: overlay upper (persistence); sparse in qcow2

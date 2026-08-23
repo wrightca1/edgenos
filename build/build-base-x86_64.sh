@@ -62,7 +62,7 @@ echo "==> collecting base artefacts -> $OUT"
 rm -rf "$OUT"; mkdir -p "$OUT"
 cp "$O/images/bzImage" "$O/images/initrd.img" "$OUT/"
 cp "$O/images/rootfs.squashfs" "$OUT/rootfs.sqsh"
-cp "$O/images/grub.img" "$O/images/boot.img" "$OUT/" 2>/dev/null || true
+cp "$O/images/grub.img" "$O/images/boot.img" "$O/images/grub-early.cfg" "$OUT/" 2>/dev/null || true
 [ -d "$O/images/efi-part" ] && cp -r "$O/images/efi-part" "$OUT/"
 cp "$O/.config" "$OUT/buildroot.config"
 ( cd "$O/images" && sha256sum bzImage initrd.img rootfs.squashfs ) > "$OUT/SHA256SUMS"
