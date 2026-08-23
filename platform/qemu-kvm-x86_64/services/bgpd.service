@@ -1,0 +1,16 @@
+[Unit]
+Description=Quagga bgpd (BGP)
+After=zebra.service
+Wants=zebra.service
+ConditionPathExists=/etc/quagga/bgpd.conf
+
+[Service]
+Type=simple
+RuntimeDirectory=quagga
+RuntimeDirectoryPreserve=yes
+ExecStart=/opt/edgenos/bgpd-x86_64 -f /etc/quagga/bgpd.conf -i /run/quagga/bgpd.pid
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

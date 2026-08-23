@@ -1,0 +1,17 @@
+# EdgeNOS virtual: front-panel ports ge0..N. Link up, no addressing from networkd —
+# zebra (Quagga) / the operator own the addresses; networkd must not remove them.
+[Match]
+Name=ge*
+
+[Link]
+ActivationPolicy=up
+RequiredForOnline=no
+
+[Network]
+DHCP=no
+LinkLocalAddressing=ipv6
+IPv6AcceptRA=no
+ConfigureWithoutCarrier=yes
+KeepConfiguration=yes
+LLDP=yes
+EmitLLDP=nearest-bridge

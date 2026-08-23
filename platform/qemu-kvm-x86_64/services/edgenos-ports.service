@@ -1,0 +1,15 @@
+[Unit]
+Description=EdgeNOS port naming (ma1 + ge0..N by PCI order)
+DefaultDependencies=no
+After=systemd-udevd.service systemd-udev-trigger.service local-fs.target
+Before=systemd-networkd.service network-pre.target lldpd.service zebra.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStartPre=-/usr/bin/udevadm settle -t 10
+ExecStart=/opt/edgenos/edgenos-ports.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

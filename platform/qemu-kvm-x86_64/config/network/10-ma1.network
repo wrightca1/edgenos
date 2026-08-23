@@ -1,0 +1,13 @@
+# EdgeNOS virtual: management port = first NIC (ma1), DHCP (v4 + v6 RA).
+[Match]
+Name=ma1
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=yes
+LLDP=yes
+
+[DHCPv4]
+UseHostname=no
+SendHostname=yes
+ClientIdentifier=mac

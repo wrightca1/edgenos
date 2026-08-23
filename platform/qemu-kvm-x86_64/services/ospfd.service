@@ -1,0 +1,16 @@
+[Unit]
+Description=Quagga ospfd (OSPFv2)
+After=zebra.service
+Wants=zebra.service
+ConditionPathExists=/etc/quagga/ospfd.conf
+
+[Service]
+Type=simple
+RuntimeDirectory=quagga
+RuntimeDirectoryPreserve=yes
+ExecStart=/opt/edgenos/ospfd-x86_64 -f /etc/quagga/ospfd.conf -i /run/quagga/ospfd.pid
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
