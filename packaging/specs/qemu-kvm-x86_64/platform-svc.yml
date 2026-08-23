@@ -25,7 +25,7 @@ files:
   - {src: platform/qemu-kvm-x86_64/config/network/20-ge.network,     dst: /etc/systemd/network/20-ge.network, mode: "0644"}
   - {src: platform/qemu-kvm-x86_64/config/issue,                     dst: /etc/issue, mode: "0644"}
   # kernel datapath: forwarding on (zebra 1.2.4 doesn't do it; the ASIC did on the hardware boards)
-  - {src: platform/qemu-kvm-x86_64/config/sysctl-edgenos.conf,       dst: /etc/sysctl.d/10-edgenos.conf, mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/config/sysctl-edgenos.conf,       dst: /etc/sysctl.d/90-edgenos.conf, mode: "0644"}
 links:
   - {dst: /etc/systemd/system/sysinit.target.wants/edgenos-ports.service,   target: /etc/systemd/system/edgenos-ports.service}
   - {dst: /etc/systemd/system/multi-user.target.wants/edgenos-l3.service,   target: /etc/systemd/system/edgenos-l3.service}
