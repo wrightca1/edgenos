@@ -52,6 +52,8 @@ if [ -n "$GRUB_SRC" ] && [ -x "$MKIMAGE" ] && [ -d "$GRUB_SRC/build-i386-pc/grub
     COMMON="memdisk tar normal linux boot ext2 fat squash4 part_msdos part_gpt search search_label search_fs_uuid configfile echo test sleep serial terminal"
     "$MKIMAGE" -O i386-pc -d "$GRUB_SRC/build-i386-pc/grub-core" -m "$BUILD_DIR/edgenos-grub-memdisk.tar" \
         -p '(memdisk)/boot/grub' -o "$OUT/grub.img" biosdisk $COMMON
+    # GRUB first stage (BIOS MBR code) for genimage — lives only in the grub2 build tree
+    cp -f "$GRUB_SRC/build-i386-pc/grub-core/boot.img" "$OUT/boot.img"
     mkdir -p "$OUT/efi-part/EFI/BOOT"
     "$MKIMAGE" -O x86_64-efi -d "$GRUB_SRC/build-x86_64-efi/grub-core" -m "$BUILD_DIR/edgenos-grub-memdisk.tar" \
         -p '(memdisk)/boot/grub' -o "$OUT/efi-part/EFI/BOOT/bootx64.efi" efi_gop efi_uga $COMMON
@@ -60,7 +62,10 @@ if [ -n "$GRUB_SRC" ] && [ -x "$MKIMAGE" ] && [ -d "$GRUB_SRC/build-i386-pc/grub
     cp -f "$BOARD_DIR/grub-early.cfg" "$OUT/grub-early.cfg"
     echo "edgenos: GRUB images regenerated with the memdisk early config"
 else
-    echo "edgenos: grub2 build trees not present — keeping existing grub.img / bootx64.efi"
+    echo "edgenos: grub2 build trees not present — keeping existing grub.img / boot.img / bootx64.efi"
 fi
+for f in grub.img boot.img efi-part/EFI/BOOT/bootx64.efi; do
+    [ -f "$OUT/$f" ] || { echo "edgenos: ERROR: $OUT/$f missing" >&2; exit 1; }
+done
 
 ls -l "$OUT/bzImage" "$OUT/initrd.img" "$OUT/rootfs.squashfs" "$OUT/grub.img" "$OUT/boot.img" "$OUT/efi-part/EFI/BOOT/bootx64.efi" 2>/dev/null || true

@@ -56,10 +56,17 @@ echo "$inv" | while read -r pci cur; do
 done
 mv "$RUN/ports.tmp" "$RUN/ports"
 
-# front-panel ports: admin-up (like a real switch), no addresses (zebra/operator own those)
+# front-panel ports: admin-up (like a real switch), no addresses (zebra/operator own those).
+# virtio-net reports "Speed: Unknown" - Linux 802.3ad then gives the port LACP key 0 and never
+# aggregates it (no LACPDUs), so give every front-panel port a real speed/duplex first (the
+# platform's ge ports are 1G). Harmless on e1000/vmxnet3, which already report a speed.
 for d in /sys/class/net/$PFX[0-9]*; do
     [ -e "$d" ] || continue
-    ip link set "$(basename "$d")" up 2>/dev/null
+    p=$(basename "$d")
+    if ethtool "$p" 2>/dev/null | grep -q "Speed: Unknown"; then
+        ethtool -s "$p" speed 1000 duplex full autoneg off 2>/dev/null || true
+    fi
+    ip link set "$p" up 2>/dev/null
 done
 echo "$MODE" > "$RUN/datapath"
 n=$(grep -c " $PFX" "$RUN/ports" 2>/dev/null || echo 0)
