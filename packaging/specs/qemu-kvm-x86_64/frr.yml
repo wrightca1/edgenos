@@ -15,6 +15,8 @@ files:
   - {src: platform/qemu-kvm-x86_64/config/frr/vtysh.conf,            dst: /etc/frr/vtysh.conf, mode: "0640"}
   - {src: platform/qemu-kvm-x86_64/services/frr-edgenos.conf,        dst: /etc/systemd/system/frr.service.d/edgenos.conf, mode: "0644"}
   - {src: platform/qemu-kvm-x86_64/services/edgenos-startup.sh,      dst: /opt/edgenos/edgenos-startup.sh, mode: "0755"}
+  - {src: platform/qemu-kvm-x86_64/services/edgenos-frr-perms.sh,    dst: /opt/edgenos/edgenos-frr-perms.sh, mode: "0755"}
+  - {src: platform/qemu-kvm-x86_64/config/tmpfiles-frr-edgenos.conf,  dst: /etc/tmpfiles.d/frr-edgenos.conf, mode: "0644"}
   - {src: platform/qemu-kvm-x86_64/services/edgenos-startup.service, dst: /etc/systemd/system/edgenos-startup.service, mode: "0644"}
 links:
   - {dst: /etc/systemd/system/multi-user.target.wants/frr.service,             target: /usr/lib/systemd/system/frr.service}

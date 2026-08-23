@@ -103,8 +103,27 @@ class EdgeNOS_vm(vrnetlab.VM):
             self.logger.info("datapath mode: %s" % mode)
             self.wait_write("/opt/edgenos/edgenos-datapath-mode %s --now" % mode, "#")
         self.push_startup_config()
+        self.push_authorized_keys()
         self.wait_write("edgenos version", "#")
         self.logger.info("completed bootstrap configuration")
+
+    def push_authorized_keys(self):
+        """/bootstrap-keys/authorized_keys (bound from the topology) -> root and admin on the VM."""
+        src = "/bootstrap-keys/authorized_keys"
+        if not os.path.isfile(src):
+            return
+        import subprocess
+        r = subprocess.run(["sshpass", "-p", DEFAULT_PASSWORD, "scp", "-q", "-o", "StrictHostKeyChecking=no",
+                            "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10", src,
+                            "%s@127.0.0.1:/tmp/authorized_keys" % DEFAULT_USER], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if r.returncode != 0:
+            self.logger.info("authorized_keys push failed: %s" % r.stdout.decode(errors="replace")[-200:])
+            return
+        self.wait_write("for u in root admin; do h=$(awk -F: -v u=$u '$1==u{print $6}' /etc/passwd); [ -n \"$h\" ] || continue; "
+                        "mkdir -p $h/.ssh && cat /tmp/authorized_keys >> $h/.ssh/authorized_keys && "
+                        "sort -u -o $h/.ssh/authorized_keys $h/.ssh/authorized_keys && chmod 700 $h/.ssh && "
+                        "chmod 600 $h/.ssh/authorized_keys && chown -R $u $h/.ssh; done; rm -f /tmp/authorized_keys", "#")
+        self.logger.info("authorized_keys installed for root and admin")
 
     def push_startup_config(self):
         """Per-node startup config: a directory bound into the container at /startup (or

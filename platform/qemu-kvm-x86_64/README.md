@@ -47,8 +47,9 @@ Naming is done at boot by `edgenos-ports.service` (`services/edgenos-ports.sh`),
 the same whatever the hypervisor calls the NICs. Addresses: `vtysh` (zebra/ospfd/bgpd) or
 `/etc/edged/addrs.conf` + `routes.conf` (applied by `edgenos-l3.service`), both persistent.
 
-Default login **root / edgenos** on the serial console (`ttyS0`, 115200), VGA (`tty0`) and
-SSH.
+Default logins: **root / edgenos** and **admin / admin** (operator account, `wheel` + `frrvty`,
+so `vtysh` works) — serial console (`ttyS0`, 115200), VGA (`tty0`) and SSH. containerlab nodes
+also get `clab / clab@123` from the launcher.
 
 ## Build (any x86_64 Linux box, no docker, no vendor SDK)
 

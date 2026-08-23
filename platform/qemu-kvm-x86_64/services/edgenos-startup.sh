@@ -15,7 +15,7 @@ if [ -f "$D/daemons" ] && ! cmp -s "$D/daemons" /etc/frr/daemons; then
     install -m 0640 -o frr -g frr "$D/daemons" /etc/frr/daemons && log "frr daemons installed"
 fi
 if [ -f "$D/frr.conf" ] && ! cmp -s "$D/frr.conf" /etc/frr/frr.conf; then
-    install -m 0640 -o frr -g frr "$D/frr.conf" /etc/frr/frr.conf && log "frr.conf installed"
+    install -m 0640 -o frr -g frrvty "$D/frr.conf" /etc/frr/frr.conf && log "frr.conf installed"
 fi
 if [ -x "$D/netconf.sh" ] || [ -f "$D/netconf.sh" ]; then
     sh "$D/netconf.sh" >/run/edgenos/netconf.log 2>&1 && log "netconf.sh applied" || log "WARNING: netconf.sh returned $? (see /run/edgenos/netconf.log)"
