@@ -58,7 +58,8 @@ bin/edgenos build x86_64-kvm_x86_64-r0 --source-root .
 → `output/images/EdgeNOS-<ver>-x86_64-kvm_x86_64-r0.bin` (ONIE installer) and
 `output/images/EdgeNOS-<ver>-x86_64-kvm_x86_64-r0.qcow2` (ready-to-boot disk).
 
-`build/build-vm-image.sh` runs all of the above in order.
+`build/build-vm-image.sh` runs all of the above in order (`BR_TRIM=1` keeps the Buildroot
+output ~1 GB for CI caches).
 
 ## Run
 
@@ -96,12 +97,21 @@ EDGENOS-BOOT/EDGENOS-DATA next to ONIE's partitions (GPT), installs GRUB (BIOS v
 | `boot/grub.cfg` | the menu on EDGENOS-BOOT (normal, rescue, ONIE chain) |
 | `board.yml` | board manifest |
 
+## Verified (2026-08)
+
+| | BIOS | UEFI | EVE-NG 7 | containerlab (routed) | containerlab (vswitch M2) | ONIE install |
+|---|---|---|---|---|---|---|
+| AMD EPYC host | ✅ | ✅ | ✅ (qemu64 CPU) | ✅ OSPF Full, h1→h2 | ✅ | ✅ BIOS + UEFI (ONIE kvm ISO) |
+| Intel Xeon host | ✅ | — | ✅ (QEMU 2.4.0 default) | ✅ | ✅ | — |
+
+(`tools/qemu/smoke-test.py`, `tools/containerlab/examples/*.clab.yml`, `tools/onie/`; ~15 s to login.)
+
 ## Status / roadmap
 
 * **M1 (this)** — mgmt plane + Quagga, Linux kernel forwarding (`datapath: none`), qcow2 +
   ONIE installer, EVE-NG + containerlab packaging, Intel + AMD, BIOS + UEFI.
-* **M2** — `edged-vswitch`: a software datapath daemon implementing
-  `core/datapath/asic_ops.h` over the `ge*` netdevs (TAP/AF_PACKET), so the BCM/FM6000
-  unification behind `asic_ops` can be exercised without hardware.
+* **M2 (this, opt-in)** — `edged-vswitch`: an `asic_ops` L2 learning switch over the `pge*`
+  netdevs (AF_PACKET) with the CPU as a port (`cpu0` TAP); `edgenos-datapath-mode vswitch
+  [--now]`. VLANs / L3 offload behind the same seam are the follow-ups.
 * CI: this platform needs none of the external source trees, so it can be the target that
   builds end-to-end in GitHub Actions (base build is cacheable; compose + boot-test is minutes).
