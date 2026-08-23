@@ -119,8 +119,6 @@
 	status = "okay";
 
 	flash@0 {
-		#address-cells = <1>;
-		#size-cells = <1>;
 		compatible = "jedec,spi-nor";
 		reg = <0>;
 		spi-max-frequency = <20000000>;
@@ -200,13 +198,13 @@
  * kirkwood.dtsi says a board changing 'ranges' must replace it completely, so
  * the whole property is restated here rather than appended to.
  */
-&mbus {
+&{/mbus@f1000000} {
 	ranges = <MBUS_ID(0xf0, 0x01) 0 0xf1000000 0x0100000	/* internal-regs */
 		  MBUS_ID(0x01, 0x2f) 0 0xf9000000 0x0800000	/* nand flash    */
 		  MBUS_ID(0x03, 0x01) 0 0xfb000000 0x0010000	/* crypto sram   */
 		  MBUS_ID(0x0c, 0x00) 0 0xf4000000 0x4000000>;	/* Prestera      */
 
-	pp0: packet-processor@f4000000 {
+	pp0: packet-processor@c00 {
 		compatible = "juniper,ex2200-prestera", "marvell,prestera-dxch3";
 		reg = <MBUS_ID(0x0c, 0x00) 0 0x4000000>;	/* 4 x 16 MB windows */
 		interrupt-parent = <&intc>;

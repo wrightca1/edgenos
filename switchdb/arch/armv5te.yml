@@ -5,15 +5,16 @@ name: ARM 32-bit soft-float (Marvell Feroceon 88FR131, ARMv5TE)
 triple: arm-linux-gnueabi
 endian: little
 bits: 32
-cpu: marvell-f
+cpu: arm926ej-s
 kernel_arch: arm
 kernel_defconfig: mvebu_v5_defconfig
 cflags:
   - -march=armv5te
-  - -mtune=marvell-f
+  - -mtune=arm926ej-s
   - -mfloat-abi=soft
 quirks:
   - "No hardware FPU. Soft-float ABI (gnueabi, not gnueabihf) - not interchangeable with the armhf toolchain used by the AS4610."
+  - "Tune as arm926ej-s. GCC has no 'marvell-f'/Feroceon tune name (dropped, or never present); arm926ej-s is the ARMv5TE core it does know and is what Debian and OpenWrt use for Kirkwood. 'marvell-pj4' compiles but is ARMv7 - wrong generation."
   - "ARMv5TE predates LPAE and the ARM generic timer; mvebu_v5 is a separate defconfig lineage from mvebu_v7."
   - "Kirkwood BootROM accepts a kwbimage over the integrated UART (xmodem), so kwboot can run a bootloader from RAM without touching flash."
 notes: >
