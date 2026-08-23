@@ -173,14 +173,17 @@ board.
 - **Virtual platform (experimental):** `x86_64-kvm_x86_64-r0` — the framework with no
   silicon. `arch/x86_64` (native, generic x86-64), `asic/vswitch`, `platform/qemu-kvm-x86_64`.
   Base = Buildroot 2026.02 LTS + systemd + kernel 6.1 built in-repo (`arch/x86_64/buildroot`,
-  no external source trees), components `platform-svc` / `quagga` (static 1.2.4 + vtysh) /
-  `edgenos-cli` / `edged-vswitch`; `imgbuild` gained the `onie-x86` installer envelope
+  no external source trees), components `platform-svc` / `frr` (FRR 10.5: EVPN-VXLAN, BGP
+  unnumbered, EVPN-MH; a static `quagga` 1.2.4 spec is kept as an alternative) / `edgenos-cli` /
+  `edged-vswitch`; mgmt VRF for `ma1`; a per-node startup-config mechanism; `imgbuild` gained the `onie-x86` installer envelope
   (GPT, BIOS + UEFI, keeps an ONIE menu entry) and a `qemu_disk` emitter (MBR hybrid
   BIOS+UEFI qcow2 via genimage, rootless). `.epk` gained `links:` (symlinks, e.g. systemd
   enablement). `edged-vswitch` is an L2 learning switch over AF_PACKET behind
   `core/datapath/asic_ops.h` — the same seam as the FM6000 board daemon — so the seam can
   be exercised without hardware. Verified: BIOS + UEFI boot, EVE-NG and containerlab on
-  Intel and AMD hosts, OSPF between two VMs, persistence across reboots. CI:
+  Intel and AMD hosts, ONIE install (BIOS + UEFI), persistence across reboots, and a full
+  two-DC EVPN-VXLAN lab (20 switches, EVPN-MH hosts, k8s/Cilium BGP, GoBGP, PA-VMs) on
+  EdgeNOS switches on both CPU vendors. CI:
   `.github/workflows/x86_64-vm.yml` builds and boot-tests it end to end.
 
 ## Current support matrix
@@ -189,4 +192,4 @@ board.
 |----------|------|------|--------|----------|--------|
 | `powerpc-accton_as5610_52x-r0` | powerpc | bcm56846 (Trident+) | 5.10 | edged | production |
 | `arm-accton-as4610-54-r0` | armhf | bcm56340 (Helix4) | 4.14 | bcmd | production |
-| `x86_64-kvm_x86_64-r0` (QEMU/KVM VM: EVE-NG, containerlab) | x86_64 | vswitch (none) | 6.1 | none / edged-vswitch | experimental |
+| `x86_64-kvm_x86_64-r0` (QEMU/KVM VM: EVE-NG, containerlab; FRR control plane) | x86_64 | vswitch (none) | 6.1 | none / edged-vswitch | experimental |

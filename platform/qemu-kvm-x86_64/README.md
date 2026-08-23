@@ -23,8 +23,13 @@ reference VM, so the ONIE install flow works unchanged.
   VXLAN, VRF, MPLS, policy routing, netfilter, overlayfs + squashfs, BIOS + EFI stub.
 * **Components** (`.epk`, overlaid by `imgbuild`):
   * `platform-svc` — port naming, networkd defaults, platform class, boot-time L3 config
-  * `quagga` — Quagga 1.2.4 zebra/ospfd/ospf6d/bgpd + vtysh, static x86_64
-    (`build/build-quagga-x86_64.sh`)
+  * `frr` — FRR 10.5 (Buildroot package: zebra/bgpd/ospfd/ospf6d/staticd/bfdd + vtysh): EVPN-VXLAN,
+    BGP unnumbered, EVPN-MH, BFD — a DC fabric control plane. The daemons file, default config,
+    unit enablement and the **startup-config** mechanism (`/etc/edgenos/startup/{netconf.sh,
+    frr.conf,daemons,sysctl.conf}`, applied by `edgenos-startup.service` before FRR; the vrnetlab
+    launcher pushes a `/startup` bind into it) ship in this component. (`quagga` — static Quagga
+    1.2.4 via `build/build-quagga-x86_64.sh` — is kept as an alternative spec for parity with
+    the hardware boards.)
   * `edgenos-cli` — on-box `edgenos` (version, platform hal, pkg)
 * **Persistence**: `squashfs-overlay` — `EDGENOS-BOOT` (ext4) carries
   `/edgenos/{bzImage,initrd.img,rootfs.sqsh}` + `/grub/grub.cfg`; `EDGENOS-DATA` (ext4) is
@@ -58,7 +63,8 @@ bin/edgenos build x86_64-kvm_x86_64-r0 --source-root .
 → `output/images/EdgeNOS-<ver>-x86_64-kvm_x86_64-r0.bin` (ONIE installer) and
 `output/images/EdgeNOS-<ver>-x86_64-kvm_x86_64-r0.qcow2` (ready-to-boot disk).
 
-`build/build-vm-image.sh` runs all of the above in order.
+`build/build-vm-image.sh` runs all of the above in order (`BR_TRIM=1` keeps the Buildroot
+output ~1 GB for CI caches).
 
 ## Run
 
@@ -91,17 +97,39 @@ EDGENOS-BOOT/EDGENOS-DATA next to ONIE's partitions (GPT), installs GRUB (BIOS v
 | `platform.py` | `EdgeNOSPlatform_x86_64_kvm_x86_64_r0`: dynamic `ge*` port list, hypervisor/NIC info, HAL (hwmon thermals; fans/PSUs/SFPs unsupported), `baseconfig()` = port naming |
 | `services/edgenos-ports.{sh,service}` | PCI-ordered naming: `ma1` + `ge0..N`; writes `/run/edgenos/ports` |
 | `services/edgenos-l3*`, `config/addrs.conf`, `config/routes.conf` | boot-time L3 config (same format as AS4610/AS5610) |
-| `services/{zebra,ospfd,ospf6d,bgpd}.service`, `config/*.conf` | Quagga units (`/opt/edgenos/<daemon>-x86_64`) and default confs |
-| `config/network/*.network` | systemd-networkd: `ma1` DHCP, `ge*` up/unaddressed/keep-config |
+| `config/frr/*`, `services/frr-edgenos.conf`, `services/edgenos-startup.*` | FRR daemons/config, unit drop-in, startup-config applier |
+| `services/{zebra,ospfd,ospf6d,bgpd}.service`, `config/*.conf` | Quagga units/confs (alternative `quagga` component) |
+| `config/network/*` | systemd-networkd: `mgmt` VRF + `ma1` DHCP in it, `ge*` up/unaddressed/keep-config, `cpu0` |
 | `boot/grub.cfg` | the menu on EDGENOS-BOOT (normal, rescue, ONIE chain) |
 | `board.yml` | board manifest |
+
+## Real-world run: the ecloud two-DC EVPN-VXLAN lab on EdgeNOS
+
+`github.com/aramidetosin/ecloud-containerlab` (`build_clab.py --edgenos`) replaces all 20 Cumulus
+VX switches of a two-DC lab with this image: spines, leaves with EVPN-MH dual-homed hosts, border
+leaves, aggregation, two tenants (L2 + L3 VNIs), k8s/Cilium BGP, a GoBGP anycast controller and
+two PA-VM firewalls. Configs are the Cumulus-rendered `/etc/network/interfaces` + `frr.conf`,
+translated (`swpN→ge(N-1)`, per-VNI vxlan devices, VRR macvlans) into the startup-config. Result
+on both an AMD EPYC and an Intel Xeon host: all 20 switches healthy ~1 min after deploy, every
+eBGP-unnumbered IPv4 + EVPN session Established, L2/L3 VNIs and cross-DC forwarding in both
+tenants, EVPN-MH LAGs (host bond partner = ES sys-mac), Cilium BGP, GoBGP, k8s 6+4 Ready, the
+app answered through the PAN NAT from the clients — the README verification of the original lab.
+
+## Verified (2026-08)
+
+| | BIOS | UEFI | EVE-NG 7 | containerlab (routed) | containerlab (vswitch M2) | ONIE install |
+|---|---|---|---|---|---|---|
+| AMD EPYC host | ✅ | ✅ | ✅ (qemu64 CPU) | ✅ OSPF Full, h1→h2 | ✅ | ✅ BIOS + UEFI (ONIE kvm ISO) |
+| Intel Xeon host | ✅ | — | ✅ (QEMU 2.4.0 default) | ✅ | ✅ | — |
+
+(`tools/qemu/smoke-test.py`, `tools/containerlab/examples/*.clab.yml`, `tools/onie/`; ~15 s to login.)
 
 ## Status / roadmap
 
 * **M1 (this)** — mgmt plane + Quagga, Linux kernel forwarding (`datapath: none`), qcow2 +
   ONIE installer, EVE-NG + containerlab packaging, Intel + AMD, BIOS + UEFI.
-* **M2** — `edged-vswitch`: a software datapath daemon implementing
-  `core/datapath/asic_ops.h` over the `ge*` netdevs (TAP/AF_PACKET), so the BCM/FM6000
-  unification behind `asic_ops` can be exercised without hardware.
+* **M2 (this, opt-in)** — `edged-vswitch`: an `asic_ops` L2 learning switch over the `pge*`
+  netdevs (AF_PACKET) with the CPU as a port (`cpu0` TAP); `edgenos-datapath-mode vswitch
+  [--now]`. VLANs / L3 offload behind the same seam are the follow-ups.
 * CI: this platform needs none of the external source trees, so it can be the target that
   builds end-to-end in GitHub Actions (base build is cacheable; compose + boot-test is minutes).
