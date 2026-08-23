@@ -1,0 +1,27 @@
+# EdgeNOS switch ASIC: Marvell Prestera DX, Cheetah-3 generation
+# Used by: juniper-ex2200-c-12t-2g
+id: prestera_dxch3
+name: Marvell Prestera DX (Cheetah-3)
+vendor: marvell
+family: cheetah3
+device_id: "0xdd54"        # register 0x4c bits [19:4]; 0xddb4 also accepted. NOT a PCI id.
+sdk: none                  # CPSS is proprietary and licence-gated; no open backend exists
+datapath: none             # to be written
+on_die_cpu: false          # discrete ASIC on the Marvell internal bus (mbus), NOT PCIe
+kernel_modules: []         # a cpssEnabler-derived shim is the intended starting point
+reference: ../junos-ex2200-static-analysis/
+quirks:
+  - "On mbus at 0xf4000000-0xf7ffffff, IRQ 113. There is NO PCIe on this board - 'pcieprobe' at the U-Boot prompt returns 'No PCIE supported', so the 98DX marketing part number cannot be read that way."
+  - "Register access is a plain load/store on an mmap'd window: 4 windows x 16 MB = the 64 MB aperture. No syscall on the common path."
+  - "MAC/SerDes apertures (0x08800000, 0x0a800000) MUST go through the kernel's atomic ioctl, not the mmap. Direct mapping works under light load and corrupts under concurrency."
+  - "Counter-set selector fields (Mode/Port/Vlan/TC/DP) never read back - a documented Marvell erratum. Bindings must be tracked in software."
+  - "CoS and policing do NOT go through CPSS; Juniper implements them in a private mrvl_* layer with Cheetah-2/Cheetah-3 variants. Register-level work is required even with an SDK in hand."
+  - "Ingress filters cannot carry counters on this platform, despite PACL being ingress-only and the hardware exposing a PACL counter class."
+  - "Twelve copper ports run QSGMII: three quad PHYs, four ports per SerDes lane. A wrong lane mapping kills four ports at once."
+notes: >
+  ~2010 Cheetah-generation Prestera. Mainline drivers/net/ethernet/marvell/prestera
+  does NOT apply - it is firmware-based (request_firmware, 0xcafebabe handshake) and
+  targets AC3X/Aldrin. This part has no firmware agent; Junos programs it by direct
+  register writes. TCAM confirmed as internal_ch3_tcam from the live unit.
+  ASIC port map: front-panel ge-0/0/N = port N (0-11), uplinks 12-13, internal 24-27,
+  CPU port 63. 1,500 ACE TCAM ceiling. Full reverse-engineering in the reference repo.

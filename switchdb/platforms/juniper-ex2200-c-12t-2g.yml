@@ -1,0 +1,48 @@
+# EdgeNOS platform: Juniper EX2200-C-12T-2G
+# 12x1G copper + 2 combo uplinks (RJ45 or SFP), Marvell Kirkwood host,
+# Marvell Prestera DX Cheetah-3. Replaces Junos 12.3R12-S14.
+onie_platform: arm-juniper-ex2200-c-12t-2g-r0   # synthetic: this board has no ONIE
+vendor: juniper
+model: ex2200-c-12t-2g
+aliases:
+  - ex2200-c
+  - juniper-ex2200-c
+
+arch: armv5te
+asic: prestera_dxch3
+kernel: "6.12"
+
+datapath: none            # no dataplane driver yet - see status
+components:
+  - frr                   # RIP/OSPF/PIM/BFD/static - replaces Junos rpd
+  - platform-svc          # board services: SysPLD, resets, IDPROM, LEDs, button
+  - edgenos-cli
+firmware: []              # no firmware blobs required
+
+portmap: ex2200-c-12t-2g.portmap
+platform_dir: platform/juniper-ex2200-c-12t-2g
+dts: kirkwood-ex2200-c-12t-2g.dts
+
+installer: uboot-tftp     # no ONIE; kernel fetched by the stock U-Boot over TFTP
+persistence: uboot-flash  # dual-bank NOR managed by U-Boot; root on USB or NFS
+init: systemd
+
+status: planned
+notes: >
+  Reverse-engineering complete enough to start; see the junos-ex2200-static-analysis
+  repo (findings 21-45) for the hardware reference, port plan and checklist.
+
+  Control plane is tractable: the Kirkwood SoC is fully mainline and every peripheral
+  driver exists upstream, so phase 1 is a board DTS plus a defconfig. The whole
+  bring-up can be done with ZERO flash writes - the stock U-Boot has tftpboot/bootelf
+  and the autoboot is interruptible (silent 1s window, any character, prompt is '=>').
+  kwboot over the console is proven as a second recovery path, and the read-only
+  golden bootloader bank is a third.
+
+  The dataplane is the project. No open driver fits this Prestera generation and CPSS
+  is licence-gated, so the ASIC backend must be written. Boot flash has 5 MB free at
+  0x200000 if a kernel or recovery image needs somewhere to live.
+
+  Board identity: cm_model 0x6b (107), hw.board.type 054d, IDPROM at I2C 0x72 with
+  base MAC ec:3e:f7:5b:bb:40 and count 0x40. Console 9600 8N1; the Kirkwood BootROM
+  speaks 115200 for kwboot only.
