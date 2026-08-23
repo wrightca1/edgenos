@@ -1,0 +1,28 @@
+# containerlab: one EdgeNOS virtual switch in vswitch (M2, software-ASIC) mode with two hosts
+# in the same L2 domain, plus the switch's own CPU port (cpu0) addressed on that subnet.
+#   containerlab deploy -t edgenos-vswitch.clab.yml
+#   docker exec clab-edgenos-vswitch-h1 ping 10.0.0.20     # h1 -> h2 through the userspace switch
+#   docker exec clab-edgenos-vswitch-h1 ping 10.0.0.1      # h1 -> sw1 cpu0 (punt path)
+name: edgenos-vswitch
+topology:
+  kinds:
+    generic_vm:
+      image: vrnetlab/edgenos_vswitch:0.2.1
+  nodes:
+    sw1:
+      kind: generic_vm
+      env:
+        EDGENOS_DATAPATH: vswitch          # flipped live at bootstrap: NICs -> pge*, cpu0 appears
+    h1:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.0.0.10/24 dev eth1
+    h2:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.0.0.20/24 dev eth1
+  links:
+    - endpoints: ["sw1:eth1", "h1:eth1"]     # pge0
+    - endpoints: ["sw1:eth2", "h2:eth1"]     # pge1

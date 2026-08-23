@@ -3,9 +3,10 @@
 EdgeNOS targets multiple switches that differ along **three orthogonal axes**, and
 more of each are coming:
 
-- **arch** — the host CPU (powerpc, armhf, … arm64, x86_64)
-- **asic** — the switch silicon (bcm56846, bcm56340, … future)
-- **platform** — the physical board (a specific arch × asic × ports × firmware)
+- **arch** — the host CPU (powerpc, armhf, x86_64, … arm64)
+- **asic** — the switch silicon (bcm56846, bcm56340, … future) — or `vswitch`: no silicon,
+  Linux netdevs + the kernel (or the `asic_ops` software datapath) forward
+- **platform** — the physical board (a specific arch × asic × ports × firmware) — or a VM
 
 The design keeps these axes separate so that **adding a switch is data + a plugin
 dir, never a fork.**
@@ -169,6 +170,18 @@ board.
     base, and 5610 `fans()`/`psus()`/`leds()`/`fan_set()` via the CPLD driver sysfs (never
     devmem). `edgenos platform hal` reports it; 4610 gets generic temps + ONLP for the rest.
   - Next: package `onlp`; native 4610 fan/PSU HAL; reflash-test on real HW; retire the forks.
+- **Virtual platform (experimental):** `x86_64-kvm_x86_64-r0` — the framework with no
+  silicon. `arch/x86_64` (native, generic x86-64), `asic/vswitch`, `platform/qemu-kvm-x86_64`.
+  Base = Buildroot 2026.02 LTS + systemd + kernel 6.1 built in-repo (`arch/x86_64/buildroot`,
+  no external source trees), components `platform-svc` / `quagga` (static 1.2.4 + vtysh) /
+  `edgenos-cli` / `edged-vswitch`; `imgbuild` gained the `onie-x86` installer envelope
+  (GPT, BIOS + UEFI, keeps an ONIE menu entry) and a `qemu_disk` emitter (MBR hybrid
+  BIOS+UEFI qcow2 via genimage, rootless). `.epk` gained `links:` (symlinks, e.g. systemd
+  enablement). `edged-vswitch` is an L2 learning switch over AF_PACKET behind
+  `core/datapath/asic_ops.h` — the same seam as the FM6000 board daemon — so the seam can
+  be exercised without hardware. Verified: BIOS + UEFI boot, EVE-NG and containerlab on
+  Intel and AMD hosts, OSPF between two VMs, persistence across reboots. CI:
+  `.github/workflows/x86_64-vm.yml` builds and boot-tests it end to end.
 
 ## Current support matrix
 
@@ -176,3 +189,4 @@ board.
 |----------|------|------|--------|----------|--------|
 | `powerpc-accton_as5610_52x-r0` | powerpc | bcm56846 (Trident+) | 5.10 | edged | production |
 | `arm-accton-as4610-54-r0` | armhf | bcm56340 (Helix4) | 4.14 | bcmd | production |
+| `x86_64-kvm_x86_64-r0` (QEMU/KVM VM: EVE-NG, containerlab) | x86_64 | vswitch (none) | 6.1 | none / edged-vswitch | experimental |

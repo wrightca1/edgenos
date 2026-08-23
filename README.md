@@ -14,6 +14,7 @@ EdgeNOS 0.1.0 — supported switches
 MODEL                  ARCH     ASIC       KERNEL  STATUS      DOWNLOAD
 accton as4610-54       armhf    bcm56340   6.1     production  EdgeNOS-0.1.0-arm-accton-as4610-54-r0.swi
 accton as5610-52x      powerpc  bcm56846   6.1     production  EdgeNOS-0.1.0-powerpc-accton_as5610_52x-r0.bin
+qemu kvm-x86-64        x86_64   vswitch    6.1     experimental EdgeNOS-0.1.0-x86_64-kvm_x86_64-r0.bin
 ```
 
 ## How it fits together
@@ -78,6 +79,17 @@ edgenos build powerpc-accton_as5610_52x-r0 --source-root ..
 The AS5610 `edged` is built from this tree (verified: 11/11 sources compile + link to an
 18.8 MB PowerPC binary). The AS4610 `bcmd` builds via its OpenBCM recipe (`build-bcmd.sh`).
 
+The **x86_64 virtual switch** (QEMU/KVM: EVE-NG, containerlab, plain qemu — Intel and AMD,
+BIOS and UEFI) needs no vendor SDK, no cross toolchain and no external source tree, so it
+builds from this repo alone:
+
+```sh
+build/build-vm-image.sh        # Buildroot base + quagga + edged-vswitch + packages -> .bin (ONIE) + .qcow2
+tools/qemu/smoke-test.py output/images/EdgeNOS-*-x86_64-kvm_x86_64-r0.qcow2   # boots it, checks ports/quagga/persistence
+```
+See [`platform/qemu-kvm-x86_64/README.md`](platform/qemu-kvm-x86_64/README.md). The same
+target is what `.github/workflows/x86_64-vm.yml` builds and boot-tests in CI.
+
 ## Layout
 
 | Dir | What |
@@ -98,7 +110,10 @@ The AS5610 `edged` is built from this tree (verified: 11/11 sources compile + li
 Production-capable on two switches (AS5610-52X, AS4610-54T), both fully package-composed
 and self-describing (each image records its component list under
 `/var/lib/edgenos/epkg/installed`). The unified AS5610 `edged` is built and linked from
-source. Adding a third switch is a `switchdb/` entry + a `platform/<board>/` folder.
+source. Adding a third switch is a `switchdb/` entry + a `platform/<board>/` folder — the
+third one is the **x86_64 virtual switch** (`x86_64-kvm_x86_64-r0`, experimental): the
+same framework with no silicon (the kernel forwards, or the `asic_ops`-based
+`edged-vswitch` software datapath), for labs and CI.
 
 ## Support this project
 
