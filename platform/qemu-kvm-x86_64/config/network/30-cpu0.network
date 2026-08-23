@@ -1,0 +1,15 @@
+# EdgeNOS virtual (vswitch mode): cpu0 = the software switch's CPU port / SVI.
+# Up, unaddressed by default (vtysh / addrs.conf), keeps operator-set addresses.
+[Match]
+Name=cpu0
+
+[Link]
+ActivationPolicy=up
+RequiredForOnline=no
+
+[Network]
+DHCP=no
+LinkLocalAddressing=ipv6
+IPv6AcceptRA=no
+ConfigureWithoutCarrier=yes
+KeepConfiguration=yes
