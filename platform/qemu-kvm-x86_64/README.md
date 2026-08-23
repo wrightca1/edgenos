@@ -116,6 +116,22 @@ eBGP-unnumbered IPv4 + EVPN session Established, L2/L3 VNIs and cross-DC forward
 tenants, EVPN-MH LAGs (host bond partner = ES sys-mac), Cilium BGP, GoBGP, k8s 6+4 Ready, the
 app answered through the PAN NAT from the clients — the README verification of the original lab.
 
+### Lessons from the lab run (folded into the image / the lab configs)
+* **802.1Q subinterfaces vs networkd**: `20-ge.network` matched `ge1.100` too (`Name=ge*`); networkd
+  configured those later-created subinterfaces and, with its default `KeepMaster=no`, pulled them out
+  of their VRF (a race that only bit on the slower host). Now `Kind=!vlan` + `KeepMaster=yes` +
+  `KeepConfiguration=yes`.
+* **Anycast gateway MAC on a VLAN-aware bridge**: a macvlan above the SVI only gives the bridge a
+  VID-less local FDB entry, so frames to the gateway MAC in that VLAN miss the (MAC, VID) lookup, get
+  flooded to every port and the VNI, and the EVPN-MH peer (same anycast MAC) routes them a second
+  time (3 copies of every routed packet). Pin it per VLAN:
+  `bridge fdb replace <anycast-mac> dev br_default vlan <vid> self permanent` (switchd does this on
+  Cumulus; the ecloud translator emits it).
+* **802.3ad on virtio**: the link speed is "Unknown", the actor key is 0, no LACPDUs. The port
+  service sets `ethtool -s geN speed 1000 duplex full autoneg off`.
+* **mgmt VRF**: vrnetlab/containerlab give every VM `10.0.0.15/24` on `ma1`; keep `ma1` in VRF `mgmt`
+  or it collides with fabric addresses in the default VRF.
+
 ## Verified (2026-08)
 
 | | BIOS | UEFI | EVE-NG 7 | containerlab (routed) | containerlab (vswitch M2) | ONIE install |
