@@ -64,7 +64,11 @@ def main():
     taken = [False] * len(ex)
     placed = []
     for p in sorted(glob.glob(os.path.join(a.gens, "*.n"))):
-        name = os.path.basename(p)[:-2]
+        # A dump may be named "<tool>@<arg>@<arg>.n" for a generator that emits
+        # only part of its output. fm6000_sbusseq needs this: its writes form 12
+        # interleaved runs in the stream, so no single point is the right place
+        # for all of them and it is scheduled one segment at a time.
+        name = os.path.basename(p)[:-2].replace("@", " ")
         g = rows(p)
         if not g: continue
         i = find_block(ex, g, taken)

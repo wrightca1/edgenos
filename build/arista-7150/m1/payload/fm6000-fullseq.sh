@@ -416,7 +416,7 @@ run_scheduled() {
 	[ -s "$_sched" ] && [ -s "$_resid" ] || return 1
 	_off=0; _ran=0; _applied=0; _bad=0
 	exec 9< "$_sched"
-	while read -r _kind _arg <&9; do
+	while read -r _kind _arg _extra <&9; do
 		case "$_kind" in
 		\#*|"") continue ;;
 		RES)
@@ -427,9 +427,12 @@ run_scheduled() {
 			;;
 		GEN)
 			if [ -x "$BIN/$_arg" ]; then
+				# $_extra carries per-step arguments, e.g. "-s 3" to emit
+				# one segment of a generator whose writes are interleaved
+				# through the stream rather than contiguous.
 				# two argument conventions, same fallback as run_standalone
-				$BIN/$_arg -b $B >> $LOG 2>&1
-				[ $? -eq 2 ] && $BIN/$_arg $B >> $LOG 2>&1
+				$BIN/$_arg $_extra -b $B >> $LOG 2>&1
+				[ $? -eq 2 ] && $BIN/$_arg $_extra $B >> $LOG 2>&1
 				_ran=$((_ran + 1))
 			else
 				say "    MISSING $_arg -- its writes are NOT in resid.txt, bring-up is incomplete"
