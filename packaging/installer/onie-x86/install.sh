@@ -39,9 +39,13 @@ if command -v onie-sysinfo >/dev/null 2>&1; then
         esac
     fi
 fi
-for t in sgdisk blkid mkfs.ext4 partprobe tar; do
+for t in sgdisk blkid mkfs.ext4 tar; do
     command -v "$t" >/dev/null 2>&1 || fail "missing tool: $t"
 done
+rereadpt() {   # tell the kernel about the new partition table
+    partprobe "$1" 2>/dev/null || blockdev --rereadpt "$1" 2>/dev/null || sgdisk -p "$1" >/dev/null 2>&1 || true
+    sleep 2
+}
 
 if [ -d /sys/firmware/efi/efivars ]; then FW=uefi; else FW=bios; fi
 say "firmware: $FW"
@@ -69,7 +73,7 @@ for lbl in "$BOOT_LABEL" "$DATA_LABEL"; do
         sgdisk -d "$n" "$disk" >/dev/null
     done
 done
-partprobe "$disk" 2>/dev/null || true
+rereadpt "$disk"
 
 # --- create EDGENOS-BOOT + EDGENOS-DATA --------------------------------------------------
 next=$(sgdisk -p "$disk" | awk '/^ *[0-9]+ /{n=$1} END{print n+1}')
@@ -80,8 +84,7 @@ if [ "$DATA_SIZE_MB" = "0" ]; then dsz="0"; else dsz="+${DATA_SIZE_MB}M"; fi
 say "creating $DATA_LABEL ($([ "$dsz" = 0 ] && echo 'rest of disk' || echo "${DATA_SIZE_MB}M")) as partition $next"
 sgdisk --new="$next:0:$dsz" --typecode="$next:8300" --change-name="$next:$DATA_LABEL" "$disk" >/dev/null
 data_n=$next
-partprobe "$disk" 2>/dev/null || true
-sleep 2
+rereadpt "$disk"
 boot_dev=$(partdev "$disk" "$boot_n"); data_dev=$(partdev "$disk" "$data_n")
 i=0; while [ ! -b "$boot_dev" ] || [ ! -b "$data_dev" ]; do i=$((i+1)); [ $i -gt 20 ] && fail "partitions did not appear"; sleep 0.5; done
 
