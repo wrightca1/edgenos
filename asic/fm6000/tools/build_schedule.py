@@ -62,21 +62,40 @@ def main():
 
     ex = rows(a.stream)
     taken = [False] * len(ex)
-    placed = []
-    for p in sorted(glob.glob(os.path.join(a.gens, "*.n"))):
-        # A dump may be named "<tool>@<arg>@<arg>.n" for a generator that emits
-        # only part of its output. fm6000_sbusseq needs this: its writes form 12
-        # interleaved runs in the stream, so no single point is the right place
-        # for all of them and it is scheduled one segment at a time.
-        name = os.path.basename(p)[:-2].replace("@", " ")
-        g = rows(p)
-        if not g: continue
+
+    # ⚠ PLACE LONGEST BLOCKS FIRST. Placing in name order let a short, highly
+    # repetitive segment land INSIDE a longer block's span and block it:
+    # fm6000_sbusseq segment 7 is 54 writes occurring 12 times in the stream,
+    # and one of those occurrences sits inside segment 8, which is 540 writes
+    # occurring exactly ONCE. Greedy name-order placement took the short one
+    # first, and segment 8 could then never be placed.
+    #
+    # That is not a cosmetic loss. A PARTIALLY placed generator is worse than an
+    # unplaced one: the segments left behind stay in the residual and run at a
+    # different point relative to the generated ones, which reorders the
+    # bring-up. Scheduling SBus with 11 of its 12 segments took Et2 DOWN in
+    # silicon while the box still forwarded over Et1 -- alpha66.
+    #
+    # Longest-first fixes it: a long block claims its span before any short
+    # block can squat inside it.
+    #
+    # A dump may be named "<tool>@<arg>@<arg>.n" for a generator that emits only
+    # part of its output, which is how the 12 interleaved SBus runs are placed.
+    cands = []
+    for path in sorted(glob.glob(os.path.join(a.gens, "*.n"))):
+        g = rows(path)
+        if g: cands.append((os.path.basename(path)[:-2].replace("@", " "), g))
+    cands.sort(key=lambda c: -len(c[1]))
+
+    placed, unplaced = [], []
+    for name, g in cands:
         i = find_block(ex, g, taken)
-        if i < 0: continue
+        if i < 0:
+            unplaced.append((name, len(g)))
+            continue
         for k in range(i, i + len(g)): taken[k] = True
         placed.append((i, len(g), name))
     placed.sort()
-
     steps, resid, run = [], [], 0
     pos = 0
     for start, length, name in placed:
@@ -103,6 +122,16 @@ def main():
     print("residual          : %d writes (%.1f%%) -- the only vendor data left"
           % (len(resid), 100.0 * len(resid) / len(ex)))
     print("schedule          : %d steps" % len(steps))
+    if unplaced:
+        # Never silent. An unplaced generator means its writes are still vendor
+        # data in the residual; a PARTIALLY placed one is a live hazard.
+        print("\nunplaced (%d) -- these writes remain vendor data:" % len(unplaced))
+        for name, n in sorted(unplaced, key=lambda u: -u[1])[:10]:
+            print("   %-34s %d writes" % (name, n))
+        fam_placed = {p[2].split()[0] for p in placed}
+        partial = sorted({n.split()[0] for n, _ in unplaced} & fam_placed)
+        if partial:
+            print("\n⚠ PARTIALLY PLACED, DO NOT SHIP THIS SCHEDULE: %s" % ", ".join(partial))
     print("\nwrote %s and %s" % (a.out_schedule, a.out_residual))
 
 if __name__ == "__main__":
