@@ -19,6 +19,8 @@ files:
   - {src: platform/qemu-kvm-x86_64/config/addrs.conf,                dst: /etc/edged/addrs.conf, mode: "0644"}
   - {src: platform/qemu-kvm-x86_64/config/routes.conf,               dst: /etc/edged/routes.conf, mode: "0644"}
   # networkd: ma1 DHCP, ge* up/unaddressed
+  - {src: platform/qemu-kvm-x86_64/config/network/05-mgmt.netdev,    dst: /etc/systemd/network/05-mgmt.netdev, mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/config/network/05-mgmt.network,   dst: /etc/systemd/network/05-mgmt.network, mode: "0644"}
   - {src: platform/qemu-kvm-x86_64/config/network/10-ma1.network,    dst: /etc/systemd/network/10-ma1.network, mode: "0644"}
   - {src: platform/qemu-kvm-x86_64/config/network/20-ge.network,     dst: /etc/systemd/network/20-ge.network, mode: "0644"}
   - {src: platform/qemu-kvm-x86_64/config/issue,                     dst: /etc/issue, mode: "0644"}

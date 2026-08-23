@@ -102,8 +102,42 @@ class EdgeNOS_vm(vrnetlab.VM):
         if mode in ("vswitch", "none"):
             self.logger.info("datapath mode: %s" % mode)
             self.wait_write("/opt/edgenos/edgenos-datapath-mode %s --now" % mode, "#")
+        self.push_startup_config()
         self.wait_write("edgenos version", "#")
         self.logger.info("completed bootstrap configuration")
+
+    def push_startup_config(self):
+        """Per-node startup config: a directory bound into the container at /startup (or
+        /config/startup) with netconf.sh / frr.conf / daemons / sysctl.conf. Copied into the
+        VM at /etc/edgenos/startup (persists on the overlay) over the host-forwarded SSH, then
+        applied with edgenos-startup.sh --restart-frr. Reboots re-apply it via the unit."""
+        src = None
+        for d in ("/startup", "/config/startup"):
+            if os.path.isdir(d) and os.listdir(d):
+                src = d
+                break
+        if not src:
+            self.logger.info("no startup config dir (/startup) — skipping")
+            return
+        self.logger.info("pushing startup config from %s" % src)
+        self.wait_write("mkdir -p /etc/edgenos/startup", "#")
+        import subprocess, time as _t
+        ok = False
+        for attempt in range(30):
+            r = subprocess.run(["sshpass", "-p", DEFAULT_PASSWORD, "scp", "-q", "-o", "StrictHostKeyChecking=no",
+                                "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5", "-r", src + "/.",
+                                "%s@127.0.0.1:/etc/edgenos/startup/" % DEFAULT_USER],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if r.returncode == 0:
+                ok = True
+                break
+            self.logger.info("scp attempt %d failed: %s" % (attempt + 1, r.stdout.decode(errors="replace")[-200:]))
+            _t.sleep(5)
+        if not ok:
+            self.logger.error("could not push the startup config")
+            return
+        self.wait_write("chmod +x /etc/edgenos/startup/*.sh 2>/dev/null; /opt/edgenos/edgenos-startup.sh --restart-frr", "#")
+        self.logger.info("startup config applied")
 
 
 class EdgeNOS(vrnetlab.VR):
@@ -120,8 +154,12 @@ if __name__ == "__main__":
     parser.add_argument("--hostname", default="edgenos", help="hostname")
     parser.add_argument("--username", default=DEFAULT_USER, help="Username")
     parser.add_argument("--password", default=DEFAULT_PASSWORD, help="Password")
-    parser.add_argument("--nics", type=int, default=int(os.getenv("CLAB_INTFS", "16")) + 1,
-                        help="number of front-panel NICs to attach (default: CLAB_INTFS+1 or 17)")
+    # containerlab only creates the ethN that have links, and vrnetlab maps VM NIC i <-> container
+    # eth<i> by index, so the VM must carry NICs up to the HIGHEST eth index in the topology, not
+    # just as many as there are links: default to 32 (like other vrnetlab NOS launchers; unpeered
+    # ports simply stay down). Override with EDGENOS_NICS / --nics.
+    parser.add_argument("--nics", type=int, default=int(os.getenv("EDGENOS_NICS", "32")),
+                        help="number of front-panel NICs to attach (default EDGENOS_NICS or 32)")
     parser.add_argument("--connection-mode", default="tc", help="Connection mode to use in the datapath")
     args = parser.parse_args()
 

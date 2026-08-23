@@ -1,8 +1,10 @@
-# EdgeNOS virtual: management port = first NIC (ma1), DHCP (v4 + v6 RA).
+# EdgeNOS virtual: management port = first NIC (ma1), DHCP (v4 + v6 RA), in the mgmt VRF (05-mgmt.netdev).
+# From a shell: `ip vrf exec mgmt ping ...` / `ip vrf exec mgmt ssh ...` for mgmt-side connections.
 [Match]
 Name=ma1
 
 [Network]
+VRF=mgmt
 DHCP=yes
 IPv6AcceptRA=yes
 LLDP=yes

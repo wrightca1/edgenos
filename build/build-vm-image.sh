@@ -38,7 +38,8 @@ make -s -C platform/qemu-kvm-x86_64 clean >/dev/null
 make -s -C platform/qemu-kvm-x86_64 CROSS_COMPILE="$TOP/output/br-x86_64/host/bin/x86_64-buildroot-linux-gnu-"
 bin/edgenos pkg build packaging/specs/qemu-kvm-x86_64/edged-vswitch.yml --source-root . --platform "$PLATFORM"
 bin/edgenos pkg build packaging/specs/qemu-kvm-x86_64/platform-svc.yml --source-root . --platform "$PLATFORM"
-bin/edgenos pkg build packaging/specs/qemu-kvm-x86_64/quagga.yml       --source-root . --arch x86_64 --asic any
+bin/edgenos pkg build packaging/specs/qemu-kvm-x86_64/frr.yml          --source-root . --platform "$PLATFORM"
+bin/edgenos pkg build packaging/specs/qemu-kvm-x86_64/quagga.yml       --source-root . --arch x86_64 --asic any   # alternative control plane (not in the default component list)
 # edgenos-cli's spec uses the parent-dir convention (paths start with edgenos/): give it one.
 mkdir -p output/srcroot && ln -sfn "$TOP" output/srcroot/edgenos
 bin/edgenos pkg build packaging/specs/edgenos-cli.yml --source-root output/srcroot --arch any --asic any

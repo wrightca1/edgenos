@@ -1,0 +1,14 @@
+[Unit]
+Description=EdgeNOS startup config (/etc/edgenos/startup: netconf.sh, frr.conf, daemons, sysctl)
+After=edgenos-ports.service edgenos-l3.service systemd-networkd.service
+Wants=edgenos-ports.service
+Before=frr.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/edgenos/edgenos-startup.sh
+RemainAfterExit=yes
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

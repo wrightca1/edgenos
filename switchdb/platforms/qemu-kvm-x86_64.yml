@@ -18,7 +18,7 @@ kernel: "6.1"                # 6.1 LTS own-build (Buildroot + systemd), see arch
 datapath: none               # default mode: the kernel forwards. /etc/edgenos/datapath=vswitch -> edged-vswitch
 components:
   - platform-svc             # port naming (ma1 + ge0..N), networkd defaults, platform class, L3 config
-  - quagga                   # zebra + ospfd + ospf6d + bgpd (native x86_64 static build)
+  - frr                      # FRR 10.5 (EVPN, BGP unnumbered, EVPN-MH, BFD) + startup-config; quagga spec kept as an alternative
   - edgenos-cli              # on-box CLI (version, platform/HAL, epkg)
   - edged-vswitch            # M2 software datapath (asic_ops L2 switch), opt-in via edgenos-datapath-mode
 firmware: []

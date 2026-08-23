@@ -116,13 +116,13 @@ def main():
         assert "inet " in out, f"ma1 has no DHCP address: {out}"
         print("[smoke] ma1 DHCP OK")
 
-        rc, out = c.cmd("for i in $(seq 1 30); do pgrep -x zebra-x86_64 >/dev/null && pgrep -x bgpd-x86_64 >/dev/null && break; sleep 1; done; pgrep -a -f -- '-x86_64 -f' | sed 's/.*opt.edgenos.//' | cut -d' ' -f1 | sort | tr '\\n' ' '")
-        for d in ("zebra", "ospfd", "ospf6d", "bgpd"):
-            assert d + "-x86_64" in out, f"{d} not running: {out}"
-        print("[smoke] quagga daemons OK")
+        rc, out = c.cmd("for i in $(seq 1 45); do pidof zebra >/dev/null && pidof bgpd >/dev/null && break; sleep 1; done; for d in zebra bgpd ospfd ospf6d staticd bfdd; do pidof $d >/dev/null && printf '%s ' $d; done; echo")
+        for d in ("zebra", "bgpd", "ospfd", "ospf6d", "staticd", "bfdd"):
+            assert d in out.split(), f"{d} not running: {out}"
+        print("[smoke] FRR daemons OK")
 
         rc, out = c.cmd("vtysh -c 'show version' 2>&1 | head -2")
-        assert rc == 0 and "Quagga" in out, f"vtysh: {out}"
+        assert rc == 0 and ("FRRouting" in out or "Quagga" in out), f"vtysh: {out}"
         print("[smoke] vtysh OK")
 
         rc, out = c.cmd("edgenos platform show 2>&1 | head -30")
