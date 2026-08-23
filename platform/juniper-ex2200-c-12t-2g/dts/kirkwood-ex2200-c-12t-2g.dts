@@ -184,25 +184,40 @@
  *   mpfe0: <Juniper EX-series Packet Forwarding Engine>
  *          at mem 0xf4000000-0xf7ffffff irq 113 on mbus0
  *
- * i.e. a 64 MB aperture = 4 x 16 MB register windows (findings/34), IRQ 113.
+ * The mbus target/attribute pair was read from the live CPU address-decode
+ * windows at internal-regs +0x20000 (U-Boot: "md 0xf1020000 20"). Window 6:
  *
- * ============================ NOT YET WRITABLE ============================
- * This node is deliberately left out, because the mbus target/attribute pair
- * for the ASIC is NOT yet known, and guessing it is worse than omitting it:
+ *   ctrl 0x03ff00c1  base 0xf4000000
+ *     bit0    = 1        enabled
+ *     [7:4]   = 0x0c     target
+ *     [15:8]  = 0x00     attribute
+ *     [31:16] = 0x03ff   size = (0x3ff+1) << 16 = 64 MB
  *
- *   - kirkwood.dtsi already assigns MBUS_ID(0x01, 0x2f) to NAND flash at
- *     0xf4000000 (64 KB). That ID is taken and means something else.
- *   - kirkwood.dtsi also warns: "If a board file needs to change this ranges
- *     it must replace it completely" - so this board must restate the whole
- *     ranges property, not append to it.
+ * The same decode reproduces two windows mainline already names -
+ * MBUS_ID(0x01,0x2f) nand flash and MBUS_ID(0x03,0x01) crypto sram - which is
+ * what confirms the bit layout.
  *
- * TO RESOLVE: read the mbus window registers on a running unit. The mbus
- * controller is at internal-regs +0x20000 (0xf1020000) - the same 4 KB window
- * Junos maps to userland as /dev/mpfe region 3 precisely so CPSS can program
- * its own decode windows (findings/30, findings/34). Decode which window
- * covers 0xf4000000 and read back its target/attribute.
- *
- * Until then there is nothing to gain from a placeholder: the ASIC has no
- * driver either, so phase 1 (console, eth0, USB root) is unaffected.
- * ==========================================================================
+ * kirkwood.dtsi says a board changing 'ranges' must replace it completely, so
+ * the whole property is restated here rather than appended to.
  */
+&mbus {
+	ranges = <MBUS_ID(0xf0, 0x01) 0 0xf1000000 0x0100000	/* internal-regs */
+		  MBUS_ID(0x01, 0x2f) 0 0xf9000000 0x0800000	/* nand flash    */
+		  MBUS_ID(0x03, 0x01) 0 0xfb000000 0x0010000	/* crypto sram   */
+		  MBUS_ID(0x0c, 0x00) 0 0xf4000000 0x4000000>;	/* Prestera      */
+
+	pp0: packet-processor@f4000000 {
+		compatible = "juniper,ex2200-prestera", "marvell,prestera-dxch3";
+		reg = <MBUS_ID(0x0c, 0x00) 0 0x4000000>;	/* 4 x 16 MB windows */
+		interrupt-parent = <&intc>;
+		interrupts = <113>;
+		memory-region = <&pfe_dma>;
+		/*
+		 * No driver exists yet. Port map, for whoever writes one:
+		 *   ASIC port N  = front-panel ge-0/0/N   (N = 0..11)
+		 *   ASIC port 12 = uplink 0, 13 = uplink 1
+		 *   ASIC 24-27   = internal, port 63 = CPU port
+		 */
+		status = "disabled";
+	};
+};
