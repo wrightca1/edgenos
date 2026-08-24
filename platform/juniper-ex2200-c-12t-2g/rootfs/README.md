@@ -113,24 +113,53 @@ date -u -s '2026-08-24 11:08:27'
 looks for the old path while the kernel exposes `/dev/rtc0`. Use
 `hwclock -f /dev/rtc0 -w`, and note it is pointless without a battery anyway.
 
-The real fix is NTP once the rootfs is running, or setting the date from the
-boot environment. Until then, expect a 1970 clock on every cold boot.
+**Resolved.** Once the management subnet gained internet access,
+`systemd-timesyncd` fixes this properly:
+
+```
+apt-get install --no-install-recommends systemd-timesyncd
+```
+
+```
+systemd-timesyncd: Contacted time server 152.67.232.7:123 (0.debian.pool.ntp.org).
+systemd-timesyncd: Initial clock synchronization to Mon 2026-08-24 13:09:41 UTC.
+```
+
+Box and build host then report an identical epoch. Note `timedatectl` prints
+nothing here — it needs dbus, which `minbase` does not ship — so check
+`journalctl -u systemd-timesyncd` instead.
+
+The `date -u -s` workaround above is still what you need in the *initramfs*
+rescue path, which has no NTP client.
 
 ## No internet on the management subnet
 
-The box reaches the lab host and nothing else — `ping 1.1.1.1` fails and DNS
-does not resolve. `apt` therefore cannot reach the Debian archive directly.
+**This was true and is no longer.** Originally the box reached the lab host and
+nothing else: ICMP, TCP/80, TCP/443 and UDP/53 to public addresses all timed
+out, so it was not a DNS problem — there was no path. `traceroute` showed
+packets dying at the gateway, then later at `10.101.1.1` once forwarding was
+partly opened.
 
-The lab host *does* have internet, so it runs **apt-cacher-ng** on port 3142
-and the box points at it:
+After the upstream fix the box has full internet:
 
-```sh
-echo 'Acquire::http::Proxy "http://<lab-host>:3142";' > /etc/apt/apt.conf.d/01proxy
+```
+# ping -c 3 8.8.8.8
+3 packets transmitted, 3 received, 0% packet loss
+rtt min/avg/max = 11.909/11.967/11.999 ms
 ```
 
-With an HTTP proxy the box needs **no DNS of its own** — apt sends the full
-URL and the proxy resolves it. That is why `/etc/resolv.conf` can stay empty
-and apt still works.
+`apt-get update` now works with no proxy at all.
+
+**The workaround is kept, disabled, because it is worth knowing.** While the
+subnet was isolated, the lab host ran **apt-cacher-ng** on 3142 and the box
+pointed at it. The neat part: with an HTTP proxy the box needs **no DNS of its
+own**, because apt sends the full URL and the proxy resolves it — so an empty
+`/etc/resolv.conf` is fine. The config survives as
+`/etc/apt/apt.conf.d/01proxy.disabled`; rename it to re-enable.
+
+One gotcha found when DNS was finally configured: `debootstrap` copies the
+**build host's** `/etc/resolv.conf` into the rootfs. Here that meant the
+switch inherited a tailscale-generated file. Overwrite it.
 
 ## systemd needs kernel options `mvebu_v5_defconfig` does not set
 
