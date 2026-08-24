@@ -167,3 +167,45 @@ back to.
 SysRq still works, because it is handled in the kernel rather than userspace,
 so `BREAK` + `b` recovers the box. That is the only route back, and it is why
 `sysrq_always_enabled` stays in the boot arguments.
+
+## Always `wipefs -a` before `mkfs`
+
+This was got wrong here and the symptom points somewhere else entirely.
+
+`mke2fs` writes its superblock at offset 1024 and does **not** clear the FAT
+boot sector in the first 512 bytes. Formatting straight over the stick's
+existing FAT32 left the partition advertising two filesystems at once:
+
+```
+# wipefs /dev/sdb1
+DEVICE OFFSET TYPE UUID                                 LABEL
+sdb1   0x52   vfat E3C5-4776                            SLINGUSB
+sdb1   0x0    vfat E3C5-4776                            SLINGUSB
+sdb1   0x1fe  vfat E3C5-4776                            SLINGUSB
+sdb1   0x438  ext2 c34d2216-1191-4041-aee1-bd74224a6775 ex2200root
+```
+
+`blkid` then refuses to choose — `ambivalent result` — and returns nothing at
+all. Everything that resolves a device through blkid breaks: `LABEL=` and
+`UUID=` in fstab, and `/dev/disk/by-label/` and `by-uuid/` never appear. So
+systemd reports
+
+```
+systemd-remount-fs[95]: mount: /: can't find LABEL=ex2200root
+```
+
+while `e2label /dev/sdb1` cheerfully prints `ex2200root`. The label is fine;
+the *lookup* is poisoned by the stale superblock.
+
+The fix is `wipefs -a /dev/sdb1` **before** `mkfs`. To repair it afterwards,
+note `wipefs` refuses to touch a mounted device — so it has to be done from
+the rescue initramfs with the filesystem unmounted. Busybox has no `wipefs`,
+but zeroing the first 1024 bytes does the same job and is safe, because ext2
+reserves that area for a boot sector and stores nothing there:
+
+```sh
+dd if=/dev/zero of=/dev/sdb1 bs=1024 count=1 conv=notrunc
+```
+
+Verified before and after at offset 510: `55 aa` became `00 00`, and the ext2
+filesystem still mounted with the full tree intact.

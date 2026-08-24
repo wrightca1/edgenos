@@ -80,6 +80,15 @@ else
     echo "   $ROOTDEV never appeared"
 fi
 echo "   staying in the rescue shell"
+
+# Configure eth0 for the rescue case only. This deliberately sits AFTER the
+# switch_root attempt: ip= was removed from bootargs because a kernel-applied
+# address makes the rootfs's ifup fail with "Address already assigned", and
+# doing it before the handover here would recreate exactly that problem.
+ip link set eth0 up 2>/dev/null
+ip addr add 10.101.104.2/29 dev eth0 2>/dev/null
+ip route add default via 10.101.104.1 2>/dev/null
+echo "   rescue networking: $(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}')"
 echo
 
 # setsid + cttyhack gives the shell a real controlling terminal, so job

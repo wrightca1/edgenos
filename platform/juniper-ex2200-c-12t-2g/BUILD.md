@@ -30,6 +30,19 @@ make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- -j3 \
 ## Package
 
 ```sh
+> **`make zImage` does not rebuild the DTB.** They are separate targets, and
+> `bootargs` lives in the DTB — so editing the device tree, running only
+> `make zImage`, and concatenating produces an image that silently boots with
+> the *old* command line. Verify what actually shipped:
+>
+> ```sh
+> dtc -I dtb -O dts arch/arm/boot/dts/marvell/kirkwood-ex2200-c-12t-2g.dtb | grep bootargs
+> cat /proc/cmdline        # on the booted box - the decisive check
+> ```
+>
+> This cost a boot cycle here: a change to remove `ip=` appeared to have no
+> effect, and the running `/proc/cmdline` still showed it.
+
 cat zImage kirkwood-ex2200-c-12t-2g.dtb > zImage-dtb    # appended, not passed
 mkimage -A arm -O linux -T kernel -C none \
         -a 0x01000000 -e 0x01000000 -d zImage-dtb uImage

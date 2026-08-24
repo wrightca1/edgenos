@@ -43,7 +43,7 @@
 		 * Consequence: changing kernel arguments means rebuilding the
 		 * DTB, not typing at the U-Boot prompt.
 		 */
-		bootargs = "console=ttyS0,9600 earlyprintk ignore_loglevel ip=10.101.104.2:10.22.1.56:10.101.104.1:255.255.255.248::eth0:off sysrq_always_enabled";
+		bootargs = "console=ttyS0,9600 earlyprintk ignore_loglevel sysrq_always_enabled";
 		stdout-path = &uart0;
 	};
 
