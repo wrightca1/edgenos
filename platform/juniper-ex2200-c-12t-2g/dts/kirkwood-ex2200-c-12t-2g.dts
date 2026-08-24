@@ -29,7 +29,21 @@
 	};
 
 	chosen {
-		bootargs = "console=ttyS0,9600 earlyprintk";
+		/*
+		 * bootargs MUST live here. U-Boot 1.1.6 on this board does not
+		 * get a command line through to the kernel - ATAG_CMDLINE never
+		 * arrives, even with CONFIG_ARM_ATAG_DTB_COMPAT - so 'setenv
+		 * bootargs' at the prompt has no effect whatsoever.
+		 *
+		 * Proven the hard way: with this property present the kernel
+		 * reported exactly this string as its command line; with it
+		 * removed, the kernel booted with NO command line and produced
+		 * no output at all, because earlyprintk was never enabled.
+		 *
+		 * Consequence: changing kernel arguments means rebuilding the
+		 * DTB, not typing at the U-Boot prompt.
+		 */
+		bootargs = "console=ttyS0,9600 earlyprintk ignore_loglevel ip=10.101.104.2:10.22.1.56:10.101.104.1:255.255.255.248::eth0:off sysrq_always_enabled";
 		stdout-path = &uart0;
 	};
 
@@ -37,15 +51,28 @@
 	 * Junos reserves 8 MB at physical 0x100000 and hands it to userland
 	 * through /dev/mpfe region 0 for DMA buffers and descriptor rings
 	 * (machdep.iomem_physaddr / iomem_size; findings/30, findings/34).
-	 * Reserve the same region so the future dataplane shim has it.
+	 *
+	 * We reserve the same SIZE but not the same ADDRESS. Junos can use
+	 * 0x100000 because its kernel lives elsewhere; a Linux zImage
+	 * decompresses to PHYS_OFFSET+TEXT_OFFSET (0x8000) and is ~12 MB, so
+	 * 0x100000..0x900000 falls inside the kernel image and the reservation
+	 * is refused:
+	 *
+	 *   OF: reserved mem: failed to reserve memory for node
+	 *       'pfe-dma@100000': base 0x00100000, size 8 MiB
+	 *
+	 * A size-only reservation lets the kernel place it somewhere valid.
+	 * The Prestera can DMA anywhere in the 512 MB, so the address is not
+	 * architecturally significant - only the size is.
 	 */
 	reserved-memory {
 		#address-cells = <1>;
 		#size-cells = <1>;
 		ranges;
 
-		pfe_dma: pfe-dma@100000 {
-			reg = <0x00100000 0x00800000>;	/* 8 MB */
+		pfe_dma: pfe-dma {
+			size = <0x00800000>;		/* 8 MB, as Junos reserves */
+			alignment = <0x00100000>;
 			no-map;
 		};
 	};
@@ -91,9 +118,15 @@
 &mdio {
 	status = "okay";
 
-	ethphy0: ethernet-phy@0 {
-		/* Marvell 88E1118, named by the Junos boot log */
-		reg = <0>;
+	/* Marvell 88E1118 at MDIO address 1. Found by letting the kernel
+	 * scan: address 0 (the obvious guess, and what the first attempt
+	 * used) is empty, which left mv643xx_eth at -EPROBE_DEFER forever.
+	 * See findings/48. Confirmed on hardware -- eth0 links at
+	 * 100 Mb/s full duplex and answers ping.
+	 */
+	ethphy0: ethernet-phy@1 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <1>;
 	};
 };
 
@@ -165,6 +198,29 @@
 			};
 		};
 	};
+};
+
+/*
+ * No SATA on this board. kirkwood.dtsi leaves sata_phy0/1 status="okay",
+ * so phy_mvebu_sata probes them at internal-regs +0x82000/+0x84000 with
+ * gate_clk 14 - and HANGS. Touching a Marvell peripheral whose clock gate
+ * is off wedges the bus, which is exactly what happened: the boot stopped
+ * dead at
+ *
+ *   calling  phy_mvebu_sata_driver_init+0x0/0x10 @ 1
+ *
+ * and never returned. Found with + ignore_loglevel.
+ *
+ * PHY_MVEBU_SATA is def_bool y and depends on MACH_KIRKWOOD, so it cannot
+ * be turned off in the config while Kirkwood support is on - the node has
+ * to be disabled here instead.
+ */
+&sata_phy0 {
+	status = "disabled";
+};
+
+&sata_phy1 {
+	status = "disabled";
 };
 
 /*
