@@ -20,7 +20,9 @@ stream order, works and takes the residual from **8,430 to 8,069** writes
     unicast THROUGH: 0% packet loss
 
 **It is not adopted, because Et2 came up on 1 of 3 boots with it and 2 of 3
-without.** Neither number is distinguishable from the 4/5 baseline at N=3 — see
+without** — and N=3 decides nothing here. The shipped configuration has since
+measured **5/5** over five boots, so the bar is now a like-for-like five-boot
+comparison rather than a comparison against an ambiguous number. Neither number is distinguishable from the 4/5 baseline at N=3 — see
 `docs/ET2-LINK-RATE.md` — so this is 361 writes bought with an unmeasured risk to a
 port. The substitution also moves writes that were scattered through the stream to a
 single earlier point, and ordering is the one thing this project has repeatedly

@@ -41,15 +41,19 @@ Et2 reads `PORT_STATUS = 0x0815`, a live one `0x08c0`/`0x0cc0`.
 **A transit test does not check Et2.** The OSPF peer is on Et1, so unicast through
 the box is 0% loss whether Et2 is up or down. Forwarding passing says nothing.
 
-## The open question
+## The question, answered
 
-Et2's rate across successive residual reductions reads 4/5 → 5/5 → 2/3 → 1/3, but
-the last two are under-sampled and the changes were not measured against each other
-at equal N. It is possible the rate has genuinely drifted as writes were removed; it
-is equally possible this is the same marginal link it always was.
+Et2's rate across successive reductions read 4/5 → 5/5 → 2/3 → 1/3, and the middle
+of that looked like a drift. It was not. The shipped configuration at **7,088
+residual writes — 25× fewer than the replay it replaced — measures 5/5**, the same
+as alpha67 and better than the file-driven baseline.
 
-Resolving it needs one configuration booted five times, then the next, on the same
-day and the same cable — not three boots each, interleaved with other changes. Until
-that is done, **a residual reduction should not be adopted on the strength of Et2
-looking acceptable in three boots.** That is why `fm6000_mapperinit`'s 361-write
-substitution is measured in `docs/RESIDUAL-CANDIDATES.md` and not shipped.
+So the 2/3 and 1/3 readings were N=3 noise, exactly as they were labelled at the
+time. Nothing in the reductions from 16,432 down to 7,088 writes has hurt this link.
+
+**The rule stands anyway.** It cost five boots to establish that two earlier
+measurements meant nothing, which is the point: at N=3 this link cannot distinguish
+a real regression from a run of bad luck, and it has already produced three wrong
+calls in this project. `fm6000_mapperinit`'s substitution stays in
+`docs/RESIDUAL-CANDIDATES.md` until it gets the same five boots — its 1/3 is no more
+meaningful than the 2/3 it was compared against, and that cuts both ways.
