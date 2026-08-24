@@ -42,9 +42,13 @@ primary back   36 routes return               14 s of loss
 ```
 
 ⚠ That tests a **clean link-down**. It does not cover a link that stays up
-while forwarding is broken — which happened on this bench, via a 10GBASE-T SFP
-whose EEPROM claimed to be a fibre optic. OSPF holds the adjacency and keeps
-feeding a black hole. BFD is what catches that; it is not configured here.
+while forwarding is broken — OSPF holds the adjacency and keeps feeding a black
+hole. BFD is what catches that, and it is not configured here.
+
+⚠ A related trap on this board, which cost a day: these PHYs report **link up
+when there is none**, at a plausible negotiated speed. A port can show 10G full
+duplex, hold an adjacency's worth of hellos, and be receiving nothing at all.
+Check `RPKT` on the port before believing a link, and see [LEDS.md](LEDS.md).
 
 ## How this differs from the finished platforms
 
