@@ -54,7 +54,17 @@ done
 if [ -b "$ROOTDEV" ]; then
     mkdir -p /mnt/root
     if mount -t ext2 "$ROOTDEV" /mnt/root 2>/dev/null; then
-        if [ -x /mnt/root/sbin/init ]; then
+        # Careful with this test. Debian is usr-merged and /sbin/init is a
+        # symlink to the ABSOLUTE path /lib/systemd/systemd, which resolves
+        # against the *initramfs* root while we are still here - so a plain
+        # `[ -x /mnt/root/sbin/init ]` follows it into the wrong filesystem
+        # and reports missing. (switch_root itself is fine; it resolves
+        # /sbin/init after pivoting.) Check the real binary via the relative
+        # /lib -> usr/lib link, and keep -h as the catch-all for a symlink we
+        # cannot follow from here.
+        if [ -x /mnt/root/lib/systemd/systemd ] ||
+           [ -x /mnt/root/usr/lib/systemd/systemd ] ||
+           [ -x /mnt/root/sbin/init ] || [ -h /mnt/root/sbin/init ]; then
             echo "   $ROOTDEV ok -- switching root"
             mount --move /dev  /mnt/root/dev  2>/dev/null
             mount --move /proc /mnt/root/proc 2>/dev/null

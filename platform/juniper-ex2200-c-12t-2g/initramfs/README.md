@@ -55,3 +55,33 @@ entries here even though `/init` mounts devtmpfs immediately afterwards.
 `/init` ends with `exec setsid cttyhack /bin/sh`. `setsid` plus `cttyhack`
 gives the shell a real controlling terminal, so job control and Ctrl-C work
 over the serial console; a bare `exec /bin/sh` leaves it without one.
+
+## The usr-merge trap in the handover check
+
+`/init` must decide whether the persistent rootfs is usable before calling
+`switch_root`. The obvious test is wrong:
+
+```sh
+[ -x /mnt/root/sbin/init ]        # reports missing even when it is there
+```
+
+Debian is usr-merged, and `/sbin/init` is a symlink to the **absolute** path
+`/lib/systemd/systemd`. While still in the initramfs, that absolute path
+resolves against the *initramfs* root — where systemd does not exist — so the
+test follows the link into the wrong filesystem and fails.
+
+`switch_root` itself is unaffected; it resolves `/sbin/init` after pivoting.
+Only the pre-check was broken. Test the real binary instead, reached through
+the *relative* `/lib -> usr/lib` link:
+
+```sh
+[ -x /mnt/root/lib/systemd/systemd ] ||
+[ -x /mnt/root/usr/lib/systemd/systemd ] ||
+[ -x /mnt/root/sbin/init ] || [ -h /mnt/root/sbin/init ]
+```
+
+Worth noting how this surfaced: the box reported
+`/dev/sdb1 mounted but has no /sbin/init` and dropped to the rescue shell —
+diagnosable in one line, and fully recoverable. Had the handover been done
+with `root=/dev/sdb1 rootwait` in bootargs instead, the same bug would have
+been an indefinite hang with no message.

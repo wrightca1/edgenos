@@ -131,3 +131,39 @@ echo 'Acquire::http::Proxy "http://<lab-host>:3142";' > /etc/apt/apt.conf.d/01pr
 With an HTTP proxy the box needs **no DNS of its own** — apt sends the full
 URL and the proxy resolves it. That is why `/etc/resolv.conf` can stay empty
 and apt still works.
+
+## systemd needs kernel options `mvebu_v5_defconfig` does not set
+
+`mvebu_v5_defconfig` is an embedded config and omits several things systemd
+treats as mandatory. The failure is abrupt and gives no hint which option is
+missing:
+
+```
+systemd[1]: Failed to mount API filesystems.
+systemd[1]: Freezing execution.
+```
+
+That is systemd being unable to mount `/sys/fs/cgroup`. The kernel needs, at
+minimum:
+
+```
+CONFIG_CGROUPS=y          # mandatory - without it systemd freezes as above
+CONFIG_TMPFS_XATTR=y      # mandatory
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_FHANDLE=y          # already set by the defconfig
+CONFIG_MEMCG=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_AUTOFS_FS=y        # optional; silences "Failed to find module autofs4"
+```
+
+## Recovery once switch_root has happened
+
+Note the asymmetry. Before `switch_root`, every failure lands in the busybox
+rescue shell. **After** it, the initramfs is gone — so a rootfs that mounts but
+whose init then fails (exactly the cgroups case above) leaves nothing to fall
+back to.
+
+SysRq still works, because it is handled in the kernel rather than userspace,
+so `BREAK` + `b` recovers the box. That is the only route back, and it is why
+`sysrq_always_enabled` stays in the boot arguments.
