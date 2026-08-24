@@ -46,21 +46,6 @@ while forwarding is broken — which happened on this bench, via a 10GBASE-T SFP
 whose EEPROM claimed to be a fibre optic. OSPF holds the adjacency and keeps
 feeding a black hole. BFD is what catches that; it is not configured here.
 
-## What does not
-
-* **IPv6 transit forwarding is not proven.** Local termination and route
-  programming are verified; pushing traffic *through* the box over IPv6 and
-  watching the chip counters has not been done. See [IPV6.md](IPV6.md).
-* **Copper ports are unreliable to bring up.** `bcm_init` with the PHY bus
-  completed on two of five attempts and stalled on three, spinning on two cores
-  with the log frozen. Unexplained, and it has not recurred recently.
-* **Convergence is slow.** 19 s to fail over, 14 s to fail back. Well inside
-  the 40 s OSPF dead interval, so detection is event-driven rather than timed
-  out — but LSA propagation, SPF and reprogramming the chip should not take
-  that long. Hello/dead tuning or BFD are the levers, on both ends.
-* **`sdkpoc` is still the bring-up agent, not a converged datapath.** See below.
-* **No cold-boot test.** Every boot so far has been warm from the vendor NOS.
-
 ## How this differs from the finished platforms
 
 `accton-as5610-52x` targets `edged` — the shared datapath in `core/datapath`.
