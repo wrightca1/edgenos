@@ -78,6 +78,44 @@ The other four mode fields stay at 4. They are the activity and speed LEDs the
 vendor firmware drives, and we have no honest source for them; leaving them at 4
 keeps them dark rather than lighting them with something invented.
 
+### ⚠⚠ An LED never justifies a bus transaction
+
+Driving these LEDs once broke **receive on all 48 copper ports**. Transmit was
+fine, the 40G SerDes ports were fine, and everything behind a BCM84848 went
+deaf — through a reboot, a full port bring-up sequence, and reverting the LED
+registers. Rolling the agent binary back restored it instantly, which is what
+identified the LED code as the cause at all.
+
+Bisected by making it runtime-switchable rather than guessing — `SDKPOC_PHYLED`
+selects off / config-only / full, and `phyled sync on|off` toggles link driving
+live, so both halves are testable on one boot:
+
+| | copper receive |
+|---|---|
+| LED code disabled | works |
+| config registers written to all 48 PHYs | works |
+| link driving from cached state | works |
+| link driving calling `bcm_port_speed_get` per PHY every 2 s | **dead** |
+
+It was the **MDIO budget**, not the registers. Twenty-four bus transactions a
+second, on a bus already shared with linkscan and the SDK's own PHY driver,
+starves the path copper receive depends on. The 40G ports were unaffected
+because they are direct SerDes and touch no MDIO.
+
+So: `bcm_port_info_t` already carries the negotiated speed in the linkscan
+callback, and `bcm_port_link_status_get()` reads software state that hardware
+linkscan maintains. Both are free. The only MDIO left is **one speed read per
+port at startup**, plus a bounded re-read for a port linkscan reports up but
+for which no speed was ever learned — which cannot repeat, because the next
+pass has one.
+
+⚠ That startup seed is **not optional**. Without it the cache is empty, and
+linkscan reports only *changes* — a port already up when the agent starts never
+populates it, so the whole panel stays dark while the code reads as correct.
+
+`leds=yes` in `datapath.conf` gates all of it, defaulting to **off**. The
+datapath is what matters; the LEDs are decoration.
+
 ### ⚠ A link with no speed is not a link
 
 `bcm_port_link_status_get` returns **UP for every copper port on this board**,

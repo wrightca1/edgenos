@@ -95,7 +95,14 @@ struct i2c_smbus_ioctl_data {
  * which is what makes this a palette rather than four coincidences. */
 /* QSFP link LEDs. The board description defines these as one block per LANE,
  * not per port: four ports x four lanes, based at 0xA000 with a 0x10 stride,
- * so Ethernet49/1 is 0xA000 and Ethernet52/4 is 0xA0F0. Transceiver control
+ * so Ethernet49/1 is 0xA000 and Ethernet52/4 is 0xA0F0.
+ *
+ * ⚠ Stated as derived facts on purpose. The .fdl is Arista Confidential and
+ * must not be reproduced even here -- this comment previously quoted its
+ * source, was sanitised on the publish branch only, and came straight back the
+ * next time the file was copied. Fix these at the source or they recur.
+ *
+ * Transceiver control
  * starts at 0xA100 and must not be caught by an off-by-one here.
  *
  * ⚠ Nothing wrote these until now, which is the whole reason the QSFP LEDs

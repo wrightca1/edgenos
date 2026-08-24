@@ -19,24 +19,47 @@ reference.
 | Boot | Aboot → `kexec` → our 6.12 kernel + initrd, from `flash:/edgenos.swi` |
 | ASIC | BCM56855_A2 via the BCM56850_A0 driver, OpenBCM SDK 6.5.24 |
 | BDE | **user space** — no `linux-kernel-bde`, no KNET, stock kernel |
-| Datapath | 40G uplink, tap netdev per port, RX and TX verified |
+| Front ports | all 52 — 48 × 10GBASE-T + 4 × 40G QSFP+ |
+| Copper rate | 10G full duplex demonstrated on one port against a 10GBASE-T peer |
+| Datapath | tap netdev per port, RX and TX verified, transit forwarding counted at the chip |
 | L3 | routed ports EOS-style — one VLAN and one L3 interface per port |
-| Control plane | FRR 8.4.4, OSPF Full, 35 routes |
-| Hardware FIB | adds, next-hop changes and withdrawals all verified against the chip |
+| Control plane | FRR 8.4.4 — OSPFv2 **and** OSPFv3, two Full adjacencies each |
+| Hardware FIB | IPv4 **and** IPv6: adds, next-hop changes and withdrawals verified against the chip |
+| Redundancy | primary/backup uplinks by OSPF cost, failover **measured** — see below |
+| Configuration | the datapath is a runtime file, `deploy/datapath.conf` — ports, addresses, policy routes, no rebuild |
 | Front panel | chassis, QSFP and copper port LEDs all driven — see [LEDS.md](LEDS.md) |
-| Platform | PSU/fan/thermal monitoring, EOS's cooling curve, hardware watchdog |
 | Platform | 5 hwmon devices, 2 PSUs over PMBus, 4 fan trays, chassis + tray LEDs |
-| Cooling | closed loop on the inlet sensor, clamped `[127, 180]`, refreshed every 60 s |
-| Watchdog | **hardware** — `sp5100_tco`, 60 s timeout, fed by `init`; resets the box if it wedges |
+| Cooling | closed loop on the inlet sensor, clamped `[108, 180]`, refreshed every 60 s |
+| PSU fans | bounded PMBus control, 40% floor, refuses a loaded supply without `--force` |
+| Watchdog | **hardware** — `sp5100_tco`, 60 s timeout, fed by `init` |
+
+Failover was tested by cutting the primary uplink with a continuous ping
+running, not by reading the routing table:
+
+```
+primary down   36 routes move to the backup   19 s of loss
+primary back   36 routes return               14 s of loss
+```
+
+⚠ That tests a **clean link-down**. It does not cover a link that stays up
+while forwarding is broken — which happened on this bench, via a 10GBASE-T SFP
+whose EEPROM claimed to be a fibre optic. OSPF holds the adjacency and keeps
+feeding a black hole. BFD is what catches that; it is not configured here.
 
 ## What does not
 
+* **IPv6 transit forwarding is not proven.** Local termination and route
+  programming are verified; pushing traffic *through* the box over IPv6 and
+  watching the chip counters has not been done. See [IPV6.md](IPV6.md).
 * **Copper ports are unreliable to bring up.** `bcm_init` with the PHY bus
   completed on two of five attempts and stalled on three, spinning on two cores
-  with the log frozen. Without the PHY bus the SDK binds only the internal TSC
-  SerDes and all 48 copper ports stay down. Unexplained.
-* **The SDK agent and control plane are started by hand.** Not in `init` yet.
-* **No cold-boot test.** Every boot so far has been warm from EOS.
+  with the log frozen. Unexplained, and it has not recurred recently.
+* **Convergence is slow.** 19 s to fail over, 14 s to fail back. Well inside
+  the 40 s OSPF dead interval, so detection is event-driven rather than timed
+  out — but LSA propagation, SPF and reprogramming the chip should not take
+  that long. Hello/dead tuning or BFD are the levers, on both ends.
+* **`sdkpoc` is still the bring-up agent, not a converged datapath.** See below.
+* **No cold-boot test.** Every boot so far has been warm from the vendor NOS.
 
 ## How this differs from the finished platforms
 
@@ -92,14 +115,24 @@ ours and is published, the vendor's numbers are not ours to publish.
 ```
 board.yml            manifest
 PROVENANCE.md        what is ours, what is not, what blocks publication
+LEDS.md              the three LED mechanisms, and the MDIO budget rule
+IPV6.md              OSPFv3, the v6 hardware FIB, and what still is not proven
 kernel/              kernel configuration
 initrd/init          the initrd: SCD, resets, sensors, cooling, panel, flash
+initrd/bin/          datapath-up.sh — applies deploy/datapath.conf at boot
 config/              config.bcm (⚠ EOS-derived — see PROVENANCE.md), phy bus
-deploy/              FRR configuration
+deploy/              datapath.conf, FRR configuration and daemons
 platmon.c            platform monitor: sensors, PSU, fans, LEDs, cooling
 kernel-params        the kernel cmdline; belongs at /mnt/flash/kernel-params
 tools/               image build, reset release, retimer, Aboot and EOS console
+tools/lansniff.c     passive capture — ARP, DHCP, IPv6 ND, OSPFv3 packet types
+tools/arpscan.c      ARP sweep for a device whose address nobody knows
 ```
+
+`lansniff` and `arpscan` exist because the initrd has no `tcpdump` and busybox
+has no capture applet. Both were written to find a device on a wire we control
+and then kept, because "what is actually arriving on this port" turned out to
+be the question that settled several faults that reasoning alone got wrong.
 
 ## Safety net
 

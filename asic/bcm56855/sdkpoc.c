@@ -771,6 +771,42 @@ struct fib_rt {
     int        valid;
 };
 
+/* IPv6, kept in parallel tables rather than folded into the v4 ones.
+ *
+ * The chip APIs differ by a flag and a field, but the ADDRESS is 16 bytes and
+ * every v4 helper here takes a uint32_t by value. Widening those would touch
+ * the working v4 path, which forwards production traffic; parallel tables cost
+ * a few hundred bytes and cannot regress it. */
+struct fib_nh6 {
+    uint8      gw[16];
+    bcm_if_t   egress;
+    int        valid;
+};
+
+struct fib_rt6 {
+    uint8      dst[16];
+    int        len;
+    uint8      gw[16];
+    int        programmed;
+    int        valid;
+};
+
+static struct fib_nh6 fib_nh6s[FIB_MAX_NH];
+static struct fib_rt6 fib_rt6s[FIB_MAX_ROUTES];
+static bcm_if_t fib_cpu_egress6;
+static long fib_routes6_added, fib_nh6_added, fib_local6_added;
+
+/* Enough of an address to identify it in a log line without pulling in
+ * inet_ntop, which the SDK's libc wrapper does not reliably provide here. */
+static const char *ip6s(const uint8 *a, char *buf)
+{
+    sprintf(buf, "%x:%x:%x:%x::%x:%x",
+            (a[0] << 8) | a[1], (a[2] << 8) | a[3],
+            (a[4] << 8) | a[5], (a[6] << 8) | a[7],
+            (a[12] << 8) | a[13], (a[14] << 8) | a[15]);
+    return buf;
+}
+
 static struct fib_nh fib_nhs[FIB_MAX_NH];
 static struct fib_rt fib_rts[FIB_MAX_ROUTES];
 static int  fib_unit;
@@ -1056,6 +1092,181 @@ static void fib_local_addr_add(uint32_t addr)
     }
 }
 
+/* ⚠ THIS is what made IPv6 unreachable, and it is not about routing.
+ *
+ * IPv6 addressed to the switch ITSELF never reached the CPU: v4 pings to our
+ * interface and loopback answered, the identical v6 pings timed out, and an
+ * OSPFv3 adjacency sat in ExStart forever while the far end retransmitted
+ * database descriptions we never saw. IPv6 MULTICAST arrived fine, because the
+ * L2 table carries explicit entries for the OSPF groups pointing at the CPU.
+ *
+ * There was no equivalent for unicast, because the chip held no IPv6 entries
+ * at all -- nothing told it that fe80::1c:73ff:fe00:3d or the v6 loopback are
+ * local addresses to terminate rather than traffic to route or drop.
+ *
+ * Link-locals matter as much as globals here: OSPFv3 peers over fe80::, so
+ * without these the control plane cannot work no matter what else is right. */
+static void fib_local_addr6_add(const uint8 *addr)
+{
+    bcm_l3_host_t host;
+    char b[64];
+    int prv;
+
+    if (fib_cpu_egress_get() != 0) {
+        return;
+    }
+    bcm_l3_host_t_init(&host);
+    host.l3a_flags = BCM_L3_IP6;
+    sal_memcpy(host.l3a_ip6_addr, addr, 16);
+    host.l3a_intf  = fib_cpu_egress;
+    prv = bcm_l3_host_add(fib_unit, &host);
+    if (prv != BCM_E_NONE && prv != BCM_E_EXISTS) {
+        printf("  FIB6: local %s rv=%d %s\n", ip6s(addr, b), prv, bcm_errmsg(prv));
+    } else {
+        fib_local6_added++;
+        printf("  FIB6: local address %s -> CPU\n", ip6s(addr, b));
+    }
+    fflush(stdout);
+}
+
+static struct fib_nh6 *fib_nh6_find(const uint8 *gw)
+{
+    int i;
+    for (i = 0; i < FIB_MAX_NH; i++) {
+        if (fib_nh6s[i].valid && !sal_memcmp(fib_nh6s[i].gw, gw, 16)) {
+            return &fib_nh6s[i];
+        }
+    }
+    return NULL;
+}
+
+static struct fib_nh6 *fib_nh6_add(const uint8 *gw, const uint8 *mac,
+                                   struct fib_intf *fi)
+{
+    struct fib_nh6 *nh = fib_nh6_find(gw);
+    bcm_l3_egress_t eg;
+    bcm_if_t eid = 0;
+    char b[64];
+    int i, prv;
+
+    if (nh != NULL) return nh;
+    for (i = 0; i < FIB_MAX_NH; i++) {
+        if (!fib_nh6s[i].valid) break;
+    }
+    if (i == FIB_MAX_NH) return NULL;
+
+    bcm_l3_egress_t_init(&eg);
+    sal_memcpy(eg.mac_addr, mac, 6);
+    eg.intf   = fi->l3_intf;
+    eg.vlan   = fi->vlan;
+    eg.port   = fi->port;
+    eg.module = 0;
+    prv = bcm_l3_egress_create(fib_unit, 0, &eg, &eid);
+    if (prv != BCM_E_NONE) {
+        fib_errors++;
+        printf("  FIB6: egress_create for %s rv=%d %s\n",
+               ip6s(gw, b), prv, bcm_errmsg(prv));
+        fflush(stdout);
+        return NULL;
+    }
+    /* Host entry for the neighbour itself, same reasoning as v4: a connected
+     * destination is covered by no route entry, so without it the chip misses
+     * and punts, and the traffic flows in software while looking fine. */
+    {
+        bcm_l3_host_t host;
+        int hrv;
+
+        bcm_l3_host_t_init(&host);
+        host.l3a_flags = BCM_L3_IP6;
+        sal_memcpy(host.l3a_ip6_addr, gw, 16);
+        host.l3a_intf  = eid;
+        hrv = bcm_l3_host_add(fib_unit, &host);
+        if (hrv == BCM_E_NONE || hrv == BCM_E_EXISTS) fib_hosts_added++;
+    }
+    if (fib_nh6_added < 3) {
+        printf("  FIB6: next hop %s -> egress %d\n", ip6s(gw, b), eid);
+        fflush(stdout);
+    }
+    sal_memcpy(fib_nh6s[i].gw, gw, 16);
+    fib_nh6s[i].egress = eid;
+    fib_nh6s[i].valid  = 1;
+    fib_nh6_added++;
+    return &fib_nh6s[i];
+}
+
+static int fib_route6_program(struct fib_rt6 *r)
+{
+    struct fib_nh6 *nh = fib_nh6_find(r->gw);
+    bcm_l3_route_t rt;
+    char b[64];
+    int prv, i;
+
+    if (nh == NULL) {
+        return -1;                  /* next hop not resolved yet */
+    }
+    bcm_l3_route_t_init(&rt);
+    rt.l3a_flags = BCM_L3_IP6 | BCM_L3_REPLACE;
+    sal_memcpy(rt.l3a_ip6_net, r->dst, 16);
+    /* Prefix length to a 128-bit mask. */
+    for (i = 0; i < 16; i++) {
+        int bits = r->len - i * 8;
+        rt.l3a_ip6_mask[i] = bits >= 8 ? 0xff : (bits <= 0 ? 0 : (uint8)(0xff << (8 - bits)));
+    }
+    rt.l3a_intf = nh->egress;
+    prv = bcm_l3_route_add(fib_unit, &rt);
+    if (prv != BCM_E_NONE && prv != BCM_E_EXISTS) {
+        fib_errors++;
+        if (fib_errors <= 8) {
+            printf("  FIB6: route %s/%d rv=%d %s\n",
+                   ip6s(r->dst, b), r->len, prv, bcm_errmsg(prv));
+            fflush(stdout);
+        }
+        return -1;
+    }
+    r->programmed = 1;
+    fib_routes6_added++;
+    return 0;
+}
+
+/* Retry anything that was waiting on this next hop, exactly as the v4 side
+ * does -- routes routinely arrive from netlink before the neighbour resolves. */
+static void fib_route6_retry(void)
+{
+    int i;
+    for (i = 0; i < FIB_MAX_ROUTES; i++) {
+        if (fib_rt6s[i].valid && !fib_rt6s[i].programmed) {
+            (void)fib_route6_program(&fib_rt6s[i]);
+        }
+    }
+}
+
+static void fib_route6_note(const uint8 *dst, int len, const uint8 *gw)
+{
+    int i, free_slot = -1;
+
+    for (i = 0; i < FIB_MAX_ROUTES; i++) {
+        if (fib_rt6s[i].valid && fib_rt6s[i].len == len &&
+            !sal_memcmp(fib_rt6s[i].dst, dst, 16)) {
+            if (sal_memcmp(fib_rt6s[i].gw, gw, 16)) {
+                sal_memcpy(fib_rt6s[i].gw, gw, 16);
+                fib_rt6s[i].programmed = 0;     /* next hop changed: reprogram */
+            } else if (fib_rt6s[i].programmed) {
+                return;
+            }
+            (void)fib_route6_program(&fib_rt6s[i]);
+            return;
+        }
+        if (!fib_rt6s[i].valid && free_slot < 0) free_slot = i;
+    }
+    if (free_slot < 0) return;
+    sal_memcpy(fib_rt6s[free_slot].dst, dst, 16);
+    sal_memcpy(fib_rt6s[free_slot].gw, gw, 16);
+    fib_rt6s[free_slot].len = len;
+    fib_rt6s[free_slot].valid = 1;
+    fib_rt6s[free_slot].programmed = 0;
+    (void)fib_route6_program(&fib_rt6s[free_slot]);
+}
+
 static void fib_handle(struct nlmsghdr *nh)
 {
     if (nh->nlmsg_type == RTM_NEWADDR) {
@@ -1073,11 +1284,26 @@ static void fib_handle(struct nlmsghdr *nh)
          * neighbours installed a route to it -- and every packet they sent
          * arrived at the chip, found no host entry telling it to punt, and was
          * dropped in silicon. Reachable everywhere except from the network. */
-        if (ifa->ifa_family != AF_INET) {
+        if (ifa->ifa_family != AF_INET && ifa->ifa_family != AF_INET6) {
             return;
         }
         if (fib_intf_by_ifindex(ifa->ifa_index) == NULL &&
             (int)ifa->ifa_index != fib_lo_ifindex) {
+            return;
+        }
+        if (ifa->ifa_family == AF_INET6) {
+            for (; RTA_OK(rta, len); rta = RTA_NEXT(rta, len)) {
+                if (rta->rta_type == IFA_LOCAL || rta->rta_type == IFA_ADDRESS) {
+                    const uint8 *a6 = (const uint8 *)RTA_DATA(rta);
+                    /* ::1 is the kernel's own business. Link-locals are NOT --
+                     * OSPFv3 peers over fe80::, so excluding them would leave
+                     * the control plane exactly as broken as before. */
+                    static const uint8 loopback6[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+                    if (!sal_memcmp(a6, loopback6, 16)) return;
+                    fib_local_addr6_add(a6);
+                    return;
+                }
+            }
             return;
         }
         for (; RTA_OK(rta, len); rta = RTA_NEXT(rta, len)) {
@@ -1103,7 +1329,29 @@ static void fib_handle(struct nlmsghdr *nh)
         int have_mac = 0;
         struct fib_intf *fi;
 
-        if (nd->ndm_family != AF_INET) return;
+        if (nd->ndm_family != AF_INET && nd->ndm_family != AF_INET6) return;
+        if (nd->ndm_family == AF_INET6) {
+            struct rtattr *r6 = (struct rtattr *)((char *)nd + NLMSG_ALIGN(sizeof *nd));
+            int l6 = nh->nlmsg_len - NLMSG_LENGTH(sizeof *nd);
+            const uint8 *a6 = NULL, *m6 = NULL;
+            struct fib_intf *fi6 = fib_intf_by_ifindex(nd->ndm_ifindex);
+
+            if (fi6 == NULL) return;
+            if (!(nd->ndm_state & (NUD_REACHABLE | NUD_STALE | NUD_PERMANENT |
+                                   NUD_DELAY | NUD_PROBE))) {
+                return;             /* FAILED/INCOMPLETE carry no usable MAC */
+            }
+            for (; RTA_OK(r6, l6); r6 = RTA_NEXT(r6, l6)) {
+                if (r6->rta_type == NDA_DST)    a6 = (const uint8 *)RTA_DATA(r6);
+                if (r6->rta_type == NDA_LLADDR) m6 = (const uint8 *)RTA_DATA(r6);
+            }
+            if (a6 != NULL && m6 != NULL) {
+                if (fib_nh6_add(a6, m6, fi6) != NULL) {
+                    fib_route6_retry();
+                }
+            }
+            return;
+        }
         /* Only neighbours on a routed interface, and the egress object is
          * built against THAT interface. Without this the MANAGEMENT gateway
          * (10.1.1.1 on eth0) became a chip next hop pointing out a front
@@ -1136,7 +1384,36 @@ static void fib_handle(struct nlmsghdr *nh)
         uint32_t dst = 0, gw = 0;
         int oif = 0;
 
-        if (rtm->rtm_family != AF_INET || rtm->rtm_type != RTN_UNICAST) {
+        if (rtm->rtm_type != RTN_UNICAST) {
+            return;
+        }
+        if (rtm->rtm_family == AF_INET6) {
+            uint8 d6[16], g6[16];
+            int oif6 = 0, have_gw = 0;
+
+            sal_memset(d6, 0, 16);
+            sal_memset(g6, 0, 16);
+            for (; RTA_OK(rta, len); rta = RTA_NEXT(rta, len)) {
+                if (rta->rta_type == RTA_DST) {
+                    sal_memcpy(d6, RTA_DATA(rta), 16);
+                } else if (rta->rta_type == RTA_GATEWAY) {
+                    sal_memcpy(g6, RTA_DATA(rta), 16);
+                    have_gw = 1;
+                } else if (rta->rta_type == RTA_OIF) {
+                    sal_memcpy(&oif6, RTA_DATA(rta), 4);
+                }
+            }
+            if (fib_intf_by_ifindex(oif6) == NULL) return;
+            /* ⚠ An IPv6 default route carries NO RTA_DST -- ::/0 is expressed
+             * by its absence, where v4 sends 0.0.0.0. Requiring RTA_DST here
+             * would silently drop the default, which is most of what OSPFv3
+             * gives us. d6 is pre-zeroed, so the absent case is already right. */
+            if (have_gw) {
+                fib_route6_note(d6, rtm->rtm_dst_len, g6);
+            }
+            return;
+        }
+        if (rtm->rtm_family != AF_INET) {
             return;
         }
         for (; RTA_OK(rta, len); rta = RTA_NEXT(rta, len)) {
@@ -1166,6 +1443,39 @@ static void fib_handle(struct nlmsghdr *nh)
         uint32_t dst = 0;
         int oif = 0;
 
+        if (rtm->rtm_family == AF_INET6 && rtm->rtm_type == RTN_UNICAST) {
+            /* Withdrawal: drop our record so a later re-advertisement is
+             * reprogrammed rather than deduplicated away as already-present. */
+            uint8 d6[16];
+            int k;
+
+            sal_memset(d6, 0, 16);
+            for (; RTA_OK(rta, len); rta = RTA_NEXT(rta, len)) {
+                if (rta->rta_type == RTA_DST) sal_memcpy(d6, RTA_DATA(rta), 16);
+            }
+            for (k = 0; k < FIB_MAX_ROUTES; k++) {
+                if (fib_rt6s[k].valid && fib_rt6s[k].len == rtm->rtm_dst_len &&
+                    !sal_memcmp(fib_rt6s[k].dst, d6, 16)) {
+                    bcm_l3_route_t rt;
+                    int q;
+
+                    bcm_l3_route_t_init(&rt);
+                    rt.l3a_flags = BCM_L3_IP6;
+                    sal_memcpy(rt.l3a_ip6_net, d6, 16);
+                    for (q = 0; q < 16; q++) {
+                        int bits = fib_rt6s[k].len - q * 8;
+                        rt.l3a_ip6_mask[q] = bits >= 8 ? 0xff :
+                                             (bits <= 0 ? 0 : (uint8)(0xff << (8 - bits)));
+                    }
+                    (void)bcm_l3_route_delete(fib_unit, &rt);
+                    fib_rt6s[k].valid = 0;
+                    fib_rt6s[k].programmed = 0;
+                    fib_routes_deleted++;
+                    break;
+                }
+            }
+            return;
+        }
         if (rtm->rtm_family != AF_INET || rtm->rtm_type != RTN_UNICAST) {
             return;
         }
@@ -1219,7 +1529,11 @@ static int fib_dump(int fd, int type)
     req.nh.nlmsg_len   = NLMSG_LENGTH(sizeof req.g);
     req.nh.nlmsg_type  = type;
     req.nh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-    req.g.rtgen_family = AF_INET;
+    /* ⚠ AF_UNSPEC, not AF_INET: the startup dump is how we learn about
+     * addresses and routes that already exist, and asking only for v4 meant
+     * every IPv6 address on the box was invisible until it changed -- which,
+     * for a loopback or a link-local, is never. */
+    req.g.rtgen_family = AF_UNSPEC;
     return send(fd, &req, req.nh.nlmsg_len, 0);
 }
 
@@ -1603,6 +1917,7 @@ static int phyled_one(int unit, int port, int set, int type, int mode,
  * move is to ask 48 PHYs what they currently think and see whether they all
  * agree.
  */
+static volatile int phyled_sync_run;
 static int phyled_fix_one(int unit, int port);
 static void phyled_fix_all(int unit);
 
@@ -1613,6 +1928,13 @@ static void phyled_cmd(int unit, char *args)
     char *tok;
 
     tok = strtok(args, " \t");
+    if (tok != NULL && !strcmp(tok, "sync")) {
+        tok = strtok(NULL, " \t");
+        phyled_sync_run = (tok != NULL && !strcmp(tok, "on"));
+        printf("  phyled: link sync %s\n", phyled_sync_run ? "ON" : "OFF");
+        fflush(stdout);
+        return;
+    }
     if (tok != NULL && !strcmp(tok, "fix")) {
         tok = strtok(NULL, " \t");
         if (tok != NULL) {
@@ -1840,20 +2162,32 @@ static void phyled_link_set(int unit, int port, int up)
 }
 
 /* Runs on the linkscan thread, which already does MDIO through the same shim. */
+/* ⚠ MDIO BUDGET. An earlier version called bcm_port_speed_get() here, and
+ * again for all 48 ports every 2 s. That is a per-PHY MDIO round trip on a bus
+ * shared with linkscan and the SDK's own PHY driver, and copper RECEIVE died
+ * across every BCM84848 port while the 40G SerDes ports kept working -- proven
+ * by rolling back to the previous binary, which restored receive at once.
+ *
+ * Never do MDIO on behalf of an LED. bcm_port_info_t already carries the
+ * negotiated speed, and bcm_port_link_status_get() reads software state that
+ * hardware linkscan maintains. Both are free. */
+static signed char led_link_cache[65];      /* -1 unknown, 0 down, 1 up */
+static int led_speed_cache[65];
+
 static void led_linkscan_cb(int unit, bcm_port_t port, bcm_port_info_t *info)
 {
-    int speed = 0;
+    int up;
 
-    if (info == NULL || info->linkstatus != BCM_PORT_LINK_STATUS_UP) {
-        phyled_link_set(unit, port, 0);
-        return;
+    if (port < 1 || port > 64) return;
+    if (info != NULL) led_speed_cache[port] = info->speed;
+    /* A link with no speed is not a link: every unconnected copper port here
+     * reports "Link Up with Speed 0M!". */
+    up = (info != NULL && info->linkstatus == BCM_PORT_LINK_STATUS_UP &&
+          info->speed > 0) ? 1 : 0;
+    if (up != led_link_cache[port]) {
+        led_link_cache[port] = (signed char)up;
+        phyled_link_set(unit, port, up);
     }
-    /* See the sync thread: link without speed is not link on this platform. */
-    if (bcm_port_speed_get(unit, port, &speed) != BCM_E_NONE || speed <= 0) {
-        phyled_link_set(unit, port, 0);
-        return;
-    }
-    phyled_link_set(unit, port, 1);
 }
 
 static int phyled_fix_one(int unit, int port)
@@ -1871,44 +2205,63 @@ static int phyled_fix_one(int unit, int port)
         }
     }
 
-    /* Start dark. Seeding from bcm_port_link_status_get here reads UP on ports
-     * with nothing plugged in -- this runs before linkscan has settled, and an
-     * LED that is wrong is worse than one that is late. The sync thread turns
-     * on whatever is genuinely up, within a couple of seconds. */
-    phyled_link_set(unit, port, 0);
+    /* Seed the cache with ONE speed read per port, here and nowhere else.
+     *
+     * The MDIO budget note forbids per-LED bus access, and means it -- but
+     * "never" leaves the cache empty forever, because linkscan reports only
+     * CHANGES and a port already up when we start never generates one. The
+     * sync thread then sees speed 0 everywhere and holds the whole panel dark,
+     * which is exactly what it did on the first attempt.
+     *
+     * 48 reads once at startup, against 24 per second forever. The second is
+     * what killed copper receive; the first is nothing. */
+    {
+        int link = 0, speed = 0, up;
+
+        if (bcm_port_speed_get(unit, port, &speed) != BCM_E_NONE) speed = 0;
+        led_speed_cache[port] = speed;
+        if (bcm_port_link_status_get(unit, port, &link) != BCM_E_NONE) link = 0;
+        /* A link with no speed is not a link -- and this runs before linkscan
+         * has settled, when every empty copper port claims to be up. */
+        up = (link == BCM_PORT_LINK_STATUS_UP && speed > 0) ? 1 : 0;
+        led_link_cache[port] = (signed char)up;
+        phyled_link_set(unit, port, up);
+    }
     return SOC_E_NONE;
 }
 
-/* Reconcile every port's LED with its link, forever.
+/* Reconcile from CACHED state only -- no MDIO, see the budget note above.
  *
- * A linkscan callback alone is not enough: it reports CHANGES, so a port that
- * is already up when we register never generates one and would stay dark until
- * it flapped. Polling the cached link state costs nothing -- HW linkscan keeps
- * it in software, no MDIO -- and we only write the PHY when our own view
- * changes, so the steady state is silent. It is also self-healing, which a
- * callback is not: one missed event does not leave an LED lying indefinitely. */
+ * Still needed alongside the callback: linkscan reports only CHANGES, so a port
+ * already up when we register never generates one and would stay dark until it
+ * flapped. Two array reads per port, and the PHY is written only when our own
+ * view changes, so the steady state is silent on the wire. */
 static void *phyled_sync_thread(void *arg)
 {
     int unit = (int)(intptr_t)arg;
-    signed char last[65];
     int p;
 
-    memset(last, -1, sizeof last);
     for (;;) {
+        if (!phyled_sync_run) { sal_sleep(2); continue; }
         for (p = 1; p <= 64; p++) {
-            int link = 0, speed = 0, up;
+            int link = 0, up;
             if (EXT_PHY_SW_STATE(unit, p) == NULL) continue;
             if (bcm_port_link_status_get(unit, p, &link) != BCM_E_NONE) continue;
-            /* ⚠ A link with no speed is not a link -- the same trap the routed
-             * port loop documents below. With the BCM84848 driver loaded every
-             * unconnected copper port reports "Link Up with Speed 0M!", so
-             * link status ALONE lights all 48 LEDs with nothing plugged in.
-             * That is exactly what it did on the first attempt. */
-            if (bcm_port_speed_get(unit, p, &speed) != BCM_E_NONE) speed = 0;
-            up = (link == BCM_PORT_LINK_STATUS_UP && speed > 0) ? 1 : 0;
-            if (up != last[p]) {
+            /* One bounded exception to the no-MDIO rule: if linkscan says the
+             * port is up but we have never learned a speed for it, the startup
+             * seed ran too early. Read it once and cache it -- this cannot
+             * repeat, because the next pass has a speed. Without it, a port
+             * that was already up at boot and never flaps stays dark forever. */
+            if (link == BCM_PORT_LINK_STATUS_UP && led_speed_cache[p] == 0) {
+                int sp = 0;
+                if (bcm_port_speed_get(unit, p, &sp) == BCM_E_NONE) {
+                    led_speed_cache[p] = sp;
+                }
+            }
+            up = (link == BCM_PORT_LINK_STATUS_UP && led_speed_cache[p] > 0) ? 1 : 0;
+            if (up != led_link_cache[p]) {
+                led_link_cache[p] = (signed char)up;
                 phyled_link_set(unit, p, up);
-                last[p] = (signed char)up;
             }
         }
         sal_sleep(2);
@@ -3062,16 +3415,32 @@ int main(int argc, char *argv[])
     /* The front-panel copper LEDs. The SDK never configures them and neither
      * did we, which is the whole reason 48 ports sat dark while forwarding. */
     if (getenv("SDKPOC_PHYBUS")) {
+        /* SDKPOC_PHYLED: unset = no LED code at all; "config" = register
+         * writes only; anything else = full. Split this way because the LED
+         * work once killed copper receive, and the only honest way to find
+         * which half did it is to be able to run one half. */
+        const char *ledmode = getenv("SDKPOC_PHYLED");
         pthread_t led_tid;
-        int lrv = bcm_linkscan_register(unit, led_linkscan_cb);
-        printf("  phyled: linkscan handler rv=%d\n", lrv);
-        phyled_fix_all(unit);
-        if (pthread_create(&led_tid, NULL, phyled_sync_thread,
-                           (void *)(intptr_t)unit) == 0) {
-            pthread_detach(led_tid);
-            printf("  phyled: link sync thread started\n");
+        int li;
+
+        for (li = 0; li < 65; li++) { led_link_cache[li] = -1; led_speed_cache[li] = 0; }
+
+        if (ledmode == NULL) {
+            printf("  phyled: disabled (SDKPOC_PHYLED=on to drive port LEDs)\n");
         } else {
-            printf("  ** phyled: could not start the link sync thread\n");
+            phyled_fix_all(unit);
+            if (strcmp(ledmode, "config") == 0) {
+                printf("  phyled: config only, link driving OFF\n");
+            } else {
+                int lrv = bcm_linkscan_register(unit, led_linkscan_cb);
+                printf("  phyled: linkscan handler rv=%d\n", lrv);
+                phyled_sync_run = 1;
+                if (pthread_create(&led_tid, NULL, phyled_sync_thread,
+                                   (void *)(intptr_t)unit) == 0) {
+                    pthread_detach(led_tid);
+                    printf("  phyled: link sync running (cached state, no MDIO)\n");
+                }
+            }
         }
     }
 

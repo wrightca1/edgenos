@@ -5,5 +5,5 @@
 # without staticd a "ip route" line in frr.conf is silently ignored.
 zebra=yes
 ospfd=yes
-ospf6d=no
+ospf6d=yes
 staticd=yes

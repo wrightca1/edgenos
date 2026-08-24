@@ -32,7 +32,8 @@ echo "=== datapath-up $(date 2>/dev/null || echo '') ==="
 # --- read the config -------------------------------------------------------
 # Simple key=value, plus repeatable "iface <name> <mac> <cidr> <mtu>" lines.
 enable=no; agent=""; config=""; phybus=no; ports=""; portmode=routed
-fibsync=yes; frr=no; rx=start; loopback=""
+leds=no
+fibsync=yes; frr=no; rx=start; loopback=""; loopback6=""
 IFACES=""; POLICIES=""
 
 while read -r k v rest; do
@@ -45,9 +46,11 @@ while read -r k v rest; do
                 case "$key" in
                     enable)   enable=$val ;;   agent)    agent=$val ;;
                     config)   config=$val ;;   phybus)   phybus=$val ;;
+                    leds)     leds=$val ;;
                     ports)    ports=$val ;;    portmode) portmode=$val ;;
                     fibsync)  fibsync=$val ;;  frr)      frr=$val ;;
                     rx)       rx=$val ;;   loopback) loopback=$val ;;
+                    loopback6) loopback6=$val ;;
                 esac ;;
     esac
 done < "$CONF"
@@ -74,6 +77,12 @@ ENVS="SDKPOC_CONFIG=$config SDKPOC_BCM=1 SDKPOC_DAEMON=1 SDKPOC_RX=$rx"
 ENVS="$ENVS SDKPOC_PORTMODE=$portmode"
 [ -n "$ports" ] && ENVS="$ENVS SDKPOC_TAP=$ports"
 case "$phybus" in yes|1|on) ENVS="$ENVS SDKPOC_PHYBUS=1" ;; esac
+# Front-panel copper LEDs. Off unless asked for: driving them once cost the
+# copper RECEIVE path across all 48 BCM84848 ports, because the first version
+# polled bcm_port_speed_get() per PHY every 2 s and starved the MDIO bus the
+# datapath depends on. It now runs off cached linkscan state, but the datapath
+# is what matters and the LEDs are decoration -- so they stay opt-in.
+case "$leds" in yes|1|on) ENVS="$ENVS SDKPOC_PHYLED=on" ;; esac
 case "$fibsync" in yes|1|on) ENVS="$ENVS SDKPOC_FIBSYNC=1" ;; esac
 
 log "starting agent: $ENVS $agent"
@@ -137,6 +146,13 @@ done
 # --- loopback --------------------------------------------------------------
 # Added BEFORE the daemons start, because ospfd picks its router-id at startup
 # and can only use an address that already exists.
+if [ -n "$loopback6" ]; then
+    # IPv6 forwarding first: setting it flips accept_ra off, and doing that
+    # after addresses are up can strip a SLAAC address out from under a daemon.
+    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
+    ip -6 addr add "$loopback6" dev lo 2>/dev/null
+    log "loopback6 $loopback6 on lo"
+fi
 if [ -n "$loopback" ]; then
     ip addr add "$loopback" dev lo 2>/dev/null
     log "loopback $loopback on lo"
@@ -177,6 +193,12 @@ case "$frr" in
         /usr/lib/frr/zebra -d -f /etc/frr/frr.conf -u root -g root >> $LOG 2>&1
         sleep 4
         /usr/lib/frr/ospfd -d -f /etc/frr/frr.conf -u root -g root >> $LOG 2>&1
+        # OSPFv3. Started unconditionally alongside ospfd: it does nothing
+        # without "router ospf6" in frr.conf, and having the process there
+        # means vtysh can see it -- configuring ospf6d while vtysh does not
+        # know it exists silently fails to save.
+        [ -x /usr/lib/frr/ospf6d ] && \
+            /usr/lib/frr/ospf6d -d -f /etc/frr/frr.conf -u root -g root >> $LOG 2>&1
         sleep 2
         n=$(ps | grep -cE '[z]ebra|[o]spfd')
         log "  FRR daemons: $n"
@@ -185,6 +207,42 @@ case "$frr" in
         log "** FRR requested but not installed"
     fi ;;
   *) log "frr=$frr -- routing daemons not started" ;;
+esac
+
+# --- retire the bootstrap default ------------------------------------------
+# init installs "default via <mgmt gw> dev <mgmt nic>" so the box can be
+# reached before the fabric exists. It must step aside once OSPF has a default,
+# and nothing does that automatically: zebra will NOT install its own default
+# while a kernel route for the same prefix exists, because a kernel route is
+# administrative distance 0 and OSPF is 110.
+#
+# ⚠ The failure this causes is invisible from the switch. The box itself still
+# reaches everything -- it has the management path. But the FIB sync skips any
+# route leaving by the management NIC, because that is not a switch port, so
+# the CHIP ends up with no default at all. Transit traffic to the internet then
+# misses in hardware, gets punted to the CPU, and Linux sends it out management
+# where a fabric source address is unroutable. A host behind the switch sees
+# its first hop answer and everything after it time out, while internal
+# destinations work perfectly because they have specific routes.
+case "$frr" in
+  yes|1|on)
+    i=0
+    while [ $i -lt 40 ]; do
+        if vtysh -c "show ip route 0.0.0.0/0" 2>/dev/null | grep -q 'Known via "ospf"'; then
+            # Any default NOT leaving by a front port is the bootstrap one.
+            for d in $(ip route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p'); do
+                case "$d" in
+                    xe*) ;;
+                    *) ip route del default dev "$d" 2>/dev/null &&
+                       log "retired bootstrap default via $d -- OSPF default now programmed" ;;
+                esac
+            done
+            break
+        fi
+        i=$((i + 1))
+        sleep 2
+    done
+    ;;
 esac
 
 log "datapath-up complete"
