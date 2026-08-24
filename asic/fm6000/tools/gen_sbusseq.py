@@ -27,14 +27,33 @@
 #          21.fd=0c REQ=18 / 21.fd=0c REQ=08 /
 #          22.fd=01 / 22.fd=00 / 22.fd=02 / 21.{45|49}=2a REQ=0e|16
 #
-# ⚠ WHAT IS AND IS NOT UNDERSTOOD. The STRUCTURE above is recovered and exact --
-# the loop bounds, the alternation, and the fact that 84 iterations carry no
-# varying parameter. The SEMANTICS are not: the SDK's SBus field table names
-# registers 0x00-0x35 (sbus_rx_data_gate, sbus_tx_output_en_cntl, ...), but these
-# writes go to devices whose register space does not line up with it, and 0xfd /
-# 0xfe are outside it entirely. So this file is an honest transcription of a
-# PROGRAM rather than of a data table -- better than 3,721 literals, and short of
-# authorship from intent. Do not describe it as the latter.
+# ⚠ SBUS IS A HANDSHAKE, NOT THREE WRITES. fm6000_fullreplay does NOT replay
+# these addresses literally -- it interprets them:
+#
+#     if (a == 0xF002) { pend = v; continue; }          /* stash, no write */
+#     if (a == 0xF001) { if (!v) continue; sbus(v, pend); continue; }
+#
+# and sbus() writes the three words then POLLS SBUS_COMMAND until busy (bit 25)
+# clears, up to 200,000 reads. A first version of this generator emitted the
+# captured writes faithfully with no poll, and took Et2 down on 5 boots out of 5
+# (PORT_STATUS 0x0815, LANE_STATUS 0) while the file-driven replay kept it up 4
+# times in 5. Issuing the next transaction before the previous one completes
+# corrupts it, and SerDes bring-up is where that shows.
+#
+# Reproducing a captured TRACE is not the same as reproducing the BEHAVIOUR that
+# produced it. The trace contains writes the vendor's own replay engine
+# deliberately does not perform.
+#
+# ⚠ WHAT IS AND IS NOT UNDERSTOOD. The STRUCTURE is recovered and exact -- the
+# loop bounds, the alternation, and the fact that 84 iterations carry no varying
+# parameter. Two device numbers are named by docs/PORT3-BRINGUP.md: SBus device
+# 0x45 is Et2's EPL16 lane and 0x49 is Et1's, which is why the ~50-iteration unit
+# alternates between them. The rest of the register SEMANTICS are not established:
+# the SDK's SBus field table names registers 0x00-0x35 (sbus_rx_data_gate,
+# sbus_tx_output_en_cntl, ...) but these devices' register space does not line up
+# with it, and 0xfd / 0xfe are outside it entirely. So this is an honest
+# transcription of a PROGRAM rather than of a data table -- better than 3,721
+# literals, short of authorship from intent. Do not describe it as the latter.
 #
 # Usage: gen_sbusseq.py <stream with the SBus writes> > fm6000_sbusseq.c
 # SPDX-License-Identifier: GPL-2.0-or-later
@@ -158,6 +177,24 @@ def main():
         out("\t{ %3d, %3d },\n" % (u0, n))
     out("};\n\n")
     out('''static int dry, list_only, nw, seg = -1;   /* -s N: emit run N only */
+static long sbus_done, sbus_timeout;
+
+/* Wait for the SBus to finish the transaction just issued: busy is bit 25 of
+ * SBUS_COMMAND. This mirrors fm6000_fullreplay's sbus(), and it is not optional
+ * -- without it Et2 went down on 5 boots out of 5. 0xffffffff means the chip is
+ * off the bus, in which case there is nothing to wait for. */
+static void sbus_wait(void)
+{
+\tlong i;
+\tif (dry || list_only) return;
+\tfor (i = 0; i < 200000; i++) {
+\t\tuint32_t s = M[SBUS_COMMAND];
+\t\t__sync_synchronize();
+\t\tif (s == 0xffffffffu) return;
+\t\tif (!(s & (1u << 25))) { sbus_done++; return; }
+\t}
+\tsbus_timeout++;
+}
 
 static void emit(uint32_t addr, uint32_t val)
 {
@@ -225,10 +262,12 @@ int main(int argc, char **argv)
 \t\t\t\temit(SBUS_REQUEST, T[t][1]);
 \t\t\t\temit(SBUS_COMMAND, 0);
 \t\t\t\temit(SBUS_COMMAND, T[t][2]);
+\t\t\t\tsbus_wait();
 \t\t\t}
 
 \t}
-\tif (!dry) fprintf(stderr, "fm6000_sbusseq: %d SBus writes\\n", nw);
+\tif (!dry) fprintf(stderr, "fm6000_sbusseq: %d writes, %ld transactions acked, "
+\t                  "%ld timed out\\n", nw, sbus_done, sbus_timeout);
 \treturn 0;
 }
 ''')

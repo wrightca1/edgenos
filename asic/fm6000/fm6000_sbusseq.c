@@ -457,6 +457,24 @@ static const uint16_t SEG[][2] = {
 };
 
 static int dry, list_only, nw, seg = -1;   /* -s N: emit run N only */
+static long sbus_done, sbus_timeout;
+
+/* Wait for the SBus to finish the transaction just issued: busy is bit 25 of
+ * SBUS_COMMAND. This mirrors fm6000_fullreplay's sbus(), and it is not optional
+ * -- without it Et2 went down on 5 boots out of 5. 0xffffffff means the chip is
+ * off the bus, in which case there is nothing to wait for. */
+static void sbus_wait(void)
+{
+	long i;
+	if (dry || list_only) return;
+	for (i = 0; i < 200000; i++) {
+		uint32_t s = M[SBUS_COMMAND];
+		__sync_synchronize();
+		if (s == 0xffffffffu) return;
+		if (!(s & (1u << 25))) { sbus_done++; return; }
+	}
+	sbus_timeout++;
+}
 
 static void emit(uint32_t addr, uint32_t val)
 {
@@ -524,9 +542,11 @@ int main(int argc, char **argv)
 				emit(SBUS_REQUEST, T[t][1]);
 				emit(SBUS_COMMAND, 0);
 				emit(SBUS_COMMAND, T[t][2]);
+				sbus_wait();
 			}
 
 	}
-	if (!dry) fprintf(stderr, "fm6000_sbusseq: %d SBus writes\n", nw);
+	if (!dry) fprintf(stderr, "fm6000_sbusseq: %d writes, %ld transactions acked, "
+	                  "%ld timed out\n", nw, sbus_done, sbus_timeout);
 	return 0;
 }
