@@ -90,3 +90,44 @@ go quiet. A quiet-based wait is wrong for anything long and silent:
 `wget | tar` prints nothing while it runs, so the console falls silent
 immediately, the next command is typed into a still-busy shell, and all the
 output interleaves. That cost two confusing captures before it was fixed.
+
+## The clock, and why `apt` fails before you fix it
+
+The board has an RTC (`f1010300.rtc`) but **no battery**, so it powers on at
+the Unix epoch. Nothing in the boot path sets the time. `apt` then rejects
+every repository with a message that does not obviously mean "wrong clock":
+
+```
+E: Release file for http://deb.debian.org/debian/dists/bookworm/InRelease
+   is not valid yet (invalid for another 20645d 9h 46min 3s)
+```
+
+20,645 days is ~56 years — 2026 minus 1970. Set the clock before anything
+that validates signatures:
+
+```sh
+date -u -s '2026-08-24 11:08:27'
+```
+
+`busybox hwclock -w` fails here with `can't open '/dev/misc/rtc'` — busybox
+looks for the old path while the kernel exposes `/dev/rtc0`. Use
+`hwclock -f /dev/rtc0 -w`, and note it is pointless without a battery anyway.
+
+The real fix is NTP once the rootfs is running, or setting the date from the
+boot environment. Until then, expect a 1970 clock on every cold boot.
+
+## No internet on the management subnet
+
+The box reaches the lab host and nothing else — `ping 1.1.1.1` fails and DNS
+does not resolve. `apt` therefore cannot reach the Debian archive directly.
+
+The lab host *does* have internet, so it runs **apt-cacher-ng** on port 3142
+and the box points at it:
+
+```sh
+echo 'Acquire::http::Proxy "http://<lab-host>:3142";' > /etc/apt/apt.conf.d/01proxy
+```
+
+With an HTTP proxy the box needs **no DNS of its own** — apt sends the full
+URL and the proxy resolves it. That is why `/etc/resolv.conf` can stay empty
+and apt still works.
