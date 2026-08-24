@@ -486,3 +486,50 @@ Held in the private GitLab repo `arista/notes/reference/`:
 - `fm5000-fm6000-datasheet.txt` — Intel document 331496-002. Public-ish but not ours to bundle.
 - `scd-dumps/*.txt.gz` — our register traces of EOS.
 - `private-data/fm6000-mrl-table.txt` — the MRL table, now runtime-loaded rather than compiled in.
+
+## ⚠ `resid.txt` contains the generating switch's own addressing
+
+The residual is not generic vendor bring-up data. **67 of its writes carry live IPv4
+addresses from the EOS install that produced the trace** — measured with
+`asic/fm6000/tools/build_schedule.py`'s output and decoded by hand:
+
+| register | writes | what they are |
+|---|---:|---|
+| `FFU_BST_KEY` | 60 | FIB / BST lookup keys |
+| `FFU_BST_ROOT_KEYS` | 3 | tree roots |
+| `FFU_SLICE_CAM` | 3 | classifier keys |
+| `FFU_BST_ACTION` | 1 | |
+
+On the lab switch those decode to its own management address, the management
+subnet and its broadcast, the transit network including the OSPF peer, several
+routed prefixes, and one **public** /24.
+
+**They cannot simply be deleted.** Dropping all 67 and regenerating a matched
+schedule produced a boot that links both ports, forms an OSPF adjacency, programs
+14 routes with `fibd` — and forwards **nothing**: 100% loss on unicast through the
+box. `FFU_BST_KEY` is the FIB's binary-search structure, so those keys are internal
+tree nodes, not leaf routes that the control plane rewrites. `fibd` fills slots;
+it does not build the tree.
+
+Two consequences:
+
+1. **A `resid.txt` is specific to the switch that generated it** and must not be
+   shared or committed. It is generated on the operator's own hardware from their
+   own licensed EOS, which is the only reason this is tolerable.
+2. Removing it needs the BST **built** rather than replayed — the structure is
+   understood well enough to say that, and no further.
+
+### ⚠ Two ways this measurement lies
+
+**`schedule.txt` and `resid.txt` are a matched pair.** The schedule addresses the
+residual by offset (`RES 2227` = the next 2,227 lines), so deleting one line shifts
+every chunk after it and the bring-up applies the wrong writes from that point on.
+The first attempt at the experiment above did exactly that and cost a boot.
+`run_scheduled` now refuses to start unless the schedule's `RES` total equals the
+residual's line count.
+
+**A ping can succeed without the silicon.** With the control plane down the box has
+a default route out the management interface, so `ping` to a lab address returns 0%
+loss having never touched the dataplane. Check `ip route get <dst>` shows `dev et1`,
+and that the route count reflects a formed adjacency, before believing a transit
+test.

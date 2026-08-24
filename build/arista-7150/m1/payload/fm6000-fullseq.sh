@@ -414,6 +414,18 @@ make_residual() {
 run_scheduled() {
 	_sched=/mnt/flash/schedule.txt; _resid=/mnt/flash/resid.txt
 	[ -s "$_sched" ] && [ -s "$_resid" ] || return 1
+	# ⚠ schedule.txt and resid.txt are a MATCHED PAIR. The schedule addresses the
+	# residual by offset -- "RES 2227" means the next 2,227 lines -- so removing a
+	# single line from resid.txt silently shifts every chunk after it and the
+	# bring-up applies the wrong writes from that point on. Editing the residual
+	# by hand cost one boot and 100% packet loss before this check existed.
+	_want=$(awk '$1=="RES" { n += $2 } END { print n+0 }' "$_sched")
+	_have=$(wc -l < "$_resid")
+	if [ "$_want" != "$_have" ]; then
+		say "  SCHEDULE/RESIDUAL MISMATCH: schedule wants $_want writes, resid.txt has $_have"
+		say "  refusing to run a misaligned schedule -- regenerate both with build_schedule.py"
+		return 1
+	fi
 	_off=0; _ran=0; _applied=0; _bad=0
 	exec 9< "$_sched"
 	while read -r _kind _arg _extra <&9; do
