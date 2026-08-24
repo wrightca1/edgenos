@@ -308,6 +308,63 @@ the mapping from selector number to source is not established.
 `L2AR` has no such register: its key layout appears fixed in hardware, so it cannot
 be read out the way the FFU's can.
 
+
+## The `SetFlags` bits, named by running frames
+
+`PARSER_RAM` carries 38 flag bits, and they matter beyond the parser: L2AR's key is
+**not** packet fields but lookup metadata, so these flags are part of what the
+forwarding rules actually match on (`docs/L2AR-STRUCTURE.md`).
+
+Naming them by correlation — looking at what the rules raising each bit happen to
+match — names about a dozen and stalls. Most raising rules are keyed on **state**,
+not on packet bytes: the discriminator was set slices earlier, so the rule that
+raises the flag has no protocol condition to read.
+
+Running a frame through the state machine sidesteps that. `parser_walk.py --flags`
+walks a set of crafted frames and reports the union of flags each raises:
+
+    IPv4/TCP           [8, 11, 14, 24, 37]
+    IPv4/UDP           [8, 11, 14, 24, 37]
+    IPv4/ICMP          [8, 11, 14, 24, 37]
+    IPv6               [9, 11, 24]
+    ARP                [26]
+    C-VLAN+IPv4        [6, 8, 14, 24]
+    S-VLAN+IPv4        [6, 8, 14, 24]
+    broadcast/IPv4     [12]
+    IPv4 multicast     [11]
+    IEEE 0180c2        [11]
+    PAUSE              [11, 34]
+
+Six bits fall out unambiguously:
+
+| bit | meaning | evidence |
+|---|---|---|
+| **6** | VLAN tag present | raised by both C-VLAN and S-VLAN frames, by nothing else |
+| **8** | IPv4 | every IPv4 frame including tagged; absent for IPv6, ARP, broadcast |
+| **9** | IPv6 | IPv6 only |
+| **12** | broadcast destination | broadcast only |
+| **26** | ARP | ARP only — and ARP raises *nothing else* |
+| **34** | MAC control / PAUSE | PAUSE only |
+
+Two structural facts also fall out, neither of which the static view showed:
+
+- **The three L4 protocols are indistinguishable at this level.** IPv4/TCP,
+  IPv4/UDP and IPv4/ICMP raise byte-identical flag sets. The parser does not
+  discriminate L4 protocol into flags, so anything downstream that treats TCP
+  differently from UDP is reading the extracted-field registers, not these bits.
+- **Non-unicast destinations short-circuit.** Broadcast raises only bit 12, IPv4
+  multicast and the IEEE reserved group only bit 11 — the parse terminates before
+  L3. A frame that is not going to be routed does not get parsed as though it were.
+
+⚠ Bits 11, 14, 24 and 37 are IP-path related and **not** separated by these eleven
+frames: 11 appears for IPv4, IPv6, multicast, IEEE-reserved and PAUSE but not for
+tagged frames, broadcast or ARP. Separating them needs more frames chosen to split
+those sets — that is the obvious next run, and it is cheap.
+
+⚠ The remaining 24 bits are not raised by any of these frames at all. They belong to
+paths not exercised here: MPLS, tunnels, QinQ, FCoE, PTP, and whatever the deeper
+slices handle.
+
 ## What this changes
 
 This does not remove a blob. It establishes that the largest remaining unexamined

@@ -111,15 +111,88 @@ def walk(w, rules, port, pkt, verbose=True):
         off += 4
     return got
 
+
+DMAC = bytes([0x44, 0x4c, 0xa8, 0x31, 0x5d, 0xab])
+SMAC = bytes([0x80, 0xa2, 0x35, 0x81, 0xca, 0xb4])
+
+def _ip4(proto, tail=b""):
+    return (bytes([0x45, 0, 0, 0x54, 0xed, 0x6a, 0x40, 0, 0x3f, proto, 0xd3, 0x51])
+            + bytes([10, 101, 101, 33]) + bytes([10, 102, 1, 1]) + tail)
+
+_L4 = bytes([0x1f, 0x90, 0, 0x50, 0, 0, 0, 1, 0, 0, 0, 2, 0x50, 2, 0x20, 0, 0, 0, 0, 0])
+
+FRAMES = {
+    "IPv4/TCP":       DMAC + SMAC + b"\x08\x00" + _ip4(6, _L4),
+    "IPv4/UDP":       DMAC + SMAC + b"\x08\x00" + _ip4(17, _L4),
+    "IPv4/ICMP":      DMAC + SMAC + b"\x08\x00" + _ip4(1, _L4),
+    "IPv6":           DMAC + SMAC + b"\x86\xdd"
+                      + bytes([0x60, 0, 0, 0, 0, 0x14, 6, 0x40]) + bytes(32) + _L4,
+    "ARP":            DMAC + SMAC + b"\x08\x06" + bytes([0, 1, 8, 0, 6, 4, 0, 1])
+                      + SMAC + bytes([10, 101, 101, 33]) + bytes(6) + bytes([10, 102, 1, 1]),
+    "C-VLAN+IPv4":    DMAC + SMAC + b"\x81\x00\x00\x64" + b"\x08\x00" + _ip4(6, _L4),
+    "S-VLAN+IPv4":    DMAC + SMAC + b"\x88\xa8\x00\x64" + b"\x08\x00" + _ip4(6, _L4),
+    "broadcast/IPv4": b"\xff" * 6 + SMAC + b"\x08\x00" + _ip4(6, _L4),
+    "IPv4 multicast": bytes([0x01, 0, 0x5e, 1, 1, 1]) + SMAC + b"\x08\x00" + _ip4(6, _L4),
+    "IEEE 0180c2":    bytes([0x01, 0x80, 0xc2, 0, 0, 0]) + SMAC + b"\x88\xcc" + bytes(40),
+    "PAUSE":          bytes([0x01, 0x80, 0xc2, 0, 0, 1]) + SMAC + b"\x88\x08"
+                      + bytes([0, 1]) + bytes(40),
+}
+
+def walk_flags(w, rules, port, pkt):
+    """Union of SetFlags raised along one frame's path."""
+    a = INIT_STATE + port * 2
+    init = w[a]
+    st = [init & 0xff, (init >> 8) & 0xff, (init >> 16) & 0xff, (init >> 24) & 0xff]
+    off, flags = 0, 0
+    for s in range(NSLICE):
+        p = [pkt[off + i] if off + i < len(pkt) else 0 for i in range(4)]
+        kv = 0
+        for i, b in enumerate([st[3], st[2], st[1], st[0]]): kv |= b << (8 * (7 - i))
+        for i, b in enumerate(p): kv |= b << (8 * (3 - i))
+        m = [r for r in rules[s] if (kv & r[2]) == (r[1] & r[2])]
+        if not m: break
+        _e, _k, _c, ram = m[-1]
+        flags |= fld(ram, "SetFlags")
+        for i in range(4):
+            if fld(ram, "StateOp%d" % i) == 1: st[i] = fld(ram, "StateValue%d" % i)
+        if fld(ram, "Terminate"): break
+        off += 4
+    return flags
+
+def flags_report(w, port):
+    """Name SetFlags bits by running frames rather than correlating rules.
+
+    Static correlation -- looking at what the rules raising a bit happen to match
+    -- names about a dozen of the 38 and stalls, because most raising rules are
+    keyed on STATE, not on packet bytes: the discriminator was set slices earlier.
+    Running a frame through the state machine sidesteps that entirely."""
+    rules = load_rules(w)
+    res = {n: walk_flags(w, rules, port, p) for n, p in FRAMES.items()}
+    print("SetFlags raised, by frame (port %d)\n" % port)
+    for n, f in res.items():
+        print("  %-18s %s" % (n, sorted(b for b in range(38) if f >> b & 1)))
+    base = res["IPv4/TCP"]
+    print("\ndifference from the IPv4/TCP baseline:")
+    for n, f in res.items():
+        if n == "IPv4/TCP": continue
+        on = sorted(b for b in range(38) if (f & ~base) >> b & 1)
+        off = sorted(b for b in range(38) if (base & ~f) >> b & 1)
+        print("  %-18s +%-12s -%s" % (n, on or "[]", off or "[]"))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+",
                     help="ADDR VALUE files; pass BOTH the ucode file (parser program) "
                          "and the replay (per-port PARSER_INIT_STATE)")
     ap.add_argument("--port", type=int, default=20, help="ingress port (default 20 = et2)")
+    ap.add_argument("--flags", action="store_true",
+                    help="walk a set of crafted frames and report which SetFlags bits each raises")
     a = ap.parse_args()
     w = {}
     for f in a.files: w.update(read(f))
+    if a.flags:
+        return flags_report(w, a.port)
     got = walk(w, load_rules(w), a.port, IPV4_TCP)
     if not got: return
     print("\nextracted-field registers resolved on the untagged IPv4/TCP path:")
