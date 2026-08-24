@@ -267,10 +267,23 @@
 		interrupts = <113>;
 		memory-region = <&pfe_dma>;
 		/*
-		 * No driver exists yet. Port map, for whoever writes one:
-		 *   ASIC port N  = front-panel ge-0/0/N   (N = 0..11)
-		 *   ASIC port 12 = uplink 0, 13 = uplink 1
-		 *   ASIC 24-27   = internal, port 63 = CPU port
+		 * No driver exists yet. Port map for whoever writes one --
+		 * READ FROM THE LIVE ASIC, and NOT the identity map that
+		 * static analysis first suggested (findings/49 corrects
+		 * findings/38):
+		 *
+		 *   front-panel ge-0/0/N -> ASIC port (N XOR 1)   N = 0..11
+		 *   uplink      ge-0/1/0 -> ASIC port 26
+		 *   uplink      ge-0/1/1 -> ASIC port 27
+		 *   ports 12, 13, 24, 25 -> internal
+		 *
+		 * Every copper pair is swapped. A driver built on N -> N
+		 * mis-targets every port on the box, and the symptom (traffic
+		 * on the neighbouring port) reads as a cabling fault.
+		 *
+		 * Confirmed three ways: phypeek, show phy, and the hardware
+		 * VLAN member bitmap 0x0C000FF4 (bits 26/27 set, 12/13 clear).
+		 * Quad PHY is an 88E1540, driven by mainline marvell.c.
 		 */
 		status = "disabled";
 	};
