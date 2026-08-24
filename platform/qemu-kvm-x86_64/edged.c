@@ -31,6 +31,8 @@
 static volatile sig_atomic_t running = 1;
 static volatile sig_atomic_t want_dump = 0;
 static void on_signal(int sig) { (void)sig; running = 0; }
+static volatile sig_atomic_t want_reload;
+static void on_hup(int sig) { (void)sig; want_reload = 1; }
 static void on_usr1(int sig)   { (void)sig; want_dump = 1; }
 
 /* Open a TUN device in tap mode (L2 frames) named `name`. */
@@ -69,6 +71,7 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGUSR1, on_usr1);
+    signal(SIGHUP, on_hup);                      /* edgenos l2/acl: re-read the conf files */
 
     fprintf(stderr, "edged-vswitch: backend=%s, cpu netdev=%s\n", asic->name, ifname);
 
@@ -91,6 +94,7 @@ int main(int argc, char **argv)
         int n = 0, tap_idx, intr_idx = -1;
 
         if (want_dump) { want_dump = 0; vswitch_dump(); }
+        if (want_reload) { want_reload = 0; vswitch_reload_conf(); }
 
         tap_idx = n;
         pfds[n].fd = tap_fd; pfds[n].events = POLLIN; n++;

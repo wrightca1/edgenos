@@ -7,10 +7,15 @@
  * port is the daemon's tx()/rx_poll() pair — the board edged bridges that to a TAP
  * netdev (cpu0) exactly like the Arista 7150 does with its FM6000, so the same
  * daemon loop drives real silicon and this. Forwarding model (M2, deliberately
- * small): one L2 domain, MAC learning with ageing, unknown-unicast/broadcast/
- * multicast flooding, CPU treated as just another port in the MAC table (its MAC is
- * learnt from the frames the control plane injects). No VLANs, no L3 offload yet —
- * those grow behind the same seam, which is the point.
+ * small): L2 port groups ("VLANs" as bridged port sets, untagged; every port starts
+ * in the default domain 0, which is also where the CPU lives), per-domain MAC
+ * learning with ageing, unknown-unicast/broadcast/multicast flooding within the
+ * domain, ingress ACLs (first match wins, no match = permit), CPU treated as just
+ * another port in the MAC table (its MAC is learnt from the frames the control
+ * plane injects). Groups and ACLs are programmed from /etc/edged/l2-groups.conf and
+ * /etc/edged/acls.conf ("edgenos l2 ...", "edgenos acl ..."), re-read on SIGHUP.
+ * No 802.1Q tagging, no L3 offload yet — those grow behind the same seam, which is
+ * the point.
  *
  * Port set: env EDGENOS_VSWITCH_PORTS="pge0 pge1 ..." (space separated), else every
  * netdev named pge<N> (what platform-svc names the NICs in vswitch mode), in order.
@@ -46,15 +51,34 @@ struct vport {
     int      ifindex;
     int      fd;                /* AF_PACKET socket, or -1 */
     int      enabled;
+    uint16_t vid;               /* L2 group; 0 = default domain (also the CPU's) */
+    int      acl;               /* index into acls[], or -1 */
     uint8_t  mac[6];
-    uint64_t rx, tx, drop;
+    uint64_t rx, tx, drop, acl_drop;
 };
 
 struct mac_entry {
     uint8_t  mac[6];
     uint8_t  valid;
     uint8_t  port;              /* 0..VSW_MAX_PORTS-1, or VSW_CPU_PORT */
+    uint16_t vid;               /* the L2 group the address was learnt in */
     uint32_t ts;                /* last seen, seconds (monotonic) */
+};
+
+struct acl_rule {
+    int      seq;
+    uint8_t  permit;            /* 1 = permit, 0 = deny */
+    uint8_t  proto;             /* 0 = any, else IPPROTO_* */
+    uint32_t src, smask;        /* host byte order, pre-masked */
+    uint32_t dst, dmask;
+    uint16_t sport, dport;      /* 0 = any */
+    uint64_t hits;
+};
+
+struct acl_set {
+    char            name[32];
+    struct acl_rule rule[VSW_ACL_RULES];
+    int             nrules;
 };
 
 struct punt {
@@ -65,10 +89,12 @@ struct punt {
 static struct vport      ports[VSW_MAX_PORTS];
 static int               nports;
 static struct mac_entry  mactab[VSW_MAC_ENTRIES];
+static struct acl_set    acls[VSW_ACL_SETS];
+static int               nacls;
 static struct punt       punt_ring[VSW_PUNT_RING];
 static unsigned          punt_head, punt_tail;       /* head=write, tail=read */
 static int               epfd = -1;
-static uint64_t          st_cpu_tx, st_cpu_rx, st_flood, st_fwd, st_punt_drop;
+static uint64_t          st_cpu_tx, st_cpu_rx, st_flood, st_fwd, st_punt_drop, st_acl_drop;
 
 static uint32_t now_s(void)
 {
@@ -88,21 +114,22 @@ static void logmsg(const char *fmt, ...)
 }
 
 /* ---------------------------------------------------------------- MAC table */
-static unsigned mac_hash(const uint8_t *m)
+static unsigned mac_hash(const uint8_t *m, uint16_t vid)
 {
     uint32_t h = 2166136261u;
     for (int i = 0; i < 6; i++) { h ^= m[i]; h *= 16777619u; }
+    h ^= vid; h *= 16777619u;
     return h & (VSW_MAC_ENTRIES - 1);
 }
 
-static int mac_lookup(const uint8_t *m)
+static int mac_lookup(const uint8_t *m, uint16_t vid)
 {
-    unsigned h = mac_hash(m);
+    unsigned h = mac_hash(m, vid);
     for (int i = 0; i < 8; i++) {                 /* linear probe, 8 deep */
         struct mac_entry *e = &mactab[(h + i) & (VSW_MAC_ENTRIES - 1)];
         if (!e->valid)
             return -1;
-        if (!memcmp(e->mac, m, 6)) {
+        if (!memcmp(e->mac, m, 6) && e->vid == vid) {
             if (now_s() - e->ts > VSW_MAC_AGE_S) { e->valid = 0; return -1; }
             return e->port;
         }
@@ -110,15 +137,15 @@ static int mac_lookup(const uint8_t *m)
     return -1;
 }
 
-static void mac_learn(const uint8_t *m, int port)
+static void mac_learn(const uint8_t *m, int port, uint16_t vid)
 {
     if (m[0] & 1)                                 /* never learn multicast/broadcast SAs */
         return;
-    unsigned h = mac_hash(m);
+    unsigned h = mac_hash(m, vid);
     struct mac_entry *victim = NULL;
     for (int i = 0; i < 8; i++) {
         struct mac_entry *e = &mactab[(h + i) & (VSW_MAC_ENTRIES - 1)];
-        if (e->valid && !memcmp(e->mac, m, 6)) {
+        if (e->valid && !memcmp(e->mac, m, 6) && e->vid == vid) {
             if (e->port != port) {
                 e->port = port;                   /* station move */
             }
@@ -130,8 +157,185 @@ static void mac_learn(const uint8_t *m, int port)
     }
     memcpy(victim->mac, m, 6);
     victim->port = port;
+    victim->vid = vid;
     victim->ts = now_s();
     victim->valid = 1;
+}
+
+/* --------------------------------------------------- L2 groups + ACL config */
+static int port_by_name(const char *name)
+{
+    for (int i = 0; i < nports; i++)
+        if (!strcmp(ports[i].name, name))
+            return i;
+    if (name[0] == 'g') {                         /* front-panel alias: geN for pgeN */
+        char alt[IFNAMSIZ];
+        snprintf(alt, sizeof(alt), "p%.14s", name);
+        for (int i = 0; i < nports; i++)
+            if (!strcmp(ports[i].name, alt))
+                return i;
+    }
+    return -1;
+}
+
+static int parse_cidr(const char *str, uint32_t *addr, uint32_t *mask)
+{
+    if (!str) return -1;
+    if (!strcmp(str, "any")) { *addr = 0; *mask = 0; return 0; }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.31s", str);
+    char *slash = strchr(buf, '/');
+    int len = 32;
+    if (slash) { *slash = 0; len = atoi(slash + 1); }
+    if (len < 0 || len > 32) return -1;
+    struct in_addr a;
+    if (inet_pton(AF_INET, buf, &a) != 1) return -1;
+    *mask = len ? 0xffffffffu << (32 - len) : 0;
+    *addr = ntohl(a.s_addr) & *mask;
+    return 0;
+}
+
+static int parse_proto(const char *str)
+{
+    if (!str) return -1;
+    if (!strcmp(str, "any") || !strcmp(str, "ip")) return 0;
+    if (!strcmp(str, "tcp"))  return 6;
+    if (!strcmp(str, "udp"))  return 17;
+    if (!strcmp(str, "icmp")) return 1;
+    if (str[0] >= '0' && str[0] <= '9') return atoi(str) & 0xff;
+    return -1;
+}
+
+static struct acl_set *acl_find(const char *name, int create)
+{
+    for (int i = 0; i < nacls; i++)
+        if (!strcmp(acls[i].name, name))
+            return &acls[i];
+    if (!create || nacls >= VSW_ACL_SETS)
+        return NULL;
+    memset(&acls[nacls], 0, sizeof(acls[nacls]));
+    snprintf(acls[nacls].name, sizeof(acls[nacls].name), "%.31s", name);
+    return &acls[nacls++];
+}
+
+/* Re-read l2-groups.conf + acls.conf ("edgenos l2/acl" write them, then SIGHUP us).
+ * Ports not named in any group fall back to the default domain 0. */
+void vswitch_reload_conf(void)
+{
+    int ngroups = 0, nrules = 0, nbinds = 0;
+    char line[512];
+
+    for (int i = 0; i < nports; i++) { ports[i].vid = 0; ports[i].acl = -1; }
+    memset(acls, 0, sizeof(acls));
+    nacls = 0;
+
+    FILE *f = fopen(VSW_GROUPS_CONF, "r");
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            char *hash = strchr(line, '#');
+            if (hash) *hash = 0;
+            char *save = NULL, *tok = strtok_r(line, " \t\r\n", &save);
+            if (!tok) continue;
+            int vid = atoi(tok), used = 0;
+            if (vid <= 0 || vid > 4094) continue;
+            while ((tok = strtok_r(NULL, " \t\r\n", &save))) {
+                int p = port_by_name(tok);
+                if (p >= 0) { ports[p].vid = (uint16_t)vid; used = 1; }
+                else logmsg("l2-groups: unknown port %s (vid %d)", tok, vid);
+            }
+            if (used) ngroups++;
+        }
+        fclose(f);
+    }
+
+    f = fopen(VSW_ACLS_CONF, "r");
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            char *hash = strchr(line, '#');
+            if (hash) *hash = 0;
+            char *save = NULL;
+            char *name = strtok_r(line, " \t\r\n", &save);
+            char *second = name ? strtok_r(NULL, " \t\r\n", &save) : NULL;
+            if (!name || !second) continue;
+            if (!strcmp(second, "apply")) {
+                struct acl_set *set = acl_find(name, 0);
+                char *tok;
+                if (!set) { logmsg("acls: apply for unknown ACL %s", name); continue; }
+                while ((tok = strtok_r(NULL, " \t\r\n", &save))) {
+                    int p = port_by_name(tok);
+                    if (p >= 0) { ports[p].acl = (int)(set - acls); nbinds++; }
+                    else logmsg("acls: unknown port %s (%s)", tok, name);
+                }
+                continue;
+            }
+            struct acl_set *set = acl_find(name, 1);
+            if (!set || set->nrules >= VSW_ACL_RULES) continue;
+            struct acl_rule r;
+            memset(&r, 0, sizeof(r));
+            r.seq = atoi(second);
+            char *act   = strtok_r(NULL, " \t\r\n", &save);
+            char *proto = act   ? strtok_r(NULL, " \t\r\n", &save) : NULL;
+            char *src   = proto ? strtok_r(NULL, " \t\r\n", &save) : NULL;
+            char *dst   = src   ? strtok_r(NULL, " \t\r\n", &save) : NULL;
+            if (!act || !dst || (strcmp(act, "permit") && strcmp(act, "deny"))) continue;
+            r.permit = !strcmp(act, "permit");
+            int pr = parse_proto(proto);
+            if (pr < 0 || parse_cidr(src, &r.src, &r.smask) < 0 || parse_cidr(dst, &r.dst, &r.dmask) < 0) {
+                logmsg("acls: bad rule: %s %d", name, r.seq);
+                continue;
+            }
+            r.proto = (uint8_t)pr;
+            char *tok;
+            while ((tok = strtok_r(NULL, " \t\r\n", &save))) {
+                char *val = strtok_r(NULL, " \t\r\n", &save);
+                if (!val) break;
+                if (!strcmp(tok, "dport")) r.dport = (uint16_t)atoi(val);
+                else if (!strcmp(tok, "sport")) r.sport = (uint16_t)atoi(val);
+            }
+            int j = set->nrules++;                 /* insert sorted by seq */
+            while (j > 0 && set->rule[j - 1].seq > r.seq) { set->rule[j] = set->rule[j - 1]; j--; }
+            set->rule[j] = r;
+            nrules++;
+        }
+        fclose(f);
+    }
+    logmsg("conf: %d L2 group line(s), %d ACL rule(s) in %d set(s), %d bind(s)",
+           ngroups, nrules, nacls, nbinds);
+}
+
+/* Ingress ACL on `in`: first matching rule wins, no match (or non-IPv4) = permit. */
+static int acl_pass(int in, const uint8_t *frame, uint16_t len)
+{
+    struct acl_set *set = (ports[in].acl >= 0) ? &acls[ports[in].acl] : NULL;
+    if (!set || !set->nrules) return 1;
+    if (len < 34 || frame[12] != 0x08 || frame[13] != 0x00) return 1;   /* IPv4 only */
+    const uint8_t *ip = frame + 14;
+    if ((ip[0] >> 4) != 4) return 1;
+    uint16_t ihl = (uint16_t)((ip[0] & 0xf) * 4);
+    if (ihl < 20 || (uint16_t)(14 + ihl) > len) return 1;
+    uint8_t  proto = ip[9];
+    uint32_t src = ((uint32_t)ip[12] << 24) | ((uint32_t)ip[13] << 16) | ((uint32_t)ip[14] << 8) | ip[15];
+    uint32_t dst = ((uint32_t)ip[16] << 24) | ((uint32_t)ip[17] << 16) | ((uint32_t)ip[18] << 8) | ip[19];
+    uint16_t sport = 0, dport = 0;
+    if ((proto == 6 || proto == 17) && (uint16_t)(14 + ihl + 4) <= len) {
+        const uint8_t *l4 = ip + ihl;
+        sport = (uint16_t)((l4[0] << 8) | l4[1]);
+        dport = (uint16_t)((l4[2] << 8) | l4[3]);
+    }
+    for (int i = 0; i < set->nrules; i++) {
+        struct acl_rule *r = &set->rule[i];
+        if (r->proto && r->proto != proto) continue;
+        if ((src & r->smask) != r->src) continue;
+        if ((dst & r->dmask) != r->dst) continue;
+        if (r->dport && r->dport != dport) continue;
+        if (r->sport && r->sport != sport) continue;
+        r->hits++;
+        if (r->permit) return 1;
+        ports[in].acl_drop++;
+        st_acl_drop++;
+        return 0;
+    }
+    return 1;
 }
 
 /* ---------------------------------------------------------------- ports */
@@ -237,20 +441,25 @@ static void forward(int in, const uint8_t *frame, uint16_t len)
 {
     if (len < 14) return;
     const uint8_t *da = frame, *sa = frame + 6;
-    mac_learn(sa, in);
-    int out = (da[0] & 1) ? -1 : mac_lookup(da);
+    uint16_t vid = (in == VSW_CPU_PORT) ? 0 : ports[in].vid;
+
+    if (in != VSW_CPU_PORT && !acl_pass(in, frame, len))
+        return;
+    mac_learn(sa, in, vid);
+    int out = (da[0] & 1) ? -1 : mac_lookup(da, vid);
     if (out >= 0 && out != in) {
         st_fwd++;
         if (out == VSW_CPU_PORT) punt_to_cpu(frame, len);
-        else port_send(&ports[out], frame, len);
+        else if (ports[out].vid == vid) port_send(&ports[out], frame, len);
         return;
     }
     if (out == in)                                  /* hairpin: drop (same as a real switch) */
         return;
-    st_flood++;                                     /* unknown / bcast / mcast: flood */
+    st_flood++;                                     /* unknown / bcast / mcast: flood the domain */
     for (int i = 0; i < nports; i++)
-        if (i != in) port_send(&ports[i], frame, len);
-    if (in != VSW_CPU_PORT) punt_to_cpu(frame, len);
+        if (i != in && ports[i].vid == vid) port_send(&ports[i], frame, len);
+    if (in != VSW_CPU_PORT && vid == 0)             /* the CPU lives in the default domain */
+        punt_to_cpu(frame, len);
 }
 
 /* ---------------------------------------------------------------- asic_ops */
@@ -274,6 +483,7 @@ static int vsw_init(void)
     }
     memset(mactab, 0, sizeof(mactab));
     punt_head = punt_tail = 0;
+    vswitch_reload_conf();
     logmsg("up: %d/%d ports, L2 learning switch, CPU = port %d", ok, nports, VSW_CPU_PORT);
     return ok ? 0 : -1;
 }
@@ -337,9 +547,10 @@ static void vsw_shutdown(void)
         if (ports[i].fd >= 0) { close(ports[i].fd); ports[i].fd = -1; }
     }
     if (epfd >= 0) { close(epfd); epfd = -1; }
-    logmsg("down: cpu tx %llu rx %llu, fwd %llu flood %llu punt-drop %llu",
+    logmsg("down: cpu tx %llu rx %llu, fwd %llu flood %llu punt-drop %llu acl-drop %llu",
            (unsigned long long)st_cpu_tx, (unsigned long long)st_cpu_rx,
-           (unsigned long long)st_fwd, (unsigned long long)st_flood, (unsigned long long)st_punt_drop);
+           (unsigned long long)st_fwd, (unsigned long long)st_flood,
+           (unsigned long long)st_punt_drop, (unsigned long long)st_acl_drop);
 }
 
 static const struct asic_ops vswitch_ops = {
@@ -359,19 +570,28 @@ const char *vswitch_port_name(int port) { return (port >= 0 && port < nports) ? 
 
 void vswitch_dump(void)
 {
-    fprintf(stderr, "vswitch: %d ports  cpu tx %llu rx %llu  fwd %llu flood %llu punt-drop %llu\n", nports,
+    fprintf(stderr, "vswitch: %d ports  cpu tx %llu rx %llu  fwd %llu flood %llu punt-drop %llu acl-drop %llu\n", nports,
             (unsigned long long)st_cpu_tx, (unsigned long long)st_cpu_rx,
-            (unsigned long long)st_fwd, (unsigned long long)st_flood, (unsigned long long)st_punt_drop);
+            (unsigned long long)st_fwd, (unsigned long long)st_flood,
+            (unsigned long long)st_punt_drop, (unsigned long long)st_acl_drop);
     for (int i = 0; i < nports; i++)
-        fprintf(stderr, "  port %-2d %-8s %s rx %llu tx %llu drop %llu\n", i, ports[i].name,
-                ports[i].enabled ? "up  " : "down", (unsigned long long)ports[i].rx,
-                (unsigned long long)ports[i].tx, (unsigned long long)ports[i].drop);
+        fprintf(stderr, "  port %-2d %-8s %s vid %-4u acl %-10s rx %llu tx %llu drop %llu acl-drop %llu\n",
+                i, ports[i].name, ports[i].enabled ? "up  " : "down", ports[i].vid,
+                ports[i].acl >= 0 ? acls[ports[i].acl].name : "-",
+                (unsigned long long)ports[i].rx, (unsigned long long)ports[i].tx,
+                (unsigned long long)ports[i].drop, (unsigned long long)ports[i].acl_drop);
+    for (int a = 0; a < nacls; a++)
+        for (int i = 0; i < acls[a].nrules; i++) {
+            struct acl_rule *r = &acls[a].rule[i];
+            fprintf(stderr, "  acl %s seq %d %s proto %u hits %llu\n", acls[a].name, r->seq,
+                    r->permit ? "permit" : "deny", r->proto, (unsigned long long)r->hits);
+        }
     int shown = 0;
     for (int i = 0; i < VSW_MAC_ENTRIES && shown < 64; i++) {
         struct mac_entry *e = &mactab[i];
         if (!e->valid || now_s() - e->ts > VSW_MAC_AGE_S) continue;
-        fprintf(stderr, "  mac %02x:%02x:%02x:%02x:%02x:%02x -> %s (age %us)\n",
-                e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5],
+        fprintf(stderr, "  mac %02x:%02x:%02x:%02x:%02x:%02x vid %-4u -> %s (age %us)\n",
+                e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5], e->vid,
                 e->port == VSW_CPU_PORT ? "cpu" : ports[e->port].name, now_s() - e->ts);
         shown++;
     }

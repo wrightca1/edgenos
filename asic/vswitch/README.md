@@ -14,10 +14,16 @@ platform (`edged-vswitch`, see `platform/qemu-kvm-x86_64/edged.c`).
 | `intr_fd()` | the epoll fd (readable when any port has frames) |
 | `shutdown()` | close, print counters |
 
-Model (M2, intentionally small): one L2 domain, MAC learning + 300 s ageing, unknown-
-unicast/broadcast/multicast flooding, the CPU is port 64 in the MAC table (its MAC is
-learnt from injected frames), hairpin drop. No VLANs / L3 offload yet: those grow behind
-the seam. `kill -USR1 <edged-vswitch>` dumps ports, counters and the MAC table.
+Model (M2, intentionally small): L2 port groups (bridged port sets, untagged; unlisted
+ports and the CPU live in the default domain 0), per-domain MAC learning + 300 s ageing,
+unknown-unicast/broadcast/multicast flooding within the domain, ingress ACLs (proto /
+src / dst / ports, first match wins, no match = permit, hit counters), the CPU is port
+64 in the MAC table (its MAC is learnt from injected frames), hairpin drop. Groups and
+ACLs come from `/etc/edged/l2-groups.conf` and `/etc/edged/acls.conf` — written by
+`edgenos l2 ...` / `edgenos acl ...`, re-read on SIGHUP. Port names: `pge<N>` (the
+front-panel alias `ge<N>` is accepted). No 802.1Q tagging (an inter-switch link carries
+one group) and no L3 offload yet: those grow behind the seam. `kill -USR1
+<edged-vswitch>` dumps ports, groups, ACL hits, counters and the MAC table.
 
 Mode switch on the virtual platform: `/etc/edgenos/datapath` = `none` (default: kernel
 forwards on `ge*`) or `vswitch` (NICs become `pge*`, owned by the daemon; the control
