@@ -1,0 +1,20 @@
+# Board manifest: QEMU/KVM x86_64 virtual switch
+# Read alongside switchdb/platforms/qemu-kvm-x86_64.yml.
+platform: x86_64-kvm_x86_64-r0
+arch: x86_64
+asic: vswitch
+
+datapath:
+  target: none                       # M1: Linux kernel forwards between ge* netdevs
+  next: edged-vswitch                # M2: asic_ops backend over the same netdevs (core/datapath/asic_ops.h)
+  layout: /opt/edgenos               # quagga daemons + EdgeNOS scripts live here (like the 4610)
+
+base:      arch/x86_64/buildroot    # Buildroot external: kernel 6.1 + systemd rootfs + initramfs + GRUB
+config:    platform/qemu-kvm-x86_64/config      # networkd (ma1 DHCP, ge* up), quagga confs, addrs/routes
+services:  platform/qemu-kvm-x86_64/services    # edgenos-ports (naming), edgenos-l3, zebra/ospfd/ospf6d/bgpd units
+boot:      platform/qemu-kvm-x86_64/boot        # grub.cfg for the EDGENOS-BOOT partition
+
+notes: >
+  Ports: first PCI NIC = ma1 (mgmt, DHCP); the rest = ge0..geN-1 in PCI order, admin-up,
+  unaddressed. Persistence: squashfs (EDGENOS-BOOT) + overlay upper on EDGENOS-DATA.
+  Boots under SeaBIOS and OVMF/UEFI from one disk image. Intel and AMD hosts (generic x86-64).

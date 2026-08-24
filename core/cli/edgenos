@@ -39,11 +39,24 @@ def cmd_version():
     return 0
 
 
+def _proc_alive(name):
+    """pgrep that works with both procps (comm match) and busybox (argv[0] match)."""
+    if subprocess.call(["pgrep", "-x", name], stdout=subprocess.DEVNULL) == 0:
+        return True
+    return subprocess.call(["pgrep", name], stdout=subprocess.DEVNULL) == 0
+
+
+def _hup(name):
+    if subprocess.call(["pkill", "-HUP", "-x", name], stdout=subprocess.DEVNULL) != 0:
+        subprocess.call(["pkill", "-HUP", name], stdout=subprocess.DEVNULL)
+
+
 def _datapath():
     """(daemon, l2-groups.conf path) for the running datapath, else (None, None)."""
-    for name, conf in (("edged", "/etc/edged/l2-groups.conf"),
+    for name, conf in (("edged-vswitch", "/etc/edged/l2-groups.conf"),
+                       ("edged", "/etc/edged/l2-groups.conf"),
                        ("bcmd", "/etc/bcmd/l2-groups.conf")):
-        if subprocess.call(["pgrep", "-x", name], stdout=subprocess.DEVNULL) == 0:
+        if _proc_alive(name):
             return name, conf
     return None, None
 
@@ -65,7 +78,7 @@ def _l2_write(conf, groups):
     os.makedirs(os.path.dirname(conf), exist_ok=True)
     with open(conf, "w") as f:
         f.write("# EdgeNOS L2-switch groups — bridge a set of ports into one VLAN.\n")
-        f.write("# <vid> <port> <port> ...   (ports: swpN on 5610, geN/xeN on 4610)\n")
+        f.write("# <vid> <port> <port> ...   (ports: swpN on 5610, geN/xeN on 4610, pgeN on the virtual vswitch)\n")
         for vid in sorted(groups, key=int):
             f.write("%s %s\n" % (vid, " ".join(groups[vid])))
 
@@ -98,7 +111,7 @@ def cmd_l2(rest):
         return 1
 
     _l2_write(conf, groups)
-    subprocess.call(["pkill", "-HUP", "-x", daemon])      # live re-sync
+    _hup(daemon)                                          # live re-sync
     print("applied — %s re-synced L2 groups from %s" % (daemon, conf))
     return 0
 
@@ -128,7 +141,7 @@ def _acl_write(conf, rules, binds):
     with open(conf, "w") as f:
         f.write("# EdgeNOS ACLs — ingress Field Processor rules (see docs/acl-design.md).\n")
         f.write("# rule:  <name> <seq> permit|deny <proto> <src-cidr> <dst-cidr> [dport N] [sport N]\n")
-        f.write("# bind:  <name> apply <port>...   (ports: swpN on 5610, geN/xeN on 4610)\n")
+        f.write("# bind:  <name> apply <port>...   (ports: swpN on 5610, geN/xeN on 4610, pgeN on the virtual vswitch)\n")
         for name, seq in sorted(rules, key=lambda k: (k[0], k[1])):
             f.write("%s %d %s\n" % (name, seq, " ".join(rules[(name, seq)])))
         for name in sorted(binds):
@@ -184,7 +197,7 @@ def cmd_acl(rest):
         return 1
 
     _acl_write(conf, rules, binds)
-    subprocess.call(["pkill", "-HUP", "-x", daemon])          # live re-program
+    _hup(daemon)                                              # live re-program
     print("applied — %s re-synced ACLs from %s" % (daemon, conf))
     return 0
 

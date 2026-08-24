@@ -1,0 +1,19 @@
+# EdgeNOS CPU architecture: x86_64 (AMD64)
+# Used by: qemu-kvm-x86_64 (x86_64-kvm_x86_64-r0) — the virtual platform (QEMU/KVM: EVE-NG,
+# containerlab, plain qemu). Also the natural home for x86 switches (Arista 7150 work in flight).
+id: x86_64
+name: x86-64 (AMD64)
+triple: x86_64-linux-gnu
+endian: little
+bits: 64
+cpu: x86-64                  # generic baseline (no -march above x86-64 v1): one image for Intel AND AMD hosts
+kernel_arch: x86_64
+kernel_defconfig: x86_64_defconfig
+cflags: []
+quirks:
+  - "First little-endian / 64-bit target. Native build: CROSS_COMPILE is empty when the build host is x86_64 (no cross toolchain)."
+  - "Base rootfs is built by Buildroot from arch/x86_64/buildroot (build/build-base-x86_64.sh); no lost sibling source trees, no vendor SDK — builds from this repo alone."
+  - "Boot is GRUB2 (legacy BIOS and UEFI both supported; one disk image boots either way). The virtual platform keys on ONIE's own kvm_x86_64 machine string."
+notes: >
+  Generic PC-class x86_64. The kernel is 6.1 LTS with virtio/e1000/vmxnet3 + the usual
+  switch control-plane networking (bridge, 8021q, bonding, vxlan, vrf, mpls) built in.

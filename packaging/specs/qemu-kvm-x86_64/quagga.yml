@@ -1,0 +1,30 @@
+# EdgeNOS package: quagga (x86_64 control plane). arch-specific, asic=any — one package
+# for every x86_64 platform. Binaries come from build/build-quagga-x86_64.sh (static,
+# built with the Buildroot toolchain). Build:
+#   bin/edgenos pkg build packaging/specs/qemu-kvm-x86_64/quagga.yml --source-root . --arch x86_64 --asic any
+name: quagga
+summary: Quagga 1.2.4 control plane (zebra + ospfd + ospf6d + bgpd + vtysh), x86_64 static
+type: overlay
+runtime_installable: true
+arch: x86_64
+asic: any
+files:
+  - {src: output/quagga-x86_64/zebra,  dst: /opt/edgenos/zebra-x86_64,  mode: "0755"}
+  - {src: output/quagga-x86_64/ospfd,  dst: /opt/edgenos/ospfd-x86_64,  mode: "0755"}
+  - {src: output/quagga-x86_64/ospf6d, dst: /opt/edgenos/ospf6d-x86_64, mode: "0755"}
+  - {src: output/quagga-x86_64/bgpd,   dst: /opt/edgenos/bgpd-x86_64,   mode: "0755"}
+  - {src: output/quagga-x86_64/vtysh,  dst: /usr/bin/vtysh,             mode: "0755"}
+  - {src: platform/qemu-kvm-x86_64/config/zebra.conf,  dst: /etc/quagga/zebra.conf,  mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/config/ospfd.conf,  dst: /etc/quagga/ospfd.conf,  mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/config/ospf6d.conf, dst: /etc/quagga/ospf6d.conf, mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/config/bgpd.conf,   dst: /etc/quagga/bgpd.conf,   mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/config/vtysh.conf,  dst: /etc/quagga/vtysh.conf,  mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/services/zebra.service,  dst: /etc/systemd/system/zebra.service,  mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/services/ospfd.service,  dst: /etc/systemd/system/ospfd.service,  mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/services/ospf6d.service, dst: /etc/systemd/system/ospf6d.service, mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/services/bgpd.service,   dst: /etc/systemd/system/bgpd.service,   mode: "0644"}
+links:
+  - {dst: /etc/systemd/system/multi-user.target.wants/zebra.service,  target: /etc/systemd/system/zebra.service}
+  - {dst: /etc/systemd/system/multi-user.target.wants/ospfd.service,  target: /etc/systemd/system/ospfd.service}
+  - {dst: /etc/systemd/system/multi-user.target.wants/ospf6d.service, target: /etc/systemd/system/ospf6d.service}
+  - {dst: /etc/systemd/system/multi-user.target.wants/bgpd.service,   target: /etc/systemd/system/bgpd.service}

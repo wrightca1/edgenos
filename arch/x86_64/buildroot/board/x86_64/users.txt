@@ -1,0 +1,4 @@
+# EdgeNOS x86_64 base: operator account (same convention as lab switches: admin/admin).
+# root stays root/edgenos (BR2_TARGET_GENERIC_ROOT_PASSWD). wheel + frrvty -> vtysh works as admin.
+# username uid group gid password home shell groups comment
+admin -1 admin -1 =admin /home/admin /bin/sh wheel,frrvty EdgeNOS admin user

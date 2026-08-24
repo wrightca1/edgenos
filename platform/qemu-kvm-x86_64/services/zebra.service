@@ -1,0 +1,16 @@
+[Unit]
+Description=Quagga zebra (RIB manager)
+After=edgenos-ports.service systemd-networkd.service
+Wants=edgenos-ports.service
+ConditionPathExists=/etc/quagga/zebra.conf
+
+[Service]
+Type=simple
+RuntimeDirectory=quagga
+RuntimeDirectoryPreserve=yes
+ExecStart=/opt/edgenos/zebra-x86_64 -f /etc/quagga/zebra.conf -i /run/quagga/zebra.pid
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

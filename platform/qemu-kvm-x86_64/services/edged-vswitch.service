@@ -1,0 +1,18 @@
+[Unit]
+Description=EdgeNOS software datapath (edged-vswitch: L2 switch over pge*, CPU port cpu0)
+After=edgenos-ports.service
+Wants=edgenos-ports.service
+Before=systemd-networkd.service zebra.service
+ConditionPathExists=/etc/edgenos/datapath
+
+[Service]
+Type=simple
+ExecCondition=/bin/sh -c 'grep -qx vswitch /etc/edgenos/datapath'
+ExecStart=/opt/edgenos/edged-vswitch cpu0
+Restart=on-failure
+RestartSec=3
+# give the TAP a moment to exist before networkd/zebra look for it
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 50); do [ -e /sys/class/net/cpu0 ] && exit 0; sleep 0.1; done; exit 0'
+
+[Install]
+WantedBy=multi-user.target

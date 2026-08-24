@@ -1,0 +1,23 @@
+# EdgeNOS package: frr — FRR control plane for the virtual switch (binaries come from the
+# base rootfs, built by Buildroot: FRR 10.5 with bgpd/zebra/ospfd/ospf6d/staticd/bfdd, vtysh).
+# This component ships the daemons file, default config, the systemd drop-in + enablement,
+# and the startup-config mechanism (/etc/edgenos/startup -> netconf.sh + frr.conf at boot).
+#   bin/edgenos pkg build packaging/specs/qemu-kvm-x86_64/frr.yml --source-root . --platform x86_64-kvm_x86_64-r0
+name: frr
+summary: FRR control plane config/enablement + EdgeNOS startup-config (netconf.sh, frr.conf)
+type: overlay
+runtime_installable: true
+depends:
+  - platform-svc
+files:
+  - {src: platform/qemu-kvm-x86_64/config/frr/daemons,               dst: /etc/frr/daemons,    mode: "0640"}
+  - {src: platform/qemu-kvm-x86_64/config/frr/frr.conf,              dst: /etc/frr/frr.conf,   mode: "0640"}
+  - {src: platform/qemu-kvm-x86_64/config/frr/vtysh.conf,            dst: /etc/frr/vtysh.conf, mode: "0640"}
+  - {src: platform/qemu-kvm-x86_64/services/frr-edgenos.conf,        dst: /etc/systemd/system/frr.service.d/edgenos.conf, mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/services/edgenos-startup.sh,      dst: /opt/edgenos/edgenos-startup.sh, mode: "0755"}
+  - {src: platform/qemu-kvm-x86_64/services/edgenos-frr-perms.sh,    dst: /opt/edgenos/edgenos-frr-perms.sh, mode: "0755"}
+  - {src: platform/qemu-kvm-x86_64/config/tmpfiles-frr-edgenos.conf,  dst: /etc/tmpfiles.d/frr-edgenos.conf, mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/services/edgenos-startup.service, dst: /etc/systemd/system/edgenos-startup.service, mode: "0644"}
+links:
+  - {dst: /etc/systemd/system/multi-user.target.wants/frr.service,             target: /usr/lib/systemd/system/frr.service}
+  - {dst: /etc/systemd/system/multi-user.target.wants/edgenos-startup.service, target: /etc/systemd/system/edgenos-startup.service}

@@ -25,7 +25,7 @@
     "platform_dir": {"type": "string", "description": "Relative path to the board support dir, default platform/<vendor>-<model>."},
     "dts":        {"type": "string", "description": "Device-tree source name under the platform dir."},
 
-    "installer":   {"type": "string", "enum": ["onie-sfx", "onl-swi"], "description": "Installer envelope to emit."},
+    "installer":   {"type": "string", "enum": ["onie-sfx", "onl-swi", "onie-x86"], "description": "Installer envelope to emit (onie-x86 = x86 ONIE self-extracting installer; GRUB, BIOS+UEFI)."},
     "persistence": {"type": "string", "enum": ["squashfs-overlay", "onl-swi"], "description": "On-disk rootfs/persistence model."},
     "init":        {"type": "string", "enum": ["systemd", "sysvinit"], "default": "systemd"},
 

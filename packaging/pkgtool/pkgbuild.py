@@ -22,6 +22,8 @@ Spec format (YAML):
     depends: [linux-user-bde]
     files:
       - {src: output/edged-rebuilt, dst: /usr/sbin/edged, mode: "0755"}
+    links:                   # optional symlinks (e.g. systemd enablement)
+      - {dst: /etc/systemd/system/multi-user.target.wants/edged.service, target: /etc/systemd/system/edged.service}
     hooks:
       postinst: |
         #!/bin/sh
@@ -102,7 +104,12 @@ def main(argv):
         mode = int(str(entry.get("mode", "0644")), 8)
         staged.append((entry["dst"], src, mode))
 
-    payload, files_meta = epk.build_payload(staged, args.epoch)
+    links = [(e["dst"], e["target"]) for e in (spec.get("links") or [])]
+    if links:
+        payload, files_meta, links_meta = epk.build_payload(staged, args.epoch, links)
+    else:
+        payload, files_meta = epk.build_payload(staged, args.epoch)
+        links_meta = []
 
     hooks = {h: (spec.get("hooks", {}) or {}).get(h) for h in HOOK_NAMES}
     manifest = {
@@ -117,6 +124,7 @@ def main(argv):
         "depends": spec.get("depends", []),
         "hooks": hooks,
         "files": files_meta,
+        "links": links_meta,
         "build": {"epoch": args.epoch},
     }
 
@@ -129,7 +137,7 @@ def main(argv):
     print(f"built {os.path.relpath(out_path, ROOT)}")
     print(f"  {final['name']} {final['version']}  arch={final['arch']} asic={final['asic']} "
           f"type={final['type']} runtime_installable={final['runtime_installable']}")
-    print(f"  {len(files_meta)} files, payload sha256 {final['payload_sha256'][:16]}…")
+    print(f"  {len(files_meta)} files, {len(links_meta)} links, payload sha256 {final['payload_sha256'][:16]}…")
     print(f"  self-verify: {status}")
     return 0 if ok else 1
 

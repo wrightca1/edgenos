@@ -26,6 +26,7 @@ manifest.json schema (format_version 1):
     depends             [str]       other package names
     hooks               {preinst,postinst,prerm,postrm: str|null}
     files               [{path, mode, size, sha256}]   target paths (no leading /)
+    links               [{path, target}]               symlinks (optional; format_version 1 additive)
     payload_sha256      str         sha256 of the data.tar.gz member
     build               {epoch, timestamp}
 """
@@ -74,10 +75,12 @@ def pkg_filename(manifest):
 
 
 # ---------------------------------------------------------------- build side
-def build_payload(staged, epoch):
+def build_payload(staged, epoch, links=()):
     """staged: list of (dst_path_no_leading_slash, abs_src, mode_int).
-    Returns (payload_bytes, files_meta). Deterministic."""
-    files_meta = []
+    links:  list of (dst_path, symlink_target) — e.g. systemd *.wants enablement.
+    Returns (payload_bytes, files_meta) — or (payload, files_meta, links_meta) when
+    links were given. Deterministic."""
+    files_meta, links_meta = [], []
     raw = io.BytesIO()
     # build an uncompressed tar, then gzip it via the CLI (returned payload is .gz)
     with tarfile.open(fileobj=raw, mode="w") as tar:
@@ -94,6 +97,17 @@ def build_payload(staged, epoch):
                 "size": len(data),
                 "sha256": sha256_bytes(data),
             })
+        for dst, target in sorted(links, key=lambda x: x[0]):
+            ti = tarfile.TarInfo(name=dst.lstrip("/"))
+            ti.type = tarfile.SYMTYPE
+            ti.linkname = target
+            ti.size = 0
+            ti.mode = 0o777
+            _norm(ti, epoch)
+            tar.addfile(ti)
+            links_meta.append({"path": "/" + dst.lstrip("/"), "target": target})
+    if links:
+        return _gzip(raw.getvalue()), files_meta, links_meta
     return _gzip(raw.getvalue()), files_meta
 
 
@@ -138,9 +152,17 @@ def verify(epk_path):
         problems.append("payload_sha256 mismatch")
         return False, problems
     want = {f["path"]: f["sha256"] for f in manifest.get("files", [])}
+    want_links = {l["path"]: l["target"] for l in manifest.get("links", [])}
     with tarfile.open(fileobj=io.BytesIO(_gunzip(payload)), mode="r") as ptar:
         seen = set()
         for ti in ptar.getmembers():
+            if ti.issym():
+                path = "/" + ti.name.lstrip("/")
+                if path not in want_links:
+                    problems.append(f"{path}: symlink not listed in manifest links")
+                elif ti.linkname != want_links[path]:
+                    problems.append(f"{path}: symlink target mismatch")
+                continue
             if not ti.isfile():
                 continue
             path = "/" + ti.name.lstrip("/")
@@ -163,6 +185,15 @@ def extract_payload(epk_path, root):
         payload = _read_payload(tar)
     with tarfile.open(fileobj=io.BytesIO(_gunzip(payload)), mode="r") as ptar:
         for ti in ptar.getmembers():
+            if ti.issym():
+                rel = ti.name.lstrip("/")
+                dst = os.path.join(root, rel)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if os.path.lexists(dst):
+                    os.unlink(dst)
+                os.symlink(ti.linkname, dst)
+                written.append(dst)
+                continue
             if not ti.isfile():
                 continue
             rel = ti.name.lstrip("/")

@@ -1,0 +1,28 @@
+#!/bin/sh
+# edgenos-datapath-mode — select the virtual switch's datapath mode.
+#   edgenos-datapath-mode                  show (configured / running)
+#   edgenos-datapath-mode none [--now]     kernel forwards; front-panel NICs are ge0..N (default)
+#   edgenos-datapath-mode vswitch [--now]  edged-vswitch owns the NICs (pge0..N); control plane sees cpu0
+# Without --now the change applies at the next boot; with --now it is applied live
+# (ports renamed, edged-vswitch started/stopped, networkd reloaded).
+F=/etc/edgenos/datapath
+mode=${1:-}; now=${2:-}
+case "$mode" in
+    "")  echo "datapath mode: configured=$(cat $F 2>/dev/null || echo none) running=$(cat /run/edgenos/datapath 2>/dev/null || echo '?')"; exit 0 ;;
+    none|vswitch) ;;
+    *)   echo "usage: $0 [none|vswitch] [--now]" >&2; exit 2 ;;
+esac
+echo "$mode" > "$F"
+if [ "$now" != "--now" ]; then
+    echo "datapath mode set to $mode — reboot to apply (or re-run with --now)"; exit 0
+fi
+if [ "$mode" = none ]; then
+    systemctl stop edged-vswitch.service 2>/dev/null || true
+fi
+/opt/edgenos/edgenos-ports.sh
+if [ "$mode" = vswitch ]; then
+    systemctl restart edged-vswitch.service
+    for i in $(seq 1 50); do [ -e /sys/class/net/cpu0 ] && break; sleep 0.1; done
+fi
+networkctl reload 2>/dev/null || true
+echo "datapath mode now $mode ($(cat /run/edgenos/ports 2>/dev/null | wc -l) NICs)"

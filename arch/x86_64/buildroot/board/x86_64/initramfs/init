@@ -1,0 +1,80 @@
+#!/bin/sh
+# EdgeNOS x86_64 initramfs — the "squashfs-overlay" persistence model.
+#
+#   EDGENOS-BOOT (ext4, ro)  : /edgenos/rootfs.sqsh + bzImage + initrd + grub/grub.cfg
+#   EDGENOS-DATA (ext4, rw)  : overlay upper/work  -> every change persists across reboots
+#   rootfs = overlay(lower=squashfs, upper=DATA/overlay/upper)
+#
+# Kernel cmdline knobs (all optional):
+#   edgenos.boot=LABEL=EDGENOS-BOOT   edgenos.data=LABEL=EDGENOS-DATA
+#   edgenos.rootfs=/edgenos/rootfs.sqsh   edgenos.debug (shell before switch_root)
+# No persistence partition -> tmpfs upper (volatile), with a loud warning.
+export PATH=/bin:/sbin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mkdir -p /dev/pts /run
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+
+log() { echo "edgenos-init: $*" > /dev/kmsg 2>/dev/null || echo "edgenos-init: $*"; }
+rescue() { log "$*"; log "dropping to a rescue shell (initramfs)"; exec sh; }
+
+BOOT=LABEL=EDGENOS-BOOT
+DATA=LABEL=EDGENOS-DATA
+SQSH=/edgenos/rootfs.sqsh
+DEBUG=
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        edgenos.boot=*)   BOOT=${arg#edgenos.boot=} ;;
+        edgenos.data=*)   DATA=${arg#edgenos.data=} ;;
+        edgenos.rootfs=*) SQSH=${arg#edgenos.rootfs=} ;;
+        edgenos.debug)    DEBUG=1 ;;
+    esac
+done
+
+# resolve LABEL=/UUID=/path to a block device, waiting up to 30s for it to appear
+resolve() {
+    spec=$1; i=0
+    while [ $i -lt 60 ]; do
+        case "$spec" in
+            LABEL=*|UUID=*) dev=$(findfs "$spec" 2>/dev/null) ;;
+            *)              dev=$spec ;;
+        esac
+        if [ -n "$dev" ] && [ -b "$dev" ]; then echo "$dev"; return 0; fi
+        i=$((i + 1)); sleep 0.5
+    done
+    return 1
+}
+
+BOOTDEV=$(resolve "$BOOT") || rescue "boot partition $BOOT not found"
+log "boot partition: $BOOTDEV"
+mount -o ro "$BOOTDEV" /mnt/boot || rescue "cannot mount $BOOTDEV"
+[ -f "/mnt/boot$SQSH" ] || rescue "rootfs $SQSH missing on $BOOTDEV"
+mount -t squashfs -o ro,loop "/mnt/boot$SQSH" /mnt/lower || rescue "cannot mount rootfs squashfs"
+
+if DATADEV=$(resolve "$DATA"); then
+    log "persistence partition: $DATADEV"
+    mount -o rw,noatime "$DATADEV" /mnt/data || {
+        log "WARNING: $DATADEV unmountable; using volatile tmpfs overlay"
+        mount -t tmpfs tmpfs /mnt/data
+    }
+else
+    log "WARNING: no persistence partition ($DATA); changes will NOT survive a reboot"
+    mount -t tmpfs tmpfs /mnt/data
+fi
+mkdir -p /mnt/data/overlay/upper /mnt/data/overlay/work
+mount -t overlay overlay \
+    -o lowerdir=/mnt/lower,upperdir=/mnt/data/overlay/upper,workdir=/mnt/data/overlay/work \
+    /mnt/root || rescue "overlay mount failed"
+
+# make the two partitions visible inside the running system
+mkdir -p /mnt/root/boot /mnt/root/mnt/persist
+mount --move /mnt/boot /mnt/root/boot
+mount --move /mnt/data /mnt/root/mnt/persist
+
+[ -n "$DEBUG" ] && { log "edgenos.debug: shell before switch_root (exit to continue)"; sh; }
+
+mount --move /dev  /mnt/root/dev
+mount --move /proc /mnt/root/proc
+mount --move /sys  /mnt/root/sys
+exec switch_root /mnt/root /sbin/init

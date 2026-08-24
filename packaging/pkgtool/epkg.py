@@ -153,7 +153,7 @@ def cmd_remove(args):
     m = json.load(open(path))
     hooks = m.get("hooks", {})
     _run_hook("prerm", hooks.get("prerm"), args.root)
-    for f in m.get("files", []):
+    for f in m.get("files", []) + m.get("links", []):
         p = os.path.join(args.root, f["path"].lstrip("/"))
         try:
             os.unlink(p)

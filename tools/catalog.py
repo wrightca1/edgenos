@@ -21,7 +21,7 @@ def version():
 
 
 def artifact_name(p, ver):
-    ext = "bin" if p.get("installer") == "onie-sfx" else "swi"
+    ext = "swi" if p.get("installer") == "onl-swi" else "bin"     # onie-sfx / onie-x86 -> .bin
     return f"EdgeNOS-{ver}-{p['onie_platform']}.{ext}"
 
 

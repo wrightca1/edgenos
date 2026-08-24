@@ -1,0 +1,30 @@
+# containerlab: two EdgeNOS virtual switches back-to-back + two Linux hosts.
+#   containerlab deploy -t edgenos-pair.clab.yml
+# eth1 of each node = ge0 inside the VM, eth2 = ge1, ... ; mgmt = ma1 (containerlab mgmt net).
+# Console: telnet <container> 5000 ; SSH: ssh root@<container> (root/edgenos unless overridden)
+name: edgenos-pair
+topology:
+  kinds:
+    generic_vm:
+      image: vrnetlab/edgenos_vswitch:0.2.1
+  nodes:
+    sw1:
+      kind: generic_vm
+    sw2:
+      kind: generic_vm
+    h1:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.0.1.10/24 dev eth1
+        - ip route replace 10.0.0.0/8 via 10.0.1.1
+    h2:
+      kind: linux
+      image: alpine:3.20
+      exec:
+        - ip addr add 10.0.2.10/24 dev eth1
+        - ip route replace 10.0.0.0/8 via 10.0.2.1
+  links:
+    - endpoints: ["sw1:eth1", "sw2:eth1"]    # ge0 <-> ge0
+    - endpoints: ["sw1:eth2", "h1:eth1"]     # sw1 ge1 <-> h1
+    - endpoints: ["sw2:eth2", "h2:eth1"]     # sw2 ge1 <-> h2

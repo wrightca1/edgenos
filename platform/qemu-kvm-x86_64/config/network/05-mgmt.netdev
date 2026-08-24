@@ -1,0 +1,10 @@
+# EdgeNOS virtual: management VRF "mgmt" (table 1000), like the hardware boards' mgmt VRF.
+# ma1 is enslaved to it (10-ma1.network), so the management address space can never collide
+# with fabric addresses in the default VRF (vrnetlab's QEMU user-net hands every VM 10.0.0.15/24).
+# Services bound in the default VRF still accept mgmt connections: net.ipv4.*_l3mdev_accept=1.
+[NetDev]
+Name=mgmt
+Kind=vrf
+
+[VRF]
+Table=1000

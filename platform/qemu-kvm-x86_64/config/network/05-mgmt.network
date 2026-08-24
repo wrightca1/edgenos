@@ -1,0 +1,12 @@
+# EdgeNOS virtual: bring the mgmt VRF device up (a VRF netdev networkd creates stays DOWN —
+# and all lookups through it fail — unless a .network manages it).
+[Match]
+Name=mgmt
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+ConfigureWithoutCarrier=yes

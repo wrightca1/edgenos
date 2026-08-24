@@ -1,0 +1,22 @@
+# EVE-NG node template for the EdgeNOS x86_64 virtual switch.
+# Install with tools/eve-ng/install-eve-template.sh (copies it to both
+# /opt/unetlab/html/templates/intel/ and /opt/unetlab/html/templates/amd/ — the image is
+# generic x86-64, identical on Intel and AMD hosts — and registers it in custom_templates.yml).
+# Image dir: /opt/unetlab/addons/qemu/edgenos-<version>/virtioa.qcow2
+---
+type: qemu
+name: EdgeNOS
+description: EdgeNOS x86_64 virtual switch
+cpulimit: 1
+icon: Switch-2D-L3-Generic-S.svg
+cpu: 1
+ram: 1024
+ethernet: 9
+eth_name: ["ma1"]
+eth_format: "ge{0}"
+console: telnet
+shutdown: 1
+qemu_arch: x86_64
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -serial mon:stdio -nographic -no-user-config -rtc base=utc
+...

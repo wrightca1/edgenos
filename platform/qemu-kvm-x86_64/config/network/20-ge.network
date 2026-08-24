@@ -1,0 +1,24 @@
+# EdgeNOS virtual: front-panel ports ge0..N. Link up, no addressing from networkd: FRR / the
+# operator own addresses, masters (bonds, bridges, VRFs) and VLAN subinterfaces.
+# - Kind=!vlan: geN.M 802.1Q subinterfaces created later by netconf are NOT ours (Name=ge* would
+#   match them; networkd would then configure them and, with its default KeepMaster=no, pull them
+#   out of the VRF they were just put in -- seen as a boot-order race on a slow host).
+# - KeepMaster=yes / KeepConfiguration=yes: even for the ports themselves, never touch an
+#   enslavement or an address somebody else configured.
+[Match]
+Name=ge*
+Kind=!vlan
+
+[Link]
+ActivationPolicy=up
+RequiredForOnline=no
+
+[Network]
+DHCP=no
+LinkLocalAddressing=ipv6
+IPv6AcceptRA=no
+ConfigureWithoutCarrier=yes
+KeepConfiguration=yes
+KeepMaster=yes
+LLDP=yes
+EmitLLDP=nearest-bridge

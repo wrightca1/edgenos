@@ -1,0 +1,17 @@
+# EdgeNOS package: edged-vswitch (software datapath for the QEMU/KVM x86_64 virtual switch).
+# The asic_ops-based L2 switch daemon + unit (inert unless /etc/edgenos/datapath says "vswitch").
+#   bin/edgenos pkg build packaging/specs/qemu-kvm-x86_64/edged-vswitch.yml --source-root . --platform x86_64-kvm_x86_64-r0
+name: edged-vswitch
+summary: Software datapath daemon (asic_ops L2 switch over pge* netdevs, CPU port cpu0)
+type: overlay
+runtime_installable: true
+depends:
+  - platform-svc
+files:
+  - {src: output/edged-vswitch,                                            dst: /opt/edgenos/edged-vswitch, mode: "0755"}
+  - {src: platform/qemu-kvm-x86_64/services/edged-vswitch.service,        dst: /etc/systemd/system/edged-vswitch.service, mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/services/edgenos-datapath-mode,        dst: /opt/edgenos/edgenos-datapath-mode, mode: "0755"}
+  - {src: platform/qemu-kvm-x86_64/config/network/30-cpu0.network,        dst: /etc/systemd/network/30-cpu0.network, mode: "0644"}
+  - {src: platform/qemu-kvm-x86_64/config/datapath,                       dst: /etc/edgenos/datapath, mode: "0644"}
+links:
+  - {dst: /etc/systemd/system/multi-user.target.wants/edged-vswitch.service, target: /etc/systemd/system/edged-vswitch.service}

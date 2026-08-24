@@ -1,0 +1,12 @@
+# EdgeNOS: extra busybox applets for the initramfs (find partitions by label).
+CONFIG_FINDFS=y
+CONFIG_BLKID=y
+CONFIG_LOSETUP=y
+CONFIG_SWITCH_ROOT=y
+# process tools the on-box CLI/scripts expect (edgenos cli uses pgrep -x)
+CONFIG_PGREP=y
+CONFIG_PKILL=y
+CONFIG_PIDOF=y
+CONFIG_KILLALL=y
+CONFIG_FEATURE_ADDUSER_TO_GROUP=y
+CONFIG_FEATURE_DEL_USER_FROM_GROUP=y

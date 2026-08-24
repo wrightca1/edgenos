@@ -22,8 +22,12 @@ def version():
 
 
 def artifact(p, ver):
-    ext = "bin" if p.get("installer") == "onie-sfx" else "swi"
+    ext = "swi" if p.get("installer") == "onl-swi" else "bin"     # onie-sfx / onie-x86 -> .bin
     return f"EdgeNOS-{ver}-{p['onie_platform']}.{ext}"
+
+
+def is_virtual(p):
+    return p.get("asic") == "vswitch" or p.get("installer") == "onie-x86" and p.get("vendor") == "qemu"
 
 
 def install_section(p, art):
@@ -50,10 +54,32 @@ sets the bootloader, and reboots into EdgeNOS automatically.
 > This switch uses a self-extracting installer (`.bin`): it partitions the disk,
 > writes the kernel FIT + rootfs squashfs, and configures U-Boot.
 """
+    elif p.get("installer") == "onie-x86":
+        common += """
+> x86 self-extracting installer (`.bin`): creates `EDGENOS-BOOT` + `EDGENOS-DATA`
+> (GPT) next to ONIE's partitions, writes kernel + initrd + rootfs squashfs + GRUB
+> menu, installs GRUB for legacy BIOS (ONIE's `grub-install`) or UEFI (our
+> `bootx64.efi` + `efibootmgr`), and keeps an **ONIE** entry in the menu.
+"""
     else:
         common += """
 > This switch uses an ONL-style installer (`.swi`): it installs the loader FIT +
 > SWI under `/mnt/onl` and boots via the ONL loader.
+"""
+    if is_virtual(p):
+        qcow = art.rsplit(".", 1)[0] + ".qcow2"
+        common += f"""
+### Or skip ONIE: the ready-to-boot disk image
+
+`{qcow}` boots straight into EdgeNOS (legacy BIOS or UEFI, Intel or AMD host):
+
+```sh
+qemu-system-x86_64 -enable-kvm -m 1024 -nographic -drive file={qcow},if=virtio \
+  -netdev user,id=m,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=m
+```
+* **EVE-NG**: `sudo tools/eve-ng/install-eve-template.sh {qcow}` on the EVE host (adds the "EdgeNOS" node type; ports `ma1`, `ge0`…).
+* **containerlab**: `tools/containerlab/build-clab-image.sh {qcow}` → `vrnetlab/edgenos_vswitch:<ver>` (kind `generic_vm`); examples in `tools/containerlab/examples/`.
+* Login **root / edgenos** (serial `ttyS0` 115200, VGA, SSH). Mgmt = first NIC (`ma1`, DHCP); front-panel = the rest (`ge0..`).
 """
     return common
 
@@ -64,7 +90,8 @@ def page(db, key, ver):
     art = artifact(p, ver)
     comps = ", ".join(f"`{c}`" for c in p.get("components", []))
     L = []
-    L.append(f"# EdgeNOS on {p['vendor'].title()} {p['model'].upper()}\n")
+    title = "QEMU/KVM x86_64 virtual switch" if is_virtual(p) else f"{p['vendor'].title()} {p['model'].upper()}"
+    L.append(f"# EdgeNOS on {title}\n")
     L.append(f"> ONIE platform string: **`{key}`**  ·  EdgeNOS **{ver}**  ·  status: **{p.get('status','?')}**\n")
     L.append("## Hardware\n")
     L.append("| | |")
@@ -76,7 +103,7 @@ def page(db, key, ver):
     L.append(f"| Verify the string on the box | `onie-sysinfo -p` → `{key}` |\n")
     L.append("## Download\n")
     L.append(f"Grab the installer for this switch from the EdgeNOS releases:\n")
-    L.append(f"- **`{art}`**\n")
+    L.append(f"- **`{art}`**" + (f"  (ONIE installer)\n- **`{art.rsplit('.', 1)[0]}.qcow2`**  (ready-to-boot disk for qemu / EVE-NG / containerlab)\n" if is_virtual(p) else "\n"))
     L.append("## Install\n")
     L.append(install_section(p, art))
     L.append("## Verify after first boot\n")

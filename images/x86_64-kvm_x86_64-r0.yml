@@ -1,0 +1,24 @@
+# Image recipe: QEMU/KVM x86_64 virtual switch (onie-x86 installer + ready-to-boot qcow2)
+# Everything is in-repo: run with `--source-root .` from the repo top.
+platform: x86_64-kvm_x86_64-r0
+installer: onie-x86
+packages_dir: output/packages
+
+onie_x86:
+  installer_template: packaging/installer/onie-x86/install.sh   # ONIE self-extracting installer (GPT, BIOS+UEFI)
+  kernel:   output/base-x86_64/bzImage
+  initrd:   output/base-x86_64/initrd.img
+  grub_cfg: platform/qemu-kvm-x86_64/boot/grub.cfg              # @VERSION@/@PLATFORM@ templated
+  grub_efi: output/base-x86_64/efi-part/EFI/BOOT/bootx64.efi    # our GRUB (embedded label search) for UEFI boxes
+  rootfs_name_in_payload: rootfs.sqsh
+
+qemu_disk:                       # ALSO emit a bootable disk image for EVE-NG / containerlab / qemu
+  format: qcow2                  # qcow2 | raw
+  genimage: output/br-x86_64/host/bin/genimage    # falls back to `genimage` on PATH
+  grub_bios_mbr:  output/base-x86_64/boot.img     # GRUB stage 1 (MBR code)
+  grub_bios_core: output/base-x86_64/grub.img     # GRUB core.img (embedded: search EDGENOS-BOOT)
+  grub_efi_dir:   output/base-x86_64/efi-part     # EFI/BOOT/bootx64.efi + fallback grub.cfg
+  grub_fallback:  output/base-x86_64/grub-early.cfg      # also placed at EDGENOS-BOOT:/boot/grub/grub.cfg
+  efi_mib: 16
+  boot_mib: 384                  # EDGENOS-BOOT: kernel + initrd + rootfs.sqsh + grub.cfg
+  data_mib: 2048                 # EDGENOS-DATA: overlay upper (persistence); sparse in qcow2
