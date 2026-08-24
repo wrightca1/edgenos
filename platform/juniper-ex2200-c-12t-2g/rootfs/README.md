@@ -161,6 +161,32 @@ One gotcha found when DNS was finally configured: `debootstrap` copies the
 **build host's** `/etc/resolv.conf` into the rootfs. Here that meant the
 switch inherited a tailscale-generated file. Overwrite it.
 
+## Install `udev`, or you get no serial console
+
+`debootstrap --variant=minbase` does **not** install udev. Everything looks
+fine until you want the serial console, and then:
+
+```
+serial-getty@ttyS0.service: Job ... failed with result 'dependency'
+dev-ttyS0.device - /dev/ttyS0
+     Active: inactive (dead)
+```
+
+`/dev/ttyS0` exists — devtmpfs creates it — but systemd's **device units** come
+from udev. Without udev, `dev-ttyS0.device` never activates, and anything with
+`BindsTo=dev-ttyS0.device` refuses to start.
+
+```sh
+apt-get install --no-install-recommends udev
+systemctl enable --now serial-getty@ttyS0.service
+```
+
+Do this when building the rootfs, not when you need it. The kernel prints to
+`console=ttyS0` with no userspace at all, so the console *looks* alive while
+being completely deaf to input — and a box that answers nothing on ping, SSH
+**and** console reads as hung when it is perfectly healthy. That cost a
+needless reboot once already (`findings/56`).
+
 ## systemd needs kernel options `mvebu_v5_defconfig` does not set
 
 `mvebu_v5_defconfig` is an embedded config and omits several things systemd
