@@ -1425,7 +1425,25 @@ static void fib_handle(struct nlmsghdr *nh)
                 sal_memcpy(&oif, RTA_DATA(rta), 4);
             }
         }
-        /* Routes leaving by any other interface are not ours to program --
+        /* ⚠ ECMP IS NOT HANDLED, and it fails SILENTLY.
+         *
+         * A multipath route carries its next hops in RTA_MULTIPATH, not in
+         * RTA_GATEWAY/RTA_OIF -- so the loop above finds neither, and this
+         * function quietly keeps whatever single-path entry the prefix already
+         * had. Tested: with two equal-cost paths to the same neighbour, FRR
+         * selected both and the kernel installed a multipath route, while the
+         * chip kept ONE egress and sent everything down one link.
+         *
+         * That is benign only while the surviving path is the good one. If it
+         * goes down, FRR drops it from the ECMP set and the chip is still
+         * pointing at it -- the same "control plane and data plane disagree"
+         * failure that has caused every hard bug in this file.
+         *
+         * Doing it properly means parsing RTA_MULTIPATH, resolving each next
+         * hop to an egress object, and pointing the route at a group built
+         * with bcm_l3_egress_ecmp_create() rather than a single bcm_if_t.
+         *
+         * Routes leaving by any other interface are not ours to program --
          * the management default via eth0 above all. Any routed front port is
          * fair game, which is what makes two-uplink topologies work. */
         if (fib_intf_by_ifindex(oif) == NULL) {
