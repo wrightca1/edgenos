@@ -72,53 +72,47 @@ Running the sequence test over the **whole** residual, not one block at a time:
 | convergent | 53 | 411 | 53 | **358** |
 | genuine table | 720 | 3,190 | — | — |
 
-**2,743 writes — 39% of the residual — appear recoverable with no new generator at
+**2,743 writes — 39% of the residual — look recoverable with no new generator at
 all**, just by writing each idempotent value once instead of many times.
 
-### ⚠ "Same value throughout" does not mean idempotent
+### ⚠ That figure is wrong, and the way it is wrong is the lesson
 
-This project has already made this mistake. `alpha41` collapsed
-`SSCHED_INIT_TOKEN`'s 64 writes to one, `--verify` passed because the final state
-was identical, and the scheduler was broken: each of those writes **pushes a
-token**. Writing the same value twice is not always the same as writing it once.
+"Same value throughout" describes the **values**. It says nothing about whether the
+writes are **separable**, and separability is what a collapse actually needs.
 
-The residual contains at least one clear instance:
+Test it directly: how many of those repeats are *back-to-back*, with nothing
+interleaved between them?
 
-    CRM_CTRL     1 address, 129 identical writes
+    back-to-back identical writes (same address AND value, immediately repeated):
+        9 of 7,088
 
-That is the indirect-access engine's strobe. Its 129 writes are 129 distinct
-operations — load `CRM_REGISTER`, load `CRM_COMMAND`, pulse `CRM_CTRL` — and
-collapsing them to one would silently perform a single operation instead of 129.
-`FFU_ATOMIC_APPLY`'s 59 pulses are the same shape.
+Nine. And one of the nine is `FFU_ATOMIC_APPLY`, a commit strobe that must never be
+collapsed. The real recoverable figure is **8 writes, 0.1%**, not 2,743.
 
-Sorted by writes, the same-value addresses are:
+The 292 `FFU_SLICE_CAM` addresses that hold one identical value across 1,354 writes
+looked like the biggest prize. **290 of them have their repeats spread far across
+the stream**, not adjacent — each re-write belongs to a different `ATOMIC_APPLY`
+commit cycle. The FFU commits by quiescing `SLICE_MASTER_VALID`, writing, and
+pulsing apply; collapsing the writes would leave later cycles committing data that
+was written before the previous commit, which is not the same operation at all.
 
-    FFU_SLICE_CAM              292 addrs  1,354 writes   storage
-    L2AR_CAM                    35 addrs    784 writes   storage
-    HASH_LAYER2_KEY_PROFILE     64 addrs    204 writes   storage
-    CRM_CTRL                     1 addr     129 writes   ⚠ STROBE
-    MOD_VALUE_RAM               33 addrs    129 writes   storage
-    MOD_CAM                     52 addrs    104 writes   storage
+This is `alpha41` wearing different clothes. There, `SSCHED_INIT_TOKEN`'s 64
+identical writes were collapsed to one, `--verify` passed because the final state
+matched, and the scheduler broke because each write pushes a token. Here the final
+state would also match. The state diff would also pass. And the chip would have
+performed a different sequence.
 
-The distinction that matters is **storage versus command port**, and a register's
-name is a hint rather than proof — `SSCHED_INIT_TOKEN` reads like storage.
+**The rule that survives:** a repeated write is only removable if nothing happens
+between it and its duplicate. Interleaving is the test, not equality of value. On
+this residual that leaves essentially nothing, which means the remaining 7,088
+writes are not padding — they are the sequence.
 
-### How to take it safely
+### The command ports, for the record
 
-Collapse only where a repeated write cannot have a side effect, and prove it per
-register rather than by pattern:
+Two registers in the residual must never be collapsed under any circumstances:
 
-1. Exclude every address whose register is a command port (`CTRL`, `COMMAND`,
-   `APPLY`, `TOKEN`, `REQUEST`, `TRIGGER`, `VALID`) — that is `CRM_CTRL` and
-   `FFU_ATOMIC_APPLY` at minimum.
-2. For what remains, collapse in **one block at a time** and boot, rather than all
-   at once: a blanket change that breaks something gives no information about
-   which register broke it.
-3. Check the state diff, not just forwarding. `asic/fm6000/fm6000_csrdump.c` plus
-   a working-boot snapshot is the tool; a transit test cannot see a scheduler that
-   is one token short.
-4. Five boots for Et2 per `docs/ET2-LINK-RATE.md`.
+    CRM_CTRL           1 address, 129 identical writes   indirect-access strobe
+    FFU_ATOMIC_APPLY   1 address,  59 pulses             commit strobe
 
-Taken carefully this is the difference between 7,088 and roughly 4,300 residual
-writes. Taken carelessly it reproduces alpha41, which passed every check the
-project had at the time.
+`CRM_CTRL`'s 129 writes are 129 distinct operations — load `CRM_REGISTER`, load
+`CRM_COMMAND`, pulse `CRM_CTRL`. Collapsing performs one.
