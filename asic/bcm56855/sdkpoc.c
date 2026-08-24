@@ -2248,10 +2248,35 @@ static int phyled_fix_one(int unit, int port)
 static void *phyled_sync_thread(void *arg)
 {
     int unit = (int)(intptr_t)arg;
-    int p;
+    int p, rr = 1;
 
     for (;;) {
         if (!phyled_sync_run) { sal_sleep(2); continue; }
+
+        /* ⚠ The cache goes STALE, and a stale cache lights a dead port.
+         *
+         * led_speed_cache is filled by the linkscan callback, and these PHYs
+         * report link up permanently -- so when a cable is pulled the speed
+         * drops to 0 and NO callback fires. The cache keeps the last real
+         * speed, the guard sees up + speed > 0, and the LED stays lit on a
+         * port with no link at all. Exactly what the speed guard exists to
+         * prevent, arriving through the back door.
+         *
+         * So refresh ONE port per pass, round-robin: 48 ports at a 2 s
+         * interval is a full sweep every ~96 s, or 0.5 MDIO reads per second.
+         * The version that killed copper receive did 24 per second. */
+        for (;;) {
+            if (++rr > 64) rr = 1;
+            if (EXT_PHY_SW_STATE(unit, rr) != NULL) break;
+            if (rr == 64) break;
+        }
+        if (EXT_PHY_SW_STATE(unit, rr) != NULL) {
+            int sp = 0;
+            if (bcm_port_speed_get(unit, rr, &sp) == BCM_E_NONE) {
+                led_speed_cache[rr] = sp;
+            }
+        }
+
         for (p = 1; p <= 64; p++) {
             int link = 0, up;
             if (EXT_PHY_SW_STATE(unit, p) == NULL) continue;

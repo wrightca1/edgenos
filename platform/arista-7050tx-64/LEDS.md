@@ -116,6 +116,28 @@ populates it, so the whole panel stays dark while the code reads as correct.
 `leds=yes` in `datapath.conf` gates all of it, defaulting to **off**. The
 datapath is what matters; the LEDs are decoration.
 
+### ⚠ And a stale speed is not a speed either
+
+The guard below was still not enough. Found during a health check: a port was
+lit while having no link at all — its neighbour did not answer, the chip
+recorded **zero** receive over 30 s, and `ps` showed it up with speed `-`.
+
+The cause was the cache the MDIO budget rule forced on us. The speed cache is
+filled only when the linkscan callback fires, and these PHYs report link up
+**permanently** — so when the cable was pulled the negotiated speed dropped to
+0 and no callback fired. The cache kept the last real speed, the guard saw
+up + speed > 0, and the LED stayed lit on a dead port.
+
+Fixed by refreshing **one port per pass, round-robin**: 48 ports at a 2 s
+interval is a full sweep every ~96 s, or 0.5 MDIO reads per second, against the
+24 per second that killed copper receive. Bounded enough to be safe, frequent
+enough that a pulled cable goes dark inside a minute and a half.
+
+⚠ Worth keeping the general shape: **caching to avoid a cost introduces a
+staleness the original code did not have.** The guard and the cache were each
+individually correct, and the combination was wrong in a way that neither
+reading alone would catch.
+
 ### ⚠ A link with no speed is not a link
 
 `bcm_port_link_status_get` returns **UP for every copper port on this board**,
