@@ -1571,7 +1571,16 @@ static int fib_start(int unit)
     }
     sal_memset(&sa, 0, sizeof sa);
     sa.nl_family = AF_NETLINK;
-    sa.nl_groups = RTMGRP_IPV4_ROUTE | RTMGRP_NEIGH | RTMGRP_IPV4_IFADDR;
+    /* ⚠ BOTH families. Subscribing only to the v4 groups is a trap that looks
+     * like success: the startup dump (AF_UNSPEC) still returns every IPv6
+     * address that already exists, and RTMGRP_NEIGH is family-agnostic, so
+     * local-address punt and v6 next-hops both work. Only ROUTES learned later
+     * -- which is all of them, since OSPFv3 converges after we start -- never
+     * arrive. The chip ends up with v6 hosts and next-hops and not one route,
+     * and IPv6 transit is silently dropped while every other v6 check passes. */
+    sa.nl_groups = RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_ROUTE |
+                   RTMGRP_NEIGH |
+                   RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR;
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
         printf("  ** netlink bind failed\n");
         close(fd);

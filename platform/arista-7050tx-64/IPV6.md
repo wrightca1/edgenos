@@ -61,9 +61,57 @@ regress it.
 Covered: local-address punt, neighbour to egress object, and route programming
 with the same retry-on-next-hop-resolution the v4 side uses.
 
-## Not done
+## Transit forwarding: verified
 
-IPv6 **transit** forwarding is not proven. Local termination and route
-programming are verified; pushing traffic *through* the box over IPv6 and
-watching the chip counters — the way the v4 path was proven with a counted
-packet run — has not been done.
+200 IPv6 packets sourced from a neighbouring switch to the public internet,
+routed through this box:
+
+```
+ingress   RUCA 202 unicast in    17,526 bytes
+egress    TUCA 200 unicast out   16,486 bytes
+CPU punt   17                    control plane only
+```
+
+200 in, 200 out, 0% loss, and only 17 packets to the CPU — the chip forwarded
+them, not Linux. Same standard the IPv4 path was held to.
+
+## ⚠ The first transit test dropped every packet, and nothing else showed it
+
+Before this worked, transit dropped 100%: packets arrived on ingress, zero
+unicast left on egress, and the chip's IPv6 route table was **empty** — while
+v6 host entries and next-hops were present and correct.
+
+The cause was the netlink subscription, which asked only for the IPv4 groups.
+That is a trap that reads as success, because two thirds of IPv6 keep working
+without the v6 groups:
+
+* the startup dump asks for `AF_UNSPEC`, so IPv6 addresses that already exist
+  are returned and the local-address punt is programmed correctly;
+* `RTMGRP_NEIGH` is family-agnostic, so v6 next-hops and egress objects build
+  correctly.
+
+Only **routes learned after start** never arrive — which is all of them, since
+OSPFv3 converges well after the agent comes up. The chip ends up holding v6
+hosts and next-hops and not one route.
+
+⚠ Meanwhile every other IPv6 check passes: adjacencies reach Full, routes
+appear in the kernel, `ping6` works in both directions, the loopback answers.
+**Every one of those tests the control plane or local termination.** None puts
+a packet *through* the box, which is the only test that separates "IPv6 works"
+from "IPv6 works except for the thing a switch is for". This document
+previously claimed transit was simply untested; it was in fact broken.
+
+Subscribe to both families:
+
+```c
+sa.nl_groups = RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_ROUTE |
+               RTMGRP_NEIGH |
+               RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR;
+```
+
+## Not a problem, despite appearances
+
+`l3 ip6route show` reports `Total Number of IPv6 entries: 2048 (IPv6/64 0,
+IPv6/128 2048)`, which reads like the chip has no capacity for v6 `/64` routes.
+It does not mean that — `/64` prefixes program fine and appear in the table.
+It is a free/allocated display, not a partition limit.

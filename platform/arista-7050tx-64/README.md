@@ -21,10 +21,10 @@ reference.
 | BDE | **user space** — no `linux-kernel-bde`, no KNET, stock kernel |
 | Front ports | all 52 — 48 × 10GBASE-T + 4 × 40G QSFP+ |
 | Copper rate | 10G full duplex demonstrated on one port against a 10GBASE-T peer |
-| Datapath | tap netdev per port, RX and TX verified, transit forwarding counted at the chip |
+| Datapath | tap netdev per port; transit forwarding counted at the chip for **both** IPv4 and IPv6 |
 | L3 | routed ports EOS-style — one VLAN and one L3 interface per port |
 | Control plane | FRR 8.4.4 — OSPFv2 **and** OSPFv3, two Full adjacencies each |
-| Hardware FIB | IPv4 **and** IPv6: adds, next-hop changes and withdrawals verified against the chip |
+| Hardware FIB | IPv4 **and** IPv6 — adds, next-hop changes and withdrawals verified against the chip; see [IPV6.md](IPV6.md) |
 | Redundancy | primary/backup uplinks by OSPF cost, failover **measured** — see below |
 | Configuration | the datapath is a runtime file, `deploy/datapath.conf` — ports, addresses, policy routes, no rebuild |
 | Front panel | chassis, QSFP and copper port LEDs all driven — see [LEDS.md](LEDS.md) |
