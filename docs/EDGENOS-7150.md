@@ -506,16 +506,39 @@ byte counter scales by ~25x. Twenty 56-byte pings against twenty 1400-byte pings
 **Only two counters are confirmed frame counters. No byte counter was found** —
 nothing scaled *up* with size, which is the opposite of the prediction.
 
-⚠ **The experiment is not clean and its result should not be built on.** Several
-counters halved exactly (136→68, 144→72, 152→76, 128→64, and eight 2→1), which is
-far too regular for a size effect and looks like the two measurement windows
-containing different amounts of background traffic — OSPF hellos arrive every few
-seconds and the large-frame run takes longer per packet. There was no idle control
-*between* the two runs, and each was run once.
+⚠ That run was under-controlled: several counters halved exactly (136→68, 144→72,
+152→76, 128→64), far too regular for a size effect, and the two windows contained
+different amounts of background traffic. **The controls are now a tool, not a habit
+to remember.**
 
-To do it properly: interleave idle baselines around every run, repeat each size
-three times, and discard any counter whose idle-window delta is non-zero. Until then
-the only claims that survive are `b1.80` and `b14.241` counting frames.
+#### `tools/counter-probe.sh` + `counter-probe.py`
+
+Runs an idle baseline around **every** measurement, repeats each class, and reports a
+counter only if it moved in **every** repetition and in **no** idle window.
+
+    counter-probe.sh <addrlist> <reps> <label>=<command> ...
+
+It takes no addresses of its own — every target comes from the command passed in, so
+nothing site-specific lives in the script.
+
+With that discipline, three classes × 2 reps, 51 counters excluded as noisy:
+
+    ARP    15 counters, every one delta = 15 = the packet count
+           b3.40 = 1020, b3.80 = 1080     <- 68 and 72 BYTES per frame
+    IPv4   b1.80 b1.200 b4.360 = 15 each; b3.40/b3.80 pick up only background
+    IPv6   b1.520 b2.80 b4.360 b10.401 = 17; b3.80 = 2138; b1.80 only +2
+
+    discriminating: ARP 0 unique, IPv4 2 (b1.200 b14.321),
+                    IPv6 4 (b1.520 b5.240 b11.481 b14.961)
+
+**`b3.40` and `b3.80` are byte counters** — 1020/15 = 68 and 1080/15 = 72 bytes per
+ARP frame, which is the right size for a 60-byte ARP plus framing. The earlier run
+concluded "no byte counter was found"; it had them and mistook their scaling for
+noise. Controls recovered a result the uncontrolled run had thrown away.
+
+**`b1.80` is not a generic ingress counter.** It moves +15 for IPv4 and only +2 for
+IPv6 over the same 15 packets, so it counts something IPv4-specific rather than every
+frame — which the single-class runs had no way to show.
 
 ⚠ Broadcast and multicast moved nothing above idle. That is consistent with the
 parser short-circuiting non-unicast destinations before L3 — but the frames may
