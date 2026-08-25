@@ -115,6 +115,17 @@ def verify(image):
     print(f"VALUE_RAM round-tripped:     {vok} ok, {vbad} mismatched")
     for f in failures:
         print(f)
+    # A round-trip over nothing is not a pass. Pointed at an image that holds no
+    # MOD tables -- ucode_l2.raw rather than ucode_tail.raw, say -- every counter
+    # is zero, no comparison ever runs, and the old verdict reported PASS. This
+    # project has been bitten by exactly that shape before ("0 of 65,792 changed"
+    # from a silently broken join), so require evidence, not absence of failure.
+    empty = [n for n, c in (("CAM", ok + bad), ("COMMAND_RAM", cok + cbad),
+                            ("VALUE_RAM", vok + vbad)) if c == 0]
+    if empty:
+        print("\nVERIFY INCONCLUSIVE - no entries found in: %s" % ", ".join(empty))
+        print("  Nothing was compared, so this is not a pass. Wrong image?")
+        return 2
     good = bad == cbad == vbad == 0
     print("\nVERIFY " + ("PASS - the encoder reproduces a program it did not write"
                          if good else "FAIL"))
