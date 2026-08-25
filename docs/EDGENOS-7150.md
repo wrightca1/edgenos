@@ -595,31 +595,71 @@ no idle window* — and an idle switch on a live network is not idle for **recei
 OSPF hellos, ARP and broadcast keep arriving, so every genuine receive-side counter
 moves at idle and is discarded before it can be reported. 66 counters were excluded
 here, and they were not noise: several sit at ~225 during an idle window and ~4,500
-during a run. **No RX counter could ever have survived that filter**, in this run or
-in the earlier ones reported as clean.
+during a run.
+
+⚠ The exclusion is **luck-dependent, not absolute** — which is worse than a known
+blind spot, because it varies run to run. A later run with quieter idle windows (53
+excluded rather than 66) reported `b3.40` and `b3.80` under strict mode, the very
+counters strict had discarded before. Strict mode does not reliably hide RX counters;
+it hides them whenever background traffic happens to land in an idle window.
 
 The fix is baseline subtraction instead of exclusion: subtract each class's *own* idle
 delta and require the excess to clear a threshold in every repetition
-(`counter-probe.py --mode baseline`). That recovers what strict mode cannot see:
+(`counter-probe.py --mode baseline`).
 
-    ONLY txonly   2: b5.280 b11.481
-    ONLY txrx     6: b3.40 b3.80 b5.200 b11.321 b12.161 b12.401
-    shared       42
+#### ⚠ Match the idle window to the run window, or baseline mode invents counters
 
-**`b3.40 b3.80 b5.200 b11.321 b12.161 b12.401` are receive-side counters** — the two
-classes differ only in whether frames came back. `b3.40` and `b3.80` are the same byte
-counters measured earlier at 68 and 72 bytes per frame, which is the consistency check
-on this result.
+`IDLE_SETTLE` must be **as long as the traffic runs**. Run 15 pings (~15s) against a 4s
+idle window and background traffic gets a quarter of the chance to appear in the
+baseline that it gets in the measurement — so steady background reads as signal.
 
-Baseline mode is the noisier of the two: a counter whose idle rate is bursty rather
-than steady can clear the threshold on background alone. Use strict to establish that
-a counter is *clean*, baseline to establish that one *exists*; disagreement between
-them is information, not a fault.
+This is not a refinement. It was tested by re-running the identical experiment with
+`IDLE_SETTLE=17` instead of `4`, and **four of six claimed findings evaporated**:
 
-⚠ The two `txonly`-unique counters are **not** evidence about direction. The classes
-differ in destination as well as in whether replies arrived: `10.101.101.25` is
-directly connected, `10.102.1.99` is a routed prefix via that same next-hop. Per-route
-or per-adjacency counting fits the observation just as well.
+| counter | mismatched windows | matched windows | verdict |
+|---|---|---|---|
+| `b3.40` | unique to the receiving class | 68 or 136 in *every* class, and at idle | background |
+| `b3.80` | unique to the receiving class | 72 or 144 in every class, and at idle | background |
+| `b12.161` | unique to the receiving class | 76 or 152 in every class, and at idle | background |
+| `b12.401` | unique to the receiving class | 64 or 128 in every class, and at idle | background |
+| `b5.200` | unique to the receiving class | peer 20/20 vs others 6/6, idle 2-5 | **survives** |
+| `b11.321` | unique to the receiving class | peer 20/20 vs others 6/6, idle 2-5 | **survives** |
+
+The four discarded ones take exactly two values, always one or two units of a fixed
+size, and appear in idle windows — one or two background events per window, nothing
+to do with the traffic. `b3.40`/`b3.80` matching the 68- and 72-byte frame sizes
+measured earlier made them *look* corroborated; that was a coincidence of frame size,
+not a confirmation.
+
+`counter-probe.sh` now emits `# WARN <label>: idle Ns < run Ms` when the windows are
+mismatched, and `counter-probe.py` prints those to stderr. Do not trust a baseline-mode
+result from a run that warned.
+
+**Receive-side, as it actually stands:** `b5.200` and `b11.321` are the only counters
+that track the class which receives replies, at ~20 against ~6 elsewhere. That is a
+real difference but not a per-frame count, so it is a lead rather than a decoded
+counter.
+
+#### A destination-specific counter pair
+
+`b5.280` and `b11.481` fire **exactly once per frame** sent to `10.102.1.99`, and not
+at all for `10.104.1.99` or for the peer:
+
+    p102   15, 15, 15, 15   (four reps across three runs, incl. matched windows)
+    p104    -,  -,  -,  1
+    peer    -,  -,  -,  -
+
+The two destinations are routed identically -- both `/24`, same next-hop
+`10.101.101.25`, same interface, same metric -- and neither is in the silicon FIB in
+the current programming pass (only 14 of 40 eligible routes fit the slot range). So
+this is **not** a direction finding and not a "frames went unanswered" finding: it
+distinguishes one destination from an identically-routed sibling, and what the silicon
+is keying on is not established.
+
+⚠ Do not read FIB slot assignments out of `/tmp/fibd.log` without checking which pass
+you are in. The log holds several programming passes; an early pass shows `10.102.1.0`
+and `10.104.1.0` at slots 248-249, while the current pass has different prefixes in
+those slots.
 
 ⚠ Broadcast and multicast moved nothing above idle. That is consistent with the
 parser short-circuiting non-unicast destinations before L3 — but the frames may

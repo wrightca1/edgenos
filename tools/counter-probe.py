@@ -34,6 +34,9 @@ def parse(path):
             key = (rep, label, kind)
             runs.setdefault(key, {})
             continue
+        if line.startswith("#"):
+            print(line, file=sys.stderr)
+            continue
         if not key or not line: continue
         f = line.split()
         if len(f) != 3: continue

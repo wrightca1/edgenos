@@ -58,9 +58,18 @@ while [ "$r" -le "$REPS" ]; do
         awk 'NR==FNR{v[$1]=$2;next} ($1 in v)&&v[$1]!=$2 {print $1, v[$1], $2}' /tmp/cp.a /tmp/cp.b
 
         sample > /tmp/cp.a
+        _t0=$(date +%s)
         eval "$cmd" >/dev/null 2>&1
         sleep 2
+        _el=$(( $(date +%s) - _t0 ))
         sample > /tmp/cp.b
+        # An idle window shorter than the run window gives background traffic
+        # less chance to appear in the baseline than in the measurement, which
+        # makes steady background look like signal. Say so rather than let it
+        # pass silently -- this is the easiest way to get a wrong answer here.
+        if [ "$IDLE" -lt "$_el" ]; then
+            echo "# WARN $label: idle ${IDLE}s < run ${_el}s -- baseline under-samples background"
+        fi
         echo "=== rep$r $label RUN"
         awk 'NR==FNR{v[$1]=$2;next} ($1 in v)&&v[$1]!=$2 {print $1, v[$1], $2}' /tmp/cp.a /tmp/cp.b
     done
