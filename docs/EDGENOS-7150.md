@@ -540,6 +540,40 @@ noise. Controls recovered a result the uncontrolled run had thrown away.
 IPv6 over the same 15 packets, so it counts something IPv4-specific rather than every
 frame — which the single-class runs had no way to show.
 
+#### ★ A falsifiable prediction, and it held
+
+The parser raises **byte-identical flags** for IPv4/ICMP, IPv4/TCP and IPv4/UDP — it
+does not discriminate L4 at all. If the counter signatures are driven by those flags,
+ICMP and TCP must produce the *same set* of counters and differ only in magnitude. If
+counters saw deeper into the packet, they would differ.
+
+Measured, 2 reps each, 51 noisy counters excluded:
+
+    counter     ICMP x15    TCP x15
+    b1.80             15         75
+    b1.200            15         60
+    b4.80             15         75
+    b4.360            15         60
+    b14.241           15         75
+    b14.321           15         60
+
+    unique to ICMP: 0        unique to TCP: 0
+
+**Identical sets, zero discriminating counters.** The magnitudes differ because a TCP
+connection attempt exchanges about five frames where a ping exchanges one — 75 = 15×5,
+60 = 15×4.
+
+This is the first prediction in this thread made *before* the measurement and
+confirmed by it, and it is real evidence that these counters are driven by the
+parser's flag output rather than by deeper inspection. It also retroactively supports
+the flag naming: the reason TCP and ICMP are indistinguishable here is the same reason
+they raise the same flags.
+
+⚠ The 6 counters split cleanly into two groups of three — `{b1.80, b4.80, b14.241}`
+at 75 and `{b1.200, b4.360, b14.321}` at 60. One group counts every frame of the
+exchange, the other four-fifths of them, so they are counting different subsets. What
+distinguishes those subsets is not established.
+
 ⚠ Broadcast and multicast moved nothing above idle. That is consistent with the
 parser short-circuiting non-unicast destinations before L3 — but the frames may
 simply not have been sent (`ping -b` needs a broadcast route), so it is not evidence
