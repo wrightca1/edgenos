@@ -99,8 +99,13 @@ numbers move.
       `ByteMux_0..3`; of the 16 selectors used, three (r53, r58, r60) lie outside
       the r1..r42 range the parser writes, so the space is not just parser
       registers. Gates FFU's 127 rules.
-- [ ] **A8. Parser conventions.** `gen_parser.py` round-trips all 2,117 of EOS's
-      entries bit-identically — and that is **not enough to author a parser**. A
+- [ ] **A8. Parser conventions — and only ~600 rules, not 2,145.**
+      Reachability analysis (`parser_walk.py --reach`) shows **603 of 2,145 rules
+      (28%) are reachable across every port role; 1,542 are dead** for this
+      deployment. The dead ones still need their never-match slots written, but not
+      understood.
+      `gen_parser.py` round-trips all 2,117 of EOS's entries bit-identically — and
+      that is **not enough to author a parser**. A
       program must also agree with L2AR, L3AR and FFU about conventions: what the
       inter-slice state means and which extracted-field register each consumer
       expects. Emitting valid words is the easy half.
@@ -269,6 +274,35 @@ is very likely correct. D2 concerns a front-panel port called "port 3", and **th
 `et` name to chip-port-number mapping is only established for two ports**
 (`et2` = 20, `et1` = 40). Pin that mapping before chasing D2; the seed table is a
 good place to look once the number is known.
+
+### ★ Only 28% of the parser is reachable
+
+`parser_walk.py --reach` treats packet bytes as free — they are attacker-controlled —
+and propagates only the **state** guard forward from each port's seed. Within one
+state, if the highest-index compatible rule has no packet condition it always wins,
+so nothing below it can fire; that floor is what keeps the analysis from marking the
+whole program live.
+
+    seed 61c70000  front-panel (52 ports)   386 rules
+    seed 6b3f0000  port 0, the CPU port     241
+    seed 00c70000  port 3                   134
+    seed 00000000  unused (21 ports)         83
+    seed 08ff0000  port 1                    46
+
+    union over every port role : 603 of 2,145 rules (28%)
+    dead for this deployment   : 1,542 rules (72%)
+
+**That is the size of A8.** Authoring the parser means authoring roughly 600 rules,
+not 2,145 — and the dead 1,542 do not need understanding at all, only the explicit
+never-match writes that keep their slots from holding stale content.
+
+It also explains why every frame terminates by slice 9: from a front-panel seed the
+reachable count peaks at slice 11 (29 rules) and falls to **1** by slice 25. The
+deep slices are almost entirely unreachable from a front-panel port.
+
+⚠ This is an **upper bound**. Reachable is not the same as "fires for real traffic",
+so the true figure is at most 603. Everything outside the set, though, is dead for
+certain, and that is the direction that matters for scoping the work.
 
 ### Tunnels and the CPU port
 

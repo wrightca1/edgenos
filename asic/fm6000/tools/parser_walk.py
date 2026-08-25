@@ -35,7 +35,7 @@
 # encoding of ops 0, 2 and 3 is unknown. No path here depends on them.
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
-import argparse, sys, os
+import argparse, sys, os, collections
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from parser_disasm import read, assemble, CAM_BASE, RAM_BASE, NENTRY, NSLICE, fld
 
@@ -180,17 +180,76 @@ def flags_report(w, port):
         print("  %-18s +%-12s -%s" % (n, on or "[]", off or "[]"))
 
 
+
+def reachable(w, rules, seed):
+    """Rules a port with this seed can ever reach.
+
+    Packet bytes are attacker-controlled, so they are treated as free and only the
+    STATE guard constrains reachability. Within one state, if the highest-index
+    compatible rule has no packet condition it always wins, so nothing below it can
+    fire -- that floor is what keeps this from marking the whole program live.
+
+    This is an upper bound: reachable is not the same as "fires for real traffic".
+    Everything OUTSIDE the result, though, is dead for certain."""
+    st0 = (seed & 0xff, (seed >> 8) & 0xff, (seed >> 16) & 0xff, (seed >> 24) & 0xff)
+    reach, fired = {0: {st0}}, collections.defaultdict(set)
+    for s in range(NSLICE):
+        nxt = set()
+        for st in reach.get(s, ()):
+            cands = []
+            for e, k, care, ram in rules[s]:
+                kb = [(k >> (8 * (7 - i))) & 0xff for i in range(4)]
+                cb = [(care >> (8 * (7 - i))) & 0xff for i in range(4)]
+                if not all((not cb[i]) or (st[3 - i] & cb[i]) == (kb[i] & cb[i])
+                           for i in range(4)):
+                    continue
+                free = all(((care >> (8 * (7 - i))) & 0xff) == 0 for i in range(4, 8))
+                cands.append((e, ram, free))
+            floor = max([e for e, _, f in cands if f], default=-1)
+            for e, ram, _ in [c for c in cands if c[0] >= floor]:
+                fired[s].add(e)
+                if fld(ram, "Terminate"): continue
+                ns = list(st)
+                for i in range(4):
+                    if fld(ram, "StateOp%d" % i) == 1: ns[i] = fld(ram, "StateValue%d" % i)
+                nxt.add(tuple(ns))
+        reach[s + 1] = nxt
+    return fired
+
+def reach_report(w):
+    rules = load_rules(w)
+    seeds = {}
+    for p in range(76):
+        a = INIT_STATE + p * 2
+        if a in w: seeds.setdefault(w[a], []).append(p)
+    total = sum(len(rules[s]) for s in range(NSLICE))
+    union = collections.defaultdict(set)
+    print("%-10s %-26s %s" % ("seed", "ports", "reachable rules"))
+    for seed, ports in sorted(seeds.items(), key=lambda x: -len(x[1])):
+        f = reachable(w, rules, seed)
+        for s, v in f.items(): union[s] |= v
+        print("%08x   %-26s %d" % (seed, "%d port(s)" % len(ports),
+                                   sum(len(v) for v in f.values())))
+    u = sum(len(v) for v in union.values())
+    print("\nunion over every port role : %d of %d rules (%.0f%%)" % (u, total, 100.0 * u / total))
+    print("dead for this deployment   : %d rules (%.0f%%)" % (total - u, 100.0 * (total - u) / total))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+",
                     help="ADDR VALUE files; pass BOTH the ucode file (parser program) "
                          "and the replay (per-port PARSER_INIT_STATE)")
     ap.add_argument("--port", type=int, default=20, help="ingress port (default 20 = et2)")
+    ap.add_argument("--reach", action="store_true",
+                    help="which rules are reachable at all, per port role")
     ap.add_argument("--flags", action="store_true",
                     help="walk a set of crafted frames and report which SetFlags bits each raises")
     a = ap.parse_args()
     w = {}
     for f in a.files: w.update(read(f))
+    if a.reach:
+        return reach_report(w)
     if a.flags:
         return flags_report(w, a.port)
     got = walk(w, load_rules(w), a.port, IPV4_TCP)
