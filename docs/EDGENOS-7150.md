@@ -86,14 +86,15 @@ numbers move.
 - [ ] **A5. The remaining 8 files — 795 pairs.** Incidental; expected to fall out
       of A1–A4.
 - [ ] **A6. Name the parser's 38 `SetFlags` bits.** *Prerequisite for A1.*
-      **11 of 38 named** by running seventeen frames — see §3. 6 VLAN, 8 IPv4,
+      **13 of 38 named** by running seventeen frames — see §3. 6 VLAN, 8 IPv4,
       9 IPv6, 12 broadcast, 16 IPv4-with-options, 26 ARP, 34 PAUSE, 14/24/37
       IPv4-without-options, 4/23 second VLAN tag.
-      **Next action:** the remaining 27 need frames for paths this switch's parser
-      actually takes. MPLS, FCoE and PTP are *not* among them — the deployed
-      program terminates all three at slice 3. Try tunnelled IPv4 (GRE/VXLAN inner),
-      IPv6 extension headers, and traffic arriving on the CPU and loopback ports,
-      whose parser seeds differ.
+      **Next action:** 25 remain. Ruled out as dead ends — MPLS, FCoE, PTP (the
+      deployed program terminates all three at slice 3), tunnels (not parsed past
+      the outer header), and per-port variation (all 52 front-panel ports share one
+      seed). What is left to try: IPv6 extension-header chains beyond hop-by-hop,
+      and frames that exercise the deeper slices, which the 21 frames so far barely
+      reach — the walk terminates by slice 9 on every one of them.
 - [ ] **A7. FFU key format.** `FFU_SLICE_SCENARIO_CFG` selects sources with
       `ByteMux_0..3`; of the 16 selectors used, three (r53, r58, r60) lie outside
       the r1..r42 range the parser writes, so the space is not just parser
@@ -224,7 +225,9 @@ Six bits are named by protocol, and running seventeen frames separates four more
 | 26 | ARP — and ARP raises nothing else |
 | 34 | MAC control / PAUSE |
 | 14, 24, 37 | **IPv4 without options** — raised together for `IHL == 5`, absent for `IHL == 6` |
-| 4, 23 | second VLAN tag — raised only by QinQ |
+| 4, 23 | a second tag is present — QinQ on a front-panel port, and the CPU port's own frames |
+| 22 | IPv6 extension header — unique to a hop-by-hop frame |
+| 3 | the CPU port's path — raised only when walking from port 0 |
 
 Structural facts the static view could not show:
 
@@ -241,7 +244,41 @@ Structural facts the static view could not show:
   deployed program. Those rules exist in the ucode default and the replay overwrote
   them, so this switch does not parse those protocols.
 
-⚠ 27 of the 38 bits are still unraised by any of the seventeen frames built so far.
+⚠ 25 of the 38 bits are still unraised by any frame built so far.
+
+### The parser seed is per-port-ROLE, and it gates L3
+
+Walking the *same* IPv4/TCP frame from each port shows the seed is what decides
+whether a port parses past the MAC header at all:
+
+    seed 61c70000  State3=61  L3 enabled   52 ports — every front-panel port
+    seed 00000000  State3=00  L3 off       21 ports — unused
+    seed 6b3f0000  State3=6b  L3 enabled    1 port  — port 0 (CPU)
+    seed 08ff0000  State3=08  L3 off        1 port  — port 1
+    seed 00c70000  State3=00  L3 off        1 port  — port 3
+
+Slice 3's IPv4/IPv6/ARP rules are guarded on `st3 & 0x20`, so a port whose seed
+lacks that bit terminates at slice 3 and extracts nothing past the MAC header. All
+52 front-panel ports share one seed and behave identically; ports 1 and 3 raise no
+flags at all for an IPv4 frame.
+
+⚠ **That is not the D2 bug, despite the coincidence of the number.** Chip port 3 is
+not a front-panel port — the parser-seed table gives ports 0, 1 and 3 a word0 low
+half of zero while the other 52 carry `0x0100 | lane` — so its L3 parsing being off
+is very likely correct. D2 concerns a front-panel port called "port 3", and **the
+`et` name to chip-port-number mapping is only established for two ports**
+(`et2` = 20, `et1` = 40). Pin that mapping before chasing D2; the seed table is a
+good place to look once the number is known.
+
+### Tunnels and the CPU port
+
+- **Tunnels are not parsed.** IPv4/GRE/IPv4 and IPv4/UDP/VXLAN raise exactly what a
+  plain IPv4/TCP frame raises — the parser does not look past the outer header.
+- **`IHL=15` raises the same set as `IHL=6`**, confirming bit 16 is options-present
+  rather than an option-length encoding.
+- **Port 0 raises bits 3, 4, 6 and 11 for an untagged frame.** Bits 4 and 6 were
+  named from QinQ as "a tag is present", and the CPU port's frames carry an internal
+  tag — so this corroborates that reading rather than contradicting it.
 
 ## L2AR — 8 slices x 64 rules
 
