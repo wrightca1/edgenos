@@ -349,6 +349,30 @@ apply.
 and moving it into our source would add ~1,417 vendor values plus 67 site addresses
 to a repository whose blocker is exactly that. See A7.
 
+**All 24 FFU slices are live, and none of its rules are droppable.** Dropping the
+2,480 `FFU_SLICE_CAM` writes to slices other than 0 took the residual from 6,727 to
+4,247 and **killed the punt path**: `et1_rx = 0`, no OSPF adjacency, 5 kernel
+routes. Those entries are the CPU-trap rules.
+
+⚠ **The reasoning that suggested dropping them was an address-decode error, and it
+is worth recording.** `FFU_SLICE_MASTER_VALID` reads `0x00000003` at `0x381880`, and
+its SDK geometry is `[24]` stride 1 — which looks like an array of 24 one-per-slice
+registers, making `0x03` mean "slices 0 and 1 valid". It is not. Each slice occupies
+a **`0x4000` block** containing its `SLICE_CAM`, `SCENARIO_CAM`, `SCENARIO_CFG` *and*
+`MASTER_VALID`, so slice *s*'s register is at `0x381880 + s*0x4000`. Reading 24
+consecutive words read 24 different registers inside slice 0's block. Read at the
+right stride, **every slice has `LookupValid` set**:
+
+    slice  0  0x381880 = 3      slice 12  0x3b1880 = 1
+    slice  1  0x385880 = 3      slice 13  0x3b5880 = 1
+    slice  2  0x389880 = 3      slice 14  0x3b9880 = 3
+    slice  7  0x39d880 = 1      slice 22  0x3d9880 = 1
+    slice  8  0x3a1880 = 3      slice 23  0x3dd880 = 3
+
+The lesson generalises: **a register's `[N]` geometry does not mean N consecutive
+words.** Check the stride against the block layout before indexing — the same class
+of mistake as reading the parser window as eight packet bytes.
+
 ## SBus — a handshake, not three writes
 
 Transaction: `REQUEST <payload>` / `COMMAND 0` / `COMMAND 01.DD.RR.VV`. 1,239
