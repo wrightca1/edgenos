@@ -460,11 +460,37 @@ Taking an idle baseline and then one traffic class at a time, the counters that 
 **This is a working traffic classifier probe.** The shared set is generic ingress
 accounting; the disjoint sets are downstream of whatever distinguishes the two.
 
-**Why that matters for A1:** ARP is the one frame that raises exactly one parser flag
-— bit 26, and nothing else. So the counters that move for ARP and *not* for unicast
-are downstream of flag 26 specifically. That is the first observable link between a
-named parser flag and anything the forwarding path does, and it is the foothold the
-static attempts on the L2AR key never found.
+#### Adding a third class corrects the two-class reading
+
+⚠ The table above lists five counters as "ARP only". **With IPv6 added to the
+comparison they are not.** Every one is shared with IPv6 — they were never
+ARP-specific, they were "not-IPv4-unicast", and two classes could not tell the
+difference. Any claim that they sit downstream of parser flag 26 is withdrawn.
+
+Re-run with three classes and an idle baseline on both sides:
+
+    class        moved   above idle   unique to it
+    IPv6 x20        72          21    11  b1.520 b5.240 b5.280 b8.80 b9.80
+                                          b10.880 b11.400 b11.481 b12.880
+                                          b14.961 b14.1040
+    IPv4 x20        71          20     2  b1.200 b14.321
+    ARP  x20        66          15     0  —
+
+    IPv6 ^ IPv4 share 10    IPv6 ^ ARP share 7    IPv4 ^ ARP share 15
+
+**IPv6 has a strong distinct signature; ARP has none of its own.** ARP's counters are
+a subset of what the other classes already touch, which fits it being the shortest
+path through the pipeline — it raises one parser flag and terminates early.
+
+**Why this matters for A1:** IPv6 raises parser flag 9 and IPv4 raises flag 8, and
+their counter sets differ by 11 and 2 counters respectively. That is an observable
+association between a named flag and specific hardware counters — the first the
+project has, and the thing three static attempts on the L2AR key never produced.
+
+⚠ The lesson from the correction is the more durable one: **a fingerprint is only as
+good as the number of classes it is contrasted against.** Two classes will always
+partition the counters into "A only", "B only" and "shared", and the first two
+buckets are artifacts until a third class tests them.
 
 ⚠ Broadcast and multicast moved nothing above idle. That is consistent with the
 parser short-circuiting non-unicast destinations before L3 — but the frames may
