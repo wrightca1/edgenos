@@ -374,11 +374,42 @@ rule fires. Progress and limits of that, measured:
   (`MuxOutput_STATS_IDX12A` 55, `STATS_IDX5AB` 50, `STATS_IDX16A` 50). The rules a
   ping exercises are probably not among them.
 
-So the counters are not a ready-made per-rule probe. Making them one means either
-finding a frame that hits one of those 55 rules, or **setting a stats index on a rule
-we choose** — which is a chip-configuration change rather than an observation, and
-should be done on a rule whose behaviour is already understood so the result can be
-checked. That is the next concrete step on A1.
+- **The profile tables are the reason, and they are empty.** A rule's
+  `MuxOutput_STATS_IDX12A` selects an entry of
+  `L2AR_STATS_IDX12A_PROFILE_TABLE[DMT_PROFILE]`, whose `Value[12]` field *is* the
+  counter index. The 55 rules use 12 distinct `DMT_PROFILE` values; read from the
+  chip, **every profile entry has `Value = 0`**:
+
+        IDX12A[0..15]  00000000 00004000 00005000 00000000 00000000 ... all zero
+        IDX16A[0..15]  00003000 00000000 ... all zero
+        IDX5AB[0..7]   00008800 00000000 ... all zero
+
+  Two entries carry a non-zero `Select`, none carries a non-zero `Value`. So every
+  counting rule resolves to counter index 0. **The hardware can count per rule; this
+  configuration does not.**
+
+### ★ The experiment that unblocks A1
+
+This is the first approach to the key that is not blocked on understanding the key.
+
+Write **distinct `Value`s** into `L2AR_STATS_IDX12A_PROFILE_TABLE` for the 12
+profiles the 55 counting rules use — profile *p* gets counter index *p*, say — then
+send frames and read `STATS_BANK_COUNTER`. Which counter moves says which
+`DMT_PROFILE`, and therefore which group of rules, matched that frame.
+
+It is attractive because:
+
+- It needs **no prior knowledge of the key**; it measures which rule fires and lets
+  the key be inferred from frames whose contents we choose.
+- It is a **12-word write** to a table that is currently all zeros and drives
+  nothing, so it cannot change forwarding — the `Value` it replaces is already 0.
+- It is **reversible**: write the zeros back.
+- It turns every later L2AR question into an observation instead of an inference,
+  which is what three failed static attempts argue for.
+
+⚠ Verify it changes nothing first: the profile tables are written during bring-up,
+so a schedule/residual boot must reproduce the same zeros before the experiment can
+be trusted to be additive.
 
 `ucode_l2.raw`'s L2AR block is the *initial* content and `l2arseq` is initial plus a
 422-entry refinement; on all 422 the ucode value equals the first of l2arseq's two
