@@ -407,9 +407,43 @@ It is attractive because:
 - It turns every later L2AR question into an observation instead of an inference,
   which is what three failed static attempts argue for.
 
-⚠ Verify it changes nothing first: the profile tables are written during bring-up,
-so a schedule/residual boot must reproduce the same zeros before the experiment can
-be trusted to be additive.
+#### Run 1 — mechanism proven, L2AR instrumentation gave a null result
+
+Written, measured and reverted on a live schedule/residual boot.
+
+**The counters work.** With `Select=1, Value=p+1` written into the 12 profiles the
+counting rules use, forwarding was unaffected (45 routes, 0% loss through the box),
+and an unrelated counter demonstrated the read path is sound:
+
+    bank 1, index 80   0x5a -> 0x78   after 30 pings   (exactly +30)
+
+**But none of the 55 instrumented rules ever fired.** Counters 1–12 stayed at zero
+across ARP, directed broadcast, multicast, unicast and IPv6 traffic, while index 80
+kept counting throughout.
+
+Three candidate explanations, in the order worth testing:
+
+1. **`Select` semantics are wrong.** `Select_RX_STATS_IDX12A[5]` was set to 1 on the
+   assumption it picks the counter bank. Index 80 lives in bank 1 and is driven by a
+   different path, so bank selection may not work that way at all — the counter may
+   have landed somewhere unread.
+2. **The 55 rules genuinely do not match this traffic.** They are 14% of the rule
+   set, and everything sent was ordinary host traffic to and from the switch.
+3. **The chain has another stage.** `DMT_PROFILE` may not be the profile selector
+   for the stats tables — it is named for the destination-mask transform, and a rule
+   could carry a separate stats profile the decoder has not identified.
+
+**What index 80 tells us that is immediately useful:** the counter that *does* move
+comes from the `STATS_AR` block — `STATS_AR_IDX_CAM` → `STATS_AR_IDX_RAM.IndexValue`
+— which is a dedicated statistics classifier with its own CAM, independent of L2AR.
+That is a **general-purpose packet-matching probe** we can program directly: match on
+whatever the CAM keys on, get a counter. It does not answer "which L2AR rule fired",
+but it is the observability tool this project has lacked, and it is worth
+characterising next.
+
+⚠ The experiment was safe and reversible exactly as predicted: 12 words written, a
+null result, originals restored, forwarding verified unchanged before and after.
+That part of the plan held.
 
 `ucode_l2.raw`'s L2AR block is the *initial* content and `l2arseq` is initial plus a
 422-entry refinement; on all 422 the ucode value equals the first of l2arseq's two
