@@ -434,12 +434,38 @@ Three candidate explanations, in the order worth testing:
    could carry a separate stats profile the decoder has not identified.
 
 **What index 80 tells us that is immediately useful:** the counter that *does* move
-comes from the `STATS_AR` block — `STATS_AR_IDX_CAM` → `STATS_AR_IDX_RAM.IndexValue`
-— which is a dedicated statistics classifier with its own CAM, independent of L2AR.
-That is a **general-purpose packet-matching probe** we can program directly: match on
-whatever the CAM keys on, get a counter. It does not answer "which L2AR rule fired",
-but it is the observability tool this project has lacked, and it is worth
-characterising next.
+comes from the `STATS_AR` block — a dedicated statistics classifier with its own CAM,
+independent of L2AR. That is the **general-purpose packet-matching probe** this
+project has lacked. Characterising it, so far:
+
+    STATS_AR_IDX_CAM   0x018000  w=4 stride 0x8  [2 x 32 x 6]   192 ternary entries
+    STATS_AR_IDX_RAM   0x018800  w=1 stride 0x20 [32 x 6]       IndexValue per entry
+    STATS_AR_RX/TX_PORT_MAP  0x018e80 / 0x018f00  [76]  RxPortDelta[8:12], Tag[0:7]
+    STATS_AR_BANK_CFG1 0x018fa0  [16]  Select_CounterNum[3:0], Select_PerChannel[7:4]
+    STATS_BANK_COUNTER 0x200000  w=2 stride 0x1000  [2048 x 16]
+
+**The counter index is assembled by a mux, not taken from one field.** Three things
+rule out the obvious readings:
+
+- `STATS_AR_IDX_RAM`'s live `IndexValue`s are **1–12**, not 80.
+- `STATS_AR_RX_PORT_MAP` is **zero for every port**, so `RxPortDelta` contributes
+  nothing.
+- `BANK_CFG1` gives each bank a different source: bank 1 (where index 80 lives) has
+  `Select_CounterNum = 7`, while banks 2/3 use 1, bank 4 uses 4, bank 11 uses 11.
+
+    bank  0  CounterNum=7   bank  6  CounterNum=0  PerChannel=2
+    bank  1  CounterNum=7   bank  7  CounterNum=5  PerChannel=6
+    bank  2  CounterNum=1   bank  8  CounterNum=3  PerChannel=1
+    bank  4  CounterNum=4   bank 11  CounterNum=11 PerChannel=1
+
+**The open question is the encoding of `Select_CounterNum`** — which of the available
+index sources each value names. Decode that and the probe becomes usable: pick a
+bank, point it at a source we control, and every counter becomes an observation.
+
+⚠ Do not assume `Select_CounterNum = n` means "source n" of the `MuxOutput_STATS_*`
+list. That is the guess this project has made twice — with the parser window and the
+FFU slice-valid array — and both times a plausible index-into-a-list reading was
+wrong. Confirm it by changing one bank's selector and watching which counter moves.
 
 ⚠ The experiment was safe and reversible exactly as predicted: 12 words written, a
 null result, originals restored, forwarding verified unchanged before and after.
