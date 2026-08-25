@@ -75,27 +75,34 @@ numbers move.
       metadata concentrated in the low 12 bytes. **Gated on the key format (A6).**
       Correlating key bits against actions yields nothing: no bit predicts an
       action, and the 61 CPU-trap rules test scattered bits.
-- [ ] **A2. MOD — 2,604 pairs.** The rewrite engine. **The encoder is done and
-      proven**: `mod_gen.py --verify --image ucode_tail.raw` round-trips 684 CAM
-      steps, 369 `COMMAND_RAM` and 329 `VALUE_RAM` words with zero mismatches.
-      Six of eight opcodes are decoded on hardware.
-      **Next action — opcode 2, and it is the whole blocker.** It is **122 of 302
-      valid commands, 40.4% of the program**, and appears in all sixteen command
-      slices, so nothing routes around it. Thirteen distinct bytes, `0x41 0x43
-      0x45 0x47 0x49 0x4b 0x4d 0x53 0x55 0x57 0x59 0x5b 0x5f` — **every operand
-      odd**, which under `length = operand+1` yields only even lengths. That is
-      the "even-length argument" flagged untested in `mod_decode.py`; holding
-      across 13 values and 122 instances is structure, but still not a decode.
-      ⚠ A static value-byte budget is **inconclusive** and must not be quoted as
-      evidence: 868 value bytes exist, 426 are demanded by decoded commands, and
-      opcode 2 would demand 1,070 under `operand+1`. It points away from a full
-      byte-consumer, but only one entry per slice fires on a frame, so a
-      whole-table total answers a question nobody asked.
-      Decide it the way the other six were decided: on a live routed flow,
-      bisect to the entry that fires in a slice, swap its command byte leaving
-      `Valid` set, and read the egress capture. Unmapped opcode 3 is untouched;
-      `INSERT`, `DELETE`, `DECREMENT_INSERT` and `DECREMENT_REPLACE` are the four
-      command-set entries with no opcode yet, for two remaining codes.
+- [ ] **A2. MOD — 2,604 pairs.** The rewrite engine. **Encoder proven and the
+      command language fully decoded.** `mod_gen.py --verify --image
+      ucode_tail.raw` round-trips 684 CAM steps, 369 `COMMAND_RAM` and 329
+      `VALUE_RAM` words with zero mismatches, and **all 302 valid commands in
+      EOS's program now decode — 0% unknown.** Opcode 3 is still unmapped but
+      appears nowhere in this program.
+      **Opcode 2 = `INSERT n`, n = operand + 1** — measured 2026-08-25, and it was
+      40.4% of the program. No opcode-2 entry fires on a routed IPv4 frame, so it
+      was decoded by installing one *into* a slot that does fire (`mod-swap.sh`).
+      Four operand values, the last two predicted before measuring:
+
+          0x43 → +4 B    0x45 → +6 B    0x47 → +8 B    0x49 → +10 B
+
+      Inserted bytes are zero because a SKIP slot has no `VALUE_RAM` behind it —
+      itself the confirmation that INSERT draws its payload from the value table.
+      Every opcode-2 byte EOS emits has an odd operand, so it only ever inserts an
+      even count; the "even-length argument" is now measured rather than assumed.
+      ⚠ `0x41` (insert 2) **drops the frame**, reproduced on three independent
+      runs. Unexplained — do not emit it.
+      **Next action:** author our own egress-modify program from intent, replacing
+      the 2,604 transcribed pairs. The full firing program for a routed IPv4 frame
+      is known and is only eight commands:
+
+          bank  3  0x85  REPLACE 6   DMAC       bank 13  0xbe  REPLACE_MASKED
+          bank  4  0x85  REPLACE 6   SMAC       bank 14  0x05  SKIP 6
+          bank 11  0x01  SKIP 2      ethertype  bank 15  0xe0  DEC   TTL
+          bank 12  0x20  CHECKSUM               bank 16  0x20  CHECKSUM
+
 - [ ] **A3. `l2arinit` — 1,128 pairs.** Same block as A1; falls out with it.
 - [ ] **A4. `l3arslice*`, `l3artables`, `smalltables` — 1,296 pairs.**
       ⚠ These are graded **AUTHORED**. The rules were written from intent; the

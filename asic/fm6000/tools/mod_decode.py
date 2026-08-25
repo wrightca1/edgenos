@@ -87,6 +87,45 @@ them, the two edits routing requires. Every other command carries a flag saying
 whether it contributes to the checksum accumulator, which is cleared after a
 CHECKSUM or at end of frame.
 
+OPCODE 2 IS INSERT -- MEASURED ON HARDWARE, 2026-08-25. n = operand + 1.
+
+No opcode-2 entry FIRES on a routed IPv4 frame, so the swap-a-firing-entry method
+that decoded the other six cannot reach it. Bisecting every command bank against a
+routed frame gives the whole firing program, and opcode 2 is absent from it:
+
+    bank  3  0x85  REPLACE 6   DMAC        bank 13  0xbe  REPLACE_MASKED
+    bank  4  0x85  REPLACE 6   SMAC        bank 14  0x05  SKIP 6
+    bank 11  0x01  SKIP 2      ethertype   bank 15  0xe0  DEC   TTL
+    bank 12  0x20  CHECKSUM                bank 16  0x20  CHECKSUM
+
+So it was decoded the other way round: install an opcode-2 byte INTO a slot known
+to fire (bank 11 slot 0, normally SKIP 2), leaving Jitter and Valid untouched so
+the CAM still matches and only the operation changes. tools/mod-swap.sh does this.
+Frame length discriminates: SKIP and REPLACE preserve it, INSERT grows it.
+
+    cmd     operand   captured   delta   inserted bytes seen at the cursor
+    0x01    (SKIP 2)   102 B       -     control: rewriting the same byte
+    0x43       3       106 B      +4     4 zero bytes after the SMAC
+    0x45       5       108 B      +6     6 zero bytes
+    0x47       7       110 B      +8     8 zero bytes   <- predicted before measuring
+    0x49       9       112 B     +10     10 zero bytes  <- predicted before measuring
+
+Four operand values, all exactly operand+1, the last two predicted in advance. The
+inserted bytes are ZERO because a SKIP slot has no MOD_VALUE_RAM bytes behind it,
+which is itself the confirmation that INSERT draws its payload from the value
+table. Every operand-2 command byte in EOS's program has an ODD operand, so this
+opcode only ever inserts an EVEN number of bytes -- the "even-length argument"
+that was flagged untested is now measured, and true.
+
+⚠ 0x41 (operand 1, i.e. insert 2 bytes) DROPS the frame. Reproduced on three
+independent runs, so it is not path flakiness. Unexplained; do not emit it.
+
+⚠ A whole-table value-byte budget argued AGAINST INSERT consuming value bytes
+(868 present, 426 demanded by decoded commands, 1070 demanded if opcode 2
+consumed operand+1). It was recorded as inconclusive at the time and it was
+wrong: only one entry per slice fires on any frame, so summing the table answers
+a question nobody asked.
+
 THE COMMAND SPLIT -- MEASURED ON HARDWARE, 2026-08-17. Command = opcode[7:5] :
 operand[4:0] is confirmed, but the "length = operand + 1" rule that used to sit
 here is NOT global, and the readings built on it were wrong. See
@@ -191,6 +230,7 @@ VAL_LAYOUT = [
 OPCODES = {
     0: ("SKIP", True),          # n = operand + 1; two skips confirmed (0x01->2, 0x05->6)
     1: ("CHECKSUM", False),     # conditional fixup: acts only after a modifying command
+    2: ("INSERT", True),        # n = operand + 1; MEASURED on hardware 2026-08-25
     4: ("REPLACE", True),       # n = operand+1 bytes; 0x85 = 6 = the MAC rewrite
     5: ("REPLACE_MASKED", True),  # operand[3:0] = dybble mask, [4] = clear-vs-keep
     6: ("END?", False),         # mandatory in the final slice; NO observed frame effect

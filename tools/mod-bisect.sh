@@ -54,8 +54,13 @@ BASEM=$(mask "$BASE")
 # Retries because the path recovers on its own: et2 is the copper DAC port and a
 # probe that drops frames disturbs neighbour state for a few seconds afterwards.
 # Returns 0 if a frame was captured.
+# ⚠ Prime et2 before every capture -- see mod-swap.sh. The PCS stays LOCKED while
+# nothing passes, so a port-level check does not predict whether transit works.
+prime(){ timeout 40 "$S/eg.sh" 'ping -c 3 -W 1 10.101.101.33 >/dev/null 2>&1; true' >/dev/null 2>&1; }
+
 path_alive(){ local i H
   for i in 1 2 3; do
+      prime
       H=$("$S/transit-probe-hex.sh")
       [ -n "$H" ] && return 0
       sleep 5

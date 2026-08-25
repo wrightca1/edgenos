@@ -31,8 +31,20 @@ restore(){ timeout 60 "$S/eg.sh" "devmem $(addr $SLOT) 32 $ORIG; true" >/dev/nul
 MAINPID=$$
 trap 'if [ "${BASHPID:-$$}" = "$MAINPID" ]; then restore; fi' EXIT INT TERM HUP
 
+# ⚠ Prime et2 before every capture. et2 is the copper DAC port and its neighbour
+# state lapses within a minute or two of idleness -- the PCS stays LOCKED
+# (LANE_STATUS=0x940, pcsRx=1) while nothing passes, so a port-level check does
+# NOT predict whether the transit path works. A short ping burst over et2
+# immediately before the probe restores it reliably; a background keepalive does
+# not survive long enough to be trusted.
+prime(){ timeout 40 "$S/eg.sh" 'ping -c 3 -W 1 10.101.101.33 >/dev/null 2>&1; true' >/dev/null 2>&1; }
+
 path_alive(){ local i H
-  for i in 1 2 3; do H=$("$S/transit-probe-hex.sh"); [ -n "$H" ] && return 0; sleep 5; done
+  for i in 1 2 3; do
+      prime
+      H=$("$S/transit-probe-hex.sh"); [ -n "$H" ] && return 0
+      sleep 5
+  done
   return 1; }
 
 printf 'bank %s slot %s  original word 0x%08x (cmd 0x%02x, jitter %d)\n' \
