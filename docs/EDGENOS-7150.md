@@ -640,26 +640,43 @@ that track the class which receives replies, at ~20 against ~6 elsewhere. That i
 real difference but not a per-frame count, so it is a lead rather than a decoded
 counter.
 
-#### A destination-specific counter pair
+#### b5.280 and b11.481 count received ICMP errors
 
-`b5.280` and `b11.481` fire **exactly once per frame** sent to `10.102.1.99`, and not
-at all for `10.104.1.99` or for the peer:
+`b5.280` (`0x205230`) and `b11.481` (`0x20b3c2`) increment **once per received ICMP
+error message**. Measured against the kernel's own `/proc/net/snmp` `IcmpMsg` counters,
+10 frames per class:
 
-    p102   15, 15, 15, 15   (four reps across three runs, incl. matched windows)
-    p104    -,  -,  -,  1
-    peer    -,  -,  -,  -
+| traffic | kernel | `b5.280` / `b11.481` |
+|---|---|---|
+| TTL=1, peer returns time-exceeded | `InType11 +10` | **+10** |
+| unreachable destination | `InType3 +10` | **+10** |
+| normal ping, replies arrive | `InType0 +10` | **+0** |
 
-The two destinations are routed identically -- both `/24`, same next-hop
-`10.101.101.25`, same interface, same metric -- and neither is in the silicon FIB in
-the current programming pass (only 14 of 40 eligible routes fit the slot range). So
-this is **not** a direction finding and not a "frames went unanswered" finding: it
-distinguishes one destination from an identically-routed sibling, and what the silicon
-is keying on is not established.
+The echo-reply row is the control: it is the same volume of received ICMP to the same
+address over the same path, and it moves these counters not at all. So the pair counts
+ICMP *errors*, not received ICMP and not received frames.
 
-⚠ Do not read FIB slot assignments out of `/tmp/fibd.log` without checking which pass
-you are in. The log holds several programming passes; an early pass shows `10.102.1.0`
-and `10.104.1.0` at slots 248-249, while the current pass has different prefixes in
-those slots.
+**They are receive-side.** An earlier reading of the same pair as destination-specific
+was wrong. They appeared to single out `10.102.1.99` out of 14 destinations only
+because that subnet's last-hop router is the one that reliably answers with
+unreachables; other live subnets returned 0-3 over a ten-second run, which is ICMP
+error rate limiting, and dead subnets returned nothing because nothing was there to
+answer. Destination was a proxy for "did an ICMP error come back".
+
+⚠ **This is worth remembering as a trap.** Sweeping destinations produced a sharp,
+perfectly reproducible signal -- 15/15/15/15 across three runs, exactly one count per
+frame, zero for an identically-routed sibling -- and the obvious reading of it was
+wrong. Reproducibility established that the effect was real; it said nothing about
+what caused it. The variable that mattered was never in the sweep.
+
+**Consequence for the parser.** Echo replies and ICMP errors are both addressed to the
+switch and both punted to the CPU, so the counter cannot be discriminating on
+destination, on punt, or on frame direction. It is discriminating on the **ICMP type
+byte**, which is direct evidence that the datapath classifies that far into the
+payload -- past the IP header and into L4. See the parser window model above.
+
+`10.102.1.1` answers pings, so a *reachable* host in that subnet produces no ICMP
+error and no count, which is the within-prefix control for the same claim.
 
 ⚠ Broadcast and multicast moved nothing above idle. That is consistent with the
 parser short-circuiting non-unicast destinations before L3 — but the frames may
