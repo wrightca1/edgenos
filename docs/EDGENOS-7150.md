@@ -75,8 +75,27 @@ numbers move.
       metadata concentrated in the low 12 bytes. **Gated on the key format (A6).**
       Correlating key bits against actions yields nothing: no bit predicts an
       action, and the 61 CPU-trap rules test scattered bits.
-- [ ] **A2. MOD — 2,604 pairs.** The rewrite engine. Needs each `MOD_CAM` command
-      decoded; the 8-bit `Command` packs an opcode *and* its operand.
+- [ ] **A2. MOD — 2,604 pairs.** The rewrite engine. **The encoder is done and
+      proven**: `mod_gen.py --verify --image ucode_tail.raw` round-trips 684 CAM
+      steps, 369 `COMMAND_RAM` and 329 `VALUE_RAM` words with zero mismatches.
+      Six of eight opcodes are decoded on hardware.
+      **Next action — opcode 2, and it is the whole blocker.** It is **122 of 302
+      valid commands, 40.4% of the program**, and appears in all sixteen command
+      slices, so nothing routes around it. Thirteen distinct bytes, `0x41 0x43
+      0x45 0x47 0x49 0x4b 0x4d 0x53 0x55 0x57 0x59 0x5b 0x5f` — **every operand
+      odd**, which under `length = operand+1` yields only even lengths. That is
+      the "even-length argument" flagged untested in `mod_decode.py`; holding
+      across 13 values and 122 instances is structure, but still not a decode.
+      ⚠ A static value-byte budget is **inconclusive** and must not be quoted as
+      evidence: 868 value bytes exist, 426 are demanded by decoded commands, and
+      opcode 2 would demand 1,070 under `operand+1`. It points away from a full
+      byte-consumer, but only one entry per slice fires on a frame, so a
+      whole-table total answers a question nobody asked.
+      Decide it the way the other six were decided: on a live routed flow,
+      bisect to the entry that fires in a slice, swap its command byte leaving
+      `Valid` set, and read the egress capture. Unmapped opcode 3 is untouched;
+      `INSERT`, `DELETE`, `DECREMENT_INSERT` and `DECREMENT_REPLACE` are the four
+      command-set entries with no opcode yet, for two remaining codes.
 - [ ] **A3. `l2arinit` — 1,128 pairs.** Same block as A1; falls out with it.
 - [ ] **A4. `l3arslice*`, `l3artables`, `smalltables` — 1,296 pairs.**
       ⚠ These are graded **AUTHORED**. The rules were written from intent; the
