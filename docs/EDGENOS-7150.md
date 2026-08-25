@@ -421,6 +421,26 @@ and an unrelated counter demonstrated the read path is sound:
 across ARP, directed broadcast, multicast, unicast and IPv6 traffic, while index 80
 kept counting throughout.
 
+⚠ **This was first recorded as "0 of 65,792 counters changed", and that figure was a
+broken tool, not a measurement.** The diff used `join a b | awk '$2!=$3'`, which
+silently produced no output on `csrdump`'s files. Re-run with
+
+    awk 'NR==FNR{v[$1]=$2;next} ($1 in v) && v[$1]!=$2' before after
+
+the same traffic moves **78 counters**. The conclusion above survives — nothing lands
+at indices 1–12 — but it now rests on a diff that works. Two earlier "no counters
+moved" statements in this project came from the same broken comparison.
+
+**The chip is already counting heavily.** 15 transit pings move 78 counters across
+banks 1–4, several by exactly the packet count:
+
+    bank 1 idx  80   0x118 -> 0x127        bank 3 idx  80   0xce45 -> 0xcf01
+    bank 1 idx 200   0x10c -> 0x11b        bank 3 idx 320   0x16c0c -> 0x172dc
+    bank 2 idx 320   0x39e -> 0x3ae        bank 4 idx  80   0xf1 -> 0x100
+
+That is a far richer observability surface than this project has been using, and it
+is free — no configuration change required to read it.
+
 Three candidate explanations, in the order worth testing:
 
 1. **`Select` semantics are wrong.** `Select_RX_STATS_IDX12A[5]` was set to 1 on the
@@ -481,6 +501,10 @@ they see the packet.
 Pick an idle bank, set `BANK_CFG1[bank]`, generate traffic, read. On this
 configuration **index 80 is where ingress unicast lands**, incrementing exactly once
 per frame — that is the reference signal to calibrate any new experiment against.
+
+⚠ **Diff counter dumps with `awk`, never `join`.** `join a b | awk '$2!=$3'` produces
+no output on `csrdump` files and reports every sweep as unchanged. Use
+`awk 'NR==FNR{v[$1]=$2;next} ($1 in v) && v[$1]!=$2'`.
 
 All of it is safe and reversible: every write above was a single word to a
 configuration register, reverted immediately, with forwarding verified at 45 routes
