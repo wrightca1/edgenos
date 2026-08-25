@@ -333,6 +333,36 @@ The file is a **table plus one mechanical rule**: 29,110 writes over 15,201
 addresses is 1.9 each, and 9,900 of the 10,249 twice-written addresses are
 `00000000` then the value — the ternary safe-update idiom.
 
+### The key has visible field structure
+
+Correlating key bits against actions gives nothing. Looking at *which bits are cared
+for together* does: the 404 rules use 231 distinct care masks, and the cared-for bit
+positions fall into contiguous runs that look like fields.
+
+    bits   0..80   width 81    the widest, 64 rules share one mask covering it
+    bits  82..90   width  9
+    bits  92..98   width  7
+    bits 240..247  width  8
+    bits 256..293  width 38    ← exactly the number of parser SetFlags bits
+    bits 298..313  width 16
+    bits 320..335  width 16
+    bits 353..356  width  4
+
+⚠ **The 38-bit run at 256..293 is a candidate for the parser's flags and is NOT
+confirmed.** Aligning them one-to-one and checking what the rules requiring each bit
+*do* gives no signal: flag 26 is ARP and raises nothing else in the parser, yet the
+L2AR rules caring about bit 282 are not dominated by `SetCpuCode` or
+`SetTrapHeader`. 38 is not a rare width, and this may be coincidence.
+
+`L2AR_FLAGS_CAM` does not settle it either — it is per-port with a 64-bit key, and
+port 40 cares about **bit 42**, outside the parser's 38.
+
+**The experiment that would settle it** is empirical rather than static: send a frame
+that raises exactly one known flag — ARP raises only bit 26 — and observe which L2AR
+rule fires. That needs per-rule hit visibility; `STATS_AR_IDX_CAM` and the
+`MuxOutput_STATS_IDX*` action bits suggest the hardware can count per rule, and
+working out how to read those counters is the next concrete step on A1.
+
 `ucode_l2.raw`'s L2AR block is the *initial* content and `l2arseq` is initial plus a
 422-entry refinement; on all 422 the ucode value equals the first of l2arseq's two
 writes and the chip holds the second.
