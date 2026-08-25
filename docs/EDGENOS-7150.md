@@ -492,6 +492,31 @@ good as the number of classes it is contrasted against.** Two classes will alway
 partition the counters into "A only", "B only" and "shared", and the first two
 buckets are artifacts until a third class tests them.
 
+#### Frame counters vs byte counters — partial, and under-controlled
+
+Same flags, different frame size, so the counter *set* should be identical while any
+byte counter scales by ~25x. Twenty 56-byte pings against twenty 1400-byte pings:
+
+    b1.80      20 -> 20    frame counter
+    b14.241    20 -> 20    frame counter
+    b1.200     20 -> 19    b4.360  20 -> 19    b14.321  20 -> 19
+    b3.40     136 -> 68    b3.80  144 -> 72    b12.161 152 -> 76   b12.401 128 -> 64
+    b1.240      2 -> 1     and eight more, all 2 -> 1
+
+**Only two counters are confirmed frame counters. No byte counter was found** —
+nothing scaled *up* with size, which is the opposite of the prediction.
+
+⚠ **The experiment is not clean and its result should not be built on.** Several
+counters halved exactly (136→68, 144→72, 152→76, 128→64, and eight 2→1), which is
+far too regular for a size effect and looks like the two measurement windows
+containing different amounts of background traffic — OSPF hellos arrive every few
+seconds and the large-frame run takes longer per packet. There was no idle control
+*between* the two runs, and each was run once.
+
+To do it properly: interleave idle baselines around every run, repeat each size
+three times, and discard any counter whose idle-window delta is non-zero. Until then
+the only claims that survive are `b1.80` and `b14.241` counting frames.
+
 ⚠ Broadcast and multicast moved nothing above idle. That is consistent with the
 parser short-circuiting non-unicast destinations before L3 — but the frames may
 simply not have been sent (`ping -b` needs a broadcast route), so it is not evidence
