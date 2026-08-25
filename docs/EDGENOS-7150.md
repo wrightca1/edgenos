@@ -574,6 +574,28 @@ at 75 and `{b1.200, b4.360, b14.321}` at 60. One group counts every frame of the
 exchange, the other four-fifths of them, so they are counting different subsets. What
 distinguishes those subsets is not established.
 
+#### RX versus TX — attempted, and confounded
+
+Pinging a destination that never answers should isolate transmit-side counting.
+Against 15 pings to the live peer:
+
+    rxtx    20 counters; 12 unique to it, including b1.80 b1.200 b4.360 b14.241
+    txonly   8 counters, every one delta 12; b3.80 = 864, b12.401 = 768
+             0 unique
+
+⚠ **The comparison does not separate direction, because the two runs did not send the
+same protocol.** Pinging an unused address never resolves ARP, so no ICMP frame is
+ever transmitted — the 12 counted events are **ARP requests**, and `b3.80 = 864`
+divided by 12 is 72 bytes per frame, exactly the ARP frame size measured earlier.
+The "txonly" class is really an ARP-only class.
+
+So the 12 counters unique to `rxtx` require *either* a received frame *or* an ICMP
+frame, and this test cannot say which. Both readings fit.
+
+A clean version needs a destination that is ARP-resolvable but silent at IP level —
+a static ARP entry for an address that does not exist would do it, since the ICMP
+frames would then be transmitted and never answered.
+
 ⚠ Broadcast and multicast moved nothing above idle. That is consistent with the
 parser short-circuiting non-unicast destinations before L3 — but the frames may
 simply not have been sent (`ping -b` needs a broadcast route), so it is not evidence
