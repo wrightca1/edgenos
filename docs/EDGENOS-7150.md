@@ -359,9 +359,26 @@ port 40 cares about **bit 42**, outside the parser's 38.
 
 **The experiment that would settle it** is empirical rather than static: send a frame
 that raises exactly one known flag — ARP raises only bit 26 — and observe which L2AR
-rule fires. That needs per-rule hit visibility; `STATS_AR_IDX_CAM` and the
-`MuxOutput_STATS_IDX*` action bits suggest the hardware can count per rule, and
-working out how to read those counters is the next concrete step on A1.
+rule fires. Progress and limits of that, measured:
+
+- **The counters exist and are readable.** `STATS_BANK_COUNTER` at `0x200000`,
+  `[2048 x 16]` w=2 stride `0x1000` — 16 banks of 2048 two-word counters — plus 64
+  `STATS_DISCRETE_COUNTER_FRAME`/`_BYTE` at `0x1a000`.
+- **They are configured, not dormant.** `STATS_AR_BANK_CFG1/2` hold real values
+  (`0032a782`, `00168404`, …), and **102 counter words are non-zero**, all in bank 1.
+- **They did not move.** A full sweep of all 65,792 counter words before and after
+  30 transit pings showed **zero** changes. Not read-clear either — the two reads
+  were identical rather than one being zeroed.
+- **The likely reason: only 14% of rules count.** A rule contributes to a counter
+  only if its action enables a stats index, and just **55 of the 404** do
+  (`MuxOutput_STATS_IDX12A` 55, `STATS_IDX5AB` 50, `STATS_IDX16A` 50). The rules a
+  ping exercises are probably not among them.
+
+So the counters are not a ready-made per-rule probe. Making them one means either
+finding a frame that hits one of those 55 rules, or **setting a stats index on a rule
+we choose** — which is a chip-configuration change rather than an observation, and
+should be done on a rule whose behaviour is already understood so the result can be
+checked. That is the next concrete step on A1.
 
 `ucode_l2.raw`'s L2AR block is the *initial* content and `l2arseq` is initial plus a
 422-entry refinement; on all 422 the ucode value equals the first of l2arseq's two
