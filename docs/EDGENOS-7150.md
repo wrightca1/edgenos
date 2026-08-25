@@ -441,6 +441,36 @@ banks 1–4, several by exactly the packet count:
 That is a far richer observability surface than this project has been using, and it
 is free — no configuration change required to read it.
 
+#### Counter fingerprints per traffic class
+
+Taking an idle baseline and then one traffic class at a time, the counters that move
+*above idle* separate the classes:
+
+    traffic      moved   counters whose delta is exactly the packet count
+    idle           51    —
+    20 unicast     76    b1.80  b1.200  b4.360  b14.241  b14.321   (all +20)
+    10 ARP         66    b1.240 b1.280 b2.40 b2.80 b4.80 b4.1240   (all +10)
+    10 broadcast    0    —
+    10 multicast   51    — (idle only)
+
+    shared by unicast and ARP : b1.240 b1.280 b2.40 b2.80 b3.40 b3.80 b4.80 b4.1240
+    unicast only              : b1.80 b1.200 b4.360 b5.240 b5.280
+    ARP only                  : b10.401 b11.241 b12.161 b12.401 b14.481
+
+**This is a working traffic classifier probe.** The shared set is generic ingress
+accounting; the disjoint sets are downstream of whatever distinguishes the two.
+
+**Why that matters for A1:** ARP is the one frame that raises exactly one parser flag
+— bit 26, and nothing else. So the counters that move for ARP and *not* for unicast
+are downstream of flag 26 specifically. That is the first observable link between a
+named parser flag and anything the forwarding path does, and it is the foothold the
+static attempts on the L2AR key never found.
+
+⚠ Broadcast and multicast moved nothing above idle. That is consistent with the
+parser short-circuiting non-unicast destinations before L3 — but the frames may
+simply not have been sent (`ping -b` needs a broadcast route), so it is not evidence
+until the transmission is confirmed.
+
 Three candidate explanations, in the order worth testing:
 
 1. **`Select` semantics are wrong.** `Select_RX_STATS_IDX12A[5]` was set to 1 on the
