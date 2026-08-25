@@ -574,27 +574,52 @@ at 75 and `{b1.200, b4.360, b14.321}` at 60. One group counts every frame of the
 exchange, the other four-fifths of them, so they are counting different subsets. What
 distinguishes those subsets is not established.
 
-#### RX versus TX — attempted, and confounded
+#### RX versus TX — and why the control was hiding the answer
 
-Pinging a destination that never answers should isolate transmit-side counting.
-Against 15 pings to the live peer:
+Isolating transmit-side counting needs a destination that is ARP-resolvable but
+silent at IP level. A **destination behind the peer** does it: `10.102.1.99` routes
+`via 10.101.101.25 dev et1`, so the next-hop MAC is already resolved and the ICMP
+frames really are transmitted — confirmed by `et1` `tx_packets` rising by 5 per 5
+pings — while nothing ever comes back. (`ip neigh add` is not available; busybox
+`ip` rejects both `add` and `replace`, so a static ARP entry is not an option here.)
 
-    rxtx    20 counters; 12 unique to it, including b1.80 b1.200 b4.360 b14.241
-    txonly   8 counters, every one delta 12; b3.80 = 864, b12.401 = 768
-             0 unique
+Both classes then transmit 15 ICMP frames and only `txrx` receives 15 back. Under the
+harness's normal control:
 
-⚠ **The comparison does not separate direction, because the two runs did not send the
-same protocol.** Pinging an unused address never resolves ARP, so no ICMP frame is
-ever transmitted — the 12 counted events are **ARP requests**, and `b3.80 = 864`
-divided by 12 is 72 bytes per frame, exactly the ARP frame size measured earlier.
-The "txonly" class is really an ARP-only class.
+    txonly   7 counters; 2 unique: b5.280 b11.481
+    txrx     5 counters; 0 unique
 
-So the 12 counters unique to `rxtx` require *either* a received frame *or* an ICMP
-frame, and this test cannot say which. Both readings fit.
+⚠ **"Zero counters unique to `txrx`" is an artifact of the control, not a result.**
+The rule that makes the harness trustworthy is *report a counter only if it moved in
+no idle window* — and an idle switch on a live network is not idle for **receiving**.
+OSPF hellos, ARP and broadcast keep arriving, so every genuine receive-side counter
+moves at idle and is discarded before it can be reported. 66 counters were excluded
+here, and they were not noise: several sit at ~225 during an idle window and ~4,500
+during a run. **No RX counter could ever have survived that filter**, in this run or
+in the earlier ones reported as clean.
 
-A clean version needs a destination that is ARP-resolvable but silent at IP level —
-a static ARP entry for an address that does not exist would do it, since the ICMP
-frames would then be transmitted and never answered.
+The fix is baseline subtraction instead of exclusion: subtract each class's *own* idle
+delta and require the excess to clear a threshold in every repetition
+(`counter-probe.py --mode baseline`). That recovers what strict mode cannot see:
+
+    ONLY txonly   2: b5.280 b11.481
+    ONLY txrx     6: b3.40 b3.80 b5.200 b11.321 b12.161 b12.401
+    shared       42
+
+**`b3.40 b3.80 b5.200 b11.321 b12.161 b12.401` are receive-side counters** — the two
+classes differ only in whether frames came back. `b3.40` and `b3.80` are the same byte
+counters measured earlier at 68 and 72 bytes per frame, which is the consistency check
+on this result.
+
+Baseline mode is the noisier of the two: a counter whose idle rate is bursty rather
+than steady can clear the threshold on background alone. Use strict to establish that
+a counter is *clean*, baseline to establish that one *exists*; disagreement between
+them is information, not a fault.
+
+⚠ The two `txonly`-unique counters are **not** evidence about direction. The classes
+differ in destination as well as in whether replies arrived: `10.101.101.25` is
+directly connected, `10.102.1.99` is a routed prefix via that same next-hop. Per-route
+or per-adjacency counting fits the observation just as well.
 
 ⚠ Broadcast and multicast moved nothing above idle. That is consistent with the
 parser short-circuiting non-unicast destinations before L3 — but the frames may
