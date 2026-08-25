@@ -90,7 +90,7 @@ CHECKSUM or at end of frame.
 THE COMMAND SPLIT -- MEASURED ON HARDWARE, 2026-08-17. Command = opcode[7:5] :
 operand[4:0] is confirmed, but the "length = operand + 1" rule that used to sit
 here is NOT global, and the readings built on it were wrong. See
-docs/PARSER-CONVENTIONS.md for the traces.
+docs/EDGENOS-7150.md (was PARSER-CONVENTIONS) for the traces.
 
 Method: on a live routed flow (Et2 -> routed -> Et1, egress captured on the peer),
 locate the entry that actually FIRES in each slice by bisection, then SWAP its
@@ -186,7 +186,7 @@ VAL_LAYOUT = [
 
 #: opcode[7:5] -> (name, does the operand mean anything?). Measured on hardware
 #: 2026-08-17 by swapping the command byte of the FIRING entry on a live routed
-#: flow; see the header and docs/PARSER-CONVENTIONS.md. Anything absent here was
+#: flow; see the header and docs/EDGENOS-7150.md (was PARSER-CONVENTIONS). Anything absent here was
 #: never observed firing, and is left unnamed rather than guessed.
 OPCODES = {
     0: ("SKIP", True),          # n = operand + 1; two skips confirmed (0x01->2, 0x05->6)

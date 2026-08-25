@@ -6,10 +6,10 @@
  * 0x49 (front port 1) and 0x45 (port 2), 44 and 45 SBus ops. Device 0x4a
  * (port 3) gets ZERO. Port 3's EPL/MAC/PCS registers ARE written, which is why
  * they compare byte-identical to a working lane; only the SerDes half is
- * missing. See docs/PORT3-BRINGUP.md.
+ * missing. See docs/EDGENOS-7150.md (was PORT3-BRINGUP).
  *
  * fm6000_lanelink replays the captured op list, and that cannot work for a cold
- * lane for two structural reasons (docs/EOS-SOURCES.md):
+ * lane for two structural reasons (docs/EDGENOS-7150.md (was EOS-SOURCES)):
  *
  *   - the writes are READ-MODIFY-WRITES, so replaying one lane's resulting
  *     values into another writes numbers derived from the wrong lane;
@@ -32,7 +32,7 @@
  * driving 0x2b to the value a working lane shows proves nothing because it is a
  * message rather than tuning state. The real DFE controls are 0x1f
  * (sbus_dfe_a_adv_cntl / _dac_cntl), 0x21 (ctl_1/2/3) and 0x2e (ctl_i) -- see
- * docs/SPICO-RE.md. Replacing SPICO means implementing the adaptation against
+ * docs/EDGENOS-7150.md (was SPICO-RE). Replacing SPICO means implementing the adaptation against
  * those, not re-triggering a state machine.
  *
  * ADDRESSING. The SDK computes  (lane << 8) + 0xd11RR,  low byte = SBus
@@ -155,7 +155,7 @@ static int wait_bits(unsigned dev, unsigned reg, uint32_t bits, const char *what
 
 /* ---- SPICO interrupt path, from DPDK's open fm10k switch driver -----------
  *
- * docs/OPEN-SOURCE-FOCALPOINT.md. DPDK issues a SerDes interrupt by writing the
+ * docs/EDGENOS-7150.md (was OPEN-SOURCE-FOCALPOINT). DPDK issues a SerDes interrupt by writing the
  * SerDes device's OWN register 0x03 with (code << 16) | param, then polling
  * register 0x04 bits 16-17 until they clear. That is a different mechanism from
  * fm6000_sbus's `irq` subcommand, which drives the SPICO BROADCAST device across

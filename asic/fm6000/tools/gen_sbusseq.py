@@ -46,7 +46,7 @@
 #
 # ⚠ WHAT IS AND IS NOT UNDERSTOOD. The STRUCTURE is recovered and exact -- the
 # loop bounds, the alternation, and the fact that 84 iterations carry no varying
-# parameter. Two device numbers are named by docs/PORT3-BRINGUP.md: SBus device
+# parameter. Two device numbers are named by docs/EDGENOS-7150.md (was PORT3-BRINGUP): SBus device
 # 0x45 is Et2's EPL16 lane and 0x49 is Et1's, which is why the ~50-iteration unit
 # alternates between them. The rest of the register SEMANTICS are not established:
 # the SDK's SBus field table names registers 0x00-0x35 (sbus_rx_data_gate,

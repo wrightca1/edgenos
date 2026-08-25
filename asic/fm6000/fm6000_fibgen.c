@@ -8,7 +8,7 @@
  *     fm6000_bst -N /tmp/nh
  *
  * The rule was read off a converged EOS FIB by correlating all 49 of its
- * boundaries against `show ip route` and `show ip arp` (docs/ROUTED-PORT-ANATOMY.md):
+ * boundaries against `show ip route` and `show ip arp` (docs/EDGENOS-7150.md (was ROUTED-PORT-ANATOMY)):
  *
  *   - every RIB route  -> one boundary at its network address, with the route's
  *                         prefix length, pointing at its gateway's nexthop

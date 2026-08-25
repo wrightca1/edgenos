@@ -38,7 +38,7 @@ so pairing each name-lea with the next group-lea recovers the whole mapping.
 
 That last one is the check that matters. L3AR_CAM's Key/KeyInvert split was
 originally recovered by byte-comparing our output against EOS's own rules, and
-the word ORDER was wrong at first (docs/L3AR-STRUCTURE.md). The table says it
+the word ORDER was wrong at first (docs/EDGENOS-7150.md (was L3AR-STRUCTURE)). The table says it
 outright.
 
 ★ THE SBUS/SERDES SPACE IS COVERED TOO, by a different shape (--sbus).
@@ -52,11 +52,11 @@ register by NUMBER rather than by string:
 so the register number falls out of the compare. 54 SBus registers recovered.
 
 ⚠ These are the registers reached by `fm6000_sbus read/write <dev> <reg>`, and
-what they reveal corrects a long-standing misreading -- see docs/SPICO-RE.md and
+what they reveal corrects a long-standing misreading -- see docs/EDGENOS-7150.md (was SPICO-RE) and
 the header of ../fm6000_serdes_enable.c.
 
 PROVENANCE: reads the SDK at runtime and embeds nothing. Facts about the silicon,
-recorded in our own words (docs/PROVENANCE.md).
+recorded in our own words (docs/EDGENOS-7150.md (was PROVENANCE)).
 
 usage:
     sdk_fieldmap.py --so <libFocalpointSDK.so> [--reg NAME] [--json out.json] [--check]

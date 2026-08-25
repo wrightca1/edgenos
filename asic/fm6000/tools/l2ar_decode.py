@@ -2,7 +2,7 @@
 """l2ar_decode.py - decode the FM6000 L2AR rules into named, readable form.
 
 L2AR is the largest transcribed block left in the tree: fm6000_l2arpre.c and
-fm6000_l2arseq.c carry 12,473 microcode pairs each (docs/PROVENANCE.md 2.5).
+fm6000_l2arseq.c carry 12,473 microcode pairs each (docs/EDGENOS-7150.md (was PROVENANCE) 2.5).
 This is the first half of replacing them, and it follows the route that worked
 for the parser -- read the geometry out of the register header rather than
 inferring it, then decode against it.
@@ -17,7 +17,7 @@ inferring it, then decode against it.
 
 So a rule is 6 segments x 4 words = 24 words of key, with a 2-word action. That
 explains the 24-word runs at stride 0x20 measured long before this file existed
-(docs/L2AR-MICROCODE-STRUCTURE.md) -- they were 6 CAM segments, not one wide
+(docs/EDGENOS-7150.md (was L2AR-MICROCODE-STRUCTURE)) -- they were 6 CAM segments, not one wide
 entry, and the key is 6 x 128 = 768 bits.
 
 Each segment is a ternary pair like the parser's, KeyInvert[63:0] / Key[127:64],

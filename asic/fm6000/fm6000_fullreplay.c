@@ -41,7 +41,7 @@ static void sbus(uint32_t cmd,uint32_t data){
  * 10GBASE-SR link on Et1 working.
  *
  * Word format: 10 bits. reg 0x07 = data[7:0]; reg 0x06 = data[9:8] with bit3 =
- * IMEM write enable and bit2 = strobe. See docs/SPICO-RE.md.
+ * IMEM write enable and bit2 = strobe. See docs/EDGENOS-7150.md (was SPICO-RE).
  */
 static const char *spico_path = NULL;
 
@@ -137,7 +137,7 @@ int main(int argc,char**argv){
       if(rd(PIN)!=0x208u){ printf("\n OFF-BUS at line %lu (0x%05x <- 0x%08x)\n",n,a,v); aborted=1; break; }
       /* Sample Et2 as the replay runs. Et2 links on only ~half of identical
        * boots, and its outcome is already fixed by the time STEP5 finishes
-       * (docs/PORT3-BRINGUP.md) -- so the transition happens somewhere INSIDE
+       * (docs/EDGENOS-7150.md (was PORT3-BRINGUP)) -- so the transition happens somewhere INSIDE
        * these 300k writes and nothing downstream can see where. One extra MMIO
        * read per 16k ops gives ~18 samples across the replay, which is enough
        * to bisect a good boot's dark->up transition to a 16k-op window.

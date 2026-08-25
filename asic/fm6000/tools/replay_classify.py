@@ -28,7 +28,7 @@ import argparse
 import collections
 import sys
 
-# word-address ranges, from fm6000_api_regs_int.h / docs/ROUTING-FIB.md
+# word-address ranges, from fm6000_api_regs_int.h / docs/EDGENOS-7150.md (was ROUTING-FIB)
 # Block address map. These are the chip's top-level base/size pairs -- interface
 # facts, each one independently confirmable from our own traces by where writes
 # actually cluster. An earlier hand-guessed version of this table was wrong in

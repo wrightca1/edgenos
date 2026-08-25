@@ -51,7 +51,7 @@ TWO MODES, because blocks differ in kind
 
 PLACEMENT is chosen in fm6000-fullseq.sh, not here, and it is per-block:
 CM/SAF hoist to their first in-loop write; L2F/LBS only works written AFTER the
-whole loop. See docs/SELF-CONTAINED-PLAN.md.
+whole loop. See docs/EDGENOS-7150.md (was SELF-CONTAINED-PLAN).
 
 Usage:
     gen_tableinit.py <replay.txt> --survey

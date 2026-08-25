@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """provenance_audit.py - classify every tracked file by where its CONTENT came from.
 
-docs/PROVENANCE.md sets the rule this checks:
+docs/EDGENOS-7150.md (was PROVENANCE) sets the rule this checks:
 
     Register addresses, field layouts and hardware behaviour are facts about the
     chip and are fine. A verbatim transcription of a proprietary program's data

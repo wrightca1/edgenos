@@ -2,7 +2,7 @@
 """gen_parser.py - emit FM6000 parser CAM+RAM entries from rules we author.
 
 This is the encoder half of replacing asic/fm6000/fm6000_parserinit.c, which
-today carries Intel's parser tables verbatim (docs/PROVENANCE.md 2.5).
+today carries Intel's parser tables verbatim (docs/EDGENOS-7150.md (was PROVENANCE) 2.5).
 parser_decode.py reads their program; this one writes ours.
 
     encode_cam(value, care, never) -> (Key, KeyInvert)

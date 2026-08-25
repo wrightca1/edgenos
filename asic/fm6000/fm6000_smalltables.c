@@ -15,7 +15,7 @@
  * WARNING: an entry's pitch is pow2ceil(words), NOT words. L2F_TABLE_4K holds
  * 3-word entries on a 4-word pitch -- one word in four is padding. Assuming a
  * pitch of 3 puts every entry after the first in the wrong row, silently. It is
- * the same failure as the L3AR_RAM3 stride; see docs/L3AR-STRUCTURE.md.
+ * the same failure as the L3AR_RAM3 stride; see docs/EDGENOS-7150.md (was L3AR-STRUCTURE).
  *
  * LBS_CAM is per-port: 55 of 76 entries, at indices 0, 1, 3, 20-47, 52-75 --
  * the active-port set the CM watermarks and MAPPER reached independently. Each

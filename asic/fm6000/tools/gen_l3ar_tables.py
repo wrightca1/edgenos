@@ -9,7 +9,7 @@ writes across 450 addresses. Two causes, and the first one matters:
 
 `fm6000_l3arinit` emits slice 0's CAM plus RAM1/RAM2 only. It was written under
 the premise `l3ar_decode.py` used to state -- *"the action is a flag rewrite, and
-that is all it is"* -- which docs/L3AR-STRUCTURE.md retracted: there are FIVE RAM
+that is all it is"* -- which docs/EDGENOS-7150.md (was L3AR-STRUCTURE) retracted: there are FIVE RAM
 banks, and RAM3/4/5 hold the L2 lookup, ALU, policer, QoS, GLORT and action-data
 muxes. Slice 0 is the forwarding stage and all 32 of its rules populate all three
 of those banks, so 160 addresses of live forwarding actions have been coming from
@@ -23,7 +23,7 @@ slices select, and a table entry is routinely referenced from more than one slic
 generator therefore emits only the entries its own rules reference, and the union
 still leaves gaps. They are authored here once, as a unit.
 
-Field layouts for both parts are in docs/L3AR-STRUCTURE.md, recovered from the
+Field layouts for both parts are in docs/EDGENOS-7150.md (was L3AR-STRUCTURE), recovered from the
 SDK's field descriptor table; the profile tables are
 `X = (selected_source & Mask) | Value` with `Select` naming the source per
 datasheet Table 5-37.

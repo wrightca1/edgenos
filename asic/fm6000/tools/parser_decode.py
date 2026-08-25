@@ -28,7 +28,7 @@ testing. Recovering 2,117 populated entries also reproduces the count reached
 independently by earlier hand analysis.
 
 WHY THIS EXISTS. asic/fm6000/fm6000_parserinit.c currently carries the parser
-microcode verbatim (see docs/PROVENANCE.md 2.5). Decoding the tables into
+microcode verbatim (see docs/EDGENOS-7150.md (was PROVENANCE) 2.5). Decoding the tables into
 match rules is the first half of replacing that file with a generator that
 emits our own parser program from a declarative protocol list; this tool is the
 decoder, not the generator.

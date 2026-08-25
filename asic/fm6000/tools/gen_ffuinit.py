@@ -28,7 +28,7 @@ FFU_SLICE_MASTER_VALID; FFU_BST_{MASTER_VALID,SCENARIO_VALID,PARTITION_MAP,
 ROOT_KEYS}. The CAM and BST *entries* are not shadowed. Measured on the working
 replay, of 1,963 multi-write registers only ~345 fall in a conservative shadow
 superset -- the other 1,618 (4,522 writes) are final-value semantics and could be
-lifted, saving ~2,904 lines. See docs/BLOB-REMOVAL-PLAN.md.
+lifted, saving ~2,904 lines. See docs/EDGENOS-7150.md (was BLOB-REMOVAL-PLAN).
 
     ⚠ That extension is a GOAL A / GOAL B TRADE: it shrinks the replay while
     moving more of EOS's values into our source. Decide it deliberately. This

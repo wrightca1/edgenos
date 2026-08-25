@@ -2,7 +2,7 @@
 """gen_l3ar_slice1.py - author L3AR slice 1 (canonical source GLORT) from intent.
 
 Slice 1 derives CSGLORT, the 12-bit "canonical SGLORT" -- the logical source of a
-frame rather than its physical source port. See docs/L3AR-STRUCTURE.md for how the
+frame rather than its physical source port. See docs/EDGENOS-7150.md (was L3AR-STRUCTURE) for how the
 layout was established; nothing here is transcribed from EOS's table.
 
 WHAT THE STAGE DOES

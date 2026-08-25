@@ -2,7 +2,7 @@
 """l2ar_gen.py - encode FM6000 L2AR rules, and prove the encoder on EOS's own.
 
 The encoder half of replacing fm6000_l2arpre.c and fm6000_l2arseq.c, which carry
-12,473 microcode pairs each (docs/PROVENANCE.md 2.5). l2ar_decode.py reads their
+12,473 microcode pairs each (docs/EDGENOS-7150.md (was PROVENANCE) 2.5). l2ar_decode.py reads their
 program; this writes ours.
 
     encode_cam(value, care, never)  -> (Key, KeyInvert)   per 64-bit segment
@@ -45,7 +45,7 @@ MASK64 = 0xFFFFFFFFFFFFFFFF
 
 # FM6000_L2AR_CAM_KEYS -- exact bit positions, 384 bits over 6 segments x 64.
 # ⚠ NOT the order Table 5-71 lists them in; that ordering was tested and refuted
-# (see docs/L2AR-MICROCODE-STRUCTURE.md). DMASK_A is deliberately absent: it is
+# (see docs/EDGENOS-7150.md (was L2AR-MICROCODE-STRUCTURE)). DMASK_A is deliberately absent: it is
 # matched by a separate structure, FM6000_L2AR_CAM_DMASK, which is why the
 # datasheet gives it bitwise-OR semantics unlike anything here.
 KEY_LAYOUT = [

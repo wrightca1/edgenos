@@ -25,7 +25,7 @@ say(){ echo "[fs] $*" >> $LOG; echo "[fs] $*"; sync; }
 # because a table's default value is the same whoever writes it.
 #
 # GENW counts writes in the executed file that came from a GENERATOR. That is
-# the number Goal B in docs/BLOB-REMOVAL-PLAN.md actually cares about.
+# the number Goal B in docs/EDGENOS-7150.md (was BLOB-REMOVAL-PLAN) actually cares about.
 GENW=0
 DIRECTW=0        # subset of GENW applied by direct MMIO, not present in the file
 # PREBUILT=1 executes a PRE-TRANSFORMED stream and performs no transformation of
@@ -76,7 +76,7 @@ $BIN/fm6000_initsbus $B >> $LOG 2>&1; say "  initsbus rc=$? PIN=$(R 0x1c021)"
 # only ever checked Et1 (10GBASE-SR fibre). With the firmware stripped:
 #   Et1 (SR)  links fine   -> PORT_STATUS=0x8c0, pcsRx=1
 #   Et2 (CR)  does NOT     -> PORT_STATUS=0x815, pcsRx=0
-# With fwd4.txt unmodified, BOTH link at 0x8c0/pcsRx=1. See docs/SPICO-RE.md.
+# With fwd4.txt unmodified, BOTH link at 0x8c0/pcsRx=1. See docs/EDGENOS-7150.md (was SPICO-RE).
 
 say "STEP3 memfill (129 memory fills)"
 $BIN/fm6000_memfill $B 0 >> $LOG 2>&1
@@ -129,7 +129,7 @@ say "STEP5 FULL REPLAY of EOS's port+forwarding bring-up (299803 writes: BOTH po
 # EVIDENCE IS THIN -- do not treat this as settled: unpaced 2/5, genuinely paced
 # 1/1. The failure is LATCHED at bring-up: once Et2 misses lock, replaying EOS's
 # own port-bounce -- 6 times, including the full 2,632-write version with the
-# SBus lane reset -- does not recover it. See docs/ET2-COPPER-LINK.md.
+# SBus lane reset -- does not recover it. See docs/EDGENOS-7150.md (was ET2-COPPER-LINK).
 # GENBLK: program whole register blocks with OUR OWN code instead of replaying
 # EOS's writes for them. Each generator writes that block's END STATE; the
 # recorded writes for the block are filtered out of the replay.
@@ -726,7 +726,7 @@ if [ "${GENBLK:-1}" = "1" ]; then
 		# FFU BST_ACTION default fill: 8,046 writes carrying two values only,
 		# 0x00700000 on even words and 0 on odd, across four contiguous runs.
 		# That is a table memset, not a program, so generating it serves BOTH
-		# goals (docs/BLOB-REMOVAL-PLAN.md) -- unlike re-encoding EOS's rules.
+		# goals (docs/EDGENOS-7150.md (was BLOB-REMOVAL-PLAN)) -- unlike re-encoding EOS's rules.
 		# Verified offline by SIMULATING gen_list: the set it removes is exactly
 		# the set this tool emits (8,046 pairs, values 0x700000 and 0 only).
 		# ⚠ gen_list filters by ADDRESS, so the runs exclude the 98 addresses
@@ -802,7 +802,7 @@ if [ "${GENBLK:-1}" = "1" ]; then
 				gen_list "fm6000_${_g}init" "$(echo $_g | tr a-z A-Z)"
 		done
 		# L3AR slice 1 -- canonical source GLORT. Authored, not transcribed; see
-		# docs/L3AR-STRUCTURE.md and asic/fm6000/tools/gen_l3ar_slice1.py.
+		# docs/EDGENOS-7150.md (was L3AR-STRUCTURE) and asic/fm6000/tools/gen_l3ar_slice1.py.
 		# 810 writes replacing 1,088 replay lines, 6 rules where EOS ships 32.
 		#
 		# No overlap with fm6000_l3arinit above: that tool is SLICE 0 ONLY and its
@@ -990,7 +990,7 @@ if [ "${SPICOLOAD:-1}" = "1" ] && [ -f "$SPICO_BLOB" ] && [ -x "$BIN/fm6000_spic
 		# gets ZERO. Its EPL/MAC/PCS registers ARE written (391 of them), which is
 		# why they compare byte-identical to a working lane; only the SerDes half
 		# is missing. That asymmetry, not a misconfiguration, is why port 3 has
-		# never linked. See docs/PORT3-BRINGUP.md.
+		# never linked. See docs/EDGENOS-7150.md (was PORT3-BRINGUP).
 		#
 		# The two captured sequences are IDENTICAL in every written value and
 		# differ only by one extra poll of reg 0x1f, so the data is lane
@@ -1044,7 +1044,7 @@ say "  0x5010 $V -> $(S 0x5010)"
 say "STEP7 settle + link"
 # ⚠ Et2 is sampled here as well as Et1, and that is not cosmetic. Et2's link
 # comes up on roughly half of otherwise identical boots -- measured over 10
-# controlled boots, see docs/PORT3-BRINGUP.md -- and at ~12 min a boot an A/B
+# controlled boots, see docs/EDGENOS-7150.md (was PORT3-BRINGUP) -- and at ~12 min a boot an A/B
 # comparison needs about 31 boots PER ARM to detect even a 50-point difference.
 # So the outcome cannot be chased by booting; it has to be caught happening.
 # Every boot now leaves a trace of both ports, so a good boot and a bad one can

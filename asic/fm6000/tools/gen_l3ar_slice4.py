@@ -2,7 +2,7 @@
 """gen_l3ar_slice4.py - author L3AR slice 4 (ALU46 operand selection) from intent.
 
 Slice 4 is the simplest of the five: it drives one action, `MuxOutput_ALU46_OP`,
-and touches neither RAM3 nor RAM5. See docs/L3AR-STRUCTURE.md for how the layout
+and touches neither RAM3 nor RAM5. See docs/EDGENOS-7150.md (was L3AR-STRUCTURE) for how the layout
 was established; nothing here is transcribed from EOS's table.
 
 WHAT THE STAGE DOES

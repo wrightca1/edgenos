@@ -6,7 +6,7 @@ worst case: its 0x10000 macros are absent entirely (EOS-SOURCES.md:77), so the
 block was mapped for months by clustering replay writes. That gets base addresses
 roughly right and ENTRY WIDTHS wrong, and a wrong width is a wrong slice stride,
 which returns a neighbouring slice's content under the wrong label without ever
-erroring. docs/L3AR-STRUCTURE.md records one such error.
+erroring. docs/EDGENOS-7150.md (was L3AR-STRUCTURE) records one such error.
 
 libFocalpointSDK.so carries a register descriptor table in .rodata that gives both:
 
@@ -23,7 +23,7 @@ libFocalpointSDK.so carries a register descriptor table in .rodata that gives bo
 703 registers across 79 blocks. The GEOMETRY columns (+32..+52) matter as much as
 the address: an entry stride is what turns a base address into the right row, and
 a wrong stride returns a neighbouring entry's content under the right label
-without ever erroring. docs/L3AR-STRUCTURE.md records exactly that failure --
+without ever erroring. docs/EDGENOS-7150.md (was L3AR-STRUCTURE) records exactly that failure --
 L3AR_RAM3 was decoded at stride 0x40 for weeks when the silicon uses 0x20, which
 silently returned slices 2-3's data under slice 1's name. This table says
 words=1, stride=0x20 for RAM3 and words=2, stride=0x40 for RAM1/2/4/5, which is

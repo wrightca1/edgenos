@@ -34,7 +34,7 @@
  *
  * A second table follows the link ops: DFE[], the RX adaptation procedure, taken
  * from a LIVE capture of one fm6000StartSerDesDfeTuning() call on EOS rather than
- * from a boot window. See the comment on DFE[] and docs/PORT3-BRINGUP.md. Pass
+ * from a boot window. See the comment on DFE[] and docs/EDGENOS-7150.md (was PORT3-BRINGUP). Pass
  * -l to run the link ops alone, which is what this tool did before.
  *
  * ⚠ PROVENANCE. The 89-op sequence is derived from an EOS capture, the same class
@@ -72,7 +72,7 @@ struct op { uint8_t kind; uint8_t off_or_sbop; uint32_t val; uint8_t reg; uint8_
  *
  * INIT[], SEQ[] and DFE[] were segmented captures of the VENDOR OS bringing a
  * lane up -- 963 ops of somebody else's program's behaviour, transcribed. That
- * is exactly what docs/PROVENANCE.md forbids shipping: "no verbatim
+ * is exactly what docs/EDGENOS-7150.md (was PROVENANCE) forbids shipping: "no verbatim
  * transcription of a proprietary program's data tables".
  *
  * They now load at runtime from an operator-supplied file, the same "bring your
@@ -181,7 +181,7 @@ static int load_ops(const char *path)
 #define NSEQ N_SEQ
 
 /* RX adaptation (DFE tuning), segmented from the LIVE capture of one
- * fm6000StartSerDesDfeTuning(0,69,0) call on EOS -- see docs/PORT3-BRINGUP.md.
+ * fm6000StartSerDesDfeTuning(0,69,0) call on EOS -- see docs/EDGENOS-7150.md (was PORT3-BRINGUP).
  * Same segmentation rules as SEQ: 29 EPL lane writes, 35 SBus ops to the lane's
  * SerDes, 30 SPICO ops claimed by the reg-0x03 payload rule. The 46 SPICO ops
  * and 6 SBus ops for lanes 0x45/0x49 in the same window are excluded.

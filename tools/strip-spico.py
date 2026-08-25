@@ -10,8 +10,8 @@ does not let us author it.
 
 ⚠ It is load-bearing for COPPER. Stripped, Et2 (10GBASE-CR) linked 0 of 7 boots
 against 5 of 10 with it (Fisher p = 0.041). Fibre is unaffected -- Et1 came up on
-all 17 stripped boots. So this produces a FIBRE-ONLY image. See docs/SPICO-RE.md
-and docs/BLOB-REMOVAL-PLAN.md.
+all 17 stripped boots. So this produces a FIBRE-ONLY image. See docs/EDGENOS-7150.md (was SPICO-RE)
+and docs/EDGENOS-7150.md (was BLOB-REMOVAL-PLAN).
 
 SBus transaction shape, from our own fm6000_initsbus.c (not from EOS):
 

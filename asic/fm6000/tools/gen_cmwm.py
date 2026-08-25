@@ -30,7 +30,7 @@ applied across a port x class matrix, the same shape `fm6000_ffubstinit` already
 exploits for the FFU BST default fill. What is recorded below is the *structure*
 -- which port ranges share a policy and what each class vector is -- not 6,500
 opaque words. Contrast JSS/SBUS lane tuning, which is board-measured and stays in
-the replay (docs/BLOB-REMOVAL-PLAN.md).
+the replay (docs/EDGENOS-7150.md (was BLOB-REMOVAL-PLAN)).
 
 ⚠ These are watermarks: they decide when the chip drops and when it asserts
 PAUSE. Getting them wrong does not fail loudly -- it shows up as packet loss or

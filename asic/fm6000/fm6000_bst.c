@@ -9,7 +9,7 @@
  * one. EOS rebuilds the standby in full and then flips that one field, so the
  * live block is never written under traffic. Verified on hardware by adding a
  * route and watching partition 14 -> 15 with block 14 untouched, then back on
- * removal. See docs/ROUTED-PORT-ANATOMY.md.
+ * removal. See docs/EDGENOS-7150.md (was ROUTED-PORT-ANATOMY).
  *
  * Addressing (register header):
  *   FFU_BST_KEY(e,b,i)          = 0x10000*e + 0x400*b +   i + 0x308000

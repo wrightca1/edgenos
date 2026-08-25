@@ -10,7 +10,7 @@
  * Any daemon that installs to the kernel (OSPF, BGP, static) is covered.
  *
  * Structures. These were originally guessed from the replay's shape; they are
- * now named and decoded -- see docs/ROUTED-PORT-ANATOMY.md.
+ * now named and decoded -- see docs/EDGENOS-7150.md (was ROUTED-PORT-ANATOMY).
  *
  *   prefix array   FFU_BST_KEY(engine, block, i)   0x10000*e + 0x400*b + i + 0x308000
  *   action array   FFU_BST_ACTION_ROUTE(e, b, i,w) 0x10000*e + 0x800*b + 2*i + 0x300000
@@ -53,7 +53,7 @@
  * fibgen walks the kernel RIB/neighbours/addresses and emits the boundary list
  * plus its NEXTHOP entries; fm6000_bst -p sorts, right-aligns, writes all 1024
  * slots of the standby and flips Partition. Both are validated against a live
- * EOS FIB (see docs/ROUTED-PORT-ANATOMY.md): the block reproduces byte for byte
+ * EOS FIB (see docs/EDGENOS-7150.md (was ROUTED-PORT-ANATOMY)): the block reproduces byte for byte
  * from shuffled input, and the boundary list matches 46 for 46.
  *
  * This daemon is kept because it is what the hardware-routing test was

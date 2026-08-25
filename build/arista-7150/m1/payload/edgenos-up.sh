@@ -47,7 +47,7 @@ say "3. port netdevs (PORTD_TXFCS=1: the ASIC expects an FCS placeholder on inje
 #
 # ⚠ Et2 does NOT come up every boot -- measured, not suspected. Treat a missing
 # et2 carrier as normal rather than as a fault, and never conclude anything from
-# a single boot. See docs/PORT3-BRINGUP.md.
+# a single boot. See docs/EDGENOS-7150.md (was PORT3-BRINGUP).
 MAC="${EDGENOS_MAC:-44:4c:a8:31:5d:ab}"     # the chip's router MAC; every routed
                                             # port carries it, a second one would
                                             # not be matched for routing

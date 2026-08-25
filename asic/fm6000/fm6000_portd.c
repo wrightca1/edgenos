@@ -11,11 +11,11 @@
  *
  * Once "et1" exists you can `ip addr add ... dev et1`, ping through it, and run
  * a routing daemon on it. Routes the daemon installs then get pushed into the
- * hardware FIB by fm6000_route / a FIB sync agent -- see docs/ROUTING-FIB.md.
+ * hardware FIB by fm6000_route / a FIB sync agent -- see docs/EDGENOS-7150.md (was ROUTING-FIB).
  *
  * The F64 tag goes INLINE in the frame at offset 12 (after SMAC), and word 1 is
  * the egress GLORT, which selects the physical port. The GLORT<->port mapping is
- * not stable across configurations -- see docs/GLORT-MAPPING.md.
+ * not stable across configurations -- see docs/EDGENOS-7150.md (was GLORT-MAPPING).
  *
  * RX framing is unreliable: a frame may sit at offset 0, be preceded by a
  * receive prefix, and may or may not still carry the tag. We locate the real
@@ -94,7 +94,7 @@ static int nports;
  * the RX layout, and it does not hold.
  *
  * It is WORD 1, and this was decoded and written down before this file guessed:
- * docs/PORT3-BRINGUP.md, "The punt frame format, decoded", from an fm6000_rxdump
+ * docs/EDGENOS-7150.md (was PORT3-BRINGUP), "The punt frame format, decoded", from an fm6000_rxdump
  * capture with no portd competing --
  *
  *     33 33 00 00 00 05 | 80 a2 35 81 ca b4 | 07 01  03 ef  00 01  ff ff | 86 dd

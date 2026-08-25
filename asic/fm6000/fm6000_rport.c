@@ -3,7 +3,7 @@
  * A routed FM6000 port is five registers. Not the GLORT CAM, not the L2F port
  * masks, not SAF_MATRIX or LBS_CAM -- configuring a port routed on EOS and
  * diffing the live chip against its access-port state changes none of those by
- * a single word. See docs/ROUTED-PORT-ANATOMY.md for the derivation.
+ * a single word. See docs/EDGENOS-7150.md (was ROUTED-PORT-ANATOMY) for the derivation.
  *
  * The recipe, validated structurally against three independent routed ports on
  * a live EOS (Et2/V=1006, Et1/V=1007, Et3/V=1008), which hold it identically:

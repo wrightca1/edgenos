@@ -9,7 +9,7 @@ ACTION_FLAGS". That is FALSE, and it is the premise this whole tool was designed
 around. There are FIVE RAM banks; the old decoder read two. Besides SetFlags,
 datasheet Table 5-31 lists 6 sequential actions and 21 output mux actions whose
 operands live in RAM3/RAM4/RAM5 and index 19 profile tables. See
-docs/L3AR-STRUCTURE.md for the verified map.
+docs/EDGENOS-7150.md (was L3AR-STRUCTURE) for the verified map.
 
 ⚠ CONSEQUENCE FOR --emit: what this tool emits covers RAM1/RAM2 only. For slice 0,
 EOS writes a nonzero RAM3, RAM4 and RAM5 word for all 32 rules. Emitting this
@@ -351,7 +351,7 @@ C_TEMPLATE = r"""/* fm6000_l3arinit.c - program the L3AR block ourselves.
  * ⚠ The line that used to stand here -- "slices 1-4 are csGlort assignment,
  * policers, storm control and L3 QoS" -- was UNCITED, and reading it as fact is
  * what produced alpha30, which deleted those slices and killed the dataplane.
- * Decoded 2026-08-20 with the real RAM3/4/5 field layout (docs/L3AR-STRUCTURE.md):
+ * Decoded 2026-08-20 with the real RAM3/4/5 field layout (docs/EDGENOS-7150.md (was L3AR-STRUCTURE)):
  * slice 1 IS csGlort assignment -- every rule is MuxOutput_SGLORT +
  * MuxOutput_CSGLORT with a distinct CSGLORT_PROFILE -- so the claim was right for
  * slice 1, but it was uncited when it was acted on, and it is wrong for the rest:

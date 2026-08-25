@@ -11,7 +11,7 @@ write count and called SAF (339) and HASH (314) the best next targets. That was
 wrong, and measuring said so: **SAF and HASH have ZERO write-once addresses
 left** -- their existing generators already took them, so what remains is
 entirely multi-write accumulating state. CM has 397 write-once addresses, the
-most of any block. Rank by authorability, not size (docs/BLOB-REMOVAL-PLAN.md).
+most of any block. Rank by authorability, not size (docs/EDGENOS-7150.md (was BLOB-REMOVAL-PLAN)).
 
 WHAT THE TABLES ARE, from the SDK's own names and shapes:
 
@@ -38,7 +38,7 @@ All 397 resolve under that formula with **no residue**.
 ⚠ THESE DECIDE WHEN THE CHIP DROPS AND WHEN IT PAUSES, exactly like the
 watermarks in gen_cmwm.py. A wrong value here shows up as loss under load, not
 as a failed transit test -- so it is checked with tools/load-test.sh at a stated
-pacing, against the EOS reference (docs/LOAD-LOSS-OPEN.md), not by pinging once.
+pacing, against the EOS reference (docs/EDGENOS-7150.md (was LOAD-LOSS-OPEN)), not by pinging once.
 
 ⚠ WRITE-ONCE ONLY, DELIBERATELY. The multi-write CM addresses (304 of them) are
 NOT claimed here. They accumulate as ports come up, and claiming an address makes

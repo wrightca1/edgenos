@@ -2,7 +2,7 @@
 """gen_smalltables.py - author the small L2F / LBS / ALU / POLICER / SSCHED tables.
 
 Five blocks, 833 replayed writes, one write per address -- the signature of plain
-tables rather than an indirect port (docs/BLOB-REMOVAL-PLAN.md).
+tables rather than an indirect port (docs/EDGENOS-7150.md (was BLOB-REMOVAL-PLAN)).
 
 WHAT MAKES THIS AUTHORED RATHER THAN RELOCATED
 
@@ -31,7 +31,7 @@ past the first to the wrong row. The same rounding explains, consistently:
 
 and it closes the block tiling with no gaps: L2F_TABLE_4K's 8 banks end precisely
 where L2F_TABLE_256 begins, which ends precisely where L2F_PROFILE_TABLE begins.
-This is the same class of error as the L3AR_RAM3 stride (docs/L3AR-STRUCTURE.md),
+This is the same class of error as the L3AR_RAM3 stride (docs/EDGENOS-7150.md (was L3AR-STRUCTURE)),
 which is why sdk_regmap.py --check now tests strides and not just addresses.
 
 ★ LBS_CAM IS PER-PORT, and its entry is a value beside its own complement
@@ -952,7 +952,7 @@ C_HEAD = r"""/* fm6000_smalltables.c - the small L2F / LBS / ALU / POLICER / SSC
  * WARNING: an entry's pitch is pow2ceil(words), NOT words. L2F_TABLE_4K holds
  * 3-word entries on a 4-word pitch -- one word in four is padding. Assuming a
  * pitch of 3 puts every entry after the first in the wrong row, silently. It is
- * the same failure as the L3AR_RAM3 stride; see docs/L3AR-STRUCTURE.md.
+ * the same failure as the L3AR_RAM3 stride; see docs/EDGENOS-7150.md (was L3AR-STRUCTURE).
  *
  * LBS_CAM is per-port: 55 of 76 entries, at indices 0, 1, 3, 20-47, 52-75 --
  * the active-port set the CM watermarks and MAPPER reached independently. Each

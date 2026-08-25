@@ -3,7 +3,7 @@
  *
  * IPv4 forwarding on the FM6000 lives in the FFU (the same TCAM used for ACLs);
  * there is no separate LPM/TRIE block. The structures were recovered by tracing
- * EOS installing routes on live silicon -- see docs/ROUTING-FIB.md.
+ * EOS installing routes on live silicon -- see docs/EDGENOS-7150.md (was ROUTING-FIB).
  *
  *   prefix array   0x33bxxx   sorted, ONE WORD per prefix (plain u32 network
  *                             address), a second copy 0x400 words below, and it

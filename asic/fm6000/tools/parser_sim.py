@@ -8,7 +8,7 @@ full. This executes them instead of reasoning about them.
 
 Given a frame and a parser program, it walks slices 0..27 exactly as the
 hardware does -- match the 64-bit key, take the LAST matching entry (measured,
-see docs/PARSER-CONVENTIONS.md), apply the action -- and reports the resulting
+see docs/EDGENOS-7150.md (was PARSER-CONVENTIONS)), apply the action -- and reports the resulting
 FIELDS channels, ACTION_FLAGS and final state. Diffing two runs shows precisely
 where two programs disagree about the same frame.
 

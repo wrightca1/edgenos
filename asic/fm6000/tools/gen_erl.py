@@ -4,7 +4,7 @@
 ERL is the first block here whose replay writes cannot be reduced to a final
 value at all: every one of its 967 addresses is written **exactly twice**, and
 636 of them with two different values. The census that ranked blocks by
-authorability (docs/BLOB-REMOVAL-PLAN.md) put ERL at zero write-once addresses --
+authorability (docs/EDGENOS-7150.md (was BLOB-REMOVAL-PLAN)) put ERL at zero write-once addresses --
 `gen_list` in its collapsing form is unusable here.
 
 It is authorable anyway, because the two writes are a PROTOCOL and the protocol is
@@ -42,7 +42,7 @@ phase 1 stays where EOS put it and phase 2 moves ~57,000 writes earlier. The end
 state is identical and the phase order per address is preserved; what changes is
 that the real rate limits are installed sooner. That is the safe direction, but
 it IS a behavioural change and it is why this is validated under load against the
-EOS reference rather than by a single ping (docs/LOAD-LOSS-OPEN.md).
+EOS reference rather than by a single ping (docs/EDGENOS-7150.md (was LOAD-LOSS-OPEN)).
 
 usage:
     gen_erl.py --emit | --addrs | --structure | --verify <img> | --counts <img> | --c FILE

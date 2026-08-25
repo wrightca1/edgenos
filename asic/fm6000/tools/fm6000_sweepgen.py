@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """fm6000_sweepgen.py - generate the L2F/LBS port sweep instead of replaying it.
 
-Step 1 of removing fwd4.txt (see docs/SELF-CONTAINED-PLAN.md).
+Step 1 of removing fwd4.txt (see docs/EDGENOS-7150.md (was SELF-CONTAINED-PLAN)).
 
 WHAT THIS REPLACES
     77% of the replay's MMIO writes sit inside one 336-iteration loop. The

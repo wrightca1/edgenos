@@ -6,7 +6,7 @@
  * It exists for one question. The replay never issues a single SBus op to the
  * SerDes of EPL14 lane 1 (Et3) -- 391 MMIO writes and nothing on the bus -- and
  * replaying lane 0's 44 SBus + 198 SPICO ops onto it does not bring the lane up
- * (docs/PORT3-BRINGUP.md). Two explanations remain: the SerDes bring-up is not
+ * (docs/EDGENOS-7150.md (was PORT3-BRINGUP)). Two explanations remain: the SerDes bring-up is not
  * relocatable out of chip init, or the SPICO micro-controller simply never
  * answers for that lane, which would make all 198 interrupt-style ops no-ops.
  * The second is measurable and this tool measures it:
@@ -161,7 +161,7 @@ int main(int argc, char **argv)
 		 * i.e. a 10-bit code and a 10-bit parameter split across three 8-bit
 		 * registers -- which is what FM6000's 8-bit SerDes register file forces,
 		 * and why FM10000's (code<<16)|param encoding does not transfer.
-		 * See docs/OPEN-SOURCE-FOCALPOINT.md.
+		 * See docs/EDGENOS-7150.md (was OPEN-SOURCE-FOCALPOINT).
 		 *
 		 * ⚠ There is no "target" field here. The writes go to the SPICO
 		 * BROADCAST device (0xfd); how one SerDes is selected is NOT established

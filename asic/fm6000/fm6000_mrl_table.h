@@ -15,7 +15,7 @@
  *
  * The MRL scan is NOT used by the working cold bring-up sequence
  * (build/arista-7150/m1/payload/fm6000-fullseq.sh); it is retained for
- * diagnostic use only. See docs/PROVENANCE.md.
+ * diagnostic use only. See docs/EDGENOS-7150.md (was PROVENANCE).
  *
  * Copyright (C) 2024 EdgeNOS Contributors.
  * SPDX-License-Identifier: GPL-2.0-or-later

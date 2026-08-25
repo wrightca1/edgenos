@@ -2,7 +2,7 @@
 """l3ar_decode.py - decode and encode the FM6000 L3AR rules.
 
 L3AR is fm6000_l3arinit.c, 3,928 transcribed microcode pairs
-(docs/PROVENANCE.md 2.5). Decoder and encoder in one file because the block is
+(docs/EDGENOS-7150.md (was PROVENANCE) 2.5). Decoder and encoder in one file because the block is
 small and the two halves share the layout tables.
 
 ★ GEOMETRY, from the SDK's register descriptor table (NOT the register header).
@@ -229,7 +229,7 @@ PROFILE_FIELDS = {
                  ("RandomizeRotB", 27, 1)],
 }
 # VID / MA_FID / W8ABCD / W16ABC / W16DEF / W16GH / ALU13_OP / ALU46_OP / QOS are
-# multi-channel; their per-channel layouts are in docs/L3AR-STRUCTURE.md. Only the
+# multi-channel; their per-channel layouts are in docs/EDGENOS-7150.md (was L3AR-STRUCTURE). Only the
 # single-channel ones are rendered here, deliberately: a half-transcribed
 # multi-channel layout would print confident wrong field names.
 

@@ -7,7 +7,7 @@
  *
  * Cold-boot validated 2026-08-07 on a DCS-7150S-52: link 0x8c0 -> 0xcc0, OSPF
  * adjacency, 35 kernel routes, 13 programmed into silicon -- indistinguishable
- * from the recorded accumulation. See docs/SELF-CONTAINED-PLAN.md.
+ * from the recorded accumulation. See docs/EDGENOS-7150.md (was SELF-CONTAINED-PLAN).
  *
  * Entry layout: SAF_ENTRY(port) = 0x0a0000 + 4*port, three words = a 96-bit
  * port mask. The port set comes from our own board table (fm6000_serdes_ports.h),

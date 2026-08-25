@@ -10,7 +10,7 @@
 #
 # Trivial fill (0x00000000, 0xffffffff) is excluded. It is not meaningfully
 # anybody's program and counting it inflates the result; an earlier hand count in
-# docs/PROVENANCE.md did exactly that and had to be revised.
+# docs/EDGENOS-7150.md (was PROVENANCE) did exactly that and had to be revised.
 #
 # Usage:
 #   ucode_overlap.py ucode_l2.raw ucode_tail.raw [--src asic/fm6000]

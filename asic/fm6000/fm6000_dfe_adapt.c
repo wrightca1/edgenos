@@ -4,7 +4,7 @@
  * firmware, which we have no permission to redistribute. Without it a fiber
  * (10GBASE-SR) lane still links -- the channel is clean enough -- but a copper
  * DAC (10GBASE-CR) lane never acquires: measured, LANE_STATUS stays 0x000
- * (docs/SPICO-RE.md).
+ * (docs/EDGENOS-7150.md (was SPICO-RE)).
  *
  * ⚠ AND THE "TUNE LOOP" WE INHERITED IS NOT TUNING. fm6000_serdes_enable.c
  * writes 0x2a and polls 0x2b, which sdk_fieldmap.py --sbus names

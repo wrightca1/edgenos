@@ -16,7 +16,7 @@
  * An entry is two words; the pair (0x00700000, 0x00000000) is the default/empty
  * action. Writing a table's default value over its own address range is a memset,
  * not Intel's program -- which is why this one is worth taking: it serves BOTH
- * goals in docs/BLOB-REMOVAL-PLAN.md, where merely re-encoding EOS's rules would
+ * goals in docs/EDGENOS-7150.md (was BLOB-REMOVAL-PLAN), where merely re-encoding EOS's rules would
  * remove the file while moving their program into our source.
  *
  * ⚠ SCOPE. This deliberately generates ONLY the default-fill addresses, not the

@@ -15,7 +15,7 @@
 #   - the SerDes SPICO firmware     -> inline in the replay set
 #   - the register replay set       -> /mnt/flash/fwd4.txt
 # These are third-party works. Without them the image still boots to a shell with
-# mgmt SSH; the dataplane simply stays down and says so. See docs/PROVENANCE.md.
+# mgmt SSH; the dataplane simply stays down and says so. See docs/EDGENOS-7150.md (was PROVENANCE).
 #
 # KERNEL: pass KERNEL=<bzImage>. The tree's default KDIR build has been seen to
 # produce an unusable kernel (no mgmt NIC IRQ, no block devices) -- see
