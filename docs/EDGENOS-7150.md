@@ -913,7 +913,28 @@ the residual at a different point in the order.
   `/usr/bin/fm6000_*` with `-a` wedged this one — about 20 non-generators ignore the
   flag and write.
 - **`boot-config` self-reverts to EOS on every EdgeNOS boot.** Re-arm before every
-  reboot.
+  reboot. Seeing `SWI=flash:/EOS-4.16.8M.swi` after a boot is the *expected* state
+  and is positive evidence EdgeNOS booted, not a fault.
+- **`reboot` returns 0 and does nothing.** busybox `reboot` signals PID 1, and
+  `rdinit=/init` does not handle it. Uptime simply keeps climbing. Use
+  `sync; reboot -f`, which bypasses init — and sync first, because `-f` does not.
+- **A fresh boot does NOT bring the dataplane up.** `fm6000_portd` creates `et1`
+  and `et2`; without it `/sys/class/net` holds only `eth0`, `lo`, `sit0` and every
+  port-level test is unrunnable. Run
+  `sh /usr/lib/edgenos/platform/edgenos-up.sh` after each boot — it starts portd,
+  zebra/ospfd and fibd.
+- ⚠ **A missing `/mnt/flash/fullseq.conf` silently selects the FULL VENDOR REPLAY.**
+  The boot completes, both ports lock, traffic forwards, and nothing announces the
+  downgrade — but `/var/log/fm6000-fullseq` reports `STEP5 FULL REPLAY` and
+  `provenance: 0 of 90396 executed writes come from our generators (0%)`. The box
+  looks healthy while running none of our code. **Check that provenance line after
+  every boot before quoting any provenance number.**
+- **A dark port can survive a link bounce and still clear on a cold boot.** `et2`
+  sat at `LANE_STATUS=0x00000000`, `pcsRx=0`, `rx_packets=0` for a whole boot while
+  the peer showed `carrier=1` at 10G — a one-way receive failure that
+  `ip link set et2 down/up` did not touch. A reboot restored it to `0x940`/`pcsRx=1`
+  on the first try. et2 is the **copper DAC** port (port 20), which is the case that
+  needs SPICO.
 
 ---
 
