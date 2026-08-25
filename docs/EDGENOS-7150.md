@@ -85,11 +85,15 @@ numbers move.
       look finished.
 - [ ] **A5. The remaining 8 files — 795 pairs.** Incidental; expected to fall out
       of A1–A4.
-- [ ] **A6. Name the parser's 38 `SetFlags` bits.** *Prerequisite for A1, and the
-      only live lead.* Six named by running frames (`parser_walk.py --flags`):
-      6 VLAN-tag-present, 8 IPv4, 9 IPv6, 12 broadcast, 26 ARP, 34 PAUSE. Bits
-      11/14/24/37 are IP-path related and unseparated; 24 bits are unexercised.
-      **Next action:** frames for MPLS, QinQ, FCoE, PTP and tunnels. Cheap.
+- [ ] **A6. Name the parser's 38 `SetFlags` bits.** *Prerequisite for A1.*
+      **11 of 38 named** by running seventeen frames — see §3. 6 VLAN, 8 IPv4,
+      9 IPv6, 12 broadcast, 16 IPv4-with-options, 26 ARP, 34 PAUSE, 14/24/37
+      IPv4-without-options, 4/23 second VLAN tag.
+      **Next action:** the remaining 27 need frames for paths this switch's parser
+      actually takes. MPLS, FCoE and PTP are *not* among them — the deployed
+      program terminates all three at slice 3. Try tunnelled IPv4 (GRE/VXLAN inner),
+      IPv6 extension headers, and traffic arriving on the CPU and loopback ports,
+      whose parser seeds differ.
 - [ ] **A7. FFU key format.** `FFU_SLICE_SCENARIO_CFG` selects sources with
       `ByteMux_0..3`; of the 16 selectors used, three (r53, r58, r60) lie outside
       the r1..r42 range the parser writes, so the space is not just parser
@@ -189,11 +193,55 @@ the EtherType dispatch guarded by the state slice 0 set.
 observation was right; the assignment was wrong. Running the program beat eyeballing
 it.
 
-**Flags**, by running frames: the three L4 protocols raise **byte-identical** flag
-sets, so the parser does not discriminate L4 into flags — anything downstream
-treating TCP differently reads the register file. Non-unicast destinations
-**short-circuit**: broadcast raises only bit 12, multicast only bit 11, and the
-parse terminates before L3.
+### ⚠ The ucode file is a DEFAULT program; the replay reprograms it
+
+`ucode_l2.raw` and the replay both write `PARSER_CAM`/`PARSER_RAM`. Of the 1,568
+words they share, **the replay writes a different value to 1,170 of them (75%)**,
+rewriting **196 of the 2,145 rules (9%)** and adding none. Slice 3 rule 4 is FCoE
+(`8906`) in the ucode file and IPv4 (`0800`) in the replay.
+
+So **the parser that runs is not the one in the ucode file.** Anything derived from
+`ucode_l2.raw` alone describes the vendor's default program, not this deployment's.
+Always load both:
+
+    parser_walk.py ucode_l2.raw fwd4.txt --flags
+
+⚠ The slice occupancy, EtherType inventory and static flag correlation recorded
+earlier in this project were taken from the ucode file alone and describe the
+default program. The frame walks below use both and describe the deployed one.
+
+### `SetFlags`, by running frames
+
+Six bits are named by protocol, and running seventeen frames separates four more:
+
+| bit | meaning |
+|---|---|
+| 6 | VLAN tag present |
+| 8 | IPv4 (with or without options) |
+| 9 | IPv6 |
+| 12 | broadcast destination |
+| 16 | **IPv4 with options** — unique to an `IHL > 5` frame |
+| 26 | ARP — and ARP raises nothing else |
+| 34 | MAC control / PAUSE |
+| 14, 24, 37 | **IPv4 without options** — raised together for `IHL == 5`, absent for `IHL == 6` |
+| 4, 23 | second VLAN tag — raised only by QinQ |
+
+Structural facts the static view could not show:
+
+- **L4 protocol is not in the flags.** TCP, UDP, ICMP, OSPF, GRE and IP-in-IP all
+  raise byte-identical sets. Anything downstream treating TCP differently is reading
+  the extracted-field registers.
+- **Fragments and multicast destinations are not flagged either** — an IPv4 fragment
+  and a packet to `224.1.1.1` raise exactly what a plain IPv4/TCP frame raises.
+- **Non-unicast short-circuits.** Broadcast raises only bit 12; multicast and the
+  IEEE reserved group only bit 11; the parse terminates before L3.
+- **QinQ is not parsed to L3.** A double-tagged frame raises 4, 6 and 23 and stops —
+  it never reaches the IPv4 bits its payload would deserve.
+- **MPLS, FCoE and PTP raise nothing at all.** All three terminate at slice 3 in the
+  deployed program. Those rules exist in the ucode default and the replay overwrote
+  them, so this switch does not parse those protocols.
+
+⚠ 27 of the 38 bits are still unraised by any of the seventeen frames built so far.
 
 ## L2AR — 8 slices x 64 rules
 
