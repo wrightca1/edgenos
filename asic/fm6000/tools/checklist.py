@@ -28,10 +28,15 @@ END = "<!-- STATUS:END -->"
 
 def run(*a):
     try:
-        return subprocess.run([sys.executable] + list(a), capture_output=True,
-                              text=True, cwd=ROOT, timeout=900).stdout
+        r = subprocess.run([sys.executable] + list(a), capture_output=True,
+                           text=True, cwd=ROOT, timeout=900)
     except Exception as e:
-        return "ERROR %s" % e
+        raise SystemExit("checklist: %s failed: %s" % (os.path.basename(a[0]), e))
+    if r.returncode != 0:
+        raise SystemExit("checklist: %s exited %d, refusing to write a partial "
+                         "status block\n%s" % (os.path.basename(a[0]),
+                                               r.returncode, r.stderr.strip()[:400]))
+    return r.stdout
 
 def status(residual=None, ucode=None):
     prov = run(os.path.join(HERE, "provenance_audit.py"))
@@ -96,6 +101,14 @@ def main():
     ap.add_argument("--ucode", nargs="*", help="operator microcode files")
     ap.add_argument("--update", action="store_true", help="rewrite the block in the doc")
     a = ap.parse_args()
+    # Every row of the block is load-bearing; the microcode line is the
+    # redistribution blocker. Without these inputs the rows vanish and the doc
+    # quietly understates what is left to do -- refuse rather than mislead.
+    if a.update and not (a.ucode and a.residual):
+        raise SystemExit(
+            "checklist: --update needs both --ucode and --residual, or the "
+            "microcode and residual rows silently disappear from the doc.\n"
+            "  e.g. checklist.py --update --residual <resid.txt> --ucode <ucode files>")
     block = status(a.residual, a.ucode)
     if not a.update:
         print(block); return
