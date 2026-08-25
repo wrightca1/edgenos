@@ -458,14 +458,37 @@ rule out the obvious readings:
     bank  2  CounterNum=1   bank  8  CounterNum=3  PerChannel=1
     bank  4  CounterNum=4   bank 11  CounterNum=11 PerChannel=1
 
-**The open question is the encoding of `Select_CounterNum`** — which of the available
-index sources each value names. Decode that and the probe becomes usable: pick a
-bank, point it at a source we control, and every counter becomes an observation.
+**`Select_CounterNum` is confirmed to gate what a bank counts** — measured, not
+assumed, by changing one bank's selector and watching the counters:
 
-⚠ Do not assume `Select_CounterNum = n` means "source n" of the `MuxOutput_STATS_*`
-list. That is the guess this project has made twice — with the parser window and the
-FFU slice-valid array — and both times a plausible index-into-a-list reading was
-wrong. Confirm it by changing one bank's selector and watching which counter moves.
+    bank 1, selector left at 7      0x9d -> 0xb1   +20 for 20 pings
+    bank 4, selector set 4 -> 7     0xa0 -> 0xb9   +25 for 25 pings
+    bank 4, selector set 4 -> 0     0xb9 -> 0xbc   +3  for 20 pings
+
+Selector values 4 and 7 both count every ingress packet; 0 nearly stops it. The
+residual +3 is background — OSPF hellos arrive on the same path.
+
+⚠ **Counting is not confined to one bank.** Index 80 increments in bank 1 *and* bank
+4 simultaneously; an earlier claim that "only bank 1 has non-zero counters" came from
+sampling every 64th counter and missing index 80 elsewhere. Banks differ in what they
+*measure* — `BANK_CFG2` carries `CounterType`, `Amount`, `ColorCase` — not in whether
+they see the packet.
+
+### Using it as a probe
+
+    counter word = 0x200000 + bank*0x1000 + index*2
+
+Pick an idle bank, set `BANK_CFG1[bank]`, generate traffic, read. On this
+configuration **index 80 is where ingress unicast lands**, incrementing exactly once
+per frame — that is the reference signal to calibrate any new experiment against.
+
+All of it is safe and reversible: every write above was a single word to a
+configuration register, reverted immediately, with forwarding verified at 45 routes
+and 0% loss before, during and after.
+
+**Still open:** which source each `Select_CounterNum` value names, and how the
+*index* (80 here) is derived — it is not `IDX_RAM.IndexValue` (live values are 1–12)
+and not `RxPortDelta` (zero on every port).
 
 ⚠ The experiment was safe and reversible exactly as predicted: 12 words written, a
 null result, originals restored, forwarding verified unchanged before and after.
