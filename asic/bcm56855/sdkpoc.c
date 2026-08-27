@@ -2365,6 +2365,442 @@ static void run_diag_cmds(int unit, const char *list)
     }
 }
 
+/* Configure ONE port as a routed interface: MAC interface to match the
+ * negotiated speed, its own VLAN with the CPU port in it, an L3 interface,
+ * control multicast to the CPU, and the my-station entry.
+ *
+ * Extracted from main's startup pass so that hotplug_worker() can run the
+ * identical sequence for a port that gains link later. Returns 0 if the port
+ * was made routed, -1 if it was skipped or a step failed.
+ *
+ * ⚠ Not for the linkscan thread -- it does MDIO and SDK table writes. */
+static int routed_port_setup(int unit, int p, int vbase)
+{
+    bcm_l3_intf_t intf;
+    bcm_pbmp_t pbm, ubm;
+    bcm_vlan_t vid = (bcm_vlan_t)(vbase + p);
+    int link = 0;
+    int prv;
+
+    /* Only bother with ports that actually have a link; the rest
+     * would just be 61 unused VLANs and L3 interfaces. */
+    {
+        int speed = 0;
+        if (bcm_port_link_status_get(unit, p, &link) != BCM_E_NONE
+            || !link) {
+            return -1;
+        }
+        /* ⚠ A link with no speed is not a link. With the BCM84848
+         * driver loaded, every unconnected copper port reports
+         * "Link Up with Speed 0M!" -- taking that at face value
+         * configured all 48 of them as routed interfaces. */
+        if (bcm_port_speed_get(unit, p, &speed) != BCM_E_NONE
+            || speed <= 0) {
+            return -1;
+        }
+
+        /* ⚠⚠ THE MAC INTERFACE MUST MATCH THE NEGOTIATED SPEED.
+         *
+         * This is what stopped the copper ports working. A 10GBASE-T
+         * port left at its default IF(XFI) while the copper side
+         * autonegotiates 1G gives a PHY with link on BOTH sides that
+         * bridges nothing: we transmitted, the Nexus transmitted, and
+         * neither received a single frame -- for hours.
+         *
+         * It was invisible from the usual places. `ps` reported the
+         * port up at 1G, the PHY reported link and AN complete, and
+         * the far end agreed the link was up. MAC loopback passed.
+         * PHY loopback passed -- so MAC <-> SerDes <-> PHY system
+         * side was fine all along. Only `port xe47` showing
+         * IF(XFI) next to Medium(Copper) gave it away.
+         *
+         * SGMII for 1G/100M, XFI for 10G. The 40G QSFP ports have no
+         * external PHY and keep XGMII, so only touch ports whose
+         * speed says otherwise. */
+        if (speed <= 2500) {
+            prv = bcm_port_interface_set(unit, p,
+                                         BCM_PORT_IF_SGMII);
+            printf("  port %-3d %d Mb -> IF SGMII rv=%d\n",
+                   p, speed, prv);
+        } else if (speed <= 10000) {
+            prv = bcm_port_interface_set(unit, p, BCM_PORT_IF_XFI);
+            printf("  port %-3d %d Mb -> IF XFI rv=%d\n",
+                   p, speed, prv);
+        }
+    }
+
+    BCM_PBMP_CLEAR(pbm);
+    BCM_PBMP_PORT_ADD(pbm, p);
+    BCM_PBMP_CLEAR(ubm);
+    BCM_PBMP_PORT_ADD(ubm, p);
+    /* The CPU port MUST be in the VLAN or nothing arriving on this
+     * port can reach software. Without it the peer's ARP replies
+     * were transmitted, received at the MAC, and then dropped with
+     * nowhere to go -- ping saw 100% loss while a capture on the
+     * far end showed a perfectly good reply on the wire. Tagged
+     * (not in ubm): the CPU keeps the tag, the front port does
+     * not.
+     *
+     * ⚠ And UNTAGGED. Adding the CPU tagged delivered every frame
+     * to Linux with an 802.1Q header on an interface that has no
+     * VLAN configured, so the kernel dropped them all: the tap's
+     * rx_packets climbed while ARP still failed. */
+    BCM_PBMP_PORT_ADD(pbm, CMIC_PORT(unit));
+    BCM_PBMP_PORT_ADD(ubm, CMIC_PORT(unit));
+
+    /* Report every step: swallowing these hid the fact that
+     * the VLAN moves were not taking effect while the L3
+     * interfaces were being created regardless. */
+    prv = bcm_vlan_create(unit, vid);
+    if (prv != BCM_E_NONE && prv != BCM_E_EXISTS) {
+        printf("  port %d: vlan_create(%d) rv=%d %s\n",
+               p, vid, prv, bcm_errmsg(prv));
+        return -1;
+    }
+    prv = bcm_vlan_port_remove(unit, 1, pbm);
+    if (prv != BCM_E_NONE) {
+        printf("  port %d: vlan_port_remove(1) rv=%d %s\n",
+               p, prv, bcm_errmsg(prv));
+    }
+    prv = bcm_vlan_port_add(unit, vid, pbm, ubm);
+    if (prv != BCM_E_NONE) {
+        printf("  port %d: vlan_port_add(%d) rv=%d %s\n",
+               p, vid, prv, bcm_errmsg(prv));
+        return -1;
+    }
+    /* The port's default VLAN must follow it, or untagged ingress
+     * still lands in VLAN 1. */
+    prv = bcm_port_untagged_vlan_set(unit, p, vid);
+    if (prv != BCM_E_NONE) {
+        printf("  port %d: untagged_vlan_set(%d) rv=%d %s\n",
+               p, vid, prv, bcm_errmsg(prv));
+    }
+
+    bcm_l3_intf_t_init(&intf);
+    intf.l3a_vid = vid;
+    intf.l3a_mac_addr[0] = 0x02;
+    intf.l3a_mac_addr[1] = 0x1c;
+    intf.l3a_mac_addr[2] = 0x73;
+    intf.l3a_mac_addr[3] = 0x00;
+    intf.l3a_mac_addr[4] = (uint8)(vid >> 8);
+    intf.l3a_mac_addr[5] = (uint8)p;
+    prv = bcm_l3_intf_create(unit, &intf);
+    if (prv != BCM_E_NONE) {
+        printf("  port %d: l3_intf_create rv=%d\n", p, prv);
+        return -1;
+    }
+
+    (void)bcm_port_control_set(unit, p, bcmPortControlIP4, 1);
+    (void)bcm_port_control_set(unit, p, bcmPortControlIP6, 1);
+
+    /* ---- control multicast straight to the CPU ------------
+     *
+     * EOS enumerates the control traffic it wants and programs an
+     * L2 multicast entry per address, per internal VLAN, pointing
+     * at a group containing the CPU. Its table on this box holds
+     * exactly six per routed VLAN (docs/EOS-VLAN-STRUCTURE.md):
+     * IPv6 all-nodes, all-routers, OSPFv3 AllSPFRouters and
+     * AllDRouters, and two solicited-node addresses.
+     *
+     * We had been relying on unknown-multicast FLOODING to reach
+     * the CPU. That works -- it is how our OSPF hellos arrived --
+     * but it punts every unknown multicast frame to software and
+     * floods it at every other member of the VLAN. Naming the
+     * addresses is both cheaper and closer to what the hardware is
+     * for.
+     *
+     * IPv4 is included here even though EOS's L2 table has no
+     * 01:00:5e entries: EOS traps IPv4 control traffic with a
+     * field-processor rule on 224/8 instead, which we have not
+     * built. An explicit entry per address gets the same result
+     * with the mechanism we do have. */
+    {
+        static const uint8 mcast_macs[][6] = {
+            {0x01,0x00,0x5e,0x00,0x00,0x01}, /* IPv4 all hosts   */
+            {0x01,0x00,0x5e,0x00,0x00,0x02}, /* IPv4 all routers */
+            {0x01,0x00,0x5e,0x00,0x00,0x05}, /* OSPFv2 AllSPF    */
+            {0x01,0x00,0x5e,0x00,0x00,0x06}, /* OSPFv2 AllDR     */
+            {0x33,0x33,0x00,0x00,0x00,0x01}, /* IPv6 all nodes   */
+            {0x33,0x33,0x00,0x00,0x00,0x02}, /* IPv6 all routers */
+            {0x33,0x33,0x00,0x00,0x00,0x05}, /* OSPFv3 AllSPF    */
+            {0x33,0x33,0x00,0x00,0x00,0x06}, /* OSPFv3 AllDR     */
+        };
+        bcm_multicast_t grp = 0;
+        int mi, added = 0;
+
+        prv = bcm_multicast_create(unit, BCM_MULTICAST_TYPE_L2,
+                                   &grp);
+        if (prv != BCM_E_NONE) {
+            printf("  port %d: multicast_create rv=%d %s\n",
+                   p, prv, bcm_errmsg(prv));
+        } else {
+            prv = bcm_multicast_egress_add(unit, grp,
+                                           CMIC_PORT(unit), -1);
+            if (prv != BCM_E_NONE) {
+                printf("  port %d: mcast egress_add(cpu) rv=%d %s\n",
+                       p, prv, bcm_errmsg(prv));
+            }
+            for (mi = 0; mi < (int)(sizeof mcast_macs /
+                                    sizeof mcast_macs[0]); mi++) {
+                bcm_l2_addr_t m;
+                bcm_l2_addr_t_init(&m, (uint8 *)mcast_macs[mi], vid);
+                m.flags      = BCM_L2_STATIC | BCM_L2_MCAST;
+                m.l2mc_group = grp;
+                if (bcm_l2_addr_add(unit, &m) == BCM_E_NONE) {
+                    added++;
+                }
+            }
+            printf("  port %-3d control mcast -> CPU: %d/%d entries "
+                   "in vlan %d (group %d)\n",
+                   p, added,
+                   (int)(sizeof mcast_macs / sizeof mcast_macs[0]),
+                   vid, grp);
+        }
+    }
+
+    /* Traffic addressed to our own router MAC must be L3
+     * LOOKED UP, not bridged.
+     *
+     * ⚠ This entry was originally BCM_L2_STATIC pointing at the
+     * CPU port, added when there were no routes and the chip was
+     * dropping the peer's ARP replies. It worked -- and then
+     * quietly prevented hardware routing: with 33 routes in the
+     * FIB, 100 transit packets arrived on xe60, all 100 went to
+     * the CPU, and 4 left on xe47. The chip was bridging them up
+     * instead of routing them, because that is exactly what the
+     * entry said to do.
+     *
+     * BCM_L2_L3LOOKUP marks the address as "mine, route it" -- the
+     * my-station entry every router needs. Frames the chip cannot
+     * route still reach the CPU. */
+    {
+        bcm_l2_addr_t l2;
+        bcm_l2_addr_t_init(&l2, intf.l3a_mac_addr, vid);
+        l2.port  = CMIC_PORT(unit);
+        l2.flags = BCM_L2_STATIC | BCM_L2_L3LOOKUP;
+        prv = bcm_l2_addr_add(unit, &l2);
+        if (prv != BCM_E_NONE) {
+            printf("  port %d: l2_addr_add(L3LOOKUP) rv=%d %s\n",
+                   p, prv, bcm_errmsg(prv));
+        }
+    }
+
+    printf("  port %-3d routed: vlan %d, intf %d, mac "
+           "02:1c:73:00:%02x:%02x\n",
+           p, vid, intf.l3a_intf_id, vid >> 8, p);
+    /* Remember the last routed interface for FIB sync to build
+     * egress objects against. */
+    if (fib_nintf < FIB_MAX_INTF) {
+        fib_intfs[fib_nintf].l3_intf = intf.l3a_intf_id;
+        fib_intfs[fib_nintf].vlan    = vid;
+        fib_intfs[fib_nintf].port    = p;
+        fib_intfs[fib_nintf].ifindex = 0;   /* resolved at fib_start */
+        fib_nintf++;
+    }
+    return 0;
+}
+
+/* ---- hot-plug bring-up -------------------------------------------------
+ *
+ * The startup pass above runs ONCE, ten seconds after the ports are enabled,
+ * and skips every port without a link. A cable plugged in afterwards therefore
+ * got nothing -- no MAC interface, no VLAN, no L3 interface -- and the port
+ * stayed dead until the whole agent was restarted. That is not a theory: it
+ * cost an afternoon on front-panel port 42, diagnosed as a broken cable and a
+ * dead router before the register that mattered was read
+ * (docs/COPPER-PORT-RX-DEAD.md, 2026-08-26).
+ *
+ * ⚠ TRIGGER ON SPEED, NOT LINK. The obvious "on link-up, configure it" would
+ * NOT have fired. Unconnected BCM84848 ports already announce "Link Up with
+ * Speed 0M!", so linkscan believes they are up and a real cable produces no
+ * down->up transition. The event that matters is speed going 0 -> non-zero.
+ *
+ * ⚠ THE CALLBACK ONLY ENQUEUES. Doing real work on the linkscan thread is what
+ * killed copper RECEIVE across all 48 ports when the LED code did MDIO there.
+ * Everything below the queue runs on a worker thread.
+ */
+#define HOTPLUG_QLEN 64
+static pthread_mutex_t hotplug_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  hotplug_cv   = PTHREAD_COND_INITIALIZER;
+static int   hotplug_q[HOTPLUG_QLEN];
+static int   hotplug_qhead, hotplug_qtail;
+static int   hotplug_run;
+static int   hotplug_vbase = 100;
+static char  hotplug_done[65];          /* 1 = already a routed interface */
+static int   hotplug_speed_cache[65];   /* last speed linkscan reported */
+static char  hotplug_pending[65];       /* already queued, do not queue twice */
+#define HOTPLUG_SWEEP_TICKS 10          /* x 2 s poll = reconcile every ~20 s */
+
+static void hotplug_mark_configured(int port)
+{
+    if (port >= 1 && port <= 64) {
+        hotplug_done[port] = 1;
+    }
+}
+
+/* Queue a port for the worker. Safe from the linkscan thread: it takes a lock
+ * and touches no hardware. The pending flag keeps a port that fails setup from
+ * being re-queued by every reconcile pass until the queue fills. */
+static void hotplug_enqueue(int port)
+{
+    if (port < 1 || port > 64) {
+        return;
+    }
+    pthread_mutex_lock(&hotplug_lock);
+    if (!hotplug_pending[port]
+        && (hotplug_qtail + 1) % HOTPLUG_QLEN != hotplug_qhead) {
+        hotplug_pending[port] = 1;
+        hotplug_q[hotplug_qtail] = port;
+        hotplug_qtail = (hotplug_qtail + 1) % HOTPLUG_QLEN;
+        pthread_cond_signal(&hotplug_cv);
+    }
+    pthread_mutex_unlock(&hotplug_lock);
+}
+
+/* Runs on the linkscan thread. Enqueue only -- no MDIO, no SDK table writes. */
+static void hotplug_linkscan_cb(int unit, bcm_port_t port, bcm_port_info_t *info)
+{
+    int speed;
+
+    (void)unit;
+    if (port < 1 || port > 64 || info == NULL) {
+        return;
+    }
+
+    speed = info->speed;
+    hotplug_speed_cache[port] = speed;
+
+    /* ⚠ LEVEL-TRIGGERED, NOT EDGE-TRIGGERED. The first version fired only on a
+     * speed transition 0 -> non-zero, and missed every case that mattered:
+     * linkscan still reports the LAST speed on a link-DOWN event, so after the
+     * first report that edge never occurs again. Port 48 stayed unconfigured
+     * through a full en=0/en=1 bounce because of it.
+     *
+     * hotplug_done[] already prevents duplicates, so no edge detection is
+     * needed or wanted: if the port is up with a real speed and is not
+     * configured, it wants configuring. Ask what the state IS, not what
+     * changed. */
+    if (speed <= 0 || info->linkstatus != BCM_PORT_LINK_STATUS_UP
+        || hotplug_done[port]) {
+        return;
+    }
+
+    hotplug_enqueue(port);
+}
+
+/* Periodic safety net, because reacting to events is not enough.
+ *
+ * A callback can be missed entirely: port 48's 10GBASE-T training finished in
+ * the window between the startup pass and bcm_linkscan_register, so no event
+ * ever existed to catch and the port sat unconfigured indefinitely. State has
+ * to be RECONCILED, not just reacted to -- which is what a real NOS does.
+ *
+ * ⚠ MDIO BUDGET. bcm_port_link_status_get reads software state that linkscan
+ * maintains and is free. bcm_port_speed_get is a per-PHY MDIO round trip, and
+ * calling it across 48 ports on a timer is precisely what killed copper
+ * RECEIVE on every BCM84848 once already. Every UNCONNECTED copper port here
+ * reports a phantom "Link Up with Speed 0M", so a naive sweep would do ~40
+ * reads a pass. This does at most ONE, round-robin. */
+static void hotplug_reconcile(int unit)
+{
+    static int rr = 1;
+    int p, n;
+
+    /* Free pass: anything linkscan has already given us a real speed for. */
+    for (p = 1; p <= 64; p++) {
+        int link = 0;
+        if (hotplug_done[p] || hotplug_speed_cache[p] <= 0) {
+            continue;
+        }
+        if (bcm_port_link_status_get(unit, p, &link) != BCM_E_NONE || !link) {
+            continue;
+        }
+        hotplug_enqueue(p);
+    }
+
+    /* One MDIO read per pass, so a port linkscan never reported still
+     * converges instead of waiting forever for an event that will not come. */
+    for (n = 0; n < 64; n++) {
+        int link = 0, speed = 0;
+        p = 1 + ((rr + n) % 64);
+        if (hotplug_done[p] || hotplug_speed_cache[p] > 0) {
+            continue;
+        }
+        if (bcm_port_link_status_get(unit, p, &link) == BCM_E_NONE && link
+            && bcm_port_speed_get(unit, p, &speed) == BCM_E_NONE && speed > 0) {
+            hotplug_speed_cache[p] = speed;
+        }
+        rr = p + 1;
+        break;
+    }
+}
+
+static void *hotplug_worker(void *arg)
+{
+    int unit = (int)(intptr_t)arg;
+
+    int idle = 0;
+
+    for (;;) {
+        int port = -1;
+
+        pthread_mutex_lock(&hotplug_lock);
+        if (!hotplug_run) {
+            pthread_mutex_unlock(&hotplug_lock);
+            break;
+        }
+        if (hotplug_qhead != hotplug_qtail) {
+            port = hotplug_q[hotplug_qhead];
+            hotplug_qhead = (hotplug_qhead + 1) % HOTPLUG_QLEN;
+            hotplug_pending[port] = 0;
+        }
+        pthread_mutex_unlock(&hotplug_lock);
+
+        /* Polling rather than a blocking wait: the reconcile below has to run
+         * on a timer, and a plain cond_wait would sleep through it forever
+         * when no event ever arrives -- the exact failure being fixed. */
+        if (port < 0) {
+            if (++idle >= HOTPLUG_SWEEP_TICKS) {
+                idle = 0;
+                hotplug_reconcile(unit);
+            }
+            sal_sleep(2);
+            continue;
+        }
+
+        if (port < 1 || port > 64 || hotplug_done[port]) {
+            continue;
+        }
+
+        /* Let the PHY settle before reading speed for real. The first speed
+         * linkscan reports can precede a usable link, and configuring against
+         * it sets the wrong MAC interface -- which is the exact failure this
+         * whole mechanism exists to avoid. */
+        sal_sleep(3);
+
+        if (routed_port_setup(unit, port, hotplug_vbase) == 0) {
+            hotplug_done[port] = 1;
+            /* The startup pass resolves tap ifindexes in fib_start(); a port
+             * that arrives afterwards has to resolve its own, or FIB sync can
+             * never match a netlink event to it and no route will program. */
+            if (fib_nintf > 0) {
+                char nm[16];
+                struct fib_intf *fi = &fib_intfs[fib_nintf - 1];
+                sal_snprintf(nm, sizeof nm, "xe%d", fi->port - 1);
+                fi->ifindex = (int)if_nametoindex(nm);
+                printf("  hotplug: port %d routed -- %s ifindex %d, l3 intf %d, "
+                       "vlan %d\n", port, nm, fi->ifindex, fi->l3_intf,
+                       fi->vlan);
+            }
+        } else {
+            printf("  hotplug: port %d gained link but setup did not "
+                   "complete\n", port);
+        }
+        fflush(stdout);
+    }
+    return NULL;
+}
+
 int main(int argc, char *argv[])
 {
     int phyrd_port = 61;          /* xe60; override with SDKPOC_PHYRD_PORT */
@@ -3179,6 +3615,22 @@ int main(int argc, char *argv[])
          * a cheerful l3_enable rv=0. */
         BCM_PBMP_ITER(all, p) {
             (void)bcm_port_enable_set(unit, p, 1);
+            /* ⚠ enable_set alone is not a bring-up. The copper ports get only
+             * this call, so one with no cable attached is never told to
+             * autonegotiate, and a cable plugged in later found a PHY that
+             * never exchanged a single autoneg code word -- MMD 7.19 read
+             * 0x0000 for hours on port 42 while a working port read 0x41e1.
+             *
+             * External-PHY ports only: the 40G QSFP cages have no external PHY
+             * and must keep autoneg off (they are SR4 optics).
+             *
+             * The MAC interface is deliberately NOT set here. It has to match
+             * the NEGOTIATED speed, which is unknown until something is
+             * plugged in; routed_port_setup() sets it then. Forcing SGMII on
+             * an idle port would cap a 10GBASE-T neighbour at 1G. */
+            if (EXT_PHY_SW_STATE(unit, p) != NULL) {
+                (void)bcm_port_autoneg_set(unit, p, 1);
+            }
         }
         (void)bcm_linkscan_mode_set_pbm(unit, all, BCM_LINKSCAN_MODE_HW);
         prv = bcm_linkscan_enable_set(unit, 250000);
@@ -3225,229 +3677,40 @@ int main(int argc, char *argv[])
             printf("  L3UcTtlErrToCpu           rv=%d\n", prv);
 
             BCM_PBMP_ITER(all, p) {
-                bcm_l3_intf_t intf;
-                bcm_pbmp_t pbm, ubm;
-                bcm_vlan_t vid = (bcm_vlan_t)(vbase + p);
-                int link = 0;
-
-                /* Only bother with ports that actually have a link; the rest
-                 * would just be 61 unused VLANs and L3 interfaces. */
-                {
-                    int speed = 0;
-                    if (bcm_port_link_status_get(unit, p, &link) != BCM_E_NONE
-                        || !link) {
-                        continue;
-                    }
-                    /* ⚠ A link with no speed is not a link. With the BCM84848
-                     * driver loaded, every unconnected copper port reports
-                     * "Link Up with Speed 0M!" -- taking that at face value
-                     * configured all 48 of them as routed interfaces. */
-                    if (bcm_port_speed_get(unit, p, &speed) != BCM_E_NONE
-                        || speed <= 0) {
-                        continue;
-                    }
-
-                    /* ⚠⚠ THE MAC INTERFACE MUST MATCH THE NEGOTIATED SPEED.
-                     *
-                     * This is what stopped the copper ports working. A 10GBASE-T
-                     * port left at its default IF(XFI) while the copper side
-                     * autonegotiates 1G gives a PHY with link on BOTH sides that
-                     * bridges nothing: we transmitted, the Nexus transmitted, and
-                     * neither received a single frame -- for hours.
-                     *
-                     * It was invisible from the usual places. `ps` reported the
-                     * port up at 1G, the PHY reported link and AN complete, and
-                     * the far end agreed the link was up. MAC loopback passed.
-                     * PHY loopback passed -- so MAC <-> SerDes <-> PHY system
-                     * side was fine all along. Only `port xe47` showing
-                     * IF(XFI) next to Medium(Copper) gave it away.
-                     *
-                     * SGMII for 1G/100M, XFI for 10G. The 40G QSFP ports have no
-                     * external PHY and keep XGMII, so only touch ports whose
-                     * speed says otherwise. */
-                    if (speed <= 2500) {
-                        prv = bcm_port_interface_set(unit, p,
-                                                     BCM_PORT_IF_SGMII);
-                        printf("  port %-3d %d Mb -> IF SGMII rv=%d\n",
-                               p, speed, prv);
-                    } else if (speed <= 10000) {
-                        prv = bcm_port_interface_set(unit, p, BCM_PORT_IF_XFI);
-                        printf("  port %-3d %d Mb -> IF XFI rv=%d\n",
-                               p, speed, prv);
-                    }
+                if (routed_port_setup(unit, p, vbase) == 0) {
+                    hotplug_mark_configured(p);
+                    nrouted++;
                 }
-
-                BCM_PBMP_CLEAR(pbm);
-                BCM_PBMP_PORT_ADD(pbm, p);
-                BCM_PBMP_CLEAR(ubm);
-                BCM_PBMP_PORT_ADD(ubm, p);
-                /* The CPU port MUST be in the VLAN or nothing arriving on this
-                 * port can reach software. Without it the peer's ARP replies
-                 * were transmitted, received at the MAC, and then dropped with
-                 * nowhere to go -- ping saw 100% loss while a capture on the
-                 * far end showed a perfectly good reply on the wire. Tagged
-                 * (not in ubm): the CPU keeps the tag, the front port does
-                 * not.
-                 *
-                 * ⚠ And UNTAGGED. Adding the CPU tagged delivered every frame
-                 * to Linux with an 802.1Q header on an interface that has no
-                 * VLAN configured, so the kernel dropped them all: the tap's
-                 * rx_packets climbed while ARP still failed. */
-                BCM_PBMP_PORT_ADD(pbm, CMIC_PORT(unit));
-                BCM_PBMP_PORT_ADD(ubm, CMIC_PORT(unit));
-
-                /* Report every step: swallowing these hid the fact that
-                 * the VLAN moves were not taking effect while the L3
-                 * interfaces were being created regardless. */
-                prv = bcm_vlan_create(unit, vid);
-                if (prv != BCM_E_NONE && prv != BCM_E_EXISTS) {
-                    printf("  port %d: vlan_create(%d) rv=%d %s\n",
-                           p, vid, prv, bcm_errmsg(prv));
-                    continue;
-                }
-                prv = bcm_vlan_port_remove(unit, 1, pbm);
-                if (prv != BCM_E_NONE) {
-                    printf("  port %d: vlan_port_remove(1) rv=%d %s\n",
-                           p, prv, bcm_errmsg(prv));
-                }
-                prv = bcm_vlan_port_add(unit, vid, pbm, ubm);
-                if (prv != BCM_E_NONE) {
-                    printf("  port %d: vlan_port_add(%d) rv=%d %s\n",
-                           p, vid, prv, bcm_errmsg(prv));
-                    continue;
-                }
-                /* The port's default VLAN must follow it, or untagged ingress
-                 * still lands in VLAN 1. */
-                prv = bcm_port_untagged_vlan_set(unit, p, vid);
-                if (prv != BCM_E_NONE) {
-                    printf("  port %d: untagged_vlan_set(%d) rv=%d %s\n",
-                           p, vid, prv, bcm_errmsg(prv));
-                }
-
-                bcm_l3_intf_t_init(&intf);
-                intf.l3a_vid = vid;
-                intf.l3a_mac_addr[0] = 0x02;
-                intf.l3a_mac_addr[1] = 0x1c;
-                intf.l3a_mac_addr[2] = 0x73;
-                intf.l3a_mac_addr[3] = 0x00;
-                intf.l3a_mac_addr[4] = (uint8)(vid >> 8);
-                intf.l3a_mac_addr[5] = (uint8)p;
-                prv = bcm_l3_intf_create(unit, &intf);
-                if (prv != BCM_E_NONE) {
-                    printf("  port %d: l3_intf_create rv=%d\n", p, prv);
-                    continue;
-                }
-
-                (void)bcm_port_control_set(unit, p, bcmPortControlIP4, 1);
-                (void)bcm_port_control_set(unit, p, bcmPortControlIP6, 1);
-
-                /* ---- control multicast straight to the CPU ------------
-                 *
-                 * EOS enumerates the control traffic it wants and programs an
-                 * L2 multicast entry per address, per internal VLAN, pointing
-                 * at a group containing the CPU. Its table on this box holds
-                 * exactly six per routed VLAN (docs/EOS-VLAN-STRUCTURE.md):
-                 * IPv6 all-nodes, all-routers, OSPFv3 AllSPFRouters and
-                 * AllDRouters, and two solicited-node addresses.
-                 *
-                 * We had been relying on unknown-multicast FLOODING to reach
-                 * the CPU. That works -- it is how our OSPF hellos arrived --
-                 * but it punts every unknown multicast frame to software and
-                 * floods it at every other member of the VLAN. Naming the
-                 * addresses is both cheaper and closer to what the hardware is
-                 * for.
-                 *
-                 * IPv4 is included here even though EOS's L2 table has no
-                 * 01:00:5e entries: EOS traps IPv4 control traffic with a
-                 * field-processor rule on 224/8 instead, which we have not
-                 * built. An explicit entry per address gets the same result
-                 * with the mechanism we do have. */
-                {
-                    static const uint8 mcast_macs[][6] = {
-                        {0x01,0x00,0x5e,0x00,0x00,0x01}, /* IPv4 all hosts   */
-                        {0x01,0x00,0x5e,0x00,0x00,0x02}, /* IPv4 all routers */
-                        {0x01,0x00,0x5e,0x00,0x00,0x05}, /* OSPFv2 AllSPF    */
-                        {0x01,0x00,0x5e,0x00,0x00,0x06}, /* OSPFv2 AllDR     */
-                        {0x33,0x33,0x00,0x00,0x00,0x01}, /* IPv6 all nodes   */
-                        {0x33,0x33,0x00,0x00,0x00,0x02}, /* IPv6 all routers */
-                        {0x33,0x33,0x00,0x00,0x00,0x05}, /* OSPFv3 AllSPF    */
-                        {0x33,0x33,0x00,0x00,0x00,0x06}, /* OSPFv3 AllDR     */
-                    };
-                    bcm_multicast_t grp = 0;
-                    int mi, added = 0;
-
-                    prv = bcm_multicast_create(unit, BCM_MULTICAST_TYPE_L2,
-                                               &grp);
-                    if (prv != BCM_E_NONE) {
-                        printf("  port %d: multicast_create rv=%d %s\n",
-                               p, prv, bcm_errmsg(prv));
-                    } else {
-                        prv = bcm_multicast_egress_add(unit, grp,
-                                                       CMIC_PORT(unit), -1);
-                        if (prv != BCM_E_NONE) {
-                            printf("  port %d: mcast egress_add(cpu) rv=%d %s\n",
-                                   p, prv, bcm_errmsg(prv));
-                        }
-                        for (mi = 0; mi < (int)(sizeof mcast_macs /
-                                                sizeof mcast_macs[0]); mi++) {
-                            bcm_l2_addr_t m;
-                            bcm_l2_addr_t_init(&m, (uint8 *)mcast_macs[mi], vid);
-                            m.flags      = BCM_L2_STATIC | BCM_L2_MCAST;
-                            m.l2mc_group = grp;
-                            if (bcm_l2_addr_add(unit, &m) == BCM_E_NONE) {
-                                added++;
-                            }
-                        }
-                        printf("  port %-3d control mcast -> CPU: %d/%d entries "
-                               "in vlan %d (group %d)\n",
-                               p, added,
-                               (int)(sizeof mcast_macs / sizeof mcast_macs[0]),
-                               vid, grp);
-                    }
-                }
-
-                /* Traffic addressed to our own router MAC must be L3
-                 * LOOKED UP, not bridged.
-                 *
-                 * ⚠ This entry was originally BCM_L2_STATIC pointing at the
-                 * CPU port, added when there were no routes and the chip was
-                 * dropping the peer's ARP replies. It worked -- and then
-                 * quietly prevented hardware routing: with 33 routes in the
-                 * FIB, 100 transit packets arrived on xe60, all 100 went to
-                 * the CPU, and 4 left on xe47. The chip was bridging them up
-                 * instead of routing them, because that is exactly what the
-                 * entry said to do.
-                 *
-                 * BCM_L2_L3LOOKUP marks the address as "mine, route it" -- the
-                 * my-station entry every router needs. Frames the chip cannot
-                 * route still reach the CPU. */
-                {
-                    bcm_l2_addr_t l2;
-                    bcm_l2_addr_t_init(&l2, intf.l3a_mac_addr, vid);
-                    l2.port  = CMIC_PORT(unit);
-                    l2.flags = BCM_L2_STATIC | BCM_L2_L3LOOKUP;
-                    prv = bcm_l2_addr_add(unit, &l2);
-                    if (prv != BCM_E_NONE) {
-                        printf("  port %d: l2_addr_add(L3LOOKUP) rv=%d %s\n",
-                               p, prv, bcm_errmsg(prv));
-                    }
-                }
-
-                printf("  port %-3d routed: vlan %d, intf %d, mac "
-                       "02:1c:73:00:%02x:%02x\n",
-                       p, vid, intf.l3a_intf_id, vid >> 8, p);
-                /* Remember the last routed interface for FIB sync to build
-                 * egress objects against. */
-                if (fib_nintf < FIB_MAX_INTF) {
-                    fib_intfs[fib_nintf].l3_intf = intf.l3a_intf_id;
-                    fib_intfs[fib_nintf].vlan    = vid;
-                    fib_intfs[fib_nintf].port    = p;
-                    fib_intfs[fib_nintf].ifindex = 0;   /* resolved at fib_start */
-                    fib_nintf++;
-                }
-                nrouted++;
             }
             printf("  %d linked ports made routed interfaces\n", nrouted);
+
+            /* Ports cabled AFTER this point get brought up by linkscan. Opt-in,
+             * like the LEDs, and for the same reason: the last piece of code to
+             * run off the linkscan thread took the copper datapath down with
+             * it. SDKPOC_HOTPLUG=off disables it without a rebuild. */
+            {
+                const char *hp = getenv("SDKPOC_HOTPLUG");
+                if (hp != NULL && strcmp(hp, "off") != 0) {
+                    pthread_t hp_tid;
+                    int hrv;
+                    hotplug_vbase = vbase;
+                    hotplug_run   = 1;
+                    hrv = bcm_linkscan_register(unit, hotplug_linkscan_cb);
+                    printf("  hotplug: linkscan handler rv=%d\n", hrv);
+                    if (pthread_create(&hp_tid, NULL, hotplug_worker,
+                                       (void *)(intptr_t)unit) == 0) {
+                        pthread_detach(hp_tid);
+                        printf("  hotplug: worker running -- ports cabled "
+                               "later come up without a restart\n");
+                    } else {
+                        hotplug_run = 0;
+                        printf("  ** hotplug: worker thread failed to start\n");
+                    }
+                } else {
+                    printf("  hotplug: disabled "
+                           "(SDKPOC_HOTPLUG=on to enable)\n");
+                }
+            }
         }
     }
 

@@ -33,6 +33,7 @@ echo "=== datapath-up $(date 2>/dev/null || echo '') ==="
 # Simple key=value, plus repeatable "iface <name> <mac> <cidr> <mtu>" lines.
 enable=no; agent=""; config=""; phybus=no; ports=""; portmode=routed
 leds=no
+hotplug=yes
 fibsync=yes; frr=no; rx=start; loopback=""; loopback6=""
 IFACES=""; POLICIES=""
 
@@ -47,6 +48,7 @@ while read -r k v rest; do
                     enable)   enable=$val ;;   agent)    agent=$val ;;
                     config)   config=$val ;;   phybus)   phybus=$val ;;
                     leds)     leds=$val ;;
+                    hotplug)  hotplug=$val ;;
                     ports)    ports=$val ;;    portmode) portmode=$val ;;
                     fibsync)  fibsync=$val ;;  frr)      frr=$val ;;
                     rx)       rx=$val ;;   loopback) loopback=$val ;;
@@ -83,6 +85,11 @@ case "$phybus" in yes|1|on) ENVS="$ENVS SDKPOC_PHYBUS=1" ;; esac
 # datapath depends on. It now runs off cached linkscan state, but the datapath
 # is what matters and the LEDs are decoration -- so they stay opt-in.
 case "$leds" in yes|1|on) ENVS="$ENVS SDKPOC_PHYLED=on" ;; esac
+# Ports cabled AFTER the agent starts. The startup pass configures a port only
+# if it has a link at that moment, so without this a cable plugged in later
+# gets no MAC interface, no VLAN and no L3 interface -- the port looks dead in
+# a way that mimics a broken cable exactly (docs/COPPER-PORT-RX-DEAD.md).
+case "$hotplug" in yes|1|on) ENVS="$ENVS SDKPOC_HOTPLUG=on" ;; esac
 case "$fibsync" in yes|1|on) ENVS="$ENVS SDKPOC_FIBSYNC=1" ;; esac
 
 log "starting agent: $ENVS $agent"
@@ -146,10 +153,18 @@ done
 # --- loopback --------------------------------------------------------------
 # Added BEFORE the daemons start, because ospfd picks its router-id at startup
 # and can only use an address that already exists.
+# ⚠ BOTH families, and unconditionally. IPv4 forwarding used to be left alone
+# here while IPv6 was enabled in the loopback6 block below -- so a box that had
+# been running fine came back from a reboot forwarding v6 in software and not
+# v4. Transit is programmed into the chip either way, but anything punted to
+# the CPU silently stopped, which is the hardest kind of asymmetry to notice.
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+# IPv6 forwarding before addresses go on: setting it flips accept_ra off, and
+# doing that afterwards can strip a SLAAC address out from under a daemon.
+sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
+log "forwarding enabled (IPv4 and IPv6)"
+
 if [ -n "$loopback6" ]; then
-    # IPv6 forwarding first: setting it flips accept_ra off, and doing that
-    # after addresses are up can strip a SLAAC address out from under a daemon.
-    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
     ip -6 addr add "$loopback6" dev lo 2>/dev/null
     log "loopback6 $loopback6 on lo"
 fi
@@ -200,6 +215,15 @@ case "$frr" in
         [ -x /usr/lib/frr/ospf6d ] && \
             /usr/lib/frr/ospf6d -d -f /etc/frr/frr.conf -u root -g root >> $LOG 2>&1
         sleep 2
+        # ⚠ Push the INTEGRATED config once every daemon is up. Starting each
+        # with -f is NOT equivalent, and the difference is silent: ospf6d read
+        # frr.conf without one error and still attached no interface to an
+        # area, so v3 came up with zero adjacencies and a third of the v6
+        # routes. vtysh -b also REPORTS parse failures, which -f does not --
+        # that is how the missing `exit` statements were finally found.
+        vtysh -b >> $LOG 2>&1 \
+            && log "  integrated config applied (vtysh -b)" \
+            || log "  ** vtysh -b reported config errors -- see above"
         n=$(ps | grep -cE '[z]ebra|[o]spfd')
         log "  FRR daemons: $n"
         [ "$n" -ge 2 ] || log "  ** FRR did not start -- see the lines above"
