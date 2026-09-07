@@ -16,6 +16,35 @@ accton as4610-54       armhf    bcm56340   6.1     production  EdgeNOS-0.1.0-arm
 accton as5610-52x      powerpc  bcm56846   6.1     production  EdgeNOS-0.1.0-powerpc-accton_as5610_52x-r0.bin
 ```
 
+## Where this work continues: NOSaic
+
+**[NOSaic](https://github.com/Salvaged-silicon/nosaic-switch)** is the successor to this
+project, rebuilt from nothing.
+
+EdgeNOS starts from a root filesystem captured from a vendor image. That was the fastest
+way to a booting switch and it became the ceiling: every board inherited someone else's
+libc, init and assumptions, and the three boards here were each captured from a different
+upstream. NOSaic builds the whole thing from source instead — its own cross-toolchains,
+package format, base system and kernel — which is what let one operating system reach both
+x86_64 and 32-bit big-endian PowerPC, with A/B upgrades that roll back on their own.
+
+**This repository stays up until NOSaic supports every switch EdgeNOS does.** Nobody is
+being left without an OS for their hardware because a newer project exists. As it stands:
+
+| Switch | EdgeNOS | NOSaic |
+|---|---|---|
+| Accton AS5610-52X (PowerPC, Trident+) | production | **moved across** — installed, forwarding |
+| Accton AS4610-54 (armhf, Helix4) | production | not started |
+| Juniper EX2200-C (armv5te, Marvell Prestera) | in progress | not started |
+
+Until that middle column is fully covered by the right-hand one, this is the project to
+use for those boards.
+
+**It is not a failed attempt, either.** The reverse engineering it produced — the Trident+
+register maps, the S-Channel findings, the ONIE and U-Boot quirks — is what NOSaic's board
+ports were written from. Where NOSaic's documentation says something was learned the hard
+way, this is usually where it was learned.
+
 ## How it fits together
 
 Four layers, each feeding the next — all driven by the switch database:
